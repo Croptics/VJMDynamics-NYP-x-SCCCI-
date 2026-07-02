@@ -109,7 +109,7 @@ a { color: inherit; }
 }
 
 /* ---- App shell --------------------------------------------------------- */
-.app-shell { display: flex; min-height: 100vh; }
+.app-shell { display: flex; min-height: 100vh; align-items: flex-start; }
 
 .sidebar {
   width: var(--sidebar-w);
@@ -120,6 +120,11 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Stay put while the page content scrolls */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 .sidebar-brand { padding: 6px 10px 20px; font-size: 22px; }
 .nav-item {

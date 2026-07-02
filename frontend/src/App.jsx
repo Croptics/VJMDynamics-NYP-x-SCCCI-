@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
+import { getToken, clearToken, getUser, getPermissions } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
@@ -12,17 +13,22 @@ import DashboardPage from "./pages/DashboardPage.jsx";
 import TripCoachPage from "./pages/TripCoachPage.jsx";
 import QRCheckInPage from "./pages/QRCheckInPage.jsx";
 import ExceptionInboxPage from "./pages/ExceptionInboxPage.jsx";
+import AccountControlPage from "./pages/AccountControlPage.jsx";
 
 /**
  * Top-level router for MusterGo.
  *
- * Auth state is held here as a simple boolean for the demo build; in production
- * this is replaced by a JWT from POST /api/auth/login stored in an auth context.
- * Unauthenticated users are redirected to /login. Authenticated users get the
- * persistent admin shell (Layout) with the feature pages nested inside.
+ * Auth is derived from the saved JWT (see lib/api.js). Initialising `authed`
+ * from the stored token means a page refresh keeps you signed in and on the
+ * same page. Logging out clears the token and returns to /login.
  */
 export default function App() {
-  const [authed, setAuthed] = useState(false);
+  const [authed, setAuthed] = useState(() => !!getToken());
+
+  const handleLogout = () => {
+    clearToken();
+    setAuthed(false);
+  };
 
   if (!authed) {
     return (
@@ -35,7 +41,7 @@ export default function App() {
 
   return (
     <Routes>
-      <Route element={<Layout />}>
+      <Route element={<Layout onLogout={handleLogout} />}>
         <Route index element={<Navigate to="/dashboard" replace />} />
 
         {/* Jun Qi — Admin Dashboard & Analytics (Screen 2) */}
@@ -55,6 +61,16 @@ export default function App() {
 
         {/* Vimal — QR Check-in (mobile-web staff view) */}
         <Route path="/checkin" element={<QRCheckInPage />} />
+
+        {/* Account control — needs the manage-accounts permission */}
+        <Route
+          path="/accounts"
+          element={
+            getPermissions().manageAccounts
+              ? <AccountControlPage />
+              : <Navigate to="/dashboard" replace />
+          }
+        />
 
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
