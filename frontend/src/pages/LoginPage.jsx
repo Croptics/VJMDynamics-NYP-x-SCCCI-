@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ClipboardCheck, Eye, EyeOff, Fingerprint } from "lucide-react";
+import { apiPost } from "../lib/api.js";
 
 /**
  * Screen 1 — Login / Authentication (shared across team; Vance leads).
@@ -12,9 +13,19 @@ export default function LoginPage({ onSignIn }) {
   const [showPw, setShowPw] = useState(false);
   const [keep, setKeep] = useState(true);
 
-  function handleSignIn() {
-    // Production: POST /api/auth/login → store JWT, then onSignIn().
-    // Demo: accept any input.
+  async function handleSignIn() {
+    // Try the real backend: POST /api/auth/login -> store JWT for later calls.
+    // If the backend isn't running, fall through to demo mode so the app still
+    // opens. Any staff ID / password is accepted in this build.
+    try {
+      const { token } = await apiPost("/auth/login", {
+        staffId: staffId || "staff_id_123",
+        password,
+      });
+      if (token) sessionStorage.setItem("mg_token", token);
+    } catch {
+      /* backend offline - continue in demo mode */
+    }
     onSignIn?.();
   }
 
@@ -55,7 +66,7 @@ export default function LoginPage({ onSignIn }) {
               id="pw"
               className="input"
               type={showPw ? "text" : "password"}
-              placeholder="••••••••••••"
+              placeholder="............"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               style={{ paddingRight: 42 }}

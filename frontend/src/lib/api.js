@@ -36,3 +36,12 @@ export async function apiPatch(path, body) {
   if (!res.ok) throw new Error(`PATCH ${path} failed (${res.status})`);
   return res.json();
 }
+
+export async function apiDelete(path) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: "DELETE",
+    headers: { ...authHeader() },
+  });
+  if (!res.ok) throw new Error(`DELETE ${path} failed (${res.status})`);
+  return res.json();
+}
