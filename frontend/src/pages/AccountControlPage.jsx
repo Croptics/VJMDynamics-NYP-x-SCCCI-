@@ -31,9 +31,21 @@ const ERR_TEXT = {
   USERNAME_TAKEN: "That username is already taken.",
   USERNAME_REQUIRED: "Username is required.",
   PASSWORD_REQUIRED: "Password is required.",
+  WEAK_PASSWORD: "Password must be at least 8 characters, with a letter and a number.",
   LAST_MAIN: "You can't remove the last account that manages accounts.",
   NOT_FOUND: "That account no longer exists.",
 };
+
+// Password rule (mirrors the backend check in data.js). Returns a message, or
+// null if the password is acceptable.
+const PW_HINT = "At least 8 characters, including a letter and a number.";
+function passwordProblem(pw) {
+  const s = String(pw || "");
+  if (s.length < 8) return "Password must be at least 8 characters.";
+  if (!/[A-Za-z]/.test(s)) return "Password must include at least one letter.";
+  if (!/[0-9]/.test(s)) return "Password must include at least one number.";
+  return null;
+}
 
 export default function AccountControlPage() {
   const [accounts, setAccounts] = useState([]);
@@ -89,9 +101,14 @@ export default function AccountControlPage() {
   }
 
   function mapError(e, fallbackCode) {
+    // Prefer the backend's error code (now carried on the Error), then fall back
+    // to matching the message text or a 409 conflict.
     const code =
+      (e.code && ERR_TEXT[e.code] ? e.code : "") ||
       Object.keys(ERR_TEXT).find((k) => String(e.message).includes(k)) ||
-      (String(e.message).includes("409") ? fallbackCode : "");
+      (e.status === 409 || String(e.message).includes("409") ? fallbackCode : "");
+    // For weak passwords the backend sends a specific message — show it verbatim.
+    if (e.code === "WEAK_PASSWORD" && e.message) return e.message;
     return ERR_TEXT[code] || "Something went wrong. Please try again.";
   }
 
@@ -99,6 +116,12 @@ export default function AccountControlPage() {
     setFormErr("");
     if (!form.username.trim()) return setFormErr(ERR_TEXT.USERNAME_REQUIRED);
     if (!editingId && !form.password) return setFormErr(ERR_TEXT.PASSWORD_REQUIRED);
+    // Enforce the password rule when creating, or when editing AND a new
+    // password was typed (blank on edit = keep the current one).
+    if (form.password) {
+      const pw = passwordProblem(form.password);
+      if (pw) return setFormErr(pw);
+    }
 
     setSaving(true);
     const payload = {
@@ -264,6 +287,12 @@ export default function AccountControlPage() {
             <input className="input" type="password" value={form.password}
               placeholder={editingId ? "••••••••" : "Set a password"}
               onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            {(!editingId || form.password) && (
+              <p className="muted" style={{ fontSize: 12, marginTop: 6,
+                color: form.password && passwordProblem(form.password) ? "var(--st-missing)" : undefined }}>
+                {PW_HINT}
+              </p>
+            )}
 
             <label className="field-label" style={{ marginTop: 18 }}>Access rights</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
