@@ -119,7 +119,7 @@ export default function LoginPage({ onSignIn }) {
           <input
             id="staffId"
             className="input"
-            placeholder="staff_194"
+            placeholder="e.g. SCCCI132"
             value={staffId}
             onChange={(e) => setStaffId(e.target.value)}
             onKeyDown={onKeyDown}
