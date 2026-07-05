@@ -7,26 +7,33 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 /**
- * MySQL data layer for the MusterGo dashboard (via the `mysql2` driver).
+ * PostgreSQL data layer for the MusterGo dashboard (via the `pg` driver).
  *
- * The backend now talks to a real MySQL server (each developer runs their own
- * local one — see MYSQL-SETUP.txt). Connection details come from environment
- * variables:
+ * Works with any Postgres host — Neon, Supabase, or a local Postgres server —
+ * since they're all plain Postgres underneath. Connection details come from
+ * environment variables:
  *
- *   DATABASE_URL = mysql://user:password@localhost:3306/mustergo   (preferred)
+ *   DATABASE_URL = postgresql://user:password@host:5432/dbname   (preferred —
+ *                  this is exactly what Neon/Supabase give you on their
+ *                  dashboard; paste it straight into backend/.env)
  *   -- or the individual pieces --
  *   DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
  *
- * If none are set it falls back to root@localhost:3306 with database "mustergo".
- * The database and tables are created automatically on first run, and the first
- * "main" account (staff_194 / password123!) is seeded so there's always a way in.
+ * Neon/Supabase require SSL; a local Postgres server usually doesn't. This
+ * file auto-detects: SSL is enabled unless the host is localhost/127.0.0.1.
+ * You can also force it with PGSSL=true or PGSSL=false in .env.
  *
- * IMPORTANT: mysql2 is asynchronous, so every exported function below returns a
+ * The database schema and seed data (first "main" account, trip, coaches) are
+ * created automatically on first run — nobody sets those up by hand.
+ *
+ * IMPORTANT: pg is asynchronous, so every exported function below returns a
  * Promise — server.js `await`s them. Call initDb() once before serving requests.
  */
 
-import mysql from "mysql2/promise";
+import pg from "pg";
 import { cleanPermissions } from "../permissions.js";
+
+const { Pool } = pg;
 
 /* ---- Fixed structure used to seed the database -------------------------- */
 export const TRIP = {
@@ -52,55 +59,68 @@ export const COACHES = [
 let pool;
 
 function readConfig() {
-  const url = process.env.DATABASE_URL || process.env.MYSQL_URL;
+  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const forceSsl = process.env.PGSSL; // "true" | "false" | undefined (auto)
+
   if (url) {
-    const u = new URL(url);
-    return {
-      host: u.hostname || "localhost",
-      port: Number(u.port || 3306),
-      user: decodeURIComponent(u.username || "root"),
-      password: decodeURIComponent(u.password || ""),
-      database: (u.pathname || "/mustergo").slice(1) || "mustergo",
-    };
+    const isLocal = /localhost|127\.0\.0\.1/.test(url);
+    const ssl = forceSsl === "true" ? { rejectUnauthorized: false }
+              : forceSsl === "false" ? false
+              : isLocal ? false
+              : { rejectUnauthorized: false }; // Neon/Supabase need SSL
+    return { connectionString: url, ssl };
   }
+
+  const host = process.env.DB_HOST || "localhost";
+  const isLocal = /localhost|127\.0\.0\.1/.test(host);
+  const ssl = forceSsl === "true" ? { rejectUnauthorized: false }
+            : forceSsl === "false" ? false
+            : isLocal ? false
+            : { rejectUnauthorized: false };
+
   return {
-    host: process.env.DB_HOST || "localhost",
-    port: Number(process.env.DB_PORT || 3306),
-    user: process.env.DB_USER || "root",
+    host,
+    port: Number(process.env.DB_PORT || 5432),
+    user: process.env.DB_USER || "postgres",
     password: process.env.DB_PASSWORD || "",
     database: process.env.DB_NAME || "mustergo",
+    ssl,
   };
 }
 
-/** Create the database (if needed), the pool, the tables, and the seed data. */
+/** Create the pool, the tables, and the seed data. */
 export async function initDb() {
   const cfg = readConfig();
+  pool = new Pool(cfg);
 
-  // 1) Make sure the database exists (connect without selecting one first).
-  const boot = await mysql.createConnection({
-    host: cfg.host, port: cfg.port, user: cfg.user, password: cfg.password,
-  });
-  await boot.query(`CREATE DATABASE IF NOT EXISTS \`${cfg.database}\``);
-  await boot.end();
+  // Fail fast with a clear error if the connection is bad, rather than only
+  // discovering it on the first request.
+  const client = await pool.connect();
+  client.release();
 
-  // 2) Pool bound to the database.
-  pool = mysql.createPool({
-    ...cfg,
-    waitForConnections: true,
-    connectionLimit: 10,
-  });
-
-  // 3) Schema + seed.
   await createSchema();
   await seed();
 
-  console.log(`  MySQL connected -> ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`);
+  const label = cfg.connectionString ? maskUrl(cfg.connectionString) : `${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database}`;
+  console.log(`  PostgreSQL connected -> ${label}`);
 }
 
-/* ---- Query helpers ------------------------------------------------------ */
+function maskUrl(url) {
+  try {
+    const u = new URL(url);
+    return `${u.username}@${u.hostname}:${u.port || 5432}${u.pathname}`;
+  } catch {
+    return "(connected)";
+  }
+}
+
+/* ---- Query helpers -------------------------------------------------------
+ * Postgres uses $1, $2, ... placeholders (not "?"), and results come back as
+ * `.rows` (not the [rows] tuple mysql2 uses).
+ * ------------------------------------------------------------------------- */
 async function all(sql, params = []) {
-  const [rows] = await pool.query(sql, params);
-  return rows;
+  const res = await pool.query(sql, params);
+  return res.rows;
 }
 async function get(sql, params = []) {
   const rows = await all(sql, params);
@@ -111,24 +131,26 @@ async function run(sql, params = []) {
 }
 
 /* ---- Schema ------------------------------------------------------------- *
- * MySQL syntax notes vs. SQLite: TEXT-as-primary-key -> VARCHAR, INTEGER -> INT,
- * and the reserved words `lead` / `localTime` are back-ticked.
+ * Postgres syntax notes vs. MySQL: VARCHAR sizes are optional but kept for
+ * clarity, TINYINT(1) -> BOOLEAN, and reserved words `lead`/`localTime` still
+ * need double-quoting (Postgres lower-cases unquoted identifiers, and our
+ * columns are camelCase, so every mixed-case column name is quoted).
  * ------------------------------------------------------------------------- */
 async function createSchema() {
   await run(`CREATE TABLE IF NOT EXISTS trips (
-    id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), dateRange VARCHAR(255), dayOf INT,
-    totalDays INT, \`lead\` VARCHAR(255), status VARCHAR(255), \`localTime\` VARCHAR(64), departsIn VARCHAR(64)
+    id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), "dateRange" VARCHAR(255), "dayOf" INT,
+    "totalDays" INT, "lead" VARCHAR(255), status VARCHAR(255), "localTime" VARCHAR(64), "departsIn" VARCHAR(64)
   )`);
   await run(`CREATE TABLE IF NOT EXISTS coaches (
     id VARCHAR(64) PRIMARY KEY, label VARCHAR(64), name VARCHAR(255), city VARCHAR(255), capacity INT
   )`);
   await run(`CREATE TABLE IF NOT EXISTS delegates (
-    id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), initials VARCHAR(16), coachId VARCHAR(64),
-    status VARCHAR(32), vip TINYINT(1), lastSeen VARCHAR(255)
+    id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), initials VARCHAR(16), "coachId" VARCHAR(64),
+    status VARCHAR(32), vip BOOLEAN, "lastSeen" VARCHAR(255)
   )`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
-    password VARCHAR(255), role VARCHAR(32), permissions TEXT, createdAt VARCHAR(64)
+    password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
   )`);
 }
 
@@ -136,21 +158,21 @@ async function seed() {
   // First "main" account (once).
   if (!(await get("SELECT id FROM accounts LIMIT 1"))) {
     const perms = defaultPermsForRole("main");
-    await run("INSERT INTO accounts (id, username, name, password, role, permissions, createdAt) VALUES (?,?,?,?,?,?,?)", [
+    await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
       "u-1", "staff_194", "Staff 194", "password123!", "main", JSON.stringify(perms), new Date().toISOString(),
     ]);
   }
   // Trip (once).
   if (!(await get("SELECT id FROM trips LIMIT 1"))) {
     await run(
-      "INSERT INTO trips (id, name, dateRange, dayOf, totalDays, `lead`, status, `localTime`, departsIn) VALUES (?,?,?,?,?,?,?,?,?)",
+      `INSERT INTO trips (id, name, "dateRange", "dayOf", "totalDays", "lead", status, "localTime", "departsIn") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [TRIP.id, TRIP.name, TRIP.dateRange, TRIP.dayOf, TRIP.totalDays, TRIP.lead, TRIP.status, TRIP.localTime, TRIP.departsIn]
     );
   }
   // Coaches (once).
   if (!(await get("SELECT id FROM coaches LIMIT 1"))) {
     for (const c of COACHES) {
-      await run("INSERT INTO coaches (id, label, name, city, capacity) VALUES (?,?,?,?,?)", [c.id, c.label, c.name, c.city, c.capacity]);
+      await run("INSERT INTO coaches (id, label, name, city, capacity) VALUES ($1,$2,$3,$4,$5)", [c.id, c.label, c.name, c.city, c.capacity]);
     }
   }
 }
@@ -200,13 +222,13 @@ function normalize(input, id) {
 }
 
 async function nextId() {
-  const row = await get("SELECT COALESCE(MAX(CAST(SUBSTRING(id, 3) AS UNSIGNED)), 0) AS m FROM delegates");
+  const row = await get(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM delegates`);
   return `d-${Number(row?.m || 0) + 1}`;
 }
 
 /* ---- Password rule (shared with the frontend hint) ---------------------- *
- * Appropriate minimum for the demo: at least 8 characters, with a letter and a
- * number. Returns an error message, or null if the password is acceptable.
+ * At least 8 characters, with a letter and a number. Returns an error
+ * message, or null if the password is acceptable.
  * ------------------------------------------------------------------------- */
 export function passwordProblem(pw) {
   const s = String(pw || "");
@@ -218,34 +240,34 @@ export function passwordProblem(pw) {
 
 /* ---- Delegate CRUD ------------------------------------------------------ */
 export async function listDelegates() {
-  return (await all("SELECT * FROM delegates ORDER BY id")).map(rowToDelegate);
+  return (await all('SELECT * FROM delegates ORDER BY id')).map(rowToDelegate);
 }
 
 export async function createDelegate(input) {
   const d = normalize(input, await nextId());
-  await run("INSERT INTO delegates (id, name, initials, coachId, status, vip, lastSeen) VALUES (?,?,?,?,?,?,?)", [
-    d.id, d.name, d.initials, d.coachId, d.status, d.vip ? 1 : 0, d.lastSeen,
+  await run(`INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
+    d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen,
   ]);
   logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign");
   return d;
 }
 
 export async function updateDelegate(id, patch) {
-  const existing = await get("SELECT * FROM delegates WHERE id = ?", [id]);
+  const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return null;
   const merged = normalize({ ...rowToDelegate(existing), ...patch }, id);
   await run(
-    "UPDATE delegates SET name=?, initials=?, coachId=?, status=?, vip=?, lastSeen=? WHERE id=?",
-    [merged.name, merged.initials, merged.coachId, merged.status, merged.vip ? 1 : 0, merged.lastSeen, id]
+    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6 WHERE id=$7`,
+    [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, id]
   );
   logActivity(`${merged.name} updated`, "reassign");
   return merged;
 }
 
 export async function deleteDelegate(id) {
-  const existing = await get("SELECT * FROM delegates WHERE id = ?", [id]);
+  const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return false;
-  await run("DELETE FROM delegates WHERE id = ?", [id]);
+  await run("DELETE FROM delegates WHERE id = $1", [id]);
   logActivity(`${existing.name} removed`, "exception");
   return true;
 }
@@ -371,13 +393,13 @@ function accountPublic(row) {
 }
 
 async function nextAccountId() {
-  const row = await get("SELECT COALESCE(MAX(CAST(SUBSTRING(id, 3) AS UNSIGNED)), 0) AS m FROM accounts");
+  const row = await get(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts`);
   return `u-${Number(row?.m || 0) + 1}`;
 }
 
 /** Full row incl. password — used only for login / auth checks. */
 export async function getAccountByUsername(username) {
-  return get("SELECT * FROM accounts WHERE username = ?", [String(username || "").trim()]);
+  return get("SELECT * FROM accounts WHERE username = $1", [String(username || "").trim()]);
 }
 
 export async function listAccounts() {
@@ -398,14 +420,14 @@ export async function createAccount(input) {
   if (await getAccountByUsername(username)) return { error: "USERNAME_TAKEN" };
 
   const id = await nextAccountId();
-  await run("INSERT INTO accounts (id, username, name, password, role, permissions, createdAt) VALUES (?,?,?,?,?,?,?)", [
+  await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
     id, username, name, password, role, JSON.stringify(perms), new Date().toISOString(),
   ]);
-  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = ?", [id])) };
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
 
 export async function updateAccount(id, patch) {
-  const existing = await get("SELECT * FROM accounts WHERE id = ?", [id]);
+  const existing = await get("SELECT * FROM accounts WHERE id = $1", [id]);
   if (!existing) return { error: "NOT_FOUND" };
 
   const username = patch.username !== undefined ? String(patch.username).trim() : existing.username;
@@ -413,7 +435,6 @@ export async function updateAccount(id, patch) {
   const perms = patch.permissions ? cleanPerms(patch.permissions) : accountPermissions(existing);
   const role = roleFromPerms(perms);
 
-  // Only change/validate the password if a new one was provided.
   let password = existing.password;
   if (patch.password) {
     const pwProblem = passwordProblem(String(patch.password));
@@ -425,25 +446,24 @@ export async function updateAccount(id, patch) {
   const clash = await getAccountByUsername(username);
   if (clash && clash.id !== id) return { error: "USERNAME_TAKEN" };
 
-  // Don't let the last account that can manage accounts lose that permission.
   if (accountPermissions(existing).manageAccounts && !perms.manageAccounts && (await countManagers()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 
-  await run("UPDATE accounts SET username=?, name=?, password=?, role=?, permissions=? WHERE id=?", [
+  await run(`UPDATE accounts SET username=$1, name=$2, password=$3, role=$4, permissions=$5 WHERE id=$6`, [
     username, name, password, role, JSON.stringify(perms), id,
   ]);
-  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = ?", [id])) };
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
 
 export async function deleteAccount(id) {
-  const existing = await get("SELECT * FROM accounts WHERE id = ?", [id]);
+  const existing = await get("SELECT * FROM accounts WHERE id = $1", [id]);
   if (!existing) return { error: "NOT_FOUND" };
 
   if (accountPermissions(existing).manageAccounts && (await countManagers()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 
-  await run("DELETE FROM accounts WHERE id = ?", [id]);
+  await run("DELETE FROM accounts WHERE id = $1", [id]);
   return { deleted: true };
 }
