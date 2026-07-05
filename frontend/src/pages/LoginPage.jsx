@@ -7,8 +7,9 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useState } from "react";
-import { ClipboardCheck, Eye, EyeOff, Fingerprint, AlertCircle } from "lucide-react";
+import { ClipboardCheck, Eye, EyeOff, Fingerprint, AlertCircle, Languages } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
+import { useLang } from "../lib/i18n.jsx";
 
 const REMEMBER_KEY = "mg_remember_v2";
 
@@ -38,6 +39,7 @@ function readRemembered() {
  * previous username + password are pre-filled so you can re-login in one click.
  */
 export default function LoginPage({ onSignIn }) {
+  const { lang, toggleLang, t } = useLang();
   const remembered = readRemembered();
   const [staffId, setStaffId] = useState(remembered?.staffId || "");
   const [password, setPassword] = useState(remembered?.password || "");
@@ -95,27 +97,34 @@ export default function LoginPage({ onSignIn }) {
 
   return (
     <div style={S.wrap}>
-      <div style={S.card}>
+      <button
+        onClick={toggleLang}
+        className="btn btn-ghost"
+        style={{ position: "absolute", top: 20, right: 20, background: "#fff" }}
+      >
+        <Languages size={16} /> {lang === "en" ? "中文" : "English"}
+      </button>
+      <div className="login-card" style={S.card}>
         {/* Brand panel */}
-        <div style={S.brand}>
+        <div className="login-panel" style={S.brand}>
           <div className="wordmark" style={{ color: "#fff", fontSize: 30 }}>
             <ClipboardCheck size={30} strokeWidth={2.4} /> MusterGo
           </div>
           <div>
-            <h2 style={S.brandH}>No one gets left behind.</h2>
-            <p style={S.brandP}>Real-time delegation attendance for SCCCI overseas trips.</p>
+            <h2 style={S.brandH}>{t("No one gets left behind.")}</h2>
+            <p style={S.brandP}>{t("Real-time delegation attendance for SCCCI overseas trips.")}</p>
           </div>
-          <p style={S.brandFoot}>A Singapore Chinese Chamber of Commerce &amp; Industry initiative</p>
+          <p style={S.brandFoot}>{t("A Singapore Chinese Chamber of Commerce & Industry initiative")}</p>
         </div>
 
         {/* Form panel */}
-        <div style={S.form}>
-          <h1 style={{ fontSize: 26 }}>Sign in</h1>
+        <div className="login-panel" style={S.form}>
+          <h1 style={{ fontSize: 26 }}>{t("Sign in")}</h1>
           <p className="muted" style={{ marginTop: 4, marginBottom: 24, fontSize: 14 }}>
-            SCCCI secretariat &amp; on-ground staff
+            {t("SCCCI secretariat & on-ground staff")}
           </p>
 
-          <label className="field-label" htmlFor="staffId">Staff ID</label>
+          <label className="field-label" htmlFor="staffId">{t("Staff ID")}</label>
           <input
             id="staffId"
             className="input"
@@ -125,7 +134,7 @@ export default function LoginPage({ onSignIn }) {
             onKeyDown={onKeyDown}
           />
 
-          <label className="field-label" htmlFor="pw" style={{ marginTop: 16 }}>Password</label>
+          <label className="field-label" htmlFor="pw" style={{ marginTop: 16 }}>{t("Password")}</label>
           <div style={{ position: "relative" }}>
             <input
               id="pw"
@@ -157,25 +166,33 @@ export default function LoginPage({ onSignIn }) {
           <div className="row between" style={{ margin: "14px 0 22px" }}>
             <label className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
               <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
-              Keep me signed in
+              {t("Keep me signed in")}
             </label>
             <a href="#" style={{ color: "var(--scc-red)", fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
-              Forgot password?
+              {t("Forgot password?")}
             </a>
           </div>
 
           <button className="btn btn-primary btn-block" onClick={handleSignIn} disabled={submitting}>
-            {submitting ? "Signing in…" : "Sign in"}
+            {submitting ? t("Signing in…") : t("Sign in")}
           </button>
           <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={handleWorkpass} disabled={submitting}>
-            <Fingerprint size={18} color="var(--scc-red)" /> Sign in with Workpass
+            <Fingerprint size={18} color="var(--scc-red)" /> {t("Sign in with Workpass")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
-            By signing in, you accept the SCCCI data handling policy.
+            {t("By signing in, you accept the SCCCI data handling policy.")}
           </p>
         </div>
       </div>
+
+      <style>{`
+        .login-card { display: grid; grid-template-columns: 1fr 1fr; }
+        @media (max-width: 720px) {
+          .login-card { grid-template-columns: 1fr; }
+          .login-panel { padding: 24px !important; }
+        }
+      `}</style>
     </div>
   );
 }
@@ -184,11 +201,11 @@ const S = {
   wrap: { minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "var(--bg)" },
   card: {
     width: "min(880px, 100%)",
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
+    maxHeight: "calc(100vh - 48px)",
     background: "#fff",
     borderRadius: "var(--r-lg)",
     overflow: "hidden",
+    overflowY: "auto",
     boxShadow: "var(--shadow-lg)",
   },
   brand: {

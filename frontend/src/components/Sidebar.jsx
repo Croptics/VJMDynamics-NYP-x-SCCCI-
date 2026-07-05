@@ -8,8 +8,10 @@ import {
   ClipboardCheck,
   LogOut,
   ShieldCheck,
+  Languages,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
+import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Left navigation rail. Mirrors the MusterGo admin shell (Screens 2–6).
@@ -18,6 +20,7 @@ import { getUser, getPermissions, clearToken } from "../lib/api.js";
  */
 export default function Sidebar({ exceptionCount = 0, onLogout }) {
   const isMain = !!getPermissions().manageAccounts;
+  const { lang, toggleLang, t } = useLang();
   const items = [
     { to: "/dashboard", label: "Dashboard", icon: LayoutGrid },
     { to: "/trips", label: "Trips", icon: MapPin },
@@ -62,14 +65,17 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
           className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}
         >
           <Icon size={18} strokeWidth={2} />
-          {label}
+          {t(label)}
           {badge ? <span className="nav-badge">{badge}</span> : null}
         </NavLink>
       ))}
 
       {/* Account + logout, pinned to the bottom */}
       <div style={S.footer}>
-        <div style={S.account}>
+        <button className="btn btn-ghost btn-block" onClick={toggleLang} title={t("Switch language")}>
+          <Languages size={16} /> {lang === "en" ? "中文" : "English"}
+        </button>
+        <div style={{ ...S.account, marginTop: 8 }}>
           <span className="avatar" style={S.avatar}>{initials}</span>
           <div style={{ minWidth: 0 }}>
             <div style={S.name}>{displayName}</div>
@@ -77,7 +83,7 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
           </div>
         </div>
         <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={handleLogout}>
-          <LogOut size={16} /> Log out
+          <LogOut size={16} /> {t("Log out")}
         </button>
       </div>
     </nav>

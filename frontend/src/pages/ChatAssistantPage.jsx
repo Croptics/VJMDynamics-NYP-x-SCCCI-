@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Send, Plus, Bot, Search } from "lucide-react";
+import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Screen 6 — AI Trip Assistant (Vance).
@@ -40,6 +41,7 @@ const SEED = [
 ];
 
 export default function ChatAssistantPage() {
+  const { t } = useLang();
   const [messages, setMessages] = useState(SEED);
   const [draft, setDraft] = useState("");
   const endRef = useRef(null);
@@ -77,23 +79,23 @@ export default function ChatAssistantPage() {
 
   return (
     <div className="page" style={{ maxWidth: 1100 }}>
-      <div className="page-eyebrow">Assistant</div>
-      <h1 className="page-title">Trip assistant</h1>
-      <p className="page-sub">Conversational queries · live data · translation</p>
+      <div className="page-eyebrow">{t("Assistant")}</div>
+      <h1 className="page-title">{t("Trip assistant")}</h1>
+      <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
 
       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, marginTop: 20 }}>
         {/* History */}
         <div className="card" style={{ padding: 12, height: 520, overflowY: "auto" }}>
           <button className="btn btn-dark btn-block" style={{ marginBottom: 12 }}>
-            <Plus size={16} /> New chat
+            <Plus size={16} /> {t("New chat")}
           </button>
           <div style={{ position: "relative", marginBottom: 12 }}>
             <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
-            <input className="input" placeholder="Search chats…" style={{ paddingLeft: 32, padding: "8px 8px 8px 32px" }} />
+            <input className="input" placeholder={t("Search chats…")} style={{ paddingLeft: 32, padding: "8px 8px 8px 32px" }} />
           </div>
           {Object.entries(grouped).map(([group, items]) => (
             <div key={group} style={{ marginBottom: 8 }}>
-              <div className="page-eyebrow" style={{ padding: "8px 8px 4px" }}>{group}</div>
+              <div className="page-eyebrow" style={{ padding: "8px 8px 4px" }}>{t(group)}</div>
               {items.map((h, i) => (
                 <button
                   key={h.id}
@@ -122,9 +124,9 @@ export default function ChatAssistantPage() {
           <div className="row" style={{ gap: 10, padding: "14px 18px", borderBottom: "1px solid var(--line)" }}>
             <span className="avatar" style={{ background: "var(--ink)", color: "#fff" }}><Bot size={16} /></span>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>Trip assistant</div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Trip assistant")}</div>
               <div className="muted" style={{ fontSize: 12 }}>
-                <span style={{ color: "var(--st-present)" }}>● Ready</span> · scoped to Beijing study mission · Eng/中文
+                <span style={{ color: "var(--st-present)" }}>● {t("Ready")}</span> · scoped to Beijing study mission · Eng/中文
               </div>
             </div>
           </div>
@@ -176,12 +178,12 @@ export default function ChatAssistantPage() {
           <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
             <input
               className="input"
-              placeholder="Ask anything about the trip…"
+              placeholder={t("Ask anything about the trip…")}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()}
             />
-            <button className="btn btn-primary" onClick={send}><Send size={16} /> Send</button>
+            <button className="btn btn-primary" onClick={send}><Send size={16} /> {t("Send")}</button>
           </div>
         </div>
       </div>

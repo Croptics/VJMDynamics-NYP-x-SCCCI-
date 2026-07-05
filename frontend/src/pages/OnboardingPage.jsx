@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { ConfidenceBadge } from "../components/StatusBadge.jsx";
 import { parseDocument } from "../lib/claudeParse.js";
+import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -41,6 +42,7 @@ const STATUS_META = {
 let fileSeq = 0;
 
 export default function OnboardingPage() {
+  const { t } = useLang();
   const inputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [tripId, setTripId] = useState("");
@@ -121,9 +123,9 @@ export default function OnboardingPage() {
   /* --------------------------------------------------------------------- */
   return (
     <div className="page">
-      <div className="page-eyebrow">Onboarding</div>
-      <h1 className="page-title">Document parsing</h1>
-      <p className="page-sub">Drop passport PDFs — AI extracts and populates the delegate list.</p>
+      <div className="page-eyebrow">{t("Onboarding")}</div>
+      <h1 className="page-title">{t("Document parsing")}</h1>
+      <p className="page-sub">{t("Drop passport PDFs — AI extracts and populates the delegate list.")}</p>
 
       {/* Upload + file list */}
       <div className="card" style={{ padding: 24, marginTop: 20 }}>
@@ -153,10 +155,10 @@ export default function OnboardingPage() {
             >
               <UploadCloud size={34} color="var(--ink-3)" />
               <p style={{ margin: "12px 0 4px", fontWeight: 600 }}>
-                Drop files or click to upload
+                {t("Drop files or click to upload")}
               </p>
               <p className="muted" style={{ fontSize: 13 }}>
-                PDF or scanned image · Max 20 files · 10 MB each
+                {t("PDF or scanned image · Max 20 files · 10 MB each")}
               </p>
               <input
                 ref={inputRef}
@@ -168,11 +170,11 @@ export default function OnboardingPage() {
               />
             </div>
 
-            <label className="field-label" style={{ marginTop: 16 }}>Assign to trip</label>
+            <label className="field-label" style={{ marginTop: 16 }}>{t("Assign to trip")}</label>
             <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
-              <option value="">Select a trip…</option>
-              {TRIPS.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+              <option value="">{t("Select a trip…")}</option>
+              {TRIPS.map((trip) => (
+                <option key={trip.id} value={trip.id}>{trip.name}</option>
               ))}
             </select>
           </div>
@@ -181,7 +183,7 @@ export default function OnboardingPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {files.length === 0 && (
               <div className="muted" style={{ fontSize: 13, paddingTop: 8 }}>
-                Uploaded files appear here with their extraction status.
+                {t("Uploaded files appear here with their extraction status.")}
               </div>
             )}
             {files.map((f) => {
@@ -233,9 +235,9 @@ export default function OnboardingPage() {
         <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
             <div>
-              <h2 style={{ fontSize: 16 }}>Recently extracted</h2>
+              <h2 style={{ fontSize: 16 }}>{t("Recently extracted")}</h2>
               <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                Review and confirm before adding to the delegate list
+                {t("Review and confirm before adding to the delegate list")}
                 {reviewNeeded > 0 && (
                   <span style={{ color: "var(--st-review)", fontWeight: 600 }}>
                     {" "}· {reviewNeeded} need manual review
@@ -245,10 +247,10 @@ export default function OnboardingPage() {
             </div>
             <div className="row" style={{ gap: 10 }}>
               <button className="btn btn-ghost" onClick={() => setEditAll((v) => !v)}>
-                <Pencil size={15} /> {editAll ? "Done editing" : "Edit all"}
+                <Pencil size={15} /> {editAll ? t("Done editing") : t("Edit all")}
               </button>
               <button className="btn btn-primary" onClick={confirmAndAdd}>
-                <CheckCircle2 size={16} /> Confirm &amp; add {rows.length}
+                <CheckCircle2 size={16} /> {t("Confirm & add")} {rows.length}
               </button>
             </div>
           </div>
@@ -257,11 +259,11 @@ export default function OnboardingPage() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Passport</th>
-                  <th>Nationality</th>
-                  <th>Expiry</th>
-                  <th>Confidence</th>
+                  <th>{t("Name")}</th>
+                  <th>{t("Passport")}</th>
+                  <th>{t("Nationality")}</th>
+                  <th>{t("Expiry")}</th>
+                  <th>{t("Confidence")}</th>
                   <th style={{ width: 44 }} />
                 </tr>
               </thead>

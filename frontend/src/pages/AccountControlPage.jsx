@@ -10,6 +10,7 @@ import { useEffect, useState, useCallback } from "react";
 import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../permissions.js";
+import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Account control (requires the "manage accounts" permission).
@@ -48,6 +49,7 @@ function passwordProblem(pw) {
 }
 
 export default function AccountControlPage() {
+  const { t } = useLang();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -178,12 +180,12 @@ export default function AccountControlPage() {
     <div className="page">
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
         <div>
-          <div className="page-eyebrow">Administration</div>
-          <h1 className="page-title">Account control</h1>
-          <p className="page-sub">Create accounts and choose exactly what each one can do.</p>
+          <div className="page-eyebrow">{t("Administration")}</div>
+          <h1 className="page-title">{t("Account control")}</h1>
+          <p className="page-sub">{t("Create accounts and choose exactly what each one can do.")}</p>
         </div>
         <button className="btn btn-primary" onClick={openCreate}>
-          <UserPlus size={16} /> New account
+          <UserPlus size={16} /> {t("New account")}
         </button>
       </div>
 
@@ -198,18 +200,18 @@ export default function AccountControlPage() {
       <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
         <div className="row" style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", gap: 8 }}>
           <ShieldCheck size={18} color="var(--ink-3)" />
-          <h2 style={{ fontSize: 16 }}>Accounts</h2>
-          <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>{accounts.length} total</span>
+          <h2 style={{ fontSize: 16 }}>{t("Accounts")}</h2>
+          <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>{accounts.length} {t("total")}</span>
         </div>
 
         {loading ? (
-          <div className="muted" style={{ padding: 24, fontSize: 14 }}>Loading…</div>
+          <div className="muted" style={{ padding: 24, fontSize: 14 }}>{t("Loading…")}</div>
         ) : accounts.length === 0 ? (
-          <div className="muted" style={{ padding: 24, fontSize: 14 }}>No accounts yet.</div>
+          <div className="muted" style={{ padding: 24, fontSize: 14 }}>{t("No accounts yet.")}</div>
         ) : (
           <table className="table">
             <thead>
-              <tr><th>Username</th><th>Name</th><th>Access</th><th style={{ width: 90 }} /></tr>
+              <tr><th>{t("Username")}</th><th>{t("Name")}</th><th>{t("Access")}</th><th style={{ width: 90 }} /></tr>
             </thead>
             <tbody>
               {accounts.map((a) => {
@@ -223,14 +225,14 @@ export default function AccountControlPage() {
                           {a.username.slice(0, 2).toUpperCase()}
                         </span>
                         <span className="mono" style={{ fontWeight: 500 }}>{a.username}</span>
-                        {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>You</span>}
+                        {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>{t("You")}</span>}
                       </div>
                     </td>
                     <td>{a.name || "—"}</td>
                     <td>
                       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                         {granted.length === 0 ? (
-                          <span className="badge badge-neutral">View only</span>
+                          <span className="badge badge-neutral">{t("View only")}</span>
                         ) : (
                           granted.map((p) => (
                             <span
@@ -267,22 +269,22 @@ export default function AccountControlPage() {
         <div style={S.overlay} onClick={() => !saving && setModalOpen(false)}>
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
-              <h2 style={{ fontSize: 18 }}>{editingId ? "Edit account" : "New account"}</h2>
+              <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit account") : t("New account")}</h2>
               <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label="Close"><X size={18} /></button>
             </div>
 
-            <label className="field-label">Username</label>
+            <label className="field-label">{t("Username")}</label>
             <input className="input mono" autoFocus value={form.username}
               placeholder="e.g. staff_123"
               onChange={(e) => setForm({ ...form, username: e.target.value })} />
 
-            <label className="field-label" style={{ marginTop: 14 }}>Name <span className="muted">(display only)</span></label>
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Name")} <span className="muted">({t("display only")})</span></label>
             <input className="input" value={form.name}
               placeholder="e.g. John Tan"
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>
-              Password {editingId && <span className="muted">(leave blank to keep current)</span>}
+              {t("Password")} {editingId && <span className="muted">({t("leave blank to keep current")})</span>}
             </label>
             <input className="input" type="password" value={form.password}
               placeholder={editingId ? "••••••••" : "Set a password"}
@@ -290,11 +292,11 @@ export default function AccountControlPage() {
             {(!editingId || form.password) && (
               <p className="muted" style={{ fontSize: 12, marginTop: 6,
                 color: form.password && passwordProblem(form.password) ? "var(--st-missing)" : undefined }}>
-                {PW_HINT}
+                {t(PW_HINT)}
               </p>
             )}
 
-            <label className="field-label" style={{ marginTop: 18 }}>Access rights</label>
+            <label className="field-label" style={{ marginTop: 18 }}>{t("Access rights")}</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {PERMISSIONS.map((p) => (
                 <label key={p.key} style={S.permRow}>
@@ -305,8 +307,8 @@ export default function AccountControlPage() {
                     style={{ marginTop: 3 }}
                   />
                   <span>
-                    <span style={{ fontWeight: 600, fontSize: 14 }}>{p.label}</span>
-                    <span className="muted" style={{ display: "block", fontSize: 12 }}>{p.desc}</span>
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
+                    <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
                   </span>
                 </label>
               ))}
@@ -317,9 +319,9 @@ export default function AccountControlPage() {
             )}
 
             <div className="row" style={{ gap: 10, marginTop: 22, justifyContent: "flex-end" }}>
-              <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>Cancel</button>
+              <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>{t("Cancel")}</button>
               <button className="btn btn-primary" onClick={save} disabled={saving}>
-                {saving ? "Saving…" : editingId ? "Save changes" : "Create account"}
+                {saving ? t("Saving…") : editingId ? t("Save changes") : t("Create account")}
               </button>
             </div>
           </div>

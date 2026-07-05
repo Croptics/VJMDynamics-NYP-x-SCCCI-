@@ -20,9 +20,12 @@ import {
   Pencil,
   Trash2,
   X,
+  BarChart3,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
+import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
+import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Screen 2 — Admin Dashboard & Analytics (Jun Qi).
@@ -50,6 +53,8 @@ const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastS
 
 export default function DashboardPage() {
   const perms = getPermissions();
+  const { t } = useLang();
+  const [tab, setTab] = useState("overview"); // "overview" | "analytics"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
   const [delegates, setDelegates] = useState([]);
@@ -167,7 +172,7 @@ export default function DashboardPage() {
   const coaches = data?.coaches || [];
   const coachName = (id) => {
     const c = coaches.find((x) => x.id === id);
-    return c ? `${c.name} · ${c.city}` : "Unassigned";
+    return c ? `${c.name} · ${c.city}` : t("Unassigned");
   };
 
   return (
@@ -175,33 +180,67 @@ export default function DashboardPage() {
       {/* ---- Header ------------------------------------------------------- */}
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
         <div>
-          <div className="page-eyebrow">Active trip</div>
-          <h1 className="page-title">Dashboard</h1>
+          <div className="page-eyebrow">{t("Active trip")}</div>
+          <h1 className="page-title">{t("Dashboard")}</h1>
           {trip ? (
             <p className="page-sub">
               {trip.name} · Day {trip.dayOf} of {trip.totalDays} · {trip.localTime} local ·{" "}
               {k?.total} delegates
             </p>
           ) : (
-            <p className="page-sub">Live present / missing / unassigned visibility.</p>
+            <p className="page-sub">{t("Live present / missing / unassigned visibility.")}</p>
           )}
         </div>
 
         <div className="row" style={{ gap: 10 }}>
           {data && (
             <span className="badge badge-present">
-              <span style={S.dot} /> Live · synced
+              <span style={S.dot} /> {t("Live · synced")}
             </span>
           )}
-          <button className="btn btn-ghost" onClick={load} title="Refresh">
-            <RefreshCw size={16} className={loading ? "spin" : ""} /> Refresh
+          <button className="btn btn-ghost" onClick={load} title={t("Refresh")}>
+            <RefreshCw size={16} className={loading ? "spin" : ""} /> {t("Refresh")}
           </button>
           <button className="btn btn-primary" onClick={exportXlsx} disabled={!data} style={{ display: perms.exportData ? undefined : "none" }}>
-            <Download size={16} /> Export
+            <Download size={16} /> {t("Export")}
           </button>
         </div>
       </div>
 
+      {/* ---- Tabs ----------------------------------------------------------- */}
+      <div className="row" style={{ gap: 8, marginTop: 18 }}>
+        <button
+          className="btn"
+          onClick={() => setTab("overview")}
+          style={{
+            background: tab === "overview" ? "var(--scc-red-tint)" : "transparent",
+            color: tab === "overview" ? "var(--scc-red)" : "var(--ink-2)",
+            border: `1px solid ${tab === "overview" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+          }}
+        >
+          {t("Overview")}
+        </button>
+        <button
+          className="btn"
+          onClick={() => setTab("analytics")}
+          style={{
+            background: tab === "analytics" ? "var(--scc-red-tint)" : "transparent",
+            color: tab === "analytics" ? "var(--scc-red)" : "var(--ink-2)",
+            border: `1px solid ${tab === "analytics" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+          }}
+        >
+          <BarChart3 size={16} /> {t("Analytics")}
+        </button>
+      </div>
+
+      {tab === "analytics" && (
+        <div style={{ marginTop: 20 }}>
+          <AnalyticsPanel />
+        </div>
+      )}
+
+      {tab === "overview" && (
+      <>
       {/* ---- Error banner ------------------------------------------------- */}
       {error && (
         <div
@@ -209,7 +248,7 @@ export default function DashboardPage() {
           style={{ marginTop: 20, padding: 16, borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}
         >
           <div className="row" style={{ gap: 10, color: "var(--st-missing)", fontWeight: 600 }}>
-            <AlertTriangle size={18} /> Couldn’t reach the backend
+            <AlertTriangle size={18} /> {t("Couldn't reach the backend")}
           </div>
           <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
             {error} — make sure it’s running (<code>cd backend &amp;&amp; npm run dev</code>), then hit Refresh.
@@ -218,19 +257,19 @@ export default function DashboardPage() {
       )}
 
       {loading && !data && (
-        <div className="muted" style={{ marginTop: 24 }}>Loading…</div>
+        <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
       )}
 
       {/* ---- KPI tiles ---------------------------------------------------- */}
       {k && (
         <div style={S.kpiGrid}>
-          <Kpi tone="missing" icon={AlertTriangle} label="Missing right now" value={`${k.missing}`}
-            suffix={`of ${k.total}`} foot={trip ? `Departure in ${trip.departsIn}` : null} big />
-          <Kpi tone="present" icon={UserCheck} label="Present" value={`${k.present}`}
+          <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
+            suffix={`${t("of")} ${k.total}`} foot={trip ? `Departure in ${trip.departsIn}` : null} big />
+          <Kpi tone="present" icon={UserCheck} label={t("Present")} value={`${k.present}`}
             foot={`+${k.presentDelta} in last 5 mins`} />
-          <Kpi tone="unassigned" icon={HelpCircle} label="Unassigned" value={`${k.unassigned}`}
-            foot="No coach yet" />
-          <Kpi tone="normal" icon={Bell} label="Open exceptions" value={`${k.openExceptions}`}
+          <Kpi tone="unassigned" icon={HelpCircle} label={t("Unassigned")} value={`${k.unassigned}`}
+            foot={t("No coach yet")} />
+          <Kpi tone="normal" icon={Bell} label={t("Open exceptions")} value={`${k.openExceptions}`}
             foot={`${k.criticalExceptions} critical · ${k.normalExceptions} normal`} />
         </div>
       )}
@@ -240,8 +279,8 @@ export default function DashboardPage() {
         <div style={S.twoCol}>
           <div className="card" style={{ padding: 22 }}>
             <div className="row between" style={{ marginBottom: 16 }}>
-              <h2 style={{ fontSize: 16 }}>Coach status</h2>
-              <span className="muted" style={{ fontSize: 13 }}>{coaches.length} coaches</span>
+              <h2 style={{ fontSize: 16 }}>{t("Coach status")}</h2>
+              <span className="muted" style={{ fontSize: 13 }}>{coaches.length} {t("coaches")}</span>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               {coaches.map((c) => (
@@ -253,11 +292,11 @@ export default function DashboardPage() {
           <div className="card" style={{ padding: 22 }}>
             <div className="row" style={{ marginBottom: 16, gap: 8 }}>
               <Activity size={18} color="var(--ink-3)" />
-              <h2 style={{ fontSize: 16 }}>Live activity</h2>
+              <h2 style={{ fontSize: 16 }}>{t("Live activity")}</h2>
             </div>
             {data.activity.length === 0 ? (
               <div className="muted" style={{ fontSize: 13 }}>
-                No activity yet. Add or update a delegate to see events here.
+                {t("No activity yet. Add or update a delegate to see events here.")}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -281,22 +320,22 @@ export default function DashboardPage() {
         <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
             <div>
-              <h2 style={{ fontSize: 16 }}>Missing right now</h2>
+              <h2 style={{ fontSize: 16 }}>{t("Missing right now")}</h2>
               <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                Reverse headcount — delegates who haven’t boarded yet
+                {t("Reverse headcount — delegates who haven't boarded yet")}
               </p>
             </div>
-            <span className="badge badge-missing">{missing.length} missing</span>
+            <span className="badge badge-missing">{missing.length} {t("missing")}</span>
           </div>
 
           {missing.length === 0 ? (
             <div className="muted" style={{ padding: 24, fontSize: 14 }}>
-              {k?.total ? "Everyone’s accounted for. 🎉" : "No delegates yet."}
+              {k?.total ? t("Everyone's accounted for. 🎉") : t("No delegates yet.")}
             </div>
           ) : (
             <table className="table">
               <thead>
-                <tr><th>Delegate</th><th>Coach</th><th>Last seen</th><th style={{ width: 90 }} /></tr>
+                <tr><th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Last seen")}</th><th style={{ width: 90 }} /></tr>
               </thead>
               <tbody>
                 {missing.map((m) => (
@@ -316,7 +355,7 @@ export default function DashboardPage() {
                     </td>
                     <td>{m.coach}</td>
                     <td className="muted">{m.lastSeen || "—"}</td>
-                    <td><span className="badge badge-missing">Missing</span></td>
+                    <td><span className="badge badge-missing">{t("Missing")}</span></td>
                   </tr>
                 ))}
               </tbody>
@@ -330,20 +369,20 @@ export default function DashboardPage() {
         <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
             <div>
-              <h2 style={{ fontSize: 16 }}>All delegates</h2>
+              <h2 style={{ fontSize: 16 }}>{t("All delegates")}</h2>
               <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                Create, edit, and remove attendance records
+                {t("Create, edit, and remove attendance records")}
               </p>
             </div>
             <div className="row" style={{ gap: 10 }}>
               {perms.manageDelegates && delegates.length > 0 && (
                 <button className="btn btn-ghost" style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }} onClick={deleteAll}>
-                  <Trash2 size={16} /> Delete all
+                  <Trash2 size={16} /> {t("Delete all")}
                 </button>
               )}
               {perms.manageDelegates && (
                 <button className="btn btn-primary" onClick={openCreate}>
-                  <Plus size={16} /> Add delegate
+                  <Plus size={16} /> {t("Add delegate")}
                 </button>
               )}
             </div>
@@ -351,13 +390,13 @@ export default function DashboardPage() {
 
           {delegates.length === 0 ? (
             <div className="muted" style={{ padding: 24, fontSize: 14 }}>
-              No delegates yet. Click <strong>Add delegate</strong> to create your first record.
+              {t("No delegates yet. Click")} <strong>{t("Add delegate")}</strong> {t("to create your first record.")}
             </div>
           ) : (
             <table className="table">
               <thead>
                 <tr>
-                  <th>Delegate</th><th>Coach</th><th>Status</th><th>Last seen</th>
+                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th>
                   <th style={{ width: 90 }} />
                 </tr>
               </thead>
@@ -407,38 +446,38 @@ export default function DashboardPage() {
         <div style={S.overlay} onClick={() => !saving && setModalOpen(false)}>
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
-              <h2 style={{ fontSize: 18 }}>{editingId ? "Edit delegate" : "Add delegate"}</h2>
+              <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit delegate") : t("Add delegate")}</h2>
               <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label="Close">
                 <X size={18} />
               </button>
             </div>
 
-            <label className="field-label">Full name</label>
+            <label className="field-label">{t("Full name")}</label>
             <input className="input" autoFocus value={form.name}
               placeholder="e.g. Lim Wei Jie"
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
-            <label className="field-label" style={{ marginTop: 14 }}>Status</label>
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Status")}</label>
             <select className="select" value={form.status}
               onChange={(e) => setForm({ ...form, status: e.target.value })}>
-              <option value="PRESENT">Present</option>
-              <option value="MISSING">Missing</option>
-              <option value="UNASSIGNED">Unassigned</option>
+              <option value="PRESENT">{t("Present")}</option>
+              <option value="MISSING">{t("Missing")}</option>
+              <option value="UNASSIGNED">{t("Unassigned")}</option>
             </select>
 
             <label className="field-label" style={{ marginTop: 14 }}>
-              Coach {form.status !== "UNASSIGNED" && <span className="muted">(required)</span>}
+              {t("Coach")} {form.status !== "UNASSIGNED" && <span className="muted">(required)</span>}
             </label>
             <select className="select" value={form.coachId}
               disabled={form.status === "UNASSIGNED"}
               onChange={(e) => setForm({ ...form, coachId: e.target.value })}>
-              <option value="">{form.status === "UNASSIGNED" ? "No coach (unassigned)" : "Select a coach…"}</option>
+              <option value="">{form.status === "UNASSIGNED" ? t("No coach (unassigned)") : t("Select a coach…")}</option>
               {coaches.map((c) => (
                 <option key={c.id} value={c.id}>{c.name} · {c.city}</option>
               ))}
             </select>
 
-            <label className="field-label" style={{ marginTop: 14 }}>Last seen (optional)</label>
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Last seen (optional)")}</label>
             <input className="input" value={form.lastSeen}
               placeholder="e.g. Lobby · 14:08"
               onChange={(e) => setForm({ ...form, lastSeen: e.target.value })} />
@@ -446,7 +485,7 @@ export default function DashboardPage() {
             <label className="row" style={{ gap: 8, marginTop: 16, fontSize: 14, cursor: "pointer" }}>
               <input type="checkbox" checked={form.vip}
                 onChange={(e) => setForm({ ...form, vip: e.target.checked })} />
-              Mark as VIP
+              {t("Mark as VIP")}
             </label>
 
             {formErr && (
@@ -461,14 +500,16 @@ export default function DashboardPage() {
 
             <div className="row" style={{ gap: 10, marginTop: 24, justifyContent: "flex-end" }}>
               <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>
-                Cancel
+                {t("Cancel")}
               </button>
               <button className="btn btn-primary" onClick={saveForm} disabled={saving || !form.name.trim()}>
-                {saving ? "Saving…" : editingId ? "Save changes" : "Add delegate"}
+                {saving ? t("Saving…") : editingId ? t("Save changes") : t("Add delegate")}
               </button>
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
@@ -498,6 +539,7 @@ function Kpi({ tone, icon: Icon, label, value, suffix, foot, big }) {
 
 /* ---- Coach progress bar ------------------------------------------------- */
 function CoachBar({ coach }) {
+  const { t } = useLang();
   const pct = coach.capacity ? Math.round((coach.boarded / coach.capacity) * 100) : 0;
   const allIn = coach.total > 0 && coach.missing === 0;
   const barColor = coach.missing > 0 ? "var(--st-missing)" : "var(--st-present)";
@@ -511,18 +553,18 @@ function CoachBar({ coach }) {
           <span style={{ fontWeight: 500, fontSize: 14 }}>{coach.name} · {coach.city}</span>
         </div>
         {coach.missing > 0 ? (
-          <span className="badge badge-missing">{coach.missing} missing</span>
+          <span className="badge badge-missing">{coach.missing} {t("missing")}</span>
         ) : allIn ? (
-          <span className="badge badge-present">All in</span>
+          <span className="badge badge-present">{t("All in")}</span>
         ) : (
-          <span className="badge badge-neutral">Empty</span>
+          <span className="badge badge-neutral">{t("Empty")}</span>
         )}
       </div>
       <div style={S.track}>
         <div style={{ ...S.fill, width: `${pct}%`, background: barColor }} />
       </div>
       <div className="muted mono" style={{ fontSize: 12, marginTop: 4 }}>
-        {coach.boarded}/{coach.capacity} boarded
+        {coach.boarded}/{coach.capacity} {t("boarded")}
       </div>
     </div>
   );

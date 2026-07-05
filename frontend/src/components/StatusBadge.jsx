@@ -1,3 +1,5 @@
+import { useLang } from "../lib/i18n.jsx";
+
 /**
  * Renders a pill in the MusterGo five-state status system.
  * Pass either a known `state` or use the confidence helper below.
@@ -15,8 +17,9 @@ const STATE_MAP = {
 };
 
 export default function StatusBadge({ state, children }) {
+  const { t } = useLang();
   const def = STATE_MAP[state] || { cls: "badge-neutral", label: state };
-  return <span className={"badge " + def.cls}>{children || def.label}</span>;
+  return <span className={"badge " + def.cls}>{children || t(def.label)}</span>;
 }
 
 /** Map a 0–1 confidence score to the review/present/missing palette. */
