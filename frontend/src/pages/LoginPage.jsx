@@ -10,7 +10,13 @@ import { useState } from "react";
 import { ClipboardCheck, Eye, EyeOff, Fingerprint, AlertCircle } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 
-const REMEMBER_KEY = "mg_remember";
+const REMEMBER_KEY = "mg_remember_v2";
+
+// One-time cleanup: an earlier build always kept "Keep me signed in" ticked
+// and could save your password even when you didn't intend it. Remove any value
+// left under the old key so a fresh start never prefills a password unexpectedly.
+// (Values saved by the current build use the new key and are unaffected.)
+try { localStorage.removeItem("mg_remember"); } catch { /* ignore */ }
 
 // Read remembered login (used to prefill the form). Stored only when the user
 // ticked "Keep me signed in". NOTE: this includes the password in localStorage,
@@ -36,7 +42,7 @@ export default function LoginPage({ onSignIn }) {
   const [staffId, setStaffId] = useState(remembered?.staffId || "");
   const [password, setPassword] = useState(remembered?.password || "");
   const [showPw, setShowPw] = useState(false);
-  const [keep, setKeep] = useState(remembered ? true : true);
+  const [keep, setKeep] = useState(!!remembered); // ticked only if a login was remembered
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
