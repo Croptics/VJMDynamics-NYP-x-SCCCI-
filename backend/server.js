@@ -29,6 +29,7 @@ import {
   getMissing,
   getDelegates,
   listDelegates,
+  getDelegateById,
   createDelegate,
   updateDelegate,
   deleteDelegate,
@@ -203,12 +204,27 @@ app.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(
   if (!body.name || !body.name.trim()) {
     return res.status(400).json({ error: "NAME_REQUIRED", message: "A name is required." });
   }
+  // A coach is required unless the delegate is explicitly Unassigned.
+  if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
+    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
+  }
   const delegate = await createDelegate(body);
   res.status(201).json(delegate);
 }));
 
 app.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const updated = await updateDelegate(req.params.id, req.body || {});
+  const patch = req.body || {};
+  const existing = await getDelegateById(req.params.id);
+  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  // Validate against the RESULT of applying this patch, not just the patch
+  // alone — e.g. changing only the status on an already-unassigned delegate
+  // still needs a coach if the new status isn't Unassigned.
+  const nextStatus = patch.status !== undefined ? patch.status : existing.status;
+  const nextCoachId = patch.coachId !== undefined ? patch.coachId : existing.coachId;
+  if (nextStatus !== "UNASSIGNED" && !nextCoachId) {
+    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
+  }
+  const updated = await updateDelegate(req.params.id, patch);
   if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
   res.json(updated);
 }));

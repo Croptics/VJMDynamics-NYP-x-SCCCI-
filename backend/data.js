@@ -243,6 +243,11 @@ export async function listDelegates() {
   return (await all('SELECT * FROM delegates ORDER BY id')).map(rowToDelegate);
 }
 
+export async function getDelegateById(id) {
+  const row = await get("SELECT * FROM delegates WHERE id = $1", [id]);
+  return row ? rowToDelegate(row) : null;
+}
+
 export async function createDelegate(input) {
   const d = normalize(input, await nextId());
   await run(`INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [

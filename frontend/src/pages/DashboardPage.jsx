@@ -61,6 +61,7 @@ export default function DashboardPage() {
   const [editingId, setEditingId] = useState(null); // null = creating
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [formErr, setFormErr] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -93,6 +94,7 @@ export default function DashboardPage() {
   function openCreate() {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setFormErr("");
     setModalOpen(true);
   }
 
@@ -105,11 +107,18 @@ export default function DashboardPage() {
       vip: !!d.vip,
       lastSeen: d.lastSeen || "",
     });
+    setFormErr("");
     setModalOpen(true);
   }
 
   async function saveForm() {
     if (!form.name.trim()) return;
+    // A coach is required unless the delegate is explicitly Unassigned.
+    if (form.status !== "UNASSIGNED" && !form.coachId) {
+      setFormErr("Please select a coach, or set status to Unassigned.");
+      return;
+    }
+    setFormErr("");
     setSaving(true);
     const payload = {
       name: form.name.trim(),
@@ -127,7 +136,7 @@ export default function DashboardPage() {
       setModalOpen(false);
       await load();
     } catch (e) {
-      setError(e.message || "Save failed.");
+      setFormErr(e.message || "Save failed.");
     } finally {
       setSaving(false);
     }
@@ -417,7 +426,9 @@ export default function DashboardPage() {
               <option value="UNASSIGNED">Unassigned</option>
             </select>
 
-            <label className="field-label" style={{ marginTop: 14 }}>Coach</label>
+            <label className="field-label" style={{ marginTop: 14 }}>
+              Coach {form.status !== "UNASSIGNED" && <span className="muted">(required)</span>}
+            </label>
             <select className="select" value={form.coachId}
               disabled={form.status === "UNASSIGNED"}
               onChange={(e) => setForm({ ...form, coachId: e.target.value })}>
@@ -437,6 +448,16 @@ export default function DashboardPage() {
                 onChange={(e) => setForm({ ...form, vip: e.target.checked })} />
               Mark as VIP
             </label>
+
+            {formErr && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8, marginTop: 16, padding: "10px 12px",
+                background: "var(--st-missing-bg)", color: "var(--st-missing)", borderRadius: "var(--r-sm)",
+                fontSize: 13, fontWeight: 600,
+              }}>
+                {formErr}
+              </div>
+            )}
 
             <div className="row" style={{ gap: 10, marginTop: 24, justifyContent: "flex-end" }}>
               <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>
