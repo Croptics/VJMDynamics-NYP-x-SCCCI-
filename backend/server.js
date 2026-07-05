@@ -124,6 +124,26 @@ app.post("/api/auth/login", wrap(async (req, res) => {
   });
 }));
 
+/**
+ * GET /api/auth/session — returns the CURRENT permissions/details for the
+ * signed-in account, straight from the database (never cached). The frontend
+ * polls this so that if someone with "manageAccounts" changes YOUR account
+ * (permissions, username, or deletes it) while you're logged in elsewhere, you
+ * get logged out automatically instead of carrying on with stale access shown
+ * in the UI. Returns 401 if the account was renamed or deleted (the old token
+ * no longer resolves to anyone).
+ */
+app.get("/api/auth/session", wrap(async (req, res) => {
+  const acc = await accountFromReq(req);
+  if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Your session is no longer valid." });
+  res.json({
+    username: acc.username,
+    name: acc.name,
+    role: acc.role,
+    permissions: accountPermissions(acc),
+  });
+}));
+
 /* ---- Accounts (requires manageAccounts) --------------------------------- */
 app.get("/api/accounts", requirePermission("manageAccounts"), wrap(async (_req, res) => {
   res.json({ accounts: await listAccounts() });
