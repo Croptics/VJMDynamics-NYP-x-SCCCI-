@@ -1,19 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
-import { BarChart3, Eye, EyeOff, RefreshCw, AlertTriangle } from "lucide-react";
+import { useMemo, useState } from "react";
+import { BarChart3, Eye, EyeOff, Sparkles } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from "recharts";
-import { apiGet, getUser } from "../lib/api.js";
+import { apiPost, getUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 
 /**
  * Analytics panel — the "Analytics" tab inside the Dashboard page.
  *
- * Read-only, built entirely on top of the existing GET
- * /api/trips/:id/dashboard and /missing endpoints (no new backend routes or
- * schema). "Customization" = each signed-in user can toggle which widgets
- * are visible; the choice is remembered per-username in localStorage.
+ * Read-only, derived from `data`/`missing` passed down by DashboardPage
+ * (which owns the single fetch + Refresh button shared by both the
+ * Overview and Analytics tabs — no separate fetch/refresh here).
+ * "Customization" = each signed-in user can toggle which widgets are
+ * visible; the choice is remembered per-username in localStorage.
  */
 
 const TRIP_ID = "t-1";
@@ -32,6 +33,16 @@ const WIDGETS = [
   { key: "vipMissing", label: "VIP vs. non-VIP missing" },
 ];
 
+/** Split the AI-generated insights text into individual points, stripping
+ *  whatever numbering/bullet marker the model used (we render our own via
+ *  an <ol>, so "1. ", "- ", "• " etc. at the start of a line are redundant). */
+function splitInsightPoints(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:\d+[.)]|[-•*])\s*/, "").trim())
+    .filter(Boolean);
+}
+
 function prefsKey() {
   const u = getUser() || {};
   return `mg_analytics_prefs_${u.username || "guest"}`;
@@ -46,33 +57,32 @@ function loadPrefs() {
   }
 }
 
-export default function AnalyticsPanel() {
-  const { t } = useLang();
-  const [data, setData] = useState(null);
-  const [missing, setMissing] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+export default function AnalyticsPanel({ data, missing }) {
+  const { t, lang } = useLang();
   const [visible, setVisible] = useState(loadPrefs);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [insights, setInsights] = useState(null);
+  const [insightsAsOf, setInsightsAsOf] = useState(null);
+  const [insightsSource, setInsightsSource] = useState(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState(null);
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function load() {
-    setLoading(true);
-    setError(null);
+  async function generateInsights() {
+    setInsightsLoading(true);
+    setInsightsError(null);
     try {
-      const [dash, miss] = await Promise.all([
-        apiGet(`/trips/${TRIP_ID}/dashboard`),
-        apiGet(`/trips/${TRIP_ID}/missing`),
-      ]);
-      setData(dash);
-      setMissing(miss.missing || []);
+      const { insights: text, asOf, source } = await apiPost(`/trips/${TRIP_ID}/insights`, { lang });
+      setInsights(text);
+      setInsightsAsOf(asOf);
+      setInsightsSource(source);
     } catch (e) {
-      setError(e.message || "Could not reach the backend.");
+      setInsightsError(
+        e.code === "AI_NOT_CONFIGURED"
+          ? e.message || "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env."
+          : e.message || "AI insights are temporarily unavailable."
+      );
     } finally {
-      setLoading(false);
+      setInsightsLoading(false);
     }
   }
 
@@ -117,13 +127,54 @@ export default function AnalyticsPanel() {
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16, marginBottom: 4 }}>
         <p className="page-sub" style={{ margin: 0 }}>{t("Attendance breakdown, coach load, and VIP visibility — live from the trip data.")}</p>
         <div className="row" style={{ gap: 10 }}>
-          <button className="btn btn-ghost" onClick={load} title={t("Refresh")}>
-            <RefreshCw size={16} className={loading ? "spin" : ""} /> {t("Refresh")}
-          </button>
           <button className="btn btn-ghost" onClick={() => setPanelOpen((v) => !v)}>
             <BarChart3 size={16} /> {t("Customize")}
           </button>
         </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16, padding: 20 }}>
+        <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <Sparkles size={18} color="var(--scc-red)" />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("AI Insights")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("A short written summary of the current attendance snapshot.")}</div>
+              <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                {t("Tip: switch to your preferred language before generating — it won't be re-translated afterward.")}
+              </div>
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={generateInsights} disabled={insightsLoading}>
+            <Sparkles size={16} /> {insightsLoading ? t("Generating…") : t("Generate Insights")}
+          </button>
+        </div>
+
+        {insightsError && (
+          <div style={{
+            marginTop: 14, padding: "10px 12px", borderRadius: "var(--r-sm)",
+            background: "var(--st-unassigned-bg)", color: "var(--st-unassigned)", fontSize: 13, fontWeight: 600,
+          }}>
+            {insightsError}
+          </div>
+        )}
+
+        {insights && !insightsError && (
+          <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+            <ol style={{ margin: 0, paddingLeft: 20, fontSize: 14, lineHeight: 1.7 }}>
+              {splitInsightPoints(insights).map((point, i) => (
+                <li key={i} style={{ marginBottom: 4 }}>{point}</li>
+              ))}
+            </ol>
+            {insightsAsOf && (
+              <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+                {t("As of")} {insightsAsOf}
+                {insightsSource === "ollama" && <> · {t("via local Ollama")}</>}
+                {insightsSource === "anthropic" && <> · {t("via Claude")}</>}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {panelOpen && (
@@ -140,17 +191,6 @@ export default function AnalyticsPanel() {
           </div>
         </div>
       )}
-
-      {error && (
-        <div className="card" style={{ marginTop: 20, padding: 16, borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
-          <div className="row" style={{ gap: 10, color: "var(--st-missing)", fontWeight: 600 }}>
-            <AlertTriangle size={18} /> {t("Couldn't reach the backend")}
-          </div>
-          <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>{error}</p>
-        </div>
-      )}
-
-      {loading && !data && <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>}
 
       {data && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 20 }}>

@@ -53,7 +53,7 @@ const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastS
 
 export default function DashboardPage() {
   const perms = getPermissions();
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [tab, setTab] = useState("overview"); // "overview" | "analytics"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
@@ -184,8 +184,9 @@ export default function DashboardPage() {
           <h1 className="page-title">{t("Dashboard")}</h1>
           {trip ? (
             <p className="page-sub">
-              {trip.name} · Day {trip.dayOf} of {trip.totalDays} · {trip.localTime} local ·{" "}
-              {k?.total} delegates
+              {lang === "zh"
+                ? `${trip.name} · 第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime} · ${k?.total} 位代表`
+                : `${trip.name} · Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime} local · ${k?.total} delegates`}
             </p>
           ) : (
             <p className="page-sub">{t("Live present / missing / unassigned visibility.")}</p>
@@ -233,15 +234,7 @@ export default function DashboardPage() {
         </button>
       </div>
 
-      {tab === "analytics" && (
-        <div style={{ marginTop: 20 }}>
-          <AnalyticsPanel />
-        </div>
-      )}
-
-      {tab === "overview" && (
-      <>
-      {/* ---- Error banner ------------------------------------------------- */}
+      {/* ---- Error banner (shared by both tabs) --------------------------- */}
       {error && (
         <div
           className="card"
@@ -260,17 +253,25 @@ export default function DashboardPage() {
         <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
       )}
 
+      {tab === "analytics" && (
+        <div style={{ marginTop: 20 }}>
+          <AnalyticsPanel data={data} missing={missing} />
+        </div>
+      )}
+
+      {tab === "overview" && (
+      <>
       {/* ---- KPI tiles ---------------------------------------------------- */}
       {k && (
         <div style={S.kpiGrid}>
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
-            suffix={`${t("of")} ${k.total}`} foot={trip ? `Departure in ${trip.departsIn}` : null} big />
+            suffix={`${t("of")} ${k.total}`} foot={trip ? `${t("Departure in")} ${trip.departsIn}` : null} big />
           <Kpi tone="present" icon={UserCheck} label={t("Present")} value={`${k.present}`}
-            foot={`+${k.presentDelta} in last 5 mins`} />
+            foot={`+${k.presentDelta} ${t("in last 5 mins")}`} />
           <Kpi tone="unassigned" icon={HelpCircle} label={t("Unassigned")} value={`${k.unassigned}`}
             foot={t("No coach yet")} />
           <Kpi tone="normal" icon={Bell} label={t("Open exceptions")} value={`${k.openExceptions}`}
-            foot={`${k.criticalExceptions} critical · ${k.normalExceptions} normal`} />
+            foot={`${k.criticalExceptions} ${t("critical")} · ${k.normalExceptions} ${t("normal")}`} />
         </div>
       )}
 
@@ -304,8 +305,8 @@ export default function DashboardPage() {
                   <div key={a.id} className="row" style={{ gap: 12, alignItems: "flex-start" }}>
                     <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
                     <div>
-                      <div style={{ fontSize: 14 }}>{a.text}</div>
-                      <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via}</div>
+                      <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
+                      <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
                     </div>
                   </div>
                 ))}
@@ -466,7 +467,7 @@ export default function DashboardPage() {
             </select>
 
             <label className="field-label" style={{ marginTop: 14 }}>
-              {t("Coach")} {form.status !== "UNASSIGNED" && <span className="muted">(required)</span>}
+              {t("Coach")} {form.status !== "UNASSIGNED" && <span className="muted">({t("required")})</span>}
             </label>
             <select className="select" value={form.coachId}
               disabled={form.status === "UNASSIGNED"}
@@ -568,6 +569,17 @@ function CoachBar({ coach }) {
       </div>
     </div>
   );
+}
+
+/** Activity text comes from the backend as plain English ("Lim added",
+ *  "All delegates removed (3)"), since it's stored as-is in the log. Rebuild
+ *  it with the translated verb rather than adding a whole new API shape. */
+function translateActivityText(text, t) {
+  const allMatch = text.match(/^All delegates removed \((\d+)\)$/);
+  if (allMatch) return `${t("All delegates removed")} (${allMatch[1]})`;
+  const verbMatch = text.match(/^(.*) (added|updated|removed)$/);
+  if (verbMatch) return `${verbMatch[1]} ${t(verbMatch[2])}`;
+  return text;
 }
 
 function activityColor(kind) {

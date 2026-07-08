@@ -31,6 +31,7 @@
  */
 
 import pg from "pg";
+import bcrypt from "bcryptjs";
 import { cleanPermissions } from "../permissions.js";
 
 const { Pool } = pg;
@@ -159,7 +160,7 @@ async function seed() {
   if (!(await get("SELECT id FROM accounts LIMIT 1"))) {
     const perms = defaultPermsForRole("main");
     await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
-      "u-1", "staff_194", "Staff 194", "password123!", "main", JSON.stringify(perms), new Date().toISOString(),
+      "u-1", "staff_194", "Staff 194", await hashPassword("password123!"), "main", JSON.stringify(perms), new Date().toISOString(),
     ]);
   }
   // Trip (once).
@@ -236,6 +237,35 @@ export function passwordProblem(pw) {
   if (!/[A-Za-z]/.test(s)) return "Password must include at least one letter.";
   if (!/[0-9]/.test(s)) return "Password must include at least one number.";
   return null;
+}
+
+/* ---- Password hashing (bcrypt) -------------------------------------------
+ * Passwords are stored as bcrypt hashes. Older rows created before hashing
+ * was added may still hold a plaintext password — verifyPassword() detects
+ * that (a bcrypt hash always looks like "$2a$10$...") and falls back to a
+ * plain comparison, then the login route upgrades the row via
+ * upgradePasswordIfNeeded() so it's hashed from then on. Nobody has to run a
+ * manual migration.
+ * ------------------------------------------------------------------------- */
+function isBcryptHash(s) {
+  return typeof s === "string" && /^\$2[aby]?\$\d{2}\$/.test(s);
+}
+
+export async function hashPassword(plain) {
+  return bcrypt.hash(String(plain), 10);
+}
+
+/** Compare a plaintext password against a stored (hashed or legacy plaintext) value. */
+export async function verifyPassword(plain, stored) {
+  if (!stored) return false;
+  if (isBcryptHash(stored)) return bcrypt.compare(String(plain), stored);
+  return String(plain) === stored; // legacy pre-hashing row
+}
+
+/** After a successful login, hash-and-persist any account still on a legacy plaintext password. */
+export async function upgradePasswordIfNeeded(account, plainPassword) {
+  if (isBcryptHash(account.password)) return;
+  await run("UPDATE accounts SET password = $1 WHERE id = $2", [await hashPassword(plainPassword), account.id]);
 }
 
 /* ---- Delegate CRUD ------------------------------------------------------ */
@@ -355,8 +385,8 @@ export async function getDelegates() {
 /* ---- Accounts + permissions -------------------------------------------- *
  * Each account carries a set of permissions (tickboxes on the Account control
  * page). A short "role" label (main/admin/staff) is derived from the
- * permissions for display. Passwords are plaintext for this school demo;
- * production would hash them (bcrypt).
+ * permissions for display. Passwords are stored as bcrypt hashes (see
+ * hashPassword/verifyPassword above).
  * ------------------------------------------------------------------------- */
 function defaultPermsForRole(role) {
   if (role === "main") return { manageDelegates: true, exportData: true, manageAccounts: true };
@@ -426,7 +456,7 @@ export async function createAccount(input) {
 
   const id = await nextAccountId();
   await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
-    id, username, name, password, role, JSON.stringify(perms), new Date().toISOString(),
+    id, username, name, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
@@ -444,7 +474,7 @@ export async function updateAccount(id, patch) {
   if (patch.password) {
     const pwProblem = passwordProblem(String(patch.password));
     if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
-    password = String(patch.password);
+    password = await hashPassword(String(patch.password));
   }
 
   if (!username) return { error: "USERNAME_REQUIRED" };

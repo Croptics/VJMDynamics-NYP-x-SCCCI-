@@ -1,0 +1,249 @@
+MUSTERGO — PROJECT STRUCTURE NOTES
+====================================
+(What each file does, organized by folder)
+
+
+ROOT LEVEL
+----------
+permissions.js
+    The single source of truth for permissions. Both frontend and backend
+    import this one file. Defines the 3 permissions (manageDelegates,
+    exportData, manageAccounts) — add one entry here and the checkbox/chip/
+    enforcement appear everywhere automatically.
+
+README.md / HIGH_LEVEL_DESIGN.md / PROJECT_IMPLEMENTATION_PHASE.md
+    Docs — setup instructions, architecture/DB schema notes, and the team's
+    sprint plan.
+
+.gitignore
+    Excludes .claude/, node_modules/, and other local-only files from git.
+
+.claude/
+    My (Claude Code) own tooling config — dev-server launch settings etc.
+    Not part of the app itself; gitignored, never pushed to GitHub.
+
+backend/delegates.json
+    Looks like a stray data export/backup. The app doesn't actually read
+    from it — delegate data comes from PostgreSQL via data.js. Safe to
+    ignore or delete.
+
+
+BACKEND/  (Express API, port 4000)
+-----------------------------------
+server.js
+    The Express app itself. Defines every API route: login/session,
+    dashboard reads, delegate CRUD, Excel export, account management.
+    Read routes (trips/dashboard/missing/delegates) require any signed-in
+    account via requireAuth(); mutating routes and export require a
+    specific permission via requirePermission() (both from auth.js). Has a
+    "TEAMMATE ZONE" comment near the bottom — the sanctioned spot for
+    teammates to plug in their own route files (e.g. routes/insights.js
+    is mounted here).
+
+auth.js
+    Session tokens + auth middleware, shared by server.js and any
+    teammate route file that needs to require a signed-in caller (e.g.
+    routes/insights.js). Issues signed JWTs (makeToken) and exports
+    accountFromReq / requireAuth / requirePermission. Set JWT_SECRET in
+    backend/.env before deploying anywhere public — without it a fixed
+    dev-only fallback is used and a warning prints on startup.
+
+data.js
+    The database layer — talks to PostgreSQL. Creates the schema/seed
+    data on first run, and exports functions like getDashboard(),
+    getMissing(), listDelegates(), account CRUD, etc. server.js just
+    calls these. Passwords are stored as bcrypt hashes (hashPassword /
+    verifyPassword). Older rows created before hashing was added are
+    auto-upgraded in place the next time that account logs in
+    successfully (upgradePasswordIfNeeded) — no manual migration needed.
+
+routes/insights.js
+    Powers the "Generate Insights" button on the Dashboard's Analytics tab.
+    Requires a signed-in account (requireAuth, from auth.js). Tries a
+    local Ollama server first (free, no key, nothing leaves your
+    machine); if Ollama isn't running, falls back to the Anthropic API
+    (needs ANTHROPIC_API_KEY in .env). If neither is available, returns a
+    clear "not configured" message instead of erroring. Also honors the
+    current UI language — asks the model to write directly in English or
+    Chinese, so no separate translation step is needed.
+
+package.json / package-lock.json
+    Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
+    bcryptjs, jsonwebtoken) and the "npm run dev" / "npm start" scripts.
+
+.env  (gitignored, not shown in file list)
+    Holds DATABASE_URL for your Postgres connection, JWT_SECRET for
+    signing session tokens (see auth.js above), and optionally
+    OLLAMA_HOST / OLLAMA_MODEL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL for
+    the AI Insights feature. See .env.example for the full list with
+    explanations.
+
+
+FRONTEND/  (React + Vite SPA, port 5173)
+------------------------------------------
+
+Entry point & routing:
+
+  main.jsx
+      The actual entry point — mounts React to the DOM, wraps everything
+      in BrowserRouter and LanguageProvider (the translation context),
+      imports the global tokens.css.
+
+  App.jsx
+      The router. Decides auth state, and maps every URL path
+      (/dashboard, /assistant, /mobile, etc.) to its page component.
+      This is the file to check first when you want to know "what page
+      does this URL show." Also remembers whether you were in the mobile
+      section before logging out, so signing back in returns you there.
+
+  vite.config.js
+      Dev server config — proxies /api/* calls to the backend on :4000
+      so the frontend never needs to think about CORS.
+
+Shared components (src/components/):
+
+  Layout.jsx
+      The desktop shell — renders Sidebar + whatever page is routed into
+      the main content area. Also polls the backend every 15s to catch
+      if your account got edited/deleted while logged in.
+
+  Sidebar.jsx
+      The left nav rail — links to every page, the EN/中文 toggle, and
+      the account/logout block at the bottom.
+
+  StatusBadge.jsx
+      Small reusable pill component for status labels (Present/Missing/
+      Unassigned/etc.) and confidence-score badges.
+
+  AnalyticsPanel.jsx
+      Rendered inside the Dashboard's "Analytics" tab. Contains: the
+      charts + "Customize" widget-toggle UI, and the "AI Insights" card
+      with the "Generate Insights" button (calls backend/routes/insights.js,
+      shows which source answered — local Ollama or Claude — and respects
+      the current language).
+
+Library helpers (src/lib/):
+
+  api.js
+      The HTTP client — apiGet/apiPost/apiPatch/apiDelete, all
+      auto-attaching your JWT. Also handles token/user storage (login
+      persistence).
+
+  i18n.jsx
+      The translation system — the English/Chinese dictionary,
+      useLang() hook (returns { lang, toggleLang, t }), and language
+      toggle logic. Static dictionary only — no data ever sent to a
+      translation API, so delegate names/live data are never exposed.
+
+  claudeParse.js
+      Simulated document-parsing helper for the Onboarding page
+      (unrelated to the AI Insights feature — this is Vance's
+      passport-scanning feature, currently running in demo mode).
+
+Pages (src/pages/) — one file per route:
+
+  LoginPage.jsx            /login              Sign-in form.
+  DashboardPage.jsx        /dashboard          Main admin screen — KPI tiles,
+                                                coach status, live activity,
+                                                missing list, delegate CRUD
+                                                table, Overview/Analytics tabs
+                                                (Analytics tab renders
+                                                AnalyticsPanel.jsx).
+  TripCoachPage.jsx        /trips              Placeholder — Desmond's trip/
+                                                coach management screen.
+  OnboardingPage.jsx       /onboarding         Passport upload + AI-extraction
+                                                preview table (built, demo mode).
+  ExceptionInboxPage.jsx   /exceptions         Placeholder — Jayden's
+                                                exception-ticket screen.
+  ChatAssistantPage.jsx    /assistant          Trip assistant chat UI —
+                                                currently simulated demo reply
+                                                (real AI wiring = teammate's
+                                                to build).
+  QRCheckInPage.jsx        /checkin            Placeholder — Vimal's QR
+                                                check-in screen.
+  AccountControlPage.jsx   /accounts           Create/edit/delete staff
+                                                accounts + permissions
+                                                (needs manageAccounts).
+
+Mobile pages (src/pages/mobile/):
+
+  MobileLayout.jsx          (wraps /mobile/*)   Bottom tab-bar shell, incl.
+                                                 the EN/中文 toggle.
+  MobileHomePage.jsx        /mobile             Condensed KPI + coach-status
+                                                 summary.
+  MobileMissingPage.jsx     /mobile/missing     Card-list view of who's
+                                                 missing.
+  MobileAssistantPage.jsx   /mobile/assistant   Mobile-styled chat UI.
+  MobileProfilePage.jsx     /mobile/profile     Account info + logout.
+
+Styles (src/styles/):
+
+  tokens.css
+      The whole design system — colors, buttons, cards, badges, tables,
+      the sidebar/page layout. Loaded globally.
+
+  mobile.css
+      Mobile-only classes (.mobile-shell, .mobile-card, .mobile-tabbar,
+      etc.), scoped so it can't clash with the desktop styles.
+
+
+HOW TO TRACE A PAGE
+--------------------
+1. Start at App.jsx to find which page a URL loads.
+2. Open that page file.
+3. If it needs live data, it calls apiGet/apiPost from lib/api.js.
+4. That hits a route in backend/server.js (or backend/routes/*.js).
+5. Which calls a function in backend/data.js (or, for AI Insights,
+   talks to local Ollama / the Anthropic API).
+
+
+AUTH & SECURITY
+-----------------
+- Session tokens are signed JWTs (backend/auth.js), not forgeable.
+  Set JWT_SECRET in backend/.env before deploying anywhere public.
+- Passwords are bcrypt-hashed (backend/data.js). Legacy plaintext rows
+  auto-upgrade on next successful login — nobody needs to run a migration.
+- Every API route requires a signed-in account at minimum; mutating
+  actions (delegate CRUD, accounts, export) additionally require the
+  matching permission from permissions.js, enforced server-side (not
+  just hidden in the UI).
+- Because tokens changed format, everyone gets signed out once after
+  this update and needs to log back in — expected, one-time.
+
+
+TESTING THE MOBILE UI ON A PHONE
+-----------------------------------
+Both dev servers already support this (vite.config.js has host: true,
+Express listens on all interfaces by default) — no code changes needed:
+
+  1. Connect your phone to the same Wi-Fi as this computer.
+  2. Run `npm run dev` in both backend/ and frontend/ as usual.
+  3. Find this computer's local IP (Windows: ipconfig -> IPv4 Address,
+     e.g. 192.168.1.11).
+  4. On the phone's browser, go to http://<that-IP>:5173/login, sign in,
+     and it'll land you on /mobile automatically.
+  5. If it won't load, Windows Firewall is the usual culprit — allow
+     Node.js through the firewall for Private networks (or allow ports
+     5173/4000). The phone only needs port 5173 — Vite's dev proxy
+     forwards /api/* to the backend on this machine's side.
+
+
+AI INSIGHTS — RUNNING IT LOCALLY
+----------------------------------
+Two options, tried in this order automatically — no code changes needed
+to switch between them:
+
+  a) Local Ollama (free, no API key, nothing leaves your machine)
+     1. Install from ollama.com
+     2. Run: ollama pull llama3.2
+     3. Leave it running in the background — auto-detected at
+        http://localhost:11434
+
+  b) Anthropic API (used automatically if Ollama isn't running)
+     1. Get a key at console.anthropic.com
+     2. Add to backend/.env:  ANTHROPIC_API_KEY=sk-ant-...
+
+If deploying the backend to a live hosting service, only option (b)
+works there — the deployed server has no access to your laptop's
+Ollama. Add ANTHROPIC_API_KEY as an environment variable on the
+hosting platform (Vercel/Render/etc.) for AI Insights to work live.

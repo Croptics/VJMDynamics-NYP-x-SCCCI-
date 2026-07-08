@@ -46,14 +46,27 @@ export default function App() {
 
   const handleSignIn = () => {
     setAuthed(true);
-    navigate(wasMobileRef.current ? "/mobile" : "/dashboard", { replace: true });
+    // If we got bounced to /login from a specific URL (e.g. someone opened
+    // /mobile/profile while logged out, or logged out while on it), go back
+    // to exactly that page.
+    const from = location.state?.from;
+    if (from && from !== "/login") {
+      navigate(from, { replace: true });
+      return;
+    }
+    // Otherwise (a brand-new session that opened straight on /login — the
+    // common case when a teammate visits the site fresh on their phone) fall
+    // back to a device guess: a phone-sized viewport goes to the mobile
+    // section, anything wider goes to the desktop dashboard.
+    const isPhoneSized = window.innerWidth <= 720;
+    navigate(wasMobileRef.current || isPhoneSized ? "/mobile" : "/dashboard", { replace: true });
   };
 
   if (!authed) {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage onSignIn={handleSignIn} />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname }} />} />
       </Routes>
     );
   }

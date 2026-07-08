@@ -40,7 +40,10 @@ import {
   createAccount,
   updateAccount,
   deleteAccount,
+  verifyPassword,
+  upgradePasswordIfNeeded,
 } from "./data.js";
+import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -67,42 +70,9 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, service: "mustergo-ba
  * managed by users with the "manageAccounts" permission on the Account control
  * page. The seeded first login is staff_194 / password123!.
  *
- * NOTE (production, not this demo): passwords are stored in plaintext and the
- * token is a simple base64 of the username. A real app would hash passwords
- * (bcrypt) and issue a signed JWT.
+ * Passwords are bcrypt-hashed (see data.js) and the session token is a
+ * signed JWT (see auth.js) — set JWT_SECRET in backend/.env for production.
  * ------------------------------------------------------------------------- */
-function makeToken(username) {
-  return `demo.${Buffer.from(String(username)).toString("base64")}.token`;
-}
-
-/** Resolve the calling account from the Authorization: Bearer token. */
-async function accountFromReq(req) {
-  const auth = req.headers.authorization || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length < 2) return null;
-  let username;
-  try {
-    username = Buffer.from(parts[1], "base64").toString("utf8");
-  } catch {
-    return null;
-  }
-  return (await getAccountByUsername(username)) || null;
-}
-
-/** Gate a route on a specific permission. */
-function requirePermission(perm) {
-  return wrap(async (req, res, next) => {
-    const acc = await accountFromReq(req);
-    if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please sign in again." });
-    if (!accountPermissions(acc)[perm]) {
-      return res.status(403).json({ error: "FORBIDDEN", message: "You don't have permission for that action." });
-    }
-    req.account = acc;
-    next();
-  });
-}
 
 app.post("/api/auth/login", wrap(async (req, res) => {
   const { staffId, password } = req.body || {};
@@ -112,9 +82,10 @@ app.post("/api/auth/login", wrap(async (req, res) => {
   }
 
   const acc = await getAccountByUsername(staffId);
-  if (!acc || acc.password !== password) {
+  if (!acc || !(await verifyPassword(password, acc.password))) {
     return res.status(401).json({ error: "INVALID_CREDENTIALS", message: "Incorrect Staff ID or password." });
   }
+  await upgradePasswordIfNeeded(acc, password);
 
   res.json({
     token: makeToken(acc.username),
@@ -182,16 +153,20 @@ function accountErrStatus(code) {
   return 400; // USERNAME_REQUIRED / PASSWORD_REQUIRED / WEAK_PASSWORD
 }
 
-/* ---- Trips -------------------------------------------------------------- */
-app.get("/api/trips", wrap(async (_req, res) => res.json([await getTrip()])));
-app.get("/api/trips/:id", wrap(async (_req, res) => res.json(await getTrip())));
+/* ---- Trips -------------------------------------------------------------- *
+ * Read-only, but still requires a signed-in account (any account — no
+ * specific permission) so attendance/delegate data can't be pulled by
+ * anyone who merely finds the API URL.
+ * ------------------------------------------------------------------------- */
+app.get("/api/trips", requireAuth(), wrap(async (_req, res) => res.json([await getTrip()])));
+app.get("/api/trips/:id", requireAuth(), wrap(async (_req, res) => res.json(await getTrip())));
 
 /* ---- Dashboard read views ----------------------------------------------- */
-app.get("/api/trips/:id/dashboard", wrap(async (_req, res) => res.json(await getDashboard())));
-app.get("/api/trips/:id/missing", wrap(async (_req, res) => res.json({ missing: await getMissing() })));
+app.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (_req, res) => res.json(await getDashboard())));
+app.get("/api/trips/:id/missing", requireAuth(), wrap(async (_req, res) => res.json({ missing: await getMissing() })));
 
 /* ---- Delegate CRUD ------------------------------------------------------ */
-app.get("/api/trips/:id/delegates", wrap(async (_req, res) => res.json({ delegates: await listDelegates() })));
+app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (_req, res) => res.json({ delegates: await listDelegates() })));
 
 // DELETE all delegates (dashboard "Delete all" button)
 app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (_req, res) => {
@@ -235,8 +210,12 @@ app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(asyn
   res.json({ deleted: true });
 }));
 
-/* ---- Excel export ------------------------------------------------------- */
-app.get("/api/trips/:id/export", wrap(async (_req, res) => {
+/* ---- Excel export --------------------------------------------------------
+ * Matches the frontend's "exportData" permission gate on the Export button —
+ * previously this route had no server-side check at all, so the gate was
+ * cosmetic only.
+ * ------------------------------------------------------------------------- */
+app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_req, res) => {
   const trip = await getTrip();
   const delegates = await getDelegates();
 
@@ -297,6 +276,9 @@ app.get("/api/trips/:id/export", wrap(async (_req, res) => {
 
 // import tripsRouter from "./routes/trips.js";
 // app.use(tripsRouter);
+
+import insightsRouter from "./routes/insights.js";
+app.use(insightsRouter);
 
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
