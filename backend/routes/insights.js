@@ -35,7 +35,7 @@ Trip: ${snapshot.trip.name} (${snapshot.trip.dateRange}), Day ${snapshot.trip.da
 Totals: ${snapshot.kpis.total} delegates · ${snapshot.kpis.present} present · ${snapshot.kpis.missing} missing · ${snapshot.kpis.unassigned} unassigned.
 
 Coaches:
-${snapshot.coaches.map((c) => `- ${c.name} (${c.city}): ${c.boarded}/${c.capacity} boarded, ${c.missing} missing`).join("\n")}
+${snapshot.coaches.map((c) => `- ${c.name}${c.city ? ` (${c.city})` : ""}: ${c.boarded}/${c.capacity} boarded, ${c.missing} missing`).join("\n")}
 
 Missing delegates (${snapshot.missing.length}):
 ${snapshot.missing.length === 0 ? "(none)" : snapshot.missing.map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""} · ${m.coach} · last seen: ${m.lastSeen || "unknown"}`).join("\n")}

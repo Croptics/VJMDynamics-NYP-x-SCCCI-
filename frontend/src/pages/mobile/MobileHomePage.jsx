@@ -10,7 +10,7 @@ const TRIP_ID = "t-1";
  * (GET /api/trips/:id/dashboard), condensed for a phone screen.
  */
 export default function MobileHomePage() {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -42,7 +42,13 @@ export default function MobileHomePage() {
             {t("Home")}
           </div>
           <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{trip ? trip.name : "MusterGo"}</h1>
-          {trip && <p className="muted" style={{ fontSize: 13, margin: 0 }}>Day {trip.dayOf} of {trip.totalDays} · {trip.localTime}</p>}
+          {trip && (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              {lang === "zh"
+                ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
+                : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime}`}
+            </p>
+          )}
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
@@ -54,7 +60,7 @@ export default function MobileHomePage() {
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={16} /> {t("Couldn't reach the backend")}
           </div>
-          <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{error}</p>
+          <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t(error)}</p>
         </div>
       )}
 
@@ -75,7 +81,7 @@ export default function MobileHomePage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {data.coaches.map((c) => (
               <div key={c.id} className="row between" style={{ fontSize: 13 }}>
-                <span>{c.name} · {c.city}</span>
+                <span>{[c.name, c.city].filter(Boolean).join(" · ")}</span>
                 <span className={c.missing > 0 ? "badge badge-missing" : "badge badge-present"}>
                   {c.missing > 0 ? `${c.missing} ${t("missing")}` : t("All in")}
                 </span>

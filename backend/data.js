@@ -371,7 +371,8 @@ export async function getMissing() {
         id: x.id,
         name: x.name,
         initials: x.initials,
-        coach: coach ? `${coach.name} · ${coach.city}` : "Unassigned",
+        // Coaches added outside the seed may have no city — don't render "null".
+        coach: coach ? [coach.name, coach.city].filter(Boolean).join(" · ") : "Unassigned",
         vip: x.vip,
         lastSeen: x.lastSeen,
       };

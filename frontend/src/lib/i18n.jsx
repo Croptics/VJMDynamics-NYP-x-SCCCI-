@@ -36,6 +36,16 @@ const DICT = {
   "Sign in with Workpass": "使用 Workpass 登录",
   "By signing in, you accept the SCCCI data handling policy.": "登录即表示您同意总商会的数据处理政策。",
   "Signing in…": "登录中…",
+  "Please enter your Staff ID and password.": "请输入员工编号和密码。",
+  "Incorrect Staff ID or password.": "员工编号或密码不正确。",
+  "Can't reach the server. Make sure the backend is running.": "无法连接服务器。请确认后端已启动。",
+  "Workpass sign-in isn't set up in this build — please use your Staff ID and password.": "此版本尚未支持 Workpass 登录 — 请使用员工编号和密码登录。",
+  "Your account access was updated. Please sign in again.": "您的账户权限已被更新，请重新登录。",
+  "Your account is no longer valid. Please sign in again.": "您的账户已失效，请重新登录。",
+  "Signed in": "已登录",
+  "Main": "主账户",
+  "Admin": "管理员",
+  "Staff": "员工",
 
   // Dashboard — overview
   "Active trip": "当前行程",
@@ -67,6 +77,12 @@ const DICT = {
   "removed": "已移除",
   "All delegates removed": "已删除全部代表",
   "you": "你",
+  "This cannot be undone.": "此操作无法撤销。",
+  "Please select a coach, or set status to Unassigned.": "请选择车辆，或将状态设为未分配。",
+  "Could not reach the backend.": "无法连接到后端服务。",
+  "Save failed.": "保存失败。",
+  "Delete failed.": "删除失败。",
+  "Delete all failed.": "全部删除失败。",
   "All delegates": "所有代表",
   "Create, edit, and remove attendance records": "创建、编辑和删除出勤记录",
   "Delete all": "全部删除",
@@ -191,6 +207,19 @@ const DICT = {
   "Manage accounts": "管理账户",
   "Access Account control — create, edit and delete accounts": "访问账户管理 — 创建、编辑和删除账户",
   "At least 8 characters, including a letter and a number.": "至少 8 个字符，需包含字母和数字。",
+  "That username is already taken.": "该用户名已被使用。",
+  "Username is required.": "请输入用户名。",
+  "Password is required.": "请输入密码。",
+  "Password must be at least 8 characters, with a letter and a number.": "密码至少需 8 个字符，且包含字母和数字。",
+  "You can't remove the last account that manages accounts.": "无法删除最后一个拥有账户管理权限的账户。",
+  "That account no longer exists.": "该账户已不存在。",
+  "Something went wrong. Please try again.": "出了点问题，请重试。",
+  "Password must be at least 8 characters.": "密码至少需要 8 个字符。",
+  "Password must include at least one letter.": "密码必须包含至少一个字母。",
+  "Password must include at least one number.": "密码必须包含至少一个数字。",
+  "Set a password": "设置密码",
+  "Could not load accounts.": "无法加载账户列表。",
+  "Delete account": "删除账户",
 
   // Mobile
   "Home": "首页",
@@ -204,7 +233,27 @@ const DICT = {
   "Permissions": "权限",
   "No special permissions on this account.": "此账户没有特殊权限。",
   "Total": "总计",
+  "last seen": "最后出现",
+
+  // AI Insights errors
+  "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env.": "请在本地安装 Ollama（免费），或请管理员在 backend/.env 中设置 ANTHROPIC_API_KEY。",
+  "AI insights are temporarily unavailable.": "AI 洞察暂时不可用，请稍后再试。",
+
+  // Chat assistant history
+  "messages": "条消息",
 };
+
+/**
+ * Non-hook translate for code that runs outside the React render cycle
+ * (window.alert in effects, etc.). Reads the saved language directly.
+ */
+export function translate(s) {
+  try {
+    return (localStorage.getItem(LANG_KEY) === "zh" && DICT[s]) || s;
+  } catch {
+    return s;
+  }
+}
 
 const LangContext = createContext({ lang: "en", toggleLang: () => {}, t: (s) => s });
 

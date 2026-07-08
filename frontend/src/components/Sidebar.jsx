@@ -31,10 +31,10 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
   ];
 
   const user = getUser() || {};
-  const displayName = user.name || user.staffId || "Signed in";
+  const displayName = user.name || user.staffId || t("Signed in");
   const roleLabel = user.role
-    ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
-    : user.staffId || "Staff";
+    ? t(user.role.charAt(0).toUpperCase() + user.role.slice(1))
+    : user.staffId || t("Staff");
   const initials = displayName
     .trim()
     .split(/\s+/)

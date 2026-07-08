@@ -10,6 +10,7 @@ import { useEffect, useRef } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import { apiGet, getUser, getPermissions } from "../lib/api.js";
+import { translate } from "../lib/i18n.jsx";
 
 // How often (ms) to re-check whether an admin changed our own account while
 // we're logged in. Also re-checks immediately whenever the tab regains focus,
@@ -58,7 +59,7 @@ export default function Layout({ onLogout }) {
     }
 
     function forceLogout(message) {
-      window.alert(message);
+      window.alert(translate(message));
       onLogout?.(); // clears the token and returns to /login (see App.jsx)
     }
 

@@ -51,7 +51,7 @@ export default function MobileMissingPage() {
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={16} /> {t("Couldn't reach the backend")}
           </div>
-          <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{error}</p>
+          <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t(error)}</p>
         </div>
       )}
 
@@ -71,7 +71,7 @@ export default function MobileMissingPage() {
             </div>
             <span className="badge badge-missing">{t("Missing")}</span>
           </div>
-          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{m.coach} · last seen {m.lastSeen || "—"}</div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{m.coach} · {t("last seen")} {m.lastSeen || "—"}</div>
         </div>
       ))}
 

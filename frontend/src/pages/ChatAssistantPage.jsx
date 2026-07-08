@@ -111,7 +111,7 @@ export default function ChatAssistantPage() {
                     <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {h.title}
                     </div>
-                    <div className="muted" style={{ fontSize: 11 }}>{h.time} · {h.count} messages</div>
+                    <div className="muted" style={{ fontSize: 11 }}>{h.time} · {h.count} {t("messages")}</div>
                   </div>
                 </button>
               ))}

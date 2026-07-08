@@ -22,11 +22,6 @@ README.md / HIGH_LEVEL_DESIGN.md / PROJECT_IMPLEMENTATION_PHASE.md
     My (Claude Code) own tooling config — dev-server launch settings etc.
     Not part of the app itself; gitignored, never pushed to GitHub.
 
-backend/delegates.json
-    Looks like a stray data export/backup. The app doesn't actually read
-    from it — delegate data comes from PostgreSQL via data.js. Safe to
-    ignore or delete.
-
 
 BACKEND/  (Express API, port 4000)
 -----------------------------------
@@ -132,8 +127,10 @@ Library helpers (src/lib/):
   i18n.jsx
       The translation system — the English/Chinese dictionary,
       useLang() hook (returns { lang, toggleLang, t }), and language
-      toggle logic. Static dictionary only — no data ever sent to a
-      translation API, so delegate names/live data are never exposed.
+      toggle logic. Also exports translate() for code outside React
+      rendering (e.g. window.alert/confirm messages). Static dictionary
+      only — no data ever sent to a translation API, so delegate
+      names/live data are never exposed.
 
   claudeParse.js
       Simulated document-parsing helper for the Onboarding page

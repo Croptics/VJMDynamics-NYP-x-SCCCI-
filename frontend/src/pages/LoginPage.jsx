@@ -74,10 +74,11 @@ export default function LoginPage({ onSignIn }) {
       }
       onSignIn?.(); // success -> enter the app
     } catch (e) {
-      const msg = String(e?.message || "");
-      if (msg.includes("401")) {
+      // e.status comes from lib/api.js's toError; message-text matching broke
+      // once the backend started sending real messages instead of bare codes.
+      if (e?.status === 401) {
         setError("Incorrect Staff ID or password.");
-      } else if (msg.includes("400")) {
+      } else if (e?.status === 400) {
         setError("Please enter your Staff ID and password.");
       } else {
         setError("Can't reach the server. Make sure the backend is running.");
@@ -159,7 +160,9 @@ export default function LoginPage({ onSignIn }) {
           {/* Inline error */}
           {error && (
             <div style={S.error} role="alert">
-              <AlertCircle size={16} /> {error}
+              {/* error state holds the English string; t() maps it so it re-renders
+                  in the right language even if the user toggles after the error shows */}
+              <AlertCircle size={16} /> {t(error)}
             </div>
           )}
 

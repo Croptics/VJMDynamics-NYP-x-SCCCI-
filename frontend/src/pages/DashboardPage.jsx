@@ -148,7 +148,10 @@ export default function DashboardPage() {
   }
 
   async function remove(d) {
-    if (!window.confirm(`Delete ${d.name}? This cannot be undone.`)) return;
+    const msg = lang === "zh"
+      ? `确定删除 ${d.name}？此操作无法撤销。`
+      : `Delete ${d.name}? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
     try {
       await apiDelete(`/delegates/${d.id}`);
       await load();
@@ -158,7 +161,10 @@ export default function DashboardPage() {
   }
 
   async function deleteAll() {
-    if (!window.confirm(`Delete ALL ${delegates.length} delegates? This cannot be undone.`)) return;
+    const msg = lang === "zh"
+      ? `确定删除全部 ${delegates.length} 位代表？此操作无法撤销。`
+      : `Delete ALL ${delegates.length} delegates? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
     try {
       await apiDelete(`/trips/${TRIP_ID}/delegates`);
       await load();
@@ -172,7 +178,7 @@ export default function DashboardPage() {
   const coaches = data?.coaches || [];
   const coachName = (id) => {
     const c = coaches.find((x) => x.id === id);
-    return c ? `${c.name} · ${c.city}` : t("Unassigned");
+    return c ? coachDisplayName(c) : t("Unassigned");
   };
 
   return (
@@ -244,7 +250,7 @@ export default function DashboardPage() {
             <AlertTriangle size={18} /> {t("Couldn't reach the backend")}
           </div>
           <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
-            {error} — make sure it’s running (<code>cd backend &amp;&amp; npm run dev</code>), then hit Refresh.
+            {t(error)} — make sure it’s running (<code>cd backend &amp;&amp; npm run dev</code>), then hit Refresh.
           </p>
         </div>
       )}
@@ -474,7 +480,7 @@ export default function DashboardPage() {
               onChange={(e) => setForm({ ...form, coachId: e.target.value })}>
               <option value="">{form.status === "UNASSIGNED" ? t("No coach (unassigned)") : t("Select a coach…")}</option>
               {coaches.map((c) => (
-                <option key={c.id} value={c.id}>{c.name} · {c.city}</option>
+                <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
               ))}
             </select>
 
@@ -495,7 +501,7 @@ export default function DashboardPage() {
                 background: "var(--st-missing-bg)", color: "var(--st-missing)", borderRadius: "var(--r-sm)",
                 fontSize: 13, fontWeight: 600,
               }}>
-                {formErr}
+                {t(formErr)}
               </div>
             )}
 
@@ -538,6 +544,20 @@ function Kpi({ tone, icon: Icon, label, value, suffix, foot, big }) {
   );
 }
 
+/* ---- Coach display helpers ----------------------------------------------
+ * Coaches added outside the original seed may have no city, or a long label
+ * ("Coach 5" instead of "C5") — never render "null" or overflow the avatar.
+ * ------------------------------------------------------------------------- */
+function coachDisplayName(c) {
+  return [c.name, c.city].filter(Boolean).join(" · ");
+}
+
+function coachShortLabel(c) {
+  if (c.label && c.label.length <= 3) return c.label;
+  const num = String(c.label || c.name || "").match(/\d+/);
+  return num ? `C${num[0]}` : String(c.label || c.name || "?").slice(0, 2).toUpperCase();
+}
+
 /* ---- Coach progress bar ------------------------------------------------- */
 function CoachBar({ coach }) {
   const { t } = useLang();
@@ -549,9 +569,9 @@ function CoachBar({ coach }) {
       <div className="row between" style={{ marginBottom: 6 }}>
         <div className="row" style={{ gap: 10 }}>
           <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
-            {coach.label}
+            {coachShortLabel(coach)}
           </span>
-          <span style={{ fontWeight: 500, fontSize: 14 }}>{coach.name} · {coach.city}</span>
+          <span style={{ fontWeight: 500, fontSize: 14 }}>{coachDisplayName(coach)}</span>
         </div>
         {coach.missing > 0 ? (
           <span className="badge badge-missing">{coach.missing} {t("missing")}</span>

@@ -76,10 +76,12 @@ export default function AnalyticsPanel({ data, missing }) {
       setInsightsAsOf(asOf);
       setInsightsSource(source);
     } catch (e) {
+      // Use our own copy of the message (not the backend's e.message) so the
+      // dictionary can translate it.
       setInsightsError(
         e.code === "AI_NOT_CONFIGURED"
-          ? e.message || "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env."
-          : e.message || "AI insights are temporarily unavailable."
+          ? "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env."
+          : "AI insights are temporarily unavailable."
       );
     } finally {
       setInsightsLoading(false);
@@ -155,7 +157,7 @@ export default function AnalyticsPanel({ data, missing }) {
             marginTop: 14, padding: "10px 12px", borderRadius: "var(--r-sm)",
             background: "var(--st-unassigned-bg)", color: "var(--st-unassigned)", fontSize: 13, fontWeight: 600,
           }}>
-            {insightsError}
+            {t(insightsError)}
           </div>
         )}
 

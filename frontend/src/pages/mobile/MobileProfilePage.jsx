@@ -12,7 +12,7 @@ export default function MobileProfilePage() {
   const { onLogout } = useOutletContext() || {};
   const user = getUser() || {};
   const perms = getPermissions();
-  const displayName = user.name || user.staffId || "Signed in";
+  const displayName = user.name || user.staffId || t("Signed in");
   const initials = displayName.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
   function handleLogout() {

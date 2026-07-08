@@ -218,6 +218,7 @@ app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(asyn
 app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_req, res) => {
   const trip = await getTrip();
   const delegates = await getDelegates();
+  const { coaches } = await getDashboard();
 
   const wb = new ExcelJS.Workbook();
   wb.creator = "MusterGo";
@@ -240,9 +241,11 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_r
     cell.alignment = { vertical: "middle" };
   });
 
+  // Look up live from the coaches table (a hardcoded c1-c4 map here used to
+  // export any newer coach's delegates as "Unassigned").
   const coachName = (id) => {
-    const map = { c1: "Coach 1 · Beijing", c2: "Coach 2 · Shanghai", c3: "Coach 3 · Hangzhou", c4: "Coach 4 · Suzhou" };
-    return map[id] || "Unassigned";
+    const c = coaches.find((x) => x.id === id);
+    return c ? [c.name, c.city].filter(Boolean).join(" · ") : "Unassigned";
   };
 
   delegates.forEach((d, i) => {

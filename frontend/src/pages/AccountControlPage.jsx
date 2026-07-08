@@ -49,7 +49,7 @@ function passwordProblem(pw) {
 }
 
 export default function AccountControlPage() {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -166,7 +166,10 @@ export default function AccountControlPage() {
   }
 
   async function remove(a) {
-    if (!window.confirm(`Delete account "${a.username}"? This cannot be undone.`)) return;
+    const msg = lang === "zh"
+      ? `确定删除账户 "${a.username}"？此操作无法撤销。`
+      : `Delete account "${a.username}"? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
     setError("");
     try {
       await apiDelete(`/accounts/${a.id}`);
@@ -192,7 +195,7 @@ export default function AccountControlPage() {
       {error && (
         <div className="card" style={{ marginTop: 20, padding: 14, borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
-            <AlertTriangle size={16} /> {error}
+            <AlertTriangle size={16} /> {t(error)}
           </div>
         </div>
       )}
@@ -287,7 +290,7 @@ export default function AccountControlPage() {
               {t("Password")} {editingId && <span className="muted">({t("leave blank to keep current")})</span>}
             </label>
             <input className="input" type="password" value={form.password}
-              placeholder={editingId ? "••••••••" : "Set a password"}
+              placeholder={editingId ? "••••••••" : t("Set a password")}
               onChange={(e) => setForm({ ...form, password: e.target.value })} />
             {(!editingId || form.password) && (
               <p className="muted" style={{ fontSize: 12, marginTop: 6,
@@ -315,7 +318,7 @@ export default function AccountControlPage() {
             </div>
 
             {formErr && (
-              <div style={S.formErr}><AlertTriangle size={15} /> {formErr}</div>
+              <div style={S.formErr}><AlertTriangle size={15} /> {t(formErr)}</div>
             )}
 
             <div className="row" style={{ gap: 10, marginTop: 22, justifyContent: "flex-end" }}>
