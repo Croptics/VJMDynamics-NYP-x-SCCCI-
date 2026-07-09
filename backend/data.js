@@ -116,8 +116,8 @@ function maskUrl(url) {
 }
 
 /* ---- Query helpers -------------------------------------------------------
- * Postgres uses $1, $2, ... placeholders (not "?"), and results come back as
- * `.rows` (not the [rows] tuple mysql2 uses).
+ * Postgres uses $1, $2, ... positional placeholders, and query results come
+ * back as `.rows` on the returned object (the `pg` driver's shape).
  * ------------------------------------------------------------------------- */
 async function all(sql, params = []) {
   const res = await pool.query(sql, params);

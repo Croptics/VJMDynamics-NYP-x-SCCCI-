@@ -2,7 +2,7 @@
   "name": "mustergo-backend",
   "private": true,
   "version": "1.0.0",
-  "description": "MusterGo backend — SCCCI delegation attendance (VJMDynamics). Express API with delegate CRUD + Excel export, backed by SQLite (sql.js).",
+  "description": "MusterGo backend — SCCCI delegation attendance (VJMDynamics). Express API with delegate CRUD + Excel export, backed by PostgreSQL.",
   "type": "module",
   "scripts": {
     "dev": "node --watch server.js",

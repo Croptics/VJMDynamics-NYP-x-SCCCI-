@@ -11,9 +11,9 @@
  *
  * Run:
  *   npm install
- *   npm run dev        # http://localhost:4000  (needs a local MySQL server)
+ *   npm run dev        # http://localhost:4000  (needs DATABASE_URL in .env — PostgreSQL)
  *
- * The data layer (data.js) talks to MySQL and is asynchronous, so the route
+ * The data layer (data.js) talks to PostgreSQL and is asynchronous, so the route
  * handlers below are async and `await` it. The server only starts listening
  * AFTER the database connection + schema are ready (see the bottom of the file).
  */
@@ -299,7 +299,7 @@ initDb()
     });
   })
   .catch((err) => {
-    console.error("\n  Could not connect to MySQL. Is your MySQL server running?");
+    console.error("\n  Could not connect to PostgreSQL. Is your database reachable?");
     console.error("  Check DATABASE_URL / DB_* settings in backend/.env\n");
     console.error(`  (${err.code || err.message})\n`);
     process.exit(1);
