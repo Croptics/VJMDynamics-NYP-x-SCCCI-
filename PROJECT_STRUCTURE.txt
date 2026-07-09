@@ -51,6 +51,19 @@ data.js
     verifyPassword). Older rows created before hashing was added are
     auto-upgraded in place the next time that account logs in
     successfully (upgradePasswordIfNeeded) — no manual migration needed.
+    Also creates Desmond's "TransitFlow" schema (the users + itinerary_items
+    tables and the extra trip/coach/delegate columns his Trips board needs) —
+    folded into createSchema()/seed() so it auto-applies on startup, instead
+    of the standalone SQL migration files his feature originally shipped with.
+
+routes/desmond.js
+    Desmond's "TransitFlow" API — the Trips & Coaches board (list trips,
+    per-trip coach/delegate/itinerary CRUD, staff directory, seed demo
+    trips, in-memory activity feed). Self-contained: makes its own pg pool
+    and gates every route behind requireAuth() from auth.js. Mounted in
+    server.js's TEAMMATE ZONE next to insightsRouter. To avoid colliding
+    with the base app's hardcoded single-trip routes it uses new paths like
+    /api/all-trips and /api/trips/:tripId/summary.
 
 routes/insights.js
     Powers the "Generate Insights" button on the Dashboard's Analytics tab.
@@ -146,8 +159,15 @@ Pages (src/pages/) — one file per route:
                                                 table, Overview/Analytics tabs
                                                 (Analytics tab renders
                                                 AnalyticsPanel.jsx).
-  TripCoachPage.jsx        /trips              Placeholder — Desmond's trip/
-                                                coach management screen.
+  TripCoachPage.jsx        /trips              Desmond's Trips & Coaches board.
+                                                Renders TripsListPage (the trip
+                                                grid) when no ?tripId= is set,
+                                                or the per-trip fleet/itinerary
+                                                board when one is. Styled by
+                                                TripCoachPage.css; calls
+                                                backend/routes/desmond.js.
+  TripsListPage.jsx        (/trips grid)       Desmond — the trip grid + the
+                                                shared useTfTheme dark-mode hook.
   OnboardingPage.jsx       /onboarding         Passport upload + AI-extraction
                                                 preview table (built, demo mode).
   ExceptionInboxPage.jsx   /exceptions         Placeholder — Jayden's

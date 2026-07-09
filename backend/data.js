@@ -138,6 +138,7 @@ async function run(sql, params = []) {
  * columns are camelCase, so every mixed-case column name is quoted).
  * ------------------------------------------------------------------------- */
 async function createSchema() {
+  /* ---- JQ base tables (Dashboard / Auth / Accounts) --------------------- */
   await run(`CREATE TABLE IF NOT EXISTS trips (
     id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), "dateRange" VARCHAR(255), "dayOf" INT,
     "totalDays" INT, "lead" VARCHAR(255), status VARCHAR(255), "localTime" VARCHAR(64), "departsIn" VARCHAR(64)
@@ -153,6 +154,57 @@ async function createSchema() {
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
   )`);
+
+  /* ---- Desmond "TransitFlow" schema (Trip Booking & Coach Management) ----
+   * Folded in from what originally shipped as database/003_*.sql + 004_*.sql.
+   * ALL ADDITIVE: new tables + `ADD COLUMN IF NOT EXISTS` on the base tables
+   * above — it never changes/drops anything the base app relies on (trips.id,
+   * coaches.id, delegates.id all stay VARCHAR text like "t-1"/"c1"), and every
+   * statement is idempotent so it re-runs harmlessly on each startup.
+   * --------------------------------------------------------------------- */
+  await run(`CREATE EXTENSION IF NOT EXISTS pgcrypto`); // for gen_random_uuid()
+
+  // trips: a parallel UUID identity. The base trips.id stays "t-1"; every new
+  // table/column below references this uuid_id instead, so they're real UUIDs.
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS uuid_id UUID UNIQUE DEFAULT gen_random_uuid()`);
+  await run(`UPDATE trips SET uuid_id = gen_random_uuid() WHERE uuid_id IS NULL`);
+
+  // users: a lightweight staff directory for coach assignment ONLY (a "guide"
+  // per coach). Separate from `accounts` — these rows never sign in anywhere.
+  await run(`CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL, email VARCHAR(255) UNIQUE,
+    role VARCHAR(32) NOT NULL DEFAULT 'staff', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+
+  // coaches: trip link, assigned guide, board order, driver name.
+  // sort_order is intentionally added WITHOUT a default so seed() can tell
+  // "never positioned" (NULL) apart and backfill a stable order first.
+  await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS trip_id       UUID REFERENCES trips(uuid_id)`);
+  await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS staff_user_id UUID REFERENCES users(id)`);
+  await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS sort_order    INT`);
+  await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS driver_name   VARCHAR(255)`);
+
+  // delegates: trip link + optional free-text fields shown on the board.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS trip_id             UUID REFERENCES trips(uuid_id)`);
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS notes               TEXT`);
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS company             VARCHAR(255)`);
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS accessibility_notes TEXT`);
+
+  // itinerary_items: per-trip schedule strip driving the journey timeline.
+  await run(`CREATE TABLE IF NOT EXISTS itinerary_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trip_id UUID NOT NULL REFERENCES trips(uuid_id) ON DELETE CASCADE,
+    day_number INT NOT NULL, start_time TIME NOT NULL, title TEXT NOT NULL,
+    location TEXT, sort_order INT NOT NULL DEFAULT 0,
+    category VARCHAR(24) NOT NULL DEFAULT 'other'
+      CHECK (category IN ('hotel','attraction','meal','factory','airport','transport','other'))
+  )`);
+
+  // Indexes for the trip-scoped lookups desmond.js runs.
+  await run(`CREATE INDEX IF NOT EXISTS idx_coaches_trip   ON coaches(trip_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_delegates_trip ON delegates(trip_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_itinerary_trip ON itinerary_items(trip_id, day_number, sort_order)`);
 }
 
 async function seed() {
@@ -174,6 +226,53 @@ async function seed() {
   if (!(await get("SELECT id FROM coaches LIMIT 1"))) {
     for (const c of COACHES) {
       await run("INSERT INTO coaches (id, label, name, city, capacity) VALUES ($1,$2,$3,$4,$5)", [c.id, c.label, c.name, c.city, c.capacity]);
+    }
+  }
+
+  // Desmond "TransitFlow" seed + backfill (folded from database/003_*.sql).
+  await seedTransitFlow();
+}
+
+/* Seed the staff directory and attach existing coaches/delegates to the
+ * Beijing trip so nothing "disappears" once the trip board filters by trip_id.
+ * Everything here is idempotent (ON CONFLICT / WHERE ... IS NULL), so it runs
+ * safely on every startup — it only ever fills gaps, never overwrites edits. */
+async function seedTransitFlow() {
+  // 1. Staff directory (6 people) — assignment targets only, not login accounts.
+  await run(`
+    INSERT INTO users (name, email, role) VALUES
+      ('Rachel Tan Hui Min',       'rachel.tan@example.com',   'staff'),
+      ('Marcus Lim Wei Jie',       'marcus.lim@example.com',   'staff'),
+      ('Priya Suresh',             'priya.suresh@example.com', 'staff'),
+      ('Muhammad Hafiz Bin Rosli', 'hafiz.rosli@example.com',  'staff'),
+      ('Jonathan Koh Zhi Hao',     'jonathan.koh@example.com', 'admin'),
+      ('Serene Ng Xin Yi',         'serene.ng@example.com',    'admin')
+    ON CONFLICT (email) DO NOTHING
+  `);
+
+  // 2. Attach existing coaches + delegates to the Beijing trip (t-1).
+  await run(`UPDATE coaches   SET trip_id = (SELECT uuid_id FROM trips WHERE id = 't-1')
+             WHERE trip_id IS NULL AND EXISTS (SELECT 1 FROM trips WHERE id = 't-1')`);
+  await run(`UPDATE delegates SET trip_id = (SELECT uuid_id FROM trips WHERE id = 't-1')
+             WHERE trip_id IS NULL AND EXISTS (SELECT 1 FROM trips WHERE id = 't-1')`);
+
+  // 3. Give every coach a stable board position (by id order) if it has none,
+  //    then set a default for future inserts.
+  await run(`
+    WITH ordered AS (
+      SELECT id, ROW_NUMBER() OVER (ORDER BY id) - 1 AS rn FROM coaches WHERE sort_order IS NULL
+    )
+    UPDATE coaches SET sort_order = ordered.rn FROM ordered WHERE coaches.id = ordered.id
+  `);
+  await run(`ALTER TABLE coaches ALTER COLUMN sort_order SET DEFAULT 0`);
+
+  // 4. Round-robin a guide onto any coach that has none, so "every coach has a
+  //    staff member" holds immediately (done in JS rather than a plpgsql block).
+  const staff = await all("SELECT id FROM users ORDER BY email");
+  if (staff.length) {
+    const unassigned = await all(`SELECT id FROM coaches WHERE staff_user_id IS NULL ORDER BY sort_order NULLS LAST, id`);
+    for (let i = 0; i < unassigned.length; i++) {
+      await run("UPDATE coaches SET staff_user_id = $1 WHERE id = $2", [staff[i % staff.length].id, unassigned[i].id]);
     }
   }
 }

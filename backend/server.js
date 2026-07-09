@@ -283,6 +283,9 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_r
 import insightsRouter from "./routes/insights.js";
 app.use(insightsRouter);
 
+import desmondRouter from "./routes/desmond.js";
+app.use(desmondRouter);
+
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {
