@@ -66,7 +66,7 @@ import {
   Moon, Sun, Search, Activity, MapPin, Building2, Landmark, UtensilsCrossed,
   Factory, Plane, Accessibility, Clock, Navigation, Gauge,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete } from "../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
 import "./TripCoachPage.css";
@@ -284,9 +284,13 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
       {!isUnassigned ? (
         <div className="tf-fleet-people">
           <div className="tf-fleet-people-row"><Users size={12} color="var(--tf-text-3)" style={{ flexShrink: 0 }} />
-            <button onClick={() => onEditStaff(coach)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--tf-text)", fontWeight: 700, textDecoration: "underline dotted" }}>
-              {coach.staffName || t("No staff assigned")}
-            </button>
+            {onEditStaff ? (
+              <button onClick={() => onEditStaff(coach)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--tf-text)", fontWeight: 700, textDecoration: "underline dotted" }}>
+                {coach.staffName || t("No staff assigned")}
+              </button>
+            ) : (
+              <span style={{ fontWeight: 700 }}>{coach.staffName || t("No staff assigned")}</span>
+            )}
             <span className="tf-muted" style={{ flexShrink: 0 }}>· {t("guide")}</span>
           </div>
           <div className="tf-fleet-people-row"><Navigation size={12} color="var(--tf-text-3)" style={{ flexShrink: 0 }} /> <span>{coach.driverName || t("No driver set")}</span> <span className="tf-muted" style={{ flexShrink: 0 }}>· {t("driver")}</span></div>
@@ -314,7 +318,7 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
 }
 
 /* ---- DelegateDetailPanel — slide-out on tap, with a reassignment control ----- */
-function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, onReassign }) {
+function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, onReassign, canEdit = true }) {
   const { t } = useLang();
   const [visible, setVisible] = useState(false);
   const [form, setForm] = useState({
@@ -369,6 +373,7 @@ function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, o
           </div>
         </div>
 
+        {canEdit && (
         <div className="tf-card" style={{ padding: 14, marginBottom: 16 }}>
           <label className="tf-field-label">{t("Move to coach")}</label>
           <div className="tf-flex tf-gap-8">
@@ -382,19 +387,22 @@ function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, o
           </div>
           <p className="tf-muted" style={{ fontSize: 11, marginTop: 6 }}>{t("Works from any device — the alternative to dragging on touchscreens.")}</p>
         </div>
+        )}
 
         <label className="tf-field-label">{t("Company")}</label>
-        <input className="tf-input" style={{ marginBottom: 14 }} value={form.company} onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))} placeholder={t("Optional")} />
+        <input className="tf-input" readOnly={!canEdit} style={{ marginBottom: 14 }} value={form.company} onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))} placeholder={t("Optional")} />
 
         <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Accessibility size={13} /> {t("Accessibility notes")}</label>
-        <input className="tf-input" style={{ marginBottom: 14 }} value={form.accessibilityNotes} onChange={(e) => setForm((f) => ({ ...f, accessibilityNotes: e.target.value }))} placeholder={t("e.g. wheelchair access, dietary needs")} />
+        <input className="tf-input" readOnly={!canEdit} style={{ marginBottom: 14 }} value={form.accessibilityNotes} onChange={(e) => setForm((f) => ({ ...f, accessibilityNotes: e.target.value }))} placeholder={t("e.g. wheelchair access, dietary needs")} />
 
         <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><MessageSquare size={13} /> {t("Notes")}</label>
-        <textarea className="tf-input" rows={5} style={{ resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder={t("Dietary needs, medical notes, flight details…")} />
+        <textarea className="tf-input" readOnly={!canEdit} rows={5} style={{ resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder={t("Dietary needs, medical notes, flight details…")} />
 
+        {canEdit && (
         <button className="tf-btn tf-btn-primary" style={{ width: "100%", justifyContent: "center", marginTop: 14 }} onClick={handleSave} disabled={saving}>
           {saving ? <Loader2 size={14} className="spin" /> : null} {t("Save changes")}
         </button>
+        )}
       </div>
     </>
   );
@@ -435,10 +443,12 @@ function JourneyTimeline({ items, dayNumber, onAddClick, coachCount, delegateCou
   if (items.length === 0) {
     return (
       <p style={{ fontSize: 13, color: "var(--tf-text-3)" }}>
-        {t("No activities for Day")} {dayNumber}.{" "}
-        <button style={{ background: "none", border: "none", color: "var(--tf-blue)", cursor: "pointer", fontSize: 13, padding: 0, fontWeight: 700 }} onClick={onAddClick}>
-          {t("Add one →")}
-        </button>
+        {t("No activities for Day")} {dayNumber}.{onAddClick && " "}
+        {onAddClick && (
+          <button style={{ background: "none", border: "none", color: "var(--tf-blue)", cursor: "pointer", fontSize: 13, padding: 0, fontWeight: 700 }} onClick={onAddClick}>
+            {t("Add one →")}
+          </button>
+        )}
       </p>
     );
   }
@@ -530,7 +540,7 @@ function JourneyTimeline({ items, dayNumber, onAddClick, coachCount, delegateCou
  *  the only thing it surfaces proactively is a red "N missing" pill, and only
  *  when N > 0, so the header stays calm when there's nothing to flag.
  * ========================================================================== */
-function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, dark, toggleDark, onEditItinerary, onAddDelegate }) {
+function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, dark, toggleDark, onEditItinerary, onAddDelegate, canEdit = true }) {
   const { t } = useLang();
   const [clock, setClock] = useState(() => new Date());
   useEffect(() => { const iv = setInterval(() => setClock(new Date()), 1000); return () => clearInterval(iv); }, []);
@@ -585,10 +595,12 @@ function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coa
         <div className="tf-hero-progress-label">{t("Trip progress")} · {Math.round(progressFraction * 100)}%</div>
       </div>
 
+      {canEdit && (
       <div className="tf-hero-actions">
         <button className="tf-btn tf-btn-glass" onClick={onEditItinerary}><PencilLine size={14} /> {t("Edit itinerary")}</button>
         <button className="tf-btn tf-btn-solid" onClick={onAddDelegate}><UserPlus size={14} /> {t("Add delegate")}</button>
       </div>
+      )}
     </div>
   );
 }
@@ -952,6 +964,7 @@ function CoachBoardView({ tripId }) {
   const navigate = useNavigate();
   const { t } = useLang();
   const [dark, toggleDark] = useTfTheme();
+  const canEdit = getPermissions().manageTrips; // "View for all, edit gated" (see permissions.js)
 
   const [trip, setTrip] = useState(null);
   const [coaches, setCoaches] = useState([]);
@@ -1058,6 +1071,7 @@ function CoachBoardView({ tripId }) {
 
   /* ---- mutations ---- */
   async function handleReassign(delegate, toCoachId) {
+    if (!canEdit) return; // reassign needs the manageTrips permission
     if (toCoachId === delegate.coachId) return;
     const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "MISSING" : delegate.status);
     const prevSnapshot = delegate;
@@ -1184,7 +1198,7 @@ function CoachBoardView({ tripId }) {
           <DelegateDetailPanel
             delegate={panelDelegate} coaches={coaches} coachLabel={panelCoachLabel}
             onClose={() => setPanelDelegate(null)} onSave={handleSaveDetails}
-            onReassign={(d, toId) => handleReassign(d, toId)}
+            onReassign={(d, toId) => handleReassign(d, toId)} canEdit={canEdit}
           />
         )}
         {ghost && <div className="tf-bus-marker" style={{ position: "fixed", left: ghost.x + 12, top: ghost.y + 12, transform: "none", zIndex: 2000, pointerEvents: "none", width: 220 }}><DelegateCard delegate={ghost.delegate} ghost /></div>}
@@ -1194,7 +1208,7 @@ function CoachBoardView({ tripId }) {
         <Hero
           trip={trip} currentStop={currentStop} nextStop={nextStop} progressFraction={tripProgress}
           missingCount={missingCount} coachCount={coaches.length} delegateCount={delegates.length}
-          dark={dark} toggleDark={toggleDark}
+          dark={dark} toggleDark={toggleDark} canEdit={canEdit}
           onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
         />
 
@@ -1202,7 +1216,7 @@ function CoachBoardView({ tripId }) {
           <div className="tf-section-head">
             <span className="tf-section-title"><Navigation size={16} /> {t("Journey timeline")} · {t("Day")} {currentDay}</span>
           </div>
-          <JourneyTimeline items={todayItems} dayNumber={currentDay} onAddClick={() => setShowItinerary(true)} coachCount={coaches.length} delegateCount={delegates.length} />
+          <JourneyTimeline items={todayItems} dayNumber={currentDay} onAddClick={canEdit ? () => setShowItinerary(true) : undefined} coachCount={coaches.length} delegateCount={delegates.length} />
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "2.2fr 1fr", gap: 20, alignItems: "flex-start" }}>
@@ -1246,16 +1260,16 @@ function CoachBoardView({ tripId }) {
                   key={coach.id} coach={coach} delegates={delegatesByCoach[coach.id] || []}
                   isOver={overCol === coach.id} colRef={(node) => { colRefs.current[coach.id] = node; }}
                   onPointerDownCard={onPointerDownCard} draggingId={ghost?.delegate?.id}
-                  onRemoveCoach={handleRemoveCoach} onRemoveDelegate={handleRemoveDelegate} onEditStaff={setEditStaffCoach}
+                  onRemoveCoach={canEdit ? handleRemoveCoach : undefined} onRemoveDelegate={canEdit ? handleRemoveDelegate : undefined} onEditStaff={canEdit ? setEditStaffCoach : undefined}
                   currentStopLabel={currentStop?.title} nextStop={nextStop}
                 />
               ))}
               <FleetCard
                 coach={{ id: UNASSIGNED_COL, label: t("Unassigned") }} delegates={delegatesByCoach[UNASSIGNED_COL] || []}
                 isUnassigned isOver={overCol === UNASSIGNED_COL} colRef={(node) => { colRefs.current[UNASSIGNED_COL] = node; }}
-                onPointerDownCard={onPointerDownCard} draggingId={ghost?.delegate?.id} onRemoveDelegate={handleRemoveDelegate}
+                onPointerDownCard={onPointerDownCard} draggingId={ghost?.delegate?.id} onRemoveDelegate={canEdit ? handleRemoveDelegate : undefined}
               />
-              <button className="tf-add-fleet-card" onClick={() => setShowAddCoach(true)}><Plus size={18} /> {t("Add coach")}</button>
+              {canEdit && <button className="tf-add-fleet-card" onClick={() => setShowAddCoach(true)}><Plus size={18} /> {t("Add coach")}</button>}
             </div>
           </div>
 
@@ -1264,10 +1278,12 @@ function CoachBoardView({ tripId }) {
       </div>
 
       {/* Mobile floating quick actions */}
+      {canEdit && (
       <div className="tf-fab-stack" style={{ display: "none" }} data-tf-mobile-fab>
         <button className="tf-fab" onClick={() => setShowAddDelegate(true)} title={t("Add delegate")}><UserPlus size={20} /></button>
         <button className="tf-fab tf-fab-mini" onClick={() => setShowAddCoach(true)} title={t("Add coach")}><Bus size={18} /></button>
       </div>
+      )}
       <style>{`@media (max-width: 720px) { [data-tf-mobile-fab] { display: flex !important; } }`}</style>
     </div>
   );

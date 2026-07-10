@@ -56,7 +56,7 @@
 import "dotenv/config";
 import { Router } from "express";
 import pg from "pg";
-import { requireAuth } from "../auth.js";
+import { requireAuth, requirePermission } from "../auth.js";
 
 const { Pool } = pg;
 
@@ -108,7 +108,17 @@ async function run(sql, params = []) { await pool.query(sql, params); }
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 const router = Router();
-router.use(requireAuth());
+
+// "View for all, edit gated": any signed-in user can READ (GET) the board and
+// log activity, but creating / editing / deleting trips, coaches, itinerary
+// items or delegates requires the "manageTrips" permission. Applied per-route
+// below (not as a blanket router.use()) — this router is mounted at the app
+// root alongside every other teammate's router, and an unscoped router.use()
+// would intercept requests meant for THEIR routes too (any POST/PATCH/DELETE
+// reaching this layer gets checked against "manageTrips" before Express ever
+// gets to decide none of this router's own paths match).
+const readAccess = requireAuth();
+const writeAccess = requirePermission("manageTrips");
 
 /* ---- Helpers -------------------------------------------------------------- */
 
@@ -147,14 +157,16 @@ function logActivity(tripId, text, kind = "system") {
   return entry;
 }
 
-router.get("/api/trips/:tripId/activity", wrap(async (req, res) => {
+router.get("/api/trips/:tripId/activity", readAccess, wrap(async (req, res) => {
   res.json({ activity: ACTIVITY.get(req.params.tripId) || [] });
 }));
 
 // The frontend calls this right after a mutation that happened through one of
 // JQ's OWN routes (delegate reassign/remove) succeeds — see file header for
-// why this router can't observe those requests directly.
-router.post("/api/trips/:tripId/activity", wrap(async (req, res) => {
+// why this router can't observe those requests directly. Cosmetic (an
+// activity-feed entry, not a real mutation), so any signed-in user, same as
+// the original design.
+router.post("/api/trips/:tripId/activity", readAccess, wrap(async (req, res) => {
   const { text, kind } = req.body || {};
   if (!text || !String(text).trim()) {
     return res.status(400).json({ error: "TEXT_REQUIRED", message: "Activity text is required." });
@@ -166,7 +178,7 @@ router.post("/api/trips/:tripId/activity", wrap(async (req, res) => {
 /* =============================================================================
  *  Staff directory
  * ========================================================================== */
-router.get("/api/users/staff", wrap(async (_req, res) => {
+router.get("/api/users/staff", readAccess, wrap(async (_req, res) => {
   const staff = await all(
     `SELECT id, name, email, role FROM users WHERE role IN ('staff','admin') ORDER BY name`
   );
@@ -176,7 +188,7 @@ router.get("/api/users/staff", wrap(async (_req, res) => {
 /* =============================================================================
  *  Trips
  * ========================================================================== */
-router.get("/api/all-trips", wrap(async (_req, res) => {
+router.get("/api/all-trips", readAccess, wrap(async (_req, res) => {
   // v3: also selects dayOf/totalDays so the trip list cards can show a real
   // per-trip progress indicator instead of just name/status/counts.
   const trips = await all(`
@@ -197,7 +209,7 @@ router.get("/api/all-trips", wrap(async (_req, res) => {
   });
 }));
 
-router.get("/api/trips/:tripId/summary", wrap(async (req, res) => {
+router.get("/api/trips/:tripId/summary", readAccess, wrap(async (req, res) => {
   const trip = await get(`SELECT * FROM trips WHERE uuid_id = $1`, [req.params.tripId]);
   if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
 
@@ -233,7 +245,7 @@ const DEMO_TRIPS = [
   { name: "Qingdao Manufacturing Study Mission", dateRange: "25–29 Jan 2027" },
 ];
 
-router.post("/api/trips/seed", wrap(async (_req, res) => {
+router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
   const existing = await all(`SELECT name FROM trips WHERE name = ANY($1::text[])`, [DEMO_TRIPS.map((t) => t.name)]);
   const existingNames = new Set(existing.map((r) => r.name));
   const toInsert = DEMO_TRIPS.filter((t) => !existingNames.has(t.name));
@@ -252,7 +264,7 @@ router.post("/api/trips/seed", wrap(async (_req, res) => {
 /* =============================================================================
  *  Coaches
  * ========================================================================== */
-router.get("/api/trips/:tripId/coaches", wrap(async (req, res) => {
+router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
   const coaches = await all(`
     SELECT
       c.id, c.label, c.capacity, c.sort_order AS "sortOrder",
@@ -275,7 +287,7 @@ router.get("/api/trips/:tripId/coaches", wrap(async (req, res) => {
 
 // Every staff member currently holding a coach, across ALL trips — powers the
 // "already assigned elsewhere" hint in the Add/Edit Coach modal.
-router.get("/api/coaches/staff-assignments", wrap(async (_req, res) => {
+router.get("/api/coaches/staff-assignments", readAccess, wrap(async (_req, res) => {
   const rows = await all(`
     SELECT c.staff_user_id AS "staffUserId", c.id AS "coachId", c.label AS "coachLabel", c.trip_id AS "tripId"
       FROM coaches c WHERE c.staff_user_id IS NOT NULL
@@ -283,7 +295,7 @@ router.get("/api/coaches/staff-assignments", wrap(async (_req, res) => {
   res.json({ assignments: rows });
 }));
 
-router.post("/api/coaches", wrap(async (req, res) => {
+router.post("/api/coaches", writeAccess, wrap(async (req, res) => {
   const { tripId, label, capacity, staffUserId, driverName } = req.body || {};
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
   if (!label || !label.trim()) return res.status(400).json({ error: "LABEL_REQUIRED", message: "A coach label is required." });
@@ -308,7 +320,7 @@ router.post("/api/coaches", wrap(async (req, res) => {
 // Switch which staff member is assigned to this coach, and/or update the
 // driver's name / capacity. All fields optional except staffUserId, which
 // (per the original design) every coach must always have one of.
-router.patch("/api/coaches/:id", wrap(async (req, res) => {
+router.patch("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
   const { staffUserId, driverName, capacity, label } = req.body || {};
   if (!staffUserId) return res.status(400).json({ error: "STAFF_REQUIRED", message: "Every coach needs a staff member assigned." });
 
@@ -333,7 +345,7 @@ router.patch("/api/coaches/:id", wrap(async (req, res) => {
   res.json({ ...updated, staffName: staffRow.name });
 }));
 
-router.delete("/api/coaches/:id", wrap(async (req, res) => {
+router.delete("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
   const countRow = await get(`SELECT COUNT(*) AS c FROM delegates WHERE "coachId" = $1`, [req.params.id]);
   const n = Number(countRow?.c || 0);
   if (n > 0) {
@@ -351,7 +363,7 @@ router.delete("/api/coaches/:id", wrap(async (req, res) => {
 /* =============================================================================
  *  Itinerary
  * ========================================================================== */
-router.get("/api/trips/:tripId/itinerary", wrap(async (req, res) => {
+router.get("/api/trips/:tripId/itinerary", readAccess, wrap(async (req, res) => {
   const items = await all(
     `SELECT id, day_number AS "dayNumber", TO_CHAR(start_time, 'HH24:MI') AS "startTime",
             title, location, sort_order AS "sortOrder", category
@@ -361,7 +373,7 @@ router.get("/api/trips/:tripId/itinerary", wrap(async (req, res) => {
   res.json({ items, categories: ITINERARY_CATEGORIES });
 }));
 
-router.post("/api/trips/:tripId/itinerary", wrap(async (req, res) => {
+router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) => {
   const { dayNumber, startTime, title, location, sortOrder, category } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
@@ -376,7 +388,7 @@ router.post("/api/trips/:tripId/itinerary", wrap(async (req, res) => {
   res.status(201).json(item);
 }));
 
-router.patch("/api/trips/:tripId/itinerary/:itemId", wrap(async (req, res) => {
+router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (req, res) => {
   const { dayNumber, startTime, title, location, category } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
@@ -392,7 +404,7 @@ router.patch("/api/trips/:tripId/itinerary/:itemId", wrap(async (req, res) => {
   res.json(item);
 }));
 
-router.delete("/api/trips/:tripId/itinerary/:itemId", wrap(async (req, res) => {
+router.delete("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (req, res) => {
   const deleted = await get(
     `DELETE FROM itinerary_items WHERE id = $1 AND trip_id = $2 RETURNING id, title`,
     [req.params.itemId, req.params.tripId]
@@ -409,7 +421,7 @@ router.delete("/api/trips/:tripId/itinerary/:itemId", wrap(async (req, res) => {
  *  reported by the frontend via POST /api/trips/:tripId/activity instead of
  *  logged here.)
  * ========================================================================== */
-router.get("/api/delegates", wrap(async (req, res) => {
+router.get("/api/delegates", readAccess, wrap(async (req, res) => {
   const { tripId } = req.query;
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId query param is required." });
   const delegates = await all(
@@ -420,7 +432,7 @@ router.get("/api/delegates", wrap(async (req, res) => {
   res.json({ delegates });
 }));
 
-router.post("/api/delegates", wrap(async (req, res) => {
+router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
   const { tripId, name, vip, notes, company, accessibilityNotes } = req.body || {};
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
   if (!name || !name.trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "A name is required." });
@@ -440,7 +452,7 @@ router.post("/api/delegates", wrap(async (req, res) => {
 // only on this feature's side (JQ's own PATCH /api/delegates/:id handles
 // coachId/status reassignment and doesn't know about these columns).
 // Every field is optional — omit a field to leave it unchanged.
-router.patch("/api/delegates/:id/details", wrap(async (req, res) => {
+router.patch("/api/delegates/:id/details", writeAccess, wrap(async (req, res) => {
   const body = req.body || {};
   const sets = [];
   const params = [];
@@ -470,7 +482,7 @@ router.patch("/api/delegates/:id/details", wrap(async (req, res) => {
 }));
 
 // Kept for backwards compatibility with the v1 frontend build.
-router.patch("/api/delegates/:id/notes", wrap(async (req, res) => {
+router.patch("/api/delegates/:id/notes", writeAccess, wrap(async (req, res) => {
   const { notes } = req.body || {};
   const delegate = await get(
     `UPDATE delegates SET notes = $1 WHERE id = $2

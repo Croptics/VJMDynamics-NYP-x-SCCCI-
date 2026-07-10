@@ -154,6 +154,11 @@ async function createSchema() {
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
   )`);
+  // Single active session per account: each login bumps this, and a token is
+  // only valid while its embedded version matches. So signing in on a new
+  // browser invalidates the token held by any older one (which then gets
+  // logged out by the session poll in the frontend Layout).
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
 
   /* ---- Desmond "TransitFlow" schema (Trip Booking & Coach Management) ----
    * Folded in from what originally shipped as database/003_*.sql + 004_*.sql.
@@ -523,8 +528,19 @@ async function countManagers() {
 
 function accountPublic(row) {
   if (!row) return null;
-  const { password, permissions, ...rest } = row; // never expose the password / raw JSON
+  const { password, permissions, token_version, ...rest } = row; // never expose password / raw JSON / session counter
   return { ...rest, permissions: accountPermissions(row) };
+}
+
+/**
+ * Start a fresh login session for an account: bump its token_version and
+ * return the new value. Any token minted with the previous version stops
+ * validating (see accountFromReq in auth.js), so an older browser is logged
+ * out the next time it polls. Called from the login route only.
+ */
+export async function startNewSession(id) {
+  const row = await get(`UPDATE accounts SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`, [id]);
+  return row?.token_version ?? 0;
 }
 
 async function nextAccountId() {

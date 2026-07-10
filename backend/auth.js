@@ -25,23 +25,31 @@ if (!process.env.JWT_SECRET) {
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-/** Issue a signed session token for a username. */
-export function makeToken(username) {
-  return jwt.sign({ username }, JWT_SECRET, { expiresIn: "7d" });
+/** Issue a signed session token for a username at a given token version. */
+export function makeToken(username, tokenVersion = 0) {
+  return jwt.sign({ username, tv: tokenVersion }, JWT_SECRET, { expiresIn: "7d" });
 }
 
 /** Resolve the calling account from a valid, signed Authorization: Bearer token. */
 export async function accountFromReq(req) {
   const auth = req.headers.authorization || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
+  // EventSource (SSE) cannot set request headers, so routes that stream (e.g.
+  // the live exceptions feed) pass ?token= instead — accept either.
+  const token = m ? m[1] : req.query?.token;
+  if (!token) return null;
   let payload;
   try {
-    payload = jwt.verify(m[1], JWT_SECRET);
+    payload = jwt.verify(token, JWT_SECRET);
   } catch {
     return null; // missing/expired/tampered token
   }
-  return (await getAccountByUsername(payload.username)) || null;
+  const account = await getAccountByUsername(payload.username);
+  if (!account) return null;
+  // Single active session: reject a token whose version is behind the account's
+  // current one (i.e. a newer login has since happened on another device).
+  if ((account.token_version ?? 0) !== (payload.tv ?? 0)) return null;
+  return account;
 }
 
 /** Gate a route on being signed in (any account), no specific permission required. */

@@ -7,9 +7,10 @@ ROOT LEVEL
 ----------
 permissions.js
     The single source of truth for permissions. Both frontend and backend
-    import this one file. Defines the 3 permissions (manageDelegates,
-    exportData, manageAccounts) — add one entry here and the checkbox/chip/
-    enforcement appear everywhere automatically.
+    import this one file. Defines the 5 permissions (manageDelegates,
+    manageTrips, manageExceptions, exportData, manageAccounts) — add one
+    entry here and the checkbox/chip/enforcement appear everywhere
+    automatically.
 
 README.md / HIGH_LEVEL_DESIGN.md / PROJECT_IMPLEMENTATION_PHASE.md
     Docs — setup instructions, architecture/DB schema notes, and the team's
@@ -38,8 +39,11 @@ server.js
 auth.js
     Session tokens + auth middleware, shared by server.js and any
     teammate route file that needs to require a signed-in caller (e.g.
-    routes/insights.js). Issues signed JWTs (makeToken) and exports
-    accountFromReq / requireAuth / requirePermission. Set JWT_SECRET in
+    routes/insights.js, routes/desmond.js, routes/exceptions.js). Issues
+    signed JWTs (makeToken) and exports accountFromReq / requireAuth /
+    requirePermission. accountFromReq also accepts the token as a ?token=
+    query param (not just the Authorization header) — needed for Jayden's
+    SSE route, since EventSource can't set custom headers. Set JWT_SECRET in
     backend/.env before deploying anywhere public — without it a fixed
     dev-only fallback is used and a warning prints on startup.
 
@@ -59,11 +63,47 @@ data.js
 routes/desmond.js
     Desmond's "TransitFlow" API — the Trips & Coaches board (list trips,
     per-trip coach/delegate/itinerary CRUD, staff directory, seed demo
-    trips, in-memory activity feed). Self-contained: makes its own pg pool
-    and gates every route behind requireAuth() from auth.js. Mounted in
+    trips, in-memory activity feed). Self-contained: makes its own pg pool.
+    "View for all, edit gated": every GET route (and the cosmetic POST
+    .../activity) uses requireAuth() (any signed-in account); every other
+    write route uses requirePermission("manageTrips") — applied per-route,
+    not as one router-level gate, since a blanket gate would also catch
+    requests meant for OTHER teammates' routers mounted alongside this one
+    (found and fixed while merging in Jayden's exceptions.js). Mounted in
     server.js's TEAMMATE ZONE next to insightsRouter. To avoid colliding
     with the base app's hardcoded single-trip routes it uses new paths like
     /api/all-trips and /api/trips/:tripId/summary.
+
+routes/exceptions.js
+    Jayden's Exception Logging & QR Fallback API — ticket CRUD (raise/
+    resolve/delete), manual attendance override, and a live Server-Sent
+    Events channel (GET /api/exceptions/stream) that pushes ticket changes
+    to every connected staff device in real time. Self-contained: makes its
+    own pg pool and creates its own tables (exception_tickets, shared
+    check_in_logs) via initExceptions(), called once from server.js's
+    startup chain after initDb(). "View for all, edit gated": reads (+ the
+    SSE stream) use requireAuth(); raising/resolving/deleting a ticket or a
+    manual override use requirePermission("manageExceptions"). Its original
+    auth code decoded the old pre-JWT token format by hand — rewritten at
+    merge time to use auth.js's requireAuth/requirePermission like every
+    other route.
+
+backend/seed-demo.js
+    One-off script (npm run seed:demo) that seeds a realistic delegate
+    roster (via data.js's own createDelegate, so rows are shaped exactly
+    like the rest of the app expects) plus 7 sample exception tickets, so
+    the Exceptions inbox and Trips board aren't empty on a fresh database.
+    Safe to re-run — skips seeding whatever already exists.
+
+backend/reset-login.js
+    One-command fix (npm run reset:login) for "I cloned the repo and can't
+    log in." The team shares ONE Neon database and `git clone` only resets
+    CODE, not the DB — the seeded staff_194/password123! login only applies
+    on a first boot against an empty DB, so once the shared DB drifts (a
+    changed password, a teammate's old branch writing to accounts) the
+    documented credentials stop working. This force-resets staff_194 back to
+    password123! with full main permissions (creating it if missing). Safe
+    to re-run; override target with RESET_USER / RESET_PASS env vars.
 
 routes/insights.js
     Powers the "Generate Insights" button on the Dashboard's Analytics tab.
@@ -77,7 +117,8 @@ routes/insights.js
 
 package.json / package-lock.json
     Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
-    bcryptjs, jsonwebtoken) and the "npm run dev" / "npm start" scripts.
+    bcryptjs, jsonwebtoken) and the scripts: "npm run dev", "npm start",
+    "npm run seed:demo", "npm run reset:login".
 
 .env  (gitignored, not shown in file list)
     Holds DATABASE_URL for your Postgres connection, JWT_SECRET for
@@ -113,7 +154,10 @@ Shared components (src/components/):
   Layout.jsx
       The desktop shell — renders Sidebar + whatever page is routed into
       the main content area. Also polls the backend every 15s to catch
-      if your account got edited/deleted while logged in.
+      if your account got edited/deleted while logged in, and separately
+      polls lib/exceptionsApi.js's getCriticalOpenCount() every 15s to
+      drive the Sidebar's live "Exceptions" badge (used to be hardcoded
+      demo state).
 
   Sidebar.jsx
       The left nav rail — links to every page, the EN/中文 toggle, and
@@ -129,6 +173,11 @@ Shared components (src/components/):
       with the "Generate Insights" button (calls backend/routes/insights.js,
       shows which source answered — local Ollama or Claude — and respects
       the current language).
+
+  LogExceptionModal.jsx
+      Jayden — the "Log exception" create form (issue type, delegate
+      picker, note, "Mark as critical" toggle). Only reachable via the
+      gated "Log exception" button on ExceptionInboxPage.jsx.
 
 Library helpers (src/lib/):
 
@@ -150,6 +199,13 @@ Library helpers (src/lib/):
       (unrelated to the AI Insights feature — this is Vance's
       passport-scanning feature, currently running in demo mode).
 
+  exceptionsApi.js
+      Jayden's data layer for the Exception Inbox — built on the shared
+      apiGet/apiPost/apiPatch/apiDelete (inherits token storage/typed
+      errors for free) plus subscribeStream() for the live SSE channel
+      (EventSource, token passed as ?token= since it can't set headers)
+      and getCriticalOpenCount() (used by Layout.jsx's sidebar badge).
+
 Pages (src/pages/) — one file per route:
 
   LoginPage.jsx            /login              Sign-in form.
@@ -170,8 +226,18 @@ Pages (src/pages/) — one file per route:
                                                 shared useTfTheme dark-mode hook.
   OnboardingPage.jsx       /onboarding         Passport upload + AI-extraction
                                                 preview table (built, demo mode).
-  ExceptionInboxPage.jsx   /exceptions         Placeholder — Jayden's
-                                                exception-ticket screen.
+  ExceptionInboxPage.jsx   /exceptions         Jayden's exception inbox —
+                                                All/Critical/Open/Resolved
+                                                tabs, a live critical-alert
+                                                banner, manual attendance
+                                                override, real-time updates
+                                                via SSE (exceptionsApi.js).
+                                                "Log exception"/Resolve/
+                                                Override/Delete need the
+                                                manageExceptions permission;
+                                                viewing the inbox doesn't.
+                                                Styled by
+                                                ExceptionInboxPage.css.
   ChatAssistantPage.jsx    /assistant          Trip assistant chat UI —
                                                 currently simulated demo reply
                                                 (real AI wiring = teammate's
@@ -264,3 +330,39 @@ If deploying the backend to a live hosting service, only option (b)
 works there — the deployed server has no access to your laptop's
 Ollama. Add ANTHROPIC_API_KEY as an environment variable on the
 hosting platform (Vercel/Render/etc.) for AI Insights to work live.
+
+
+CAN'T LOG IN AFTER CLONING? (shared-database gotcha)
+--------------------------------------------------------
+The team shares ONE Neon database. `git clone` resets your CODE but NOT the
+database — so the seeded `staff_194 / password123!` login (which only runs
+on a first boot against an empty DB) may not match what's currently stored
+in the shared DB. If someone changed the password, or a teammate on an older
+pre-bcrypt branch wrote to the accounts table, the documented credentials
+stop working for everyone.
+
+Fix it in one command (no more editing Neon by hand):
+
+  cd backend
+  npm run reset:login        # staff_194 back to password123!, full access
+
+Note: because logins now enforce a single active session, when YOU reset and
+log in, other people's staff_194 sessions get logged out. Longer term, each
+developer having their own Neon database (free tier allows several) avoids
+this class of problem entirely.
+
+
+EXCEPTIONS FEATURE — SEEDING DEMO DATA
+------------------------------------------
+The Exception inbox and Trips board start empty on a fresh database (the
+base app only seeds a trip, 4 coaches, and the first login). To populate
+them with a realistic delegate roster + 7 sample tickets:
+
+  cd backend
+  npm run seed:demo
+
+Safe to re-run — it skips seeding whatever already exists. By default,
+new accounts (and any created before this feature) don't have the
+"Manage exceptions" permission — grant it in Account Control to let an
+account raise/resolve/delete tickets or do a manual override; everyone
+signed in can already view the inbox and live alerts.

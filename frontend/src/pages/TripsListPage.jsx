@@ -24,7 +24,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, AlertCircle, Bus, Users, Sparkles, Moon, Sun, Search, MapPin } from "lucide-react";
-import { apiGet, apiPost } from "../lib/api.js";
+import { apiGet, apiPost, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import "./TripCoachPage.css";
 
@@ -117,6 +117,7 @@ export default function TripsListPage() {
   const [loadError, setLoadError] = useState(null);
   const [seeding, setSeeding] = useState(false);
   const [query, setQuery] = useState("");
+  const canEdit = getPermissions().manageTrips; // gate edit controls (see permissions.js)
 
   const fetchTrips = useCallback(async () => {
     try {
@@ -183,11 +184,15 @@ export default function TripsListPage() {
             <EmptyIllustration />
             <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>{t("No trips yet")}</h2>
             <p className="tf-muted" style={{ fontSize: 13.5, marginBottom: 16, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
-              {t("Seed a set of demo trips to explore the board, or wait for the admin team to add one.")}
+              {canEdit
+                ? t("Seed a set of demo trips to explore the board, or wait for the admin team to add one.")
+                : t("No trips have been added yet. Please check back later.")}
             </p>
+            {canEdit && (
             <button className="tf-btn tf-btn-primary" style={{ margin: "0 auto" }} onClick={handleSeed} disabled={seeding}>
               {seeding ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} {t("Seed demo trips")}
             </button>
+            )}
           </div>
         )}
 

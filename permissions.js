@@ -38,6 +38,20 @@ export const PERMISSIONS = [
     default: true,
   },
   {
+    key: "manageTrips",
+    label: "Manage trips",
+    desc: "Edit trips, coaches and itineraries on the Trips board",
+    chip: "Trips",
+    default: false,
+  },
+  {
+    key: "manageExceptions",
+    label: "Manage exceptions",
+    desc: "Log, resolve, delete tickets and perform manual attendance overrides",
+    chip: "Exceptions",
+    default: false,
+  },
+  {
     key: "exportData",
     label: "Export data",
     desc: "Download the attendance report as Excel",

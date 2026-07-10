@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "seed:demo": "node seed-demo.js",
+    "reset:login": "node reset-login.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

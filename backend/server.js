@@ -42,6 +42,7 @@ import {
   deleteAccount,
   verifyPassword,
   upgradePasswordIfNeeded,
+  startNewSession,
 } from "./data.js";
 import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
 
@@ -87,8 +88,11 @@ app.post("/api/auth/login", wrap(async (req, res) => {
   }
   await upgradePasswordIfNeeded(acc, password);
 
+  // Start a fresh session — invalidates any token held by an older browser.
+  const tokenVersion = await startNewSession(acc.id);
+
   res.json({
-    token: makeToken(acc.username),
+    token: makeToken(acc.username, tokenVersion),
     role: acc.role,
     name: acc.name,
     username: acc.username,
@@ -131,12 +135,14 @@ app.patch("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (
   const result = await updateAccount(req.params.id, req.body || {});
   if (result.error) return res.status(accountErrStatus(result.error)).json(result);
   // If you edited your OWN account, hand back a fresh token for the (possibly
-  // new) username so the client can keep working without re-logging in.
+  // new) username so the client can keep working without re-logging in. Reuse
+  // the current token_version (editing your account is not a new login, so it
+  // must not invalidate this very browser's session).
   const isSelf = req.account && req.account.id === req.params.id;
   res.json({
     account: result.account,
     self: !!isSelf,
-    token: isSelf ? makeToken(result.account.username) : undefined,
+    token: isSelf ? makeToken(result.account.username, req.account.token_version ?? 0) : undefined,
   });
 }));
 
@@ -286,6 +292,9 @@ app.use(insightsRouter);
 import desmondRouter from "./routes/desmond.js";
 app.use(desmondRouter);
 
+import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
+app.use(exceptionsRouter);
+
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {
@@ -295,6 +304,7 @@ app.use((err, _req, res, _next) => {
 
 /* ---- Start (only after the database is ready) --------------------------- */
 initDb()
+  .then(initExceptions) // creates exception_tickets/check_in_logs after the base schema exists
   .then(() => {
     app.listen(PORT, () => {
       console.log(`\n  MusterGo backend running -> http://localhost:${PORT}`);

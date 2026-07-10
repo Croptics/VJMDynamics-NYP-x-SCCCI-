@@ -6,22 +6,27 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import { apiGet, getUser, getPermissions } from "../lib/api.js";
 import { translate } from "../lib/i18n.jsx";
+import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 
 // How often (ms) to re-check whether an admin changed our own account while
 // we're logged in. Also re-checks immediately whenever the tab regains focus,
 // so switching back to the tab catches a change without waiting for the timer.
 const SESSION_CHECK_INTERVAL_MS = 15000;
 
+// How often (ms) to refresh the sidebar's critical-exception badge. Kept
+// separate from the session-check interval since it's unrelated data.
+const EXCEPTION_BADGE_INTERVAL_MS = 15000;
+
 /**
  * Admin shell layout. The sidebar persists; routed pages render in <Outlet/>.
  * `onLogout` is passed through to the sidebar's Log out button.
- * `exceptionCount` is hard-coded here as demo state; in production it comes
- * from GET /api/trips/:id/dashboard.
+ * `exceptionCount` is the live count of unresolved CRITICAL tickets from
+ * Jayden's exception module (GET /api/trips/:id/exceptions/critical-count).
  *
  * This also polls GET /api/auth/session so that if another account with the
  * "manageAccounts" permission edits or deletes YOUR account while you're
@@ -29,8 +34,24 @@ const SESSION_CHECK_INTERVAL_MS = 15000;
  * carrying on with stale, out-of-date permissions.
  */
 export default function Layout({ onLogout }) {
-  const openExceptions = 3; // demo: matches Screen 2
+  const [openExceptions, setOpenExceptions] = useState(0);
   const checkingRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadBadge() {
+      try {
+        const n = await getCriticalOpenCount();
+        if (!cancelled) setOpenExceptions(n);
+      } catch {
+        // Exception module unreachable/not seeded yet — leave the badge at 0
+        // rather than showing a stale or broken count.
+      }
+    }
+    loadBadge();
+    const iv = setInterval(loadBadge, EXCEPTION_BADGE_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
 
   useEffect(() => {
     async function checkSession() {
