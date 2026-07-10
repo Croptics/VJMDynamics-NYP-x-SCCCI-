@@ -10,6 +10,7 @@ import { useEffect, useRef } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import { apiGet, getUser, getPermissions } from "../lib/api.js";
+import useCriticalCount from "../lib/useCriticalCount.js";
 
 // How often (ms) to re-check whether an admin changed our own account while
 // we're logged in. Also re-checks immediately whenever the tab regains focus,
@@ -28,7 +29,7 @@ const SESSION_CHECK_INTERVAL_MS = 15000;
  * carrying on with stale, out-of-date permissions.
  */
 export default function Layout({ onLogout }) {
-  const openExceptions = 3; // demo: matches Screen 2
+  const openExceptions = useCriticalCount();
   const checkingRef = useRef(false);
 
   useEffect(() => {
