@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "seed:demo": "node seed-demo.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -295,8 +295,9 @@ app.get("/api/trips/:id/export", wrap(async (_req, res) => {
  *  Keep all your changes between this banner and the Fallback below.
  * ============================================================================= */
 
-// import tripsRouter from "./routes/trips.js";
-// app.use(tripsRouter);
+// Jayden — Exception Logging, Critical Alerts & QR Fallback (Screens 5 & 10)
+import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
+app.use(exceptionsRouter);
 
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
@@ -307,6 +308,7 @@ app.use((err, _req, res, _next) => {
 
 /* ---- Start (only after the database is ready) --------------------------- */
 initDb()
+  .then(initExceptions)
   .then(() => {
     app.listen(PORT, () => {
       console.log(`\n  MusterGo backend running -> http://localhost:${PORT}`);
