@@ -290,7 +290,29 @@ function preferRomanised(records) {
   return records.some(hasLatin) ? records.filter(hasLatin) : records;
 }
 
-const finalizeRecords = (records) => preferRomanised(dedupeByName(records));
+// Tidy a name the model produced: drop non-name placeholders, and for a mixed
+// "邓邵徽 / Reyes Tin" style value keep just the romanised part. Returns "" for
+// anything that isn't a usable name (so it gets filtered out).
+function cleanName(raw) {
+  let s = (raw || "").toString().trim();
+  if (!s) return "";
+  if (/^(none|not|n\/?a|unknown|unspecified|not\s+specified|none\s+specified)/i.test(s) || /\bspecified\b/i.test(s)) return "";
+  const hasCJK = /[㐀-鿿]/.test(s);
+  const hasLatin = /[A-Za-z]/.test(s);
+  if (hasCJK && hasLatin) {
+    // Keep the romanised portion; strip CJK runs and tidy leftover separators.
+    s = s.replace(/[㐀-鿿]+/g, " ").replace(/[/｜|·・、，,]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    s = s.replace(/^[\s/·・-]+|[\s/·・-]+$/g, "").trim();
+  }
+  return s;
+}
+
+function finalizeRecords(records) {
+  const cleaned = records
+    .map((r) => ({ ...r, fullName: cleanName(r.fullName) }))
+    .filter((r) => r.fullName);
+  return preferRomanised(dedupeByName(cleaned));
+}
 
 /* Structure text into records. Claude first (accuracy), Ollama fallback (free,
  * page-batched to fit a small local context window). Returns {records, engine}
@@ -764,16 +786,35 @@ function buildSystemPrompt(snapshot, lang) {
       ).join("\n")
     : "(no delegates in the system yet)";
 
-  return `You are the "Trip Assistant" for MusterGo, an attendance system used by SCCCI staff running an overseas delegation. You answer staff questions about the CURRENT state of the trip using ONLY the live snapshot below. This snapshot was taken at ${snapshot.asOf}.
+  return `You are the "Trip Assistant" for MusterGo, an attendance system used by SCCCI staff running an overseas delegation (the Beijing study mission). You help busy staff — often on their phones — understand the CURRENT state of the trip using ONLY the live snapshot below (taken at ${snapshot.asOf}).
 
-Rules:
-- Answer only from the snapshot. If the answer isn't in it, say so plainly — never invent delegates, numbers, companies or coaches.
-- Be concise and operational: staff are busy and often on their phones. Prefer short sentences and simple "- " bullets.
-- When asked for counts, breakdowns or "how many", read the tallies below and give exact numbers.
-- For look-ups about a specific person or company, use the roster.
-- If a question is ambiguous, ask ONE brief clarifying question instead of guessing.
-- No markdown headers.
+CORE RULES
+- Ground every answer in the snapshot. Give exact numbers and real names from it. Never invent delegates, companies, coaches or figures.
+- If the snapshot doesn't contain the answer, say so plainly and offer what you CAN help with.
+- Be concise and operational: short sentences and simple "- " bullets. You may bold a key number with **like this**. No markdown headers.
 - ${languageLine}
+
+HANDLING DIFFERENT QUESTIONS
+- Greetings / thanks ("hi", "thanks"): reply warmly in one line and offer what you can do (attendance, missing delegates, coaches, exceptions, itinerary, delegate/company look-ups).
+- Counts & breakdowns ("how many from finance?", "which companies?"): read the tallies and give the number plus the names/items.
+- Person or company look-up ("what company is X from?", "who's from Mencast?"): use the roster.
+- Comparisons ("which coach has the most missing?"): compute from the coach list.
+- Risk / "who should I worry about?": prioritise missing VIPs and CRITICAL exceptions.
+- Operational advice ("what should I do?"): base suggestions strictly on what the snapshot shows (e.g. who to chase).
+- Out of scope (weather, unrelated topics): politely say it's outside the trip data you track, then redirect.
+- Ambiguous: ask ONE short clarifying question instead of guessing.
+
+EXAMPLES (style only — always use the REAL snapshot numbers, not these)
+Q: hi
+A: Hi! I can help with the Beijing study mission — attendance, who's missing, coach status, open exceptions, the itinerary, or delegate look-ups. What would you like?
+
+Q: how many delegates, and which companies are biggest?
+A: There are **N** delegates. Biggest by headcount:
+- Company A — 3
+- Company B — 2
+
+Q: what's the weather in Beijing?
+A: I only track the trip's attendance and logistics, not the weather. I can tell you who's missing, coach status, or today's itinerary though — want any of those?
 
 === LIVE SNAPSHOT ===
 Trip: ${snapshot.trip.name} (${snapshot.trip.dateRange}). Day ${snapshot.trip.dayOf} of ${snapshot.trip.totalDays}. Local time ${snapshot.trip.localTime}. Departs in ${snapshot.trip.departsIn}.

@@ -23,6 +23,41 @@ const STARTERS = [
   "What's on today's itinerary?",
 ];
 
+// Tappable follow-ups shown under the latest answer (like a real chat app).
+const FOLLOWUPS = [
+  "Who should I worry about right now?",
+  "Break down delegates by company",
+  "Which coach has the most missing?",
+];
+
+// Minimal, safe markdown-ish renderer: **bold** + "- " bullets + line breaks.
+// Renders to React nodes (no dangerouslySetInnerHTML), so no XSS surface.
+function inline(s, keyBase) {
+  return s.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
+    p.startsWith("**") && p.endsWith("**")
+      ? <strong key={`${keyBase}-${i}`}>{p.slice(2, -2)}</strong>
+      : <span key={`${keyBase}-${i}`}>{p}</span>
+  );
+}
+function renderRich(text) {
+  const lines = (text || "").split("\n");
+  const out = [];
+  let bullets = null;
+  const flush = () => {
+    if (bullets) { out.push(<ul key={`ul-${out.length}`} style={{ margin: "4px 0", paddingLeft: 18 }}>{bullets}</ul>); bullets = null; }
+  };
+  lines.forEach((raw, i) => {
+    const line = raw.replace(/\s+$/, "");
+    const m = line.match(/^\s*[-*]\s+(.*)$/);
+    if (m) { (bullets ||= []).push(<li key={`li-${i}`} style={{ margin: "2px 0" }}>{inline(m[1], i)}</li>); return; }
+    flush();
+    if (line.trim() === "") { out.push(<div key={`sp-${i}`} style={{ height: 6 }} />); return; }
+    out.push(<div key={`ln-${i}`}>{inline(line, i)}</div>);
+  });
+  flush();
+  return out;
+}
+
 // Group saved chats into Today / Yesterday / Earlier for the sidebar.
 function groupByDay(sessions) {
   const now = new Date();
@@ -84,10 +119,19 @@ export default function ChatAssistantPage() {
     } catch { /* ignore */ }
   }
 
-  function newChat() {
-    setCurrentId(null);
-    setMessages([]);
+  async function newChat() {
+    // Already sitting in a blank, unused chat — don't spawn a duplicate empty
+    // tab (matches ChatGPT/Claude: "New chat" is a no-op on an empty chat).
+    if (currentId && messages.length === 0) return;
     setDraft("");
+    setMessages([]);
+    try {
+      const created = await apiPost("/chat/sessions", {});
+      setCurrentId(created.id);
+      await loadSessions(); // the new tab shows in the sidebar right away
+    } catch {
+      setCurrentId(null); // fall back to a local blank chat
+    }
   }
 
   async function removeSession(id, e) {
@@ -245,12 +289,24 @@ export default function ChatAssistantPage() {
                     background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
                     border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)",
                     color: m.notice ? "var(--st-unassigned)" : undefined,
-                    padding: "10px 14px", borderRadius: "14px 14px 14px 4px", fontSize: 14, whiteSpace: "pre-wrap",
+                    padding: "10px 14px", borderRadius: "14px 14px 14px 4px", fontSize: 14, lineHeight: 1.5,
                   }}>
-                    {m.content}
+                    {m.notice ? m.content : renderRich(m.content)}
                   </div>
                 </div>
               )
+            )}
+            {/* Tappable follow-ups under the latest answer */}
+            {!sending && messages.length > 0 &&
+              messages[messages.length - 1].role === "ASSISTANT" &&
+              !messages[messages.length - 1].notice && (
+              <div className="row" style={{ gap: 8, flexWrap: "wrap", paddingLeft: 44 }}>
+                {FOLLOWUPS.map((s) => (
+                  <button key={s} className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => send(s)}>
+                    {t(s)}
+                  </button>
+                ))}
+              </div>
             )}
             {sending && (
               <div className="row" style={{ alignItems: "flex-start", gap: 10, maxWidth: "85%" }}>
