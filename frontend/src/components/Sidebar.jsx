@@ -19,12 +19,14 @@ import { useLang } from "../lib/i18n.jsx";
  * The account block + Log out button sit pinned to the bottom.
  */
 export default function Sidebar({ exceptionCount = 0, onLogout }) {
-  const isMain = !!getPermissions().manageAccounts;
+  const perms = getPermissions();
+  const isMain = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
   const items = [
     { to: "/dashboard", label: "Dashboard", icon: LayoutGrid },
     { to: "/trips", label: "Trips", icon: MapPin },
-    { to: "/onboarding", label: "Documents", icon: FileText },
+    // Onboarding (document parsing) bulk-creates delegates → manageDelegates.
+    ...(perms.manageDelegates ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
     { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
     { to: "/assistant", label: "Chat assistant", icon: MessageSquare },
     ...(isMain ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),

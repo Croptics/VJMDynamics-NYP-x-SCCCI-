@@ -295,6 +295,9 @@ app.use(desmondRouter);
 import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
 app.use(exceptionsRouter);
 
+import vanceRouter from "./routes/vance.js";
+app.use(vanceRouter);
+
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {

@@ -88,12 +88,36 @@ routes/exceptions.js
     merge time to use auth.js's requireAuth/requirePermission like every
     other route.
 
+routes/vance.js
+    Vance's DocuSync AI + Trip Assistant API — two AI features. (1) Document
+    parsing: an uploaded directory / attendee list / spreadsheet / scanned
+    passport is read (text via the `unpdf` package, or Claude vision for
+    scans/images) and turned into structured delegate rows with a confidence
+    score; on confirm they're written to the SHARED delegates table via
+    data.js's createDelegate(). (2) Trip assistant chatbot: answers questions
+    over a live snapshot of everyone's data (delegates/coaches/exceptions/
+    check-ins/itinerary), streaming replies token-by-token, with saved chat
+    history. Self-contained: own pg pool, own tables created lazily on first
+    use via ensureReady() (extra delegate columns + chat_sessions/
+    chat_messages). Parsing requires manageDelegates; the chatbot is any
+    signed-in user. Parsing prefers Claude (needs ANTHROPIC_API_KEY; required
+    for scans); the chatbot is Ollama-first then Claude, like insights.js.
+
 backend/seed-demo.js
     One-off script (npm run seed:demo) that seeds a realistic delegate
     roster (via data.js's own createDelegate, so rows are shaped exactly
     like the rest of the app expects) plus 7 sample exception tickets, so
     the Exceptions inbox and Trips board aren't empty on a fresh database.
     Safe to re-run — skips seeding whatever already exists.
+
+backend/seed-team.js
+    One-command setup (npm run seed:team) that creates ONE login account per
+    team member (jq / vance / desmond / jayden / vimal, each "password123!",
+    full access), so nobody has to share staff_194. WHY IT MATTERS: logins
+    enforce a single active session (auth.js bumps token_version each login),
+    so when the whole team shares staff_194 they constantly log each other
+    out ("Your account is no longer valid" every ~15s). Using your OWN account
+    fixes it. Safe to re-run — never overwrites an account that already exists.
 
 backend/reset-login.js
     One-command fix (npm run reset:login) for "I cloned the repo and can't
@@ -117,8 +141,9 @@ routes/insights.js
 
 package.json / package-lock.json
     Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
-    bcryptjs, jsonwebtoken) and the scripts: "npm run dev", "npm start",
-    "npm run seed:demo", "npm run reset:login".
+    bcryptjs, jsonwebtoken, unpdf) and the scripts: "npm run dev",
+    "npm start", "npm run seed:demo", "npm run reset:login",
+    "npm run seed:team".
 
 .env  (gitignored, not shown in file list)
     Holds DATABASE_URL for your Postgres connection, JWT_SECRET for
@@ -195,9 +220,10 @@ Library helpers (src/lib/):
       names/live data are never exposed.
 
   claudeParse.js
-      Simulated document-parsing helper for the Onboarding page
-      (unrelated to the AI Insights feature — this is Vance's
-      passport-scanning feature, currently running in demo mode).
+      Vance's parse/confirm bridge for the Onboarding page — uploads a file
+      to backend/routes/vance.js (POST /api/documents/parse), polls the
+      async parse job, and commits the reviewed rows (onboarding/confirm).
+      Real backend now, not a demo.
 
   exceptionsApi.js
       Jayden's data layer for the Exception Inbox — built on the shared
@@ -214,7 +240,13 @@ Pages (src/pages/) — one file per route:
                                                 missing list, delegate CRUD
                                                 table, Overview/Analytics tabs
                                                 (Analytics tab renders
-                                                AnalyticsPanel.jsx).
+                                                AnalyticsPanel.jsx). The "All
+                                                delegates" table has a search
+                                                box + status filter + sort
+                                                (name/recently added/status/
+                                                coach) and an "Uploaded" column
+                                                (delegates.createdAt, set on
+                                                creation in data.js).
   TripCoachPage.jsx        /trips              Desmond's Trips & Coaches board.
                                                 Renders TripsListPage (the trip
                                                 grid) when no ?tripId= is set,
@@ -224,8 +256,16 @@ Pages (src/pages/) — one file per route:
                                                 backend/routes/desmond.js.
   TripsListPage.jsx        (/trips grid)       Desmond — the trip grid + the
                                                 shared useTfTheme dark-mode hook.
-  OnboardingPage.jsx       /onboarding         Passport upload + AI-extraction
-                                                preview table (built, demo mode).
+  OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — upload a
+                                                directory / attendee list /
+                                                scanned passport, AI extracts
+                                                delegate rows (confidence-
+                                                scored, editable), confirm to
+                                                add them to the shared list.
+                                                Gated behind manageDelegates
+                                                (route + sidebar item), since
+                                                it bulk-creates delegates.
+                                                Calls backend/routes/vance.js.
   ExceptionInboxPage.jsx   /exceptions         Jayden's exception inbox —
                                                 All/Critical/Open/Resolved
                                                 tabs, a live critical-alert
@@ -238,10 +278,15 @@ Pages (src/pages/) — one file per route:
                                                 viewing the inbox doesn't.
                                                 Styled by
                                                 ExceptionInboxPage.css.
-  ChatAssistantPage.jsx    /assistant          Trip assistant chat UI —
-                                                currently simulated demo reply
-                                                (real AI wiring = teammate's
-                                                to build).
+  ChatAssistantPage.jsx    /assistant          Vance's Trip Assistant — a real
+                                                chatbot answering over the live
+                                                trip snapshot (everyone's data),
+                                                replies streaming token-by-token
+                                                via SSE; saved/renameable/
+                                                pinnable/exportable chats,
+                                                clickable delegate names. Any
+                                                signed-in user. Calls
+                                                backend/routes/vance.js.
   QRCheckInPage.jsx        /checkin            Placeholder — Vimal's QR
                                                 check-in screen.
   AccountControlPage.jsx   /accounts           Create/edit/delete staff
@@ -256,7 +301,9 @@ Mobile pages (src/pages/mobile/):
                                                  summary.
   MobileMissingPage.jsx     /mobile/missing     Card-list view of who's
                                                  missing.
-  MobileAssistantPage.jsx   /mobile/assistant   Mobile-styled chat UI.
+  MobileAssistantPage.jsx   /mobile/assistant   Mobile chat — same real AI
+                                                 assistant as the desktop one
+                                                 (Vance; POST /api/chat/messages).
   MobileProfilePage.jsx     /mobile/profile     Account info + logout.
 
 Styles (src/styles/):
@@ -350,6 +397,26 @@ Note: because logins now enforce a single active session, when YOU reset and
 log in, other people's staff_194 sessions get logged out. Longer term, each
 developer having their own Neon database (free tier allows several) avoids
 this class of problem entirely.
+
+
+GETTING LOGGED OUT EVERY ~15 SECONDS? ("Your account is no longer valid")
+------------------------------------------------------------------------
+Logins enforce a SINGLE ACTIVE SESSION per account (auth.js bumps a
+token_version on every login; the 15s session poll logs out any session whose
+token is behind). That is correct for one person — but if the WHOLE TEAM
+shares `staff_194` on the shared database, every login anywhere (a teammate,
+another clone, another tab) invalidates everyone else, so you get kicked out
+constantly even while idle.
+
+Fix: give each person their OWN account, then sign in as yourself, not
+staff_194:
+
+  cd backend
+  npm run seed:team          # creates jq / vance / desmond / jayden / vimal
+                             # (each "password123!", full access)
+
+Your session then only ends when YOU log in elsewhere — not when a teammate
+does.
 
 
 EXCEPTIONS FEATURE — SEEDING DEMO DATA

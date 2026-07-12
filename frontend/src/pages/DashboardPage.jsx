@@ -6,7 +6,7 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Download,
   RefreshCw,
@@ -22,7 +22,7 @@ import {
   X,
   BarChart3,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
 import { useLang } from "../lib/i18n.jsx";
@@ -61,6 +61,11 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // "All delegates" table filter + sort
+  const [delegateQuery, setDelegateQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
+
   // modal state
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = creating
@@ -91,8 +96,40 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
-  function exportXlsx() {
-    window.open(`${API_BASE}/trips/${TRIP_ID}/export?format=xlsx`, "_blank");
+  async function exportXlsx() {
+    // Fetch with the auth header (the export route requires the "exportData"
+    // permission) and trigger the download from the response blob. A plain
+    // window.open() can't send the Authorization header, so it would 401.
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/trips/${TRIP_ID}/export?format=xlsx`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!res.ok) {
+        throw new Error(
+          res.status === 403
+            ? "You don't have permission to export."
+            : res.status === 401
+            ? "Please sign in again."
+            : `Export failed (${res.status}).`
+        );
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const match = cd.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : "attendance.xlsx";
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message || "Export failed.");
+    }
   }
 
   /* ---- CRUD handlers ---------------------------------------------------- */
@@ -180,6 +217,28 @@ export default function DashboardPage() {
     const c = coaches.find((x) => x.id === id);
     return c ? coachDisplayName(c) : t("Unassigned");
   };
+
+  // The "All delegates" table, after the search box, status filter and sort.
+  const visibleDelegates = useMemo(() => {
+    const query = delegateQuery.trim().toLowerCase();
+    let list = delegates.filter((d) => {
+      if (statusFilter !== "ALL" && d.status !== statusFilter) return false;
+      if (query) {
+        const hay = `${d.name || ""} ${d.company || ""}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    });
+    const byName = (a, b) => (a.name || "").localeCompare(b.name || "");
+    list = [...list].sort((a, b) => {
+      if (sortMode === "recent") return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+      if (sortMode === "status") return (a.status || "").localeCompare(b.status || "") || byName(a, b);
+      if (sortMode === "coach") return coachName(a.coachId).localeCompare(coachName(b.coachId)) || byName(a, b);
+      return byName(a, b); // name
+    });
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [delegates, delegateQuery, statusFilter, sortMode, coaches]);
 
   return (
     <div className="page">
@@ -395,6 +454,30 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {delegates.length > 0 && (
+            <div className="row" style={{ gap: 10, padding: "12px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+              <input
+                className="input"
+                style={{ maxWidth: 240, flex: "1 1 180px" }}
+                placeholder={t("Search delegates…")}
+                value={delegateQuery}
+                onChange={(e) => setDelegateQuery(e.target.value)}
+              />
+              <select className="select" style={{ maxWidth: 170 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="ALL">{t("All statuses")}</option>
+                <option value="PRESENT">{t("Present")}</option>
+                <option value="MISSING">{t("Missing")}</option>
+                <option value="UNASSIGNED">{t("Unassigned")}</option>
+              </select>
+              <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+                <option value="name">{t("Sort: Name")}</option>
+                <option value="recent">{t("Sort: Recently added")}</option>
+                <option value="status">{t("Sort: Status")}</option>
+                <option value="coach">{t("Sort: Coach")}</option>
+              </select>
+            </div>
+          )}
+
           {delegates.length === 0 ? (
             <div className="muted" style={{ padding: 24, fontSize: 14 }}>
               {t("No delegates yet. Click")} <strong>{t("Add delegate")}</strong> {t("to create your first record.")}
@@ -403,12 +486,12 @@ export default function DashboardPage() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th>
+                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th><th>{t("Uploaded")}</th>
                   <th style={{ width: 90 }} />
                 </tr>
               </thead>
               <tbody>
-                {delegates.map((d) => (
+                {visibleDelegates.map((d) => (
                   <tr key={d.id}>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
@@ -424,6 +507,7 @@ export default function DashboardPage() {
                     <td>{coachName(d.coachId)}</td>
                     <td><StatusBadge state={d.status} /></td>
                     <td className="muted">{d.lastSeen || "—"}</td>
+                    <td className="muted">{fmtUploadDate(d.createdAt)}</td>
                     <td>
                       {perms.manageDelegates ? (
                         <div className="row" style={{ gap: 6 }}>
@@ -442,6 +526,13 @@ export default function DashboardPage() {
                     </td>
                   </tr>
                 ))}
+                {visibleDelegates.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                      {t("No delegates match your filters.")}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           )}
@@ -556,6 +647,16 @@ function coachShortLabel(c) {
   if (c.label && c.label.length <= 3) return c.label;
   const num = String(c.label || c.name || "").match(/\d+/);
   return num ? `C${num[0]}` : String(c.label || c.name || "?").slice(0, 2).toUpperCase();
+}
+
+/** Format a delegate's upload timestamp (createdAt) as e.g. "12 Jul, 14:30".
+ *  Older rows created before the column existed still get the migration time,
+ *  so this only shows "—" if the value is genuinely missing/unparseable. */
+function fmtUploadDate(v) {
+  if (!v) return "—";
+  const d = new Date(v);
+  if (isNaN(d)) return "—";
+  return d.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 /* ---- Coach progress bar ------------------------------------------------- */

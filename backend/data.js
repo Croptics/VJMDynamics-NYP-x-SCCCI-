@@ -150,6 +150,11 @@ async function createSchema() {
     id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), initials VARCHAR(16), "coachId" VARCHAR(64),
     status VARCHAR(32), vip BOOLEAN, "lastSeen" VARCHAR(255)
   )`);
+  // When each delegate was first added (upload/creation time) — powers the
+  // "Uploaded" column + "recently added" sort on the Dashboard. Additive: a
+  // NOT NULL DEFAULT now() means existing rows get the migration time and new
+  // rows default to their insert time (createDelegate doesn't set it).
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)

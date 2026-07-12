@@ -82,8 +82,17 @@ export default function App() {
         {/* Desmond — Trip Booking & Dynamic Coach Management (Screen 3) */}
         <Route path="/trips" element={<TripCoachPage />} />
 
-        {/* Vance — AI Document Parsing & Onboarding (Screen 4) — FULL */}
-        <Route path="/onboarding" element={<OnboardingPage />} />
+        {/* Vance — AI Document Parsing & Onboarding (Screen 4) — FULL.
+            Bulk-creates delegates, so it needs the same manageDelegates
+            permission the backend parse/confirm routes require. */}
+        <Route
+          path="/onboarding"
+          element={
+            getPermissions().manageDelegates
+              ? <OnboardingPage />
+              : <Navigate to="/dashboard" replace />
+          }
+        />
 
         {/* Jayden — Exception Logging & QR Fallback (Screen 5) */}
         <Route path="/exceptions" element={<ExceptionInboxPage />} />
