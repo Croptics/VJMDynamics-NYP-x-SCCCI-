@@ -2,9 +2,11 @@
  *  OWNED BY:  Vance — Trip Assistant (AI Chatbot)
  * ============================================================================= */
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Plus, Bot, Search, Trash2 } from "lucide-react";
-import { apiGet, apiPost, apiDelete } from "../lib/api.js";
+import { Send, Plus, Bot, Search, Trash2, Copy, Check } from "lucide-react";
+import { apiGet, apiPost, apiDelete, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 /**
  * Screen 6 — AI Trip Assistant (Vance). Use Case 2.
@@ -86,7 +88,14 @@ export default function ChatAssistantPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [filter, setFilter] = useState("");
+  const [copiedIdx, setCopiedIdx] = useState(null);
   const endRef = useRef(null);
+
+  const copyMsg = (i, text) => {
+    navigator.clipboard?.writeText(text);
+    setCopiedIdx(i);
+    setTimeout(() => setCopiedIdx((c) => (c === i ? null : c)), 1500);
+  };
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
 
@@ -147,30 +156,74 @@ export default function ChatAssistantPage() {
     } catch { /* ignore */ }
   }
 
+  /* ---- streaming: append tokens to the last (assistant) message --------- */
+  const appendToLast = (tok) =>
+    setMessages((m) => {
+      const copy = [...m];
+      const last = copy[copy.length - 1];
+      copy[copy.length - 1] = { ...last, content: last.content + tok };
+      return copy;
+    });
+
+  async function streamReply(sessionId, content) {
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/chat/sessions/${sessionId}/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ content, lang }),
+    });
+    // Fallback to the non-streaming endpoint if SSE isn't available.
+    if (!res.ok || !res.body) {
+      const { reply } = await apiPost(`/chat/sessions/${sessionId}/messages`, { content, lang });
+      appendToLast(reply.content);
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = frame.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        const data = JSON.parse(line.slice(5).trim());
+        if (data.token) appendToLast(data.token);
+        if (data.error) throw new Error(data.error);
+      }
+    }
+  }
+
   /* ---- send ------------------------------------------------------------ */
   async function send(text) {
     const content = (text ?? draft).trim();
     if (!content || sending) return;
     setDraft("");
     setSending(true);
-    setMessages((m) => [...m, { role: "USER", content }]);
+    // Add the user's message + an EMPTY assistant bubble that fills as tokens
+    // stream in (shows a typing indicator until the first token arrives).
+    setMessages((m) => [...m, { role: "USER", content }, { role: "ASSISTANT", content: "" }]);
 
     try {
-      // Create a session on the first message of a brand-new chat, and show it
-      // in the sidebar IMMEDIATELY (before the slow AI reply) so it's obvious a
-      // new chat was started.
       let sessionId = currentId;
       if (!sessionId) {
         const created = await apiPost("/chat/sessions", {});
         sessionId = created.id;
         setCurrentId(sessionId);
-        await loadSessions();
+        await loadSessions(); // show the new tab in the sidebar right away
       }
-      const { reply } = await apiPost(`/chat/sessions/${sessionId}/messages`, { content, lang });
-      setMessages((m) => [...m, { role: "ASSISTANT", content: reply.content }]);
+      await streamReply(sessionId, content);
       loadSessions(); // refresh titles/order in the sidebar
     } catch (err) {
-      setMessages((m) => [...m, { role: "ASSISTANT", content: err.message || t("The assistant is temporarily unavailable."), notice: true }]);
+      setMessages((m) => {
+        const copy = [...m];
+        copy[copy.length - 1] = { role: "ASSISTANT", content: err.message || t("The assistant is temporarily unavailable."), notice: true };
+        return copy;
+      });
     } finally {
       setSending(false);
     }
@@ -219,8 +272,12 @@ export default function ChatAssistantPage() {
                     onClick={() => openSession(h.id)}
                     style={{
                       width: "100%", textAlign: "left",
-                      background: active ? "var(--scc-red-tint)" : "transparent",
+                      background: active ? "var(--scc-red-tint)" : "var(--surface-2)",
                       color: active ? "var(--scc-red)" : "var(--ink-2)",
+                      border: `1px solid ${active ? "var(--scc-red)" : "var(--line)"}`,
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      marginBottom: 8,
                       display: "flex", alignItems: "center", gap: 6,
                     }}
                   >
@@ -285,13 +342,25 @@ export default function ChatAssistantPage() {
               ) : (
                 <div key={i} className="row" style={{ alignItems: "flex-start", gap: 10, maxWidth: "85%" }}>
                   <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
-                  <div style={{
-                    background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
-                    border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)",
-                    color: m.notice ? "var(--st-unassigned)" : undefined,
-                    padding: "10px 14px", borderRadius: "14px 14px 14px 4px", fontSize: 14, lineHeight: 1.5,
-                  }}>
-                    {m.notice ? m.content : renderRich(m.content)}
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{
+                      background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
+                      border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)",
+                      color: m.notice ? "var(--st-unassigned)" : undefined,
+                      padding: "10px 14px", borderRadius: "14px 14px 14px 4px", fontSize: 14, lineHeight: 1.5,
+                    }}>
+                      {m.notice ? m.content
+                        : m.content ? renderRich(m.content)
+                        : <span className="mg-typing"><i /><i /><i /></span>}
+                    </div>
+                    {!m.notice && m.content && (
+                      <button
+                        onClick={() => copyMsg(i, m.content)}
+                        style={{ marginTop: 4, marginLeft: 4, background: "none", border: "none", cursor: "pointer", color: "var(--ink-3)", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
+                      >
+                        {copiedIdx === i ? <Check size={13} /> : <Copy size={13} />} {copiedIdx === i ? t("Copied") : t("Copy")}
+                      </button>
+                    )}
                   </div>
                 </div>
               )
@@ -306,14 +375,6 @@ export default function ChatAssistantPage() {
                     {t(s)}
                   </button>
                 ))}
-              </div>
-            )}
-            {sending && (
-              <div className="row" style={{ alignItems: "flex-start", gap: 10, maxWidth: "85%" }}>
-                <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
-                <div style={{ background: "var(--surface-2)", border: "1px solid var(--line)", padding: "13px 16px", borderRadius: "14px 14px 14px 4px" }}>
-                  <span className="mg-typing"><i /><i /><i /></span>
-                </div>
               </div>
             )}
             <div ref={endRef} />

@@ -171,6 +171,50 @@ async function ollamaChat(messages, system, opts = {}) {
   }
 }
 
+/* Streaming chat: calls onToken(text) for each chunk as the model generates.
+ * Returns the full text, or null if Ollama couldn't stream (caller falls back).
+ * num_predict caps the answer length so replies stay fast on CPU. */
+async function ollamaStream(messages, system, onToken, { numPredict = 400 } = {}) {
+  const base = process.env.OLLAMA_HOST || "http://localhost:11434";
+  const model = process.env.OLLAMA_MODEL || "llama3.2";
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "system", content: system }, ...messages],
+        stream: true,
+        keep_alive: "30m",
+        options: { num_predict: numPredict },
+      }),
+    });
+    if (!res.ok || !res.body) return null;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", full = "", got = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const j = JSON.parse(line);
+          const tok = j.message?.content || "";
+          if (tok) { got = true; full += tok; onToken(tok); }
+        } catch { /* partial JSON line — wait for more */ }
+      }
+    }
+    return got ? full : null;
+  } catch {
+    return null;
+  }
+}
+
 /* =============================================================================
  *  FEATURE 1 — DOCUMENT PARSING  (Use Case 1)
  * ========================================================================== */
@@ -961,6 +1005,52 @@ router.post("/api/chat/sessions/:id/messages", requireAuth(), express.json(), wr
   }
   await q(`UPDATE chat_sessions SET updated_at = now(), title = $2 WHERE id = $1`, [sessionId, title]);
   res.json({ reply: { content: reply.content }, title, source: reply.source });
+}));
+
+/* Streaming reply (Server-Sent Events) — tokens appear as they're generated. */
+router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const sessionId = req.params.id;
+  const owned = await q(`SELECT id, title FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
+  if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
+  const userText = (req.body?.content || "").toString().trim();
+  if (!userText) return res.status(400).json({ error: "EMPTY", message: "Type a question first." });
+
+  const prior = await q(`SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId]);
+  const priorRows = prior.rows;
+  const history = normaliseHistory([...priorRows, { role: "user", content: userText }]);
+  const snapshot = await buildSnapshot();
+  const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  let full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
+
+  // Fallback if Ollama couldn't stream (not running / busy) — use the same
+  // non-streaming path (Claude, or a clear error message).
+  if (full == null) {
+    try {
+      const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
+      full = r.content;
+      sse({ token: full });
+    } catch (err) {
+      sse({ error: err.message });
+      return res.end();
+    }
+  }
+
+  await q(`INSERT INTO chat_messages (id, session_id, role, content) VALUES ($1,$2,'user',$3)`, [randomUUID(), sessionId, userText]);
+  await q(`INSERT INTO chat_messages (id, session_id, role, content) VALUES ($1,$2,'assistant',$3)`, [randomUUID(), sessionId, full]);
+  let title = owned.rows[0].title;
+  if (title === "New chat") title = userText.length > 48 ? userText.slice(0, 47) + "…" : userText;
+  await q(`UPDATE chat_sessions SET updated_at = now(), title = $2 WHERE id = $1`, [sessionId, title]);
+  sse({ done: true, title });
+  res.end();
 }));
 
 router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => {
