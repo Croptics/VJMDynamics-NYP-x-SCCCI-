@@ -105,6 +105,7 @@ async function init() {
     content     TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await q(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
   console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages");
@@ -142,10 +143,15 @@ async function anthropicChat(messages, system, maxTokens = 700) {
   return textOf(response);
 }
 
+// Model split: the chatbot uses the fast model (OLLAMA_MODEL), document parsing
+// uses a higher-quality one (OLLAMA_PARSE_MODEL) since extraction accuracy matters.
+const CHAT_MODEL = () => process.env.OLLAMA_MODEL || "llama3.2";
+const PARSE_MODEL = () => process.env.OLLAMA_PARSE_MODEL || "llama3.2";
+
 async function ollamaChat(messages, system, opts = {}) {
-  const { timeoutMs = 45000, format, keepAlive = "30m" } = opts;
+  const { timeoutMs = 45000, format, keepAlive = "30m", model } = opts;
   const base = process.env.OLLAMA_HOST || "http://localhost:11434";
-  const model = process.env.OLLAMA_MODEL || "llama3.2";
+  const useModel = model || CHAT_MODEL();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -153,7 +159,7 @@ async function ollamaChat(messages, system, opts = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
+        model: useModel,
         messages: [{ role: "system", content: system }, ...messages],
         stream: false,
         keep_alive: keepAlive,       // keep the model resident so we don't pay the ~27s reload each call
@@ -176,7 +182,7 @@ async function ollamaChat(messages, system, opts = {}) {
  * num_predict caps the answer length so replies stay fast on CPU. */
 async function ollamaStream(messages, system, onToken, { numPredict = 400 } = {}) {
   const base = process.env.OLLAMA_HOST || "http://localhost:11434";
-  const model = process.env.OLLAMA_MODEL || "llama3.2";
+  const model = CHAT_MODEL();
   try {
     const res = await fetch(`${base}/api/chat`, {
       method: "POST",
@@ -400,7 +406,7 @@ async function structureFromText(pages) {
       const raw = await ollamaChat(
         [{ role: "user", content: `Extract every distinct person from this text. Reply as JSON: {"records":[ ... ]}.\n\n${page}` }],
         TEXT_STRUCTURE_SYSTEM,
-        { timeoutMs: 240000, format: "json", keepAlive: "30m" }
+        { timeoutMs: 240000, format: "json", keepAlive: "30m", model: PARSE_MODEL() }
       );
       const recs = extractRecords(raw);
       if (recs) out.push(...recs);
@@ -480,7 +486,7 @@ async function structurePage(text) {
     const raw = await ollamaChat(
       [{ role: "user", content: `Extract every distinct person from this text. Reply as JSON: {"records":[ ... ]}.\n\n${text}` }],
       TEXT_STRUCTURE_SYSTEM,
-      { timeoutMs: 240000, format: "json", keepAlive: "30m" }
+      { timeoutMs: 240000, format: "json", keepAlive: "30m", model: PARSE_MODEL() }
     );
     const recs = extractRecords(raw);
     if (recs) return recs;
@@ -957,12 +963,32 @@ router.post("/api/chat/messages", requireAuth(), express.json(), wrap(async (req
 router.get("/api/chat/sessions", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const r = await q(`
-    SELECT s.id, s.title, s.updated_at,
+    SELECT s.id, s.title, s.updated_at, s.pinned,
            (SELECT COUNT(*)::int FROM chat_messages m WHERE m.session_id = s.id) AS message_count
       FROM chat_sessions s
      WHERE s.account_id = $1
-     ORDER BY s.updated_at DESC LIMIT 50`, [req.account.id]);
+     ORDER BY s.pinned DESC, s.updated_at DESC LIMIT 50`, [req.account.id]);
   res.json({ sessions: r.rows });
+}));
+
+/* Rename and/or pin a chat. */
+router.patch("/api/chat/sessions/:id", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const owned = await q(`SELECT id FROM chat_sessions WHERE id = $1 AND account_id = $2`, [req.params.id, req.account.id]);
+  if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
+  const sets = [];
+  const params = [];
+  if (typeof req.body?.title === "string") {
+    const title = req.body.title.trim().slice(0, 120) || "Untitled chat";
+    params.push(title); sets.push(`title = $${params.length}`);
+  }
+  if (typeof req.body?.pinned === "boolean") {
+    params.push(req.body.pinned); sets.push(`pinned = $${params.length}`);
+  }
+  if (!sets.length) return res.status(400).json({ error: "NOTHING_TO_UPDATE" });
+  params.push(req.params.id);
+  const r = await q(`UPDATE chat_sessions SET ${sets.join(", ")} WHERE id = $${params.length} RETURNING id, title, pinned`, params);
+  res.json(r.rows[0]);
 }));
 
 router.post("/api/chat/sessions", requireAuth(), express.json(), wrap(async (req, res) => {
@@ -1051,6 +1077,57 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   await q(`UPDATE chat_sessions SET updated_at = now(), title = $2 WHERE id = $1`, [sessionId, title]);
   sse({ done: true, title });
   res.end();
+}));
+
+/* Regenerate the last answer (SSE): drop the previous assistant reply and
+ * stream a fresh one for the same last question. */
+router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const sessionId = req.params.id;
+  const owned = await q(`SELECT id, title FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
+  if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
+
+  const msgs = (await q(`SELECT id, role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId])).rows;
+  // Remove the most recent assistant message (the one being regenerated).
+  let lastA = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === "assistant") { lastA = i; break; } }
+  if (lastA >= 0) { await q(`DELETE FROM chat_messages WHERE id = $1`, [msgs[lastA].id]); msgs.splice(lastA, 1); }
+  if (!msgs.length || msgs[msgs.length - 1].role !== "user") {
+    return res.status(400).json({ error: "NOTHING_TO_REGENERATE", message: "There's no question to regenerate." });
+  }
+
+  const history = normaliseHistory(msgs);
+  const snapshot = await buildSnapshot();
+  const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+  const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  let full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
+  if (full == null) {
+    try { const r = await answer(msgs, req.body?.lang); full = r.content; sse({ token: full }); }
+    catch (err) { sse({ error: err.message }); return res.end(); }
+  }
+  await q(`INSERT INTO chat_messages (id, session_id, role, content) VALUES ($1,$2,'assistant',$3)`, [randomUUID(), sessionId, full]);
+  await q(`UPDATE chat_sessions SET updated_at = now() WHERE id = $1`, [sessionId]);
+  sse({ done: true });
+  res.end();
+}));
+
+/* Delegate roster with details — powers clickable delegate cards in the chat. */
+router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const r = await q(`
+    SELECT d.name, d.company, d.role, d.industry, d.status, d.vip, d.email,
+           c.name AS coach, c.city AS coach_city
+      FROM delegates d
+      LEFT JOIN coaches c ON c.id = d."coachId"
+     ORDER BY d.name`);
+  res.json({ delegates: r.rows });
 }));
 
 router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => {
