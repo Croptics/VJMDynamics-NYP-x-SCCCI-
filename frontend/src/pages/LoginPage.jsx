@@ -7,7 +7,7 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useState } from "react";
-import { ClipboardCheck, Eye, EyeOff, Fingerprint, AlertCircle, Languages } from "lucide-react";
+import { ClipboardCheck, Eye, EyeOff, ScanFace, AlertCircle, Languages } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 
@@ -180,7 +180,7 @@ export default function LoginPage({ onSignIn }) {
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
           <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={handleWorkpass} disabled={submitting}>
-            <Fingerprint size={18} color="var(--scc-red)" /> {t("Sign in with Workpass")}
+            <ScanFace size={18} color="var(--scc-red)" /> {t("Sign in with Workpass")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
