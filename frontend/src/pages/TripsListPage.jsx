@@ -13,9 +13,10 @@
 // header). tokens.css is not touched; nothing here can leak onto other pages.
 //
 // This file also owns the shared light/dark theme hook (useTfTheme) used by
-// both this page and TripCoachPage.jsx, so the two stay in sync. It's a
-// self-contained toggle for just these two pages (localStorage key "tf_theme")
-// — it doesn't touch tokens.css or affect any other page in the app.
+// both this page and TripCoachPage.jsx. It now just mirrors the app-wide
+// theme (lib/theme.jsx) so the Trips feature stays in sync with the same
+// dark-mode toggle used everywhere else, instead of tracking its own
+// separate on/off state.
 //
 // v3: trip cards now show a real progress indicator (dayOf/totalDays, which
 // GET /all-trips added in v3 — see desmond.js) and the empty state got a
@@ -23,27 +24,18 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, AlertCircle, Bus, Users, Sparkles, Moon, Sun, Search, MapPin } from "lucide-react";
+import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin } from "lucide-react";
 import { apiGet, apiPost, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { useTheme } from "../lib/theme.jsx";
 import "./TripCoachPage.css";
 
-const THEME_KEY = "tf_theme";
-
-/** Shared light/dark toggle for the Trips feature only. Persisted so it stays
- *  put across visits; independent of every other page's (light-only) theme. */
+/** Shared light/dark toggle for the Trips feature — now just a thin wrapper
+ *  around the app-wide theme, so this page's dark mode always matches every
+ *  other page's instead of tracking its own separate state. */
 export function useTfTheme() {
-  const [dark, setDark] = useState(() => {
-    try { return localStorage.getItem(THEME_KEY) === "dark"; } catch { return false; }
-  });
-  const toggle = useCallback(() => {
-    setDark((d) => {
-      const next = !d;
-      try { localStorage.setItem(THEME_KEY, next ? "dark" : "light"); } catch { /* ignore */ }
-      return next;
-    });
-  }, []);
-  return [dark, toggle];
+  const { theme, toggleTheme } = useTheme();
+  return [theme === "dark", toggleTheme];
 }
 
 const STATUS_COLOR = {
@@ -63,11 +55,14 @@ function StatusChip({ status }) {
   );
 }
 
-/** v3: per-trip progress bar. Only shown for statuses where "progress" is a
- *  meaningful concept — a trip still in Planning hasn't started day 1 yet,
- *  so showing a bar there would imply travel is underway when it isn't. */
+/** Per-trip progress bar. Always renders a track + label for every status
+ *  (rather than returning null for Planning/Cancelled) so every card in the
+ *  grid is the same height and the list stays visually aligned. Planning and
+ *  Cancelled show an empty (0%) track with a muted label instead of a
+ *  percentage, since "progress" isn't a meaningful concept for either. */
 function TripProgress({ trip }) {
   const { t } = useLang();
+
   if (trip.status === "Completed") {
     return (
       <div>
@@ -76,12 +71,31 @@ function TripProgress({ trip }) {
       </div>
     );
   }
-  if (trip.status !== "In progress" || !trip.totalDays) return null;
-  const pct = Math.round(Math.min(1, Math.max(0, (trip.dayOf || 0) / trip.totalDays)) * 100);
+
+  if (trip.status === "In progress" && trip.totalDays) {
+    const pct = Math.round(Math.min(1, Math.max(0, (trip.dayOf || 0) / trip.totalDays)) * 100);
+    return (
+      <div>
+        <div className="tf-trip-progress-track"><div className="tf-trip-progress-fill" style={{ width: `${pct}%` }} /></div>
+        <div className="tf-trip-progress-label">{t("Day")} {trip.dayOf} {t("of")} {trip.totalDays}</div>
+      </div>
+    );
+  }
+
+  if (trip.status === "Cancelled") {
+    return (
+      <div>
+        <div className="tf-trip-progress-track"><div className="tf-trip-progress-fill" style={{ width: "0%" }} /></div>
+        <div className="tf-trip-progress-label">{t("Cancelled")}</div>
+      </div>
+    );
+  }
+
+  // Planning (or any status without enough data to compute a percentage).
   return (
     <div>
-      <div className="tf-trip-progress-track"><div className="tf-trip-progress-fill" style={{ width: `${pct}%` }} /></div>
-      <div className="tf-trip-progress-label">{t("Day")} {trip.dayOf} {t("of")} {trip.totalDays}</div>
+      <div className="tf-trip-progress-track"><div className="tf-trip-progress-fill" style={{ width: "0%" }} /></div>
+      <div className="tf-trip-progress-label">{t("Not started yet")}</div>
     </div>
   );
 }
@@ -112,10 +126,11 @@ function EmptyIllustration() {
 export default function TripsListPage() {
   const navigate = useNavigate();
   const { t } = useLang();
-  const [dark, toggleDark] = useTfTheme();
+  const [dark] = useTfTheme();
   const [trips, setTrips] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [seeding, setSeeding] = useState(false);
+  const [seedMessage, setSeedMessage] = useState(null);
   const [query, setQuery] = useState("");
   const canEdit = getPermissions().manageTrips; // gate edit controls (see permissions.js)
 
@@ -133,13 +148,20 @@ export default function TripsListPage() {
 
   async function handleSeed() {
     setSeeding(true);
+    setSeedMessage(null);
     try {
-      await apiPost("/trips/seed", {});
+      const result = await apiPost("/trips/seed", {});
       await fetchTrips();
+      setSeedMessage(
+        result.created > 0
+          ? `+${result.created} ${t("new trip")}${result.created === 1 ? "" : "s"} ${t("added")}`
+          : t("All demo trips are already on the board")
+      );
     } catch (err) {
       setLoadError(err.message);
     } finally {
       setSeeding(false);
+      setTimeout(() => setSeedMessage(null), 4000);
     }
   }
 
@@ -158,9 +180,21 @@ export default function TripsListPage() {
             <div className="tf-hero-eyebrow" style={{ color: "var(--tf-text-3)" }}>{t("Trip management")}</div>
             <h1 style={{ fontSize: 28, fontWeight: 800, marginTop: 2 }}>{t("Trips & coaches")}</h1>
           </div>
-          <button className="tf-icon-toggle" onClick={toggleDark} title={t(dark ? "Light mode" : "Dark mode")}>
-            {dark ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {/* Persistent seed control — previously only reachable from the
+               zero-trips empty state, so once any trip existed there was no
+               UI path left to add the newer demo trips. Gated on manageTrips. */}
+            {canEdit && trips && !loadError && (
+              <>
+                {seedMessage && (
+                  <span className="tf-muted" style={{ fontSize: 12.5, fontWeight: 600 }}>{seedMessage}</span>
+                )}
+                <button className="tf-btn tf-btn-solid tf-btn-sm" onClick={handleSeed} disabled={seeding}>
+                  {seeding ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} {t("Seed more trips")}
+                </button>
+              </>
+            )}
+          </div>
         </div>
         <p className="tf-muted" style={{ fontSize: 14, marginBottom: 20 }}>
           {t("Manage itineraries and reassign delegates between coaches on the fly.")}
@@ -183,24 +217,24 @@ export default function TripsListPage() {
           <div className="tf-card" style={{ textAlign: "center", padding: "48px 20px" }}>
             <EmptyIllustration />
             <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>{t("No trips yet")}</h2>
-            <p className="tf-muted" style={{ fontSize: 13.5, marginBottom: 16, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
+            <p className="tf-muted" style={{ fontSize: 13.5, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
               {canEdit
-                ? t("Seed a set of demo trips to explore the board, or wait for the admin team to add one.")
+                ? t("Use “Seed more trips” above to explore the board, or wait for the admin team to add one.")
                 : t("No trips have been added yet. Please check back later.")}
             </p>
-            {canEdit && (
-            <button className="tf-btn tf-btn-primary" style={{ margin: "0 auto" }} onClick={handleSeed} disabled={seeding}>
-              {seeding ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} {t("Seed demo trips")}
-            </button>
-            )}
           </div>
         )}
 
         {trips && !loadError && trips.length > 0 && (
           <>
-            <div className="tf-search" style={{ maxWidth: 340, marginBottom: 18 }}>
-              <Search size={15} color="var(--tf-text-3)" />
-              <input placeholder={t("Search trips…")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            <div className="tf-between" style={{ marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
+              <div className="tf-search" style={{ maxWidth: 340, flex: "1 1 240px" }}>
+                <Search size={15} color="var(--tf-text-3)" />
+                <input placeholder={t("Search trips…")} value={query} onChange={(e) => setQuery(e.target.value)} />
+              </div>
+              <span className="tf-muted" style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>
+                {query.trim() ? `${filteredTrips.length} ${t("of")} ${trips.length}` : trips.length} {t(trips.length === 1 ? "trip" : "trips")}
+              </span>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
@@ -209,7 +243,11 @@ export default function TripsListPage() {
                   key={trip.id}
                   onClick={() => navigate(`/trips?tripId=${trip.id}`)}
                   className="tf-card"
-                  style={{ margin: 0, textAlign: "left", cursor: "pointer", display: "flex", flexDirection: "column", gap: 10, transition: "transform 0.15s ease, box-shadow 0.15s ease" }}
+                  style={{
+                    margin: 0, textAlign: "left", cursor: "pointer", display: "flex", flexDirection: "column", gap: 10,
+                    borderLeft: `4px solid var(--tf-${STATUS_COLOR[trip.status] || "grey"})`,
+                    transition: "transform 0.15s ease, box-shadow 0.15s ease",
+                  }}
                   onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "var(--tf-shadow-md)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--tf-shadow-sm)"; }}
                 >

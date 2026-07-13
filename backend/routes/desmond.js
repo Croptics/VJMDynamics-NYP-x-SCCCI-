@@ -229,9 +229,13 @@ router.get("/api/trips/:tripId/summary", readAccess, wrap(async (req, res) => {
   });
 }));
 
-// Fixed list of 10 demo trips. Idempotent: only inserts whichever of these
-// names don't already exist, so clicking this endpoint twice never
-// duplicates trips in the shared database.
+// Demo trip catalogue. Idempotent: only inserts whichever names don't already
+// exist, so running it twice (or against a DB that already has some) never
+// duplicates. Each entry may optionally set status/dayOf/totalDays; when
+// omitted the insert falls back to Planning / day 1 of 5, so the original 10
+// keep behaving exactly as before. (v5 — added 5 destinations beyond mainland
+// China and a couple of non-Planning statuses so the seeded list reads as a
+// realistic mix rather than ten identical "Planning" placeholders.)
 const DEMO_TRIPS = [
   { name: "Shanghai Innovation Mission",        dateRange: "3–7 Sep 2026" },
   { name: "Guangzhou Trade Delegation",         dateRange: "14–18 Sep 2026" },
@@ -243,6 +247,12 @@ const DEMO_TRIPS = [
   { name: "Tianjin Port & Logistics Mission",   dateRange: "7–11 Dec 2026" },
   { name: "Nanjing Heritage & Trade Tour",      dateRange: "11–15 Jan 2027" },
   { name: "Qingdao Manufacturing Study Mission", dateRange: "25–29 Jan 2027" },
+  // — v5 additions —
+  { name: "Vientiane Cultural & Trade Mission", dateRange: "10–14 Feb 2027" }, // Laos
+  { name: "Manila Innovation Summit",           dateRange: "3–8 Mar 2027", status: "In progress", dayOf: 3, totalDays: 6 }, // Philippines
+  { name: "Jakarta & Bali Trade Mission",       dateRange: "17–22 Mar 2027" }, // Indonesia
+  { name: "Bangkok Business Exchange",          dateRange: "7–12 Apr 2027", status: "Completed", dayOf: 6, totalDays: 6 }, // Thailand
+  { name: "Yunnan Cross-Border Trade Mission",  dateRange: "21–25 Apr 2027" }, // Yunnan
 ];
 
 router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
@@ -253,8 +263,8 @@ router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
   for (const t of toInsert) {
     await run(
       `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status)
-       VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, 1, 5, 'Planning')`,
-      [t.name, t.dateRange]
+       VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5)`,
+      [t.name, t.dateRange, t.dayOf || 1, t.totalDays || 5, t.status || "Planning"]
     );
   }
 

@@ -9,9 +9,12 @@ import {
   LogOut,
   ShieldCheck,
   Languages,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { useTheme } from "../lib/theme.jsx";
 
 /**
  * Left navigation rail. Mirrors the MusterGo admin shell (Screens 2–6).
@@ -22,6 +25,7 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
   const perms = getPermissions();
   const isMain = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
+  const { theme, toggleTheme } = useTheme();
   const items = [
     { to: "/dashboard", label: "Dashboard", icon: LayoutGrid },
     { to: "/trips", label: "Trips", icon: MapPin },
@@ -78,11 +82,27 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
           <Languages size={16} /> {lang === "en" ? "中文" : "English"}
         </button>
         <div style={{ ...S.account, marginTop: 8 }}>
-          <span className="avatar" style={S.avatar}>{initials}</span>
-          <div style={{ minWidth: 0 }}>
-            <div style={S.name}>{displayName}</div>
-            <div className="muted" style={{ fontSize: 11 }}>{roleLabel}</div>
-          </div>
+          <NavLink
+            to="/settings"
+            className={({ isActive }) => "sidebar-account" + (isActive ? " active" : "")}
+            style={S.accountLink}
+            title={t("Settings")}
+          >
+            <span className="avatar" style={S.avatar}>{initials}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={S.name}>{displayName}</div>
+              <div className="muted" style={{ fontSize: 11 }}>{roleLabel}</div>
+            </div>
+          </NavLink>
+          <button
+            className="btn btn-ghost"
+            style={S.themeBtn}
+            onClick={toggleTheme}
+            title={t(theme === "dark" ? "Light mode" : "Dark mode")}
+            aria-label={t(theme === "dark" ? "Light mode" : "Dark mode")}
+          >
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
         </div>
         <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={handleLogout}>
           <LogOut size={16} /> {t("Log out")}
@@ -97,10 +117,21 @@ const S = {
   account: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
+    gap: 8,
     padding: "10px 12px",
     borderTop: "1px solid var(--line)",
   },
+  accountLink: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+    padding: "4px 6px",
+    margin: "-4px -6px",
+    textDecoration: "none",
+  },
+  themeBtn: { padding: 8, flexShrink: 0 },
   avatar: { width: 34, height: 34, background: "var(--scc-red-tint)", color: "var(--scc-red)" },
   name: {
     fontSize: 13,

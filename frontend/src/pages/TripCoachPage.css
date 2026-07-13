@@ -186,6 +186,13 @@
 .tf-card {
   background: var(--tf-surface); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-md);
   box-shadow: var(--tf-shadow-sm); padding: 20px 22px; margin-bottom: 20px;
+  /* Trip cards are rendered as <button> elements (clickable grid cards), and
+     buttons don't inherit `color` from ancestors by default — without this
+     they fall back to the UA default black button text in dark mode instead
+     of following --tf-text, no matter how dark the surface behind them is. */
+  color: var(--tf-text);
+  text-align: inherit;
+  font: inherit;
 }
 .tf-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 .tf-section-title { font-size: 18px; font-weight: 800; display: flex; align-items: center; gap: 8px; }

@@ -7,6 +7,7 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Download,
   RefreshCw,
@@ -21,6 +22,7 @@ import {
   Trash2,
   X,
   BarChart3,
+  ChevronRight,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
@@ -54,6 +56,7 @@ const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastS
 export default function DashboardPage() {
   const perms = getPermissions();
   const { t, lang } = useLang();
+  const navigate = useNavigate();
   const [tab, setTab] = useState("overview"); // "overview" | "analytics"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
@@ -61,10 +64,21 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Trip switcher — the whole dashboard re-points to the selected trip.
+  // "t-1" = the default Beijing trip (unfiltered); anything else is a trip uuid.
+  const [selectedTripId, setSelectedTripId] = useState(TRIP_ID);
+  const [trips, setTrips] = useState([]);            // all trips (for the dropdown)
+  const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
+
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
+  const [showAllDelegates, setShowAllDelegates] = useState(false);
+  const [showAllCoaches, setShowAllCoaches] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [history, setHistory] = useState([]);
+
 
   // modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -77,24 +91,36 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [dash, miss, dels] = await Promise.all([
-        apiGet(`/trips/${TRIP_ID}/dashboard`),
-        apiGet(`/trips/${TRIP_ID}/missing`),
-        apiGet(`/trips/${TRIP_ID}/delegates`),
+      const [dash, miss, dels, hist] = await Promise.all([
+        apiGet(`/trips/${selectedTripId}/dashboard`),
+        apiGet(`/trips/${selectedTripId}/missing`),
+        apiGet(`/trips/${selectedTripId}/delegates`),
+        apiGet(`/activity?limit=200`),
       ]);
       setData(dash);
       setMissing(miss.missing || []);
       setDelegates(dels.delegates || []);
+      setHistory(hist.activity || []);
+      // Remember the base trip's uuid the first time we load it, so the trip
+      // dropdown can list the OTHER trips without duplicating it.
+      if (selectedTripId === TRIP_ID && dash.trip?.uuid_id) {
+        setMainTrip({ uuid: dash.trip.uuid_id, name: dash.trip.name });
+      }
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedTripId]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Trip list for the switcher (Desmond's all-trips), fetched once.
+  useEffect(() => {
+    apiGet("/all-trips").then((r) => setTrips(r.trips || [])).catch(() => {});
+  }, []);
 
   async function exportXlsx() {
     // Fetch with the auth header (the export route requires the "exportData"
@@ -102,7 +128,7 @@ export default function DashboardPage() {
     // window.open() can't send the Authorization header, so it would 401.
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/trips/${TRIP_ID}/export?format=xlsx`, {
+      const res = await fetch(`${API_BASE}/trips/${selectedTripId}/export?format=xlsx`, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
       if (!res.ok) {
@@ -173,7 +199,7 @@ export default function DashboardPage() {
       if (editingId) {
         await apiPatch(`/delegates/${editingId}`, payload);
       } else {
-        await apiPost(`/trips/${TRIP_ID}/delegates`, payload);
+        await apiPost(`/trips/${selectedTripId}/delegates`, payload);
       }
       setModalOpen(false);
       await load();
@@ -203,8 +229,30 @@ export default function DashboardPage() {
       : `Delete ALL ${delegates.length} delegates? This cannot be undone.`;
     if (!window.confirm(msg)) return;
     try {
-      await apiDelete(`/trips/${TRIP_ID}/delegates`);
+      await apiDelete(`/trips/${selectedTripId}/delegates`);
       await load();
+    } catch (e) {
+      setError(e.message || "Delete all failed.");
+    }
+  }
+
+  async function removeHistoryEntry(id) {
+    try {
+      await apiDelete(`/activity/${id}`);
+      setHistory((h) => h.filter((a) => a.id !== id));
+    } catch (e) {
+      setError(e.message || "Delete failed.");
+    }
+  }
+
+  async function clearHistory() {
+    const msg = lang === "zh"
+      ? `确定清空全部 ${history.length} 条历史记录？此操作无法撤销。`
+      : `Clear ALL ${history.length} history entries? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+    try {
+      await apiDelete(`/activity`);
+      setHistory([]);
     } catch (e) {
       setError(e.message || "Delete all failed.");
     }
@@ -240,6 +288,24 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [delegates, delegateQuery, statusFilter, sortMode, coaches]);
 
+  /* ---- Trip switcher derived state -------------------------------------- */
+  // The uuid of the trip currently shown (for the "open in Trips board" links).
+  const currentTripUuid = selectedTripId === TRIP_ID ? (trip?.uuid_id || mainTrip?.uuid) : selectedTripId;
+  // Dropdown: the base trip (as "t-1", unfiltered) + every other trip by uuid.
+  const tripOptions = useMemo(() => {
+    const opts = [{ id: TRIP_ID, name: mainTrip?.name || trip?.name || "Beijing study mission" }];
+    for (const tr of trips) {
+      if (mainTrip && tr.id === mainTrip.uuid) continue; // skip the base (it's the t-1 option)
+      opts.push({ id: tr.id, name: tr.name });
+    }
+    return opts;
+  }, [trips, mainTrip, trip]);
+
+  const TOP_N = 10;
+  const COACH_TOP_N = 4;
+  const HISTORY_TOP_N = 8;
+  const openCoachBoard = () => { if (currentTripUuid) navigate(`/trips?tripId=${currentTripUuid}`); };
+
   return (
     <div className="page">
       {/* ---- Header ------------------------------------------------------- */}
@@ -250,15 +316,15 @@ export default function DashboardPage() {
           {trip ? (
             <p className="page-sub">
               {lang === "zh"
-                ? `${trip.name} · 第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime} · ${k?.total} 位代表`
-                : `${trip.name} · Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime} local · ${k?.total} delegates`}
+                ? `${trip.name} · 第 ${trip.dayOf}/${trip.totalDays} 天${trip.localTime ? ` · 当地时间 ${trip.localTime}` : ""} · ${k?.total} 位代表`
+                : `${trip.name} · Day ${trip.dayOf} of ${trip.totalDays}${trip.localTime ? ` · ${trip.localTime} local` : ""} · ${k?.total} delegates`}
             </p>
           ) : (
             <p className="page-sub">{t("Live present / missing / unassigned visibility.")}</p>
           )}
         </div>
 
-        <div className="row" style={{ gap: 10 }}>
+        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
           {data && (
             <span className="badge badge-present">
               <span style={S.dot} /> {t("Live · synced")}
@@ -272,6 +338,24 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
+
+      {/* ---- Trip switcher bar (its own row, so its position never shifts) - */}
+      {tripOptions.length > 1 && (
+        <div className="row" style={{ gap: 8, marginTop: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <span className="muted" style={{ fontSize: 13 }}>{t("Viewing trip")}</span>
+          <select
+            className="select"
+            style={{ maxWidth: 260 }}
+            value={selectedTripId}
+            onChange={(e) => { setSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); }}
+            title={t("Switch trip")}
+          >
+            {tripOptions.map((tr) => (
+              <option key={tr.id} value={tr.id}>{tr.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* ---- Tabs ----------------------------------------------------------- */}
       <div className="row" style={{ gap: 8, marginTop: 18 }}>
@@ -348,85 +432,70 @@ export default function DashboardPage() {
               <h2 style={{ fontSize: 16 }}>{t("Coach status")}</h2>
               <span className="muted" style={{ fontSize: 13 }}>{coaches.length} {t("coaches")}</span>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {coaches.map((c) => (
-                <CoachBar key={c.id} coach={c} />
-              ))}
-            </div>
+            {coaches.length === 0 ? (
+              <div className="muted" style={{ fontSize: 13 }}>{t("No coaches for this trip yet.")}</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                {(showAllCoaches ? coaches : coaches.slice(0, COACH_TOP_N)).map((c) => (
+                  <CoachBar key={c.id} coach={c} onOpen={currentTripUuid ? openCoachBoard : undefined} />
+                ))}
+              </div>
+            )}
+            {coaches.length > COACH_TOP_N && (
+              <div style={{ marginTop: 16, textAlign: "center" }}>
+                <button className="btn btn-ghost" onClick={() => setShowAllCoaches((v) => !v)}>
+                  {showAllCoaches ? t("Show less") : `${t("Show all")} ${coaches.length}`}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="card" style={{ padding: 22 }}>
-            <div className="row" style={{ marginBottom: 16, gap: 8 }}>
-              <Activity size={18} color="var(--ink-3)" />
-              <h2 style={{ fontSize: 16 }}>{t("Live activity")}</h2>
+            <div className="row between" style={{ marginBottom: 16 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <Activity size={18} color="var(--ink-3)" />
+                <h2 style={{ fontSize: 16 }}>{t("History tracker")}</h2>
+              </div>
+              {perms.manageDelegates && history.length > 0 && (
+                <button className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12.5 }} onClick={clearHistory}>
+                  <Trash2 size={13} /> {t("Clear all")}
+                </button>
+              )}
             </div>
-            {data.activity.length === 0 ? (
+            {history.length === 0 ? (
               <div className="muted" style={{ fontSize: 13 }}>
                 {t("No activity yet. Add or update a delegate to see events here.")}
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                {data.activity.map((a) => (
-                  <div key={a.id} className="row" style={{ gap: 12, alignItems: "flex-start" }}>
-                    <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
-                    <div>
-                      <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
-                      <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {(showAllHistory ? history : history.slice(0, HISTORY_TOP_N)).map((a) => (
+                    <div key={a.id} className="row between" style={{ gap: 12, alignItems: "flex-start" }}>
+                      <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+                        <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
+                        <div>
+                          <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
+                          <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
+                        </div>
+                      </div>
+                      {perms.manageDelegates && (
+                        <button onClick={() => removeHistoryEntry(a.id)} aria-label="Delete" style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </div>
+                  ))}
+                </div>
+                {history.length > HISTORY_TOP_N && (
+                  <div style={{ marginTop: 16, textAlign: "center" }}>
+                    <button className="btn btn-ghost" onClick={() => setShowAllHistory((v) => !v)}>
+                      {showAllHistory ? t("Show less") : `${t("Show all")} ${history.length}`}
+                    </button>
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </div>
-        </div>
-      )}
-
-      {/* ---- Reverse-headcount missing list ------------------------------ */}
-      {data && (
-        <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
-          <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
-            <div>
-              <h2 style={{ fontSize: 16 }}>{t("Missing right now")}</h2>
-              <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                {t("Reverse headcount — delegates who haven't boarded yet")}
-              </p>
-            </div>
-            <span className="badge badge-missing">{missing.length} {t("missing")}</span>
-          </div>
-
-          {missing.length === 0 ? (
-            <div className="muted" style={{ padding: 24, fontSize: 14 }}>
-              {k?.total ? t("Everyone's accounted for. 🎉") : t("No delegates yet.")}
-            </div>
-          ) : (
-            <table className="table">
-              <thead>
-                <tr><th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Last seen")}</th><th style={{ width: 90 }} /></tr>
-              </thead>
-              <tbody>
-                {missing.map((m) => (
-                  <tr key={m.id}>
-                    <td>
-                      <div className="row" style={{ gap: 10 }}>
-                        <span className="avatar" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
-                          {m.initials}
-                        </span>
-                        <span style={{ fontWeight: 500 }}>{m.name}</span>
-                        {m.vip && (
-                          <span className="badge badge-review" style={{ padding: "2px 8px" }}>
-                            <Crown size={12} /> VIP
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td>{m.coach}</td>
-                    <td className="muted">{m.lastSeen || "—"}</td>
-                    <td><span className="badge badge-missing">{t("Missing")}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
         </div>
       )}
 
@@ -491,7 +560,7 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {visibleDelegates.map((d) => (
+                {(showAllDelegates ? visibleDelegates : visibleDelegates.slice(0, TOP_N)).map((d) => (
                   <tr key={d.id}>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
@@ -535,6 +604,13 @@ export default function DashboardPage() {
                 )}
               </tbody>
             </table>
+          )}
+          {visibleDelegates.length > TOP_N && (
+            <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", textAlign: "center" }}>
+              <button className="btn btn-ghost" onClick={() => setShowAllDelegates((v) => !v)}>
+                {showAllDelegates ? t("Show less") : `${t("Show all")} ${visibleDelegates.length}`}
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -659,14 +735,24 @@ function fmtUploadDate(v) {
   return d.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-/* ---- Coach progress bar ------------------------------------------------- */
-function CoachBar({ coach }) {
+/* ---- Coach progress bar -------------------------------------------------
+ * When onOpen is provided the whole row is clickable and navigates to that
+ * trip's board on the Trips (Desmond) page.
+ * ------------------------------------------------------------------------- */
+function CoachBar({ coach, onOpen }) {
   const { t } = useLang();
   const pct = coach.capacity ? Math.round((coach.boarded / coach.capacity) * 100) : 0;
   const allIn = coach.total > 0 && coach.missing === 0;
   const barColor = coach.missing > 0 ? "var(--st-missing)" : "var(--st-present)";
+  const clickable = !!onOpen;
   return (
-    <div>
+    <div
+      onClick={onOpen}
+      role={clickable ? "button" : undefined}
+      title={clickable ? t("Open in Trips board") : undefined}
+      style={clickable ? { cursor: "pointer", borderRadius: "var(--r-sm)", padding: 6, margin: -6 } : undefined}
+      className={clickable ? "coach-row" : undefined}
+    >
       <div className="row between" style={{ marginBottom: 6 }}>
         <div className="row" style={{ gap: 10 }}>
           <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
@@ -674,13 +760,16 @@ function CoachBar({ coach }) {
           </span>
           <span style={{ fontWeight: 500, fontSize: 14 }}>{coachDisplayName(coach)}</span>
         </div>
-        {coach.missing > 0 ? (
-          <span className="badge badge-missing">{coach.missing} {t("missing")}</span>
-        ) : allIn ? (
-          <span className="badge badge-present">{t("All in")}</span>
-        ) : (
-          <span className="badge badge-neutral">{t("Empty")}</span>
-        )}
+        <div className="row" style={{ gap: 6 }}>
+          {coach.missing > 0 ? (
+            <span className="badge badge-missing">{coach.missing} {t("missing")}</span>
+          ) : allIn ? (
+            <span className="badge badge-present">{t("All in")}</span>
+          ) : (
+            <span className="badge badge-neutral">{t("Empty")}</span>
+          )}
+          {clickable && <ChevronRight size={16} className="muted" />}
+        </div>
       </div>
       <div style={S.track}>
         <div style={{ ...S.fill, width: `${pct}%`, background: barColor }} />
@@ -718,5 +807,5 @@ const S = {
   fill: { height: "100%", borderRadius: 999, transition: "width 0.4s ease" },
   iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },
   overlay: { position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 },
-  modal: { width: "min(440px, 100%)", padding: 24, background: "#fff" },
+  modal: { width: "min(440px, 100%)", padding: 24, background: "var(--surface)" },
 };

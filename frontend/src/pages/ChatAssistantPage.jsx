@@ -385,7 +385,7 @@ export default function ChatAssistantPage() {
         {/* Conversation panel */}
         <div className="card" style={{ display: "flex", flexDirection: "column", height: 520 }}>
           <div className="row" style={{ gap: 10, padding: "14px 18px", borderBottom: "1px solid var(--line)" }}>
-            <span className="avatar" style={{ background: "var(--ink)", color: "#fff" }}><Bot size={16} /></span>
+            <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}><Bot size={16} /></span>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Trip assistant")}</div>
               <div className="muted" style={{ fontSize: 12 }}>
@@ -418,7 +418,7 @@ export default function ChatAssistantPage() {
                 </div>
               ) : (
                 <div key={i} className="row" style={{ alignItems: "flex-start", gap: 10, maxWidth: "85%" }}>
-                  <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
+                  <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
                   <div style={{ minWidth: 0 }}>
                     <div style={{
                       background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
@@ -472,7 +472,7 @@ export default function ChatAssistantPage() {
         <div onClick={() => setCard(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ padding: 0, width: 340, maxWidth: "92%", overflow: "hidden" }}>
             <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="avatar" style={{ background: "var(--ink)", color: "#fff" }}>{initialsOf(card.name)}</span>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}>{initialsOf(card.name)}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                   {card.name} {card.vip && <Star size={14} fill="#e0a800" color="#e0a800" />}

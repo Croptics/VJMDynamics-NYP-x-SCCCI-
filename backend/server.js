@@ -34,6 +34,9 @@ import {
   updateDelegate,
   deleteDelegate,
   deleteAllDelegates,
+  getActivity,
+  deleteActivity,
+  deleteAllActivity,
   getAccountByUsername,
   accountPermissions,
   listAccounts,
@@ -43,6 +46,7 @@ import {
   verifyPassword,
   upgradePasswordIfNeeded,
   startNewSession,
+  resolveTripUuid,
 } from "./data.js";
 import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
 
@@ -167,16 +171,29 @@ function accountErrStatus(code) {
 app.get("/api/trips", requireAuth(), wrap(async (_req, res) => res.json([await getTrip()])));
 app.get("/api/trips/:id", requireAuth(), wrap(async (_req, res) => res.json(await getTrip())));
 
-/* ---- Dashboard read views ----------------------------------------------- */
-app.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (_req, res) => res.json(await getDashboard())));
-app.get("/api/trips/:id/missing", requireAuth(), wrap(async (_req, res) => res.json({ missing: await getMissing() })));
+/* ---- Dashboard read views ------------------------------------------------
+ * The :id is "t-1" for the default Beijing dashboard (unfiltered — every
+ * delegate, exactly as before) or a real trip uuid to scope the whole
+ * dashboard to that trip (the Dashboard's trip switcher). resolveTripUuid()
+ * maps "t-1" -> null (no filter) and a uuid -> that uuid.
+ * ------------------------------------------------------------------------- */
+app.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (req, res) => {
+  res.json(await getDashboard(await resolveTripUuid(req.params.id)));
+}));
+app.get("/api/trips/:id/missing", requireAuth(), wrap(async (req, res) => {
+  res.json({ missing: await getMissing(await resolveTripUuid(req.params.id)) });
+}));
 
 /* ---- Delegate CRUD ------------------------------------------------------ */
-app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (_req, res) => res.json({ delegates: await listDelegates() })));
+app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
+  res.json({ delegates: await listDelegates(await resolveTripUuid(req.params.id)) });
+}));
 
-// DELETE all delegates (dashboard "Delete all" button)
-app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (_req, res) => {
-  const deleted = await deleteAllDelegates();
+// DELETE all delegates (dashboard "Delete all" button) — scoped to whichever
+// trip is currently selected; the base t-1 view (resolveTripUuid -> null)
+// keeps the original "clear everything" behaviour.
+app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const deleted = await deleteAllDelegates(await resolveTripUuid(req.params.id));
   res.json({ deleted });
 }));
 
@@ -189,7 +206,7 @@ app.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(
   if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
     return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
   }
-  const delegate = await createDelegate(body);
+  const delegate = await createDelegate(body, await resolveTripUuid(req.params.id));
   res.status(201).json(delegate);
 }));
 
@@ -221,10 +238,11 @@ app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(asyn
  * previously this route had no server-side check at all, so the gate was
  * cosmetic only.
  * ------------------------------------------------------------------------- */
-app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_req, res) => {
-  const trip = await getTrip();
-  const delegates = await getDelegates();
-  const { coaches } = await getDashboard();
+app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  const trip = await getTrip(tripUuid);
+  const delegates = await getDelegates(tripUuid);
+  const { coaches } = await getDashboard(tripUuid);
 
   const wb = new ExcelJS.Workbook();
   wb.creator = "MusterGo";
@@ -265,6 +283,27 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_r
   res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
   await wb.xlsx.write(res);
   res.end();
+}));
+
+/* ---- History tracker (persisted activity log) -----------------------------
+ * Dashboard's "History tracker" card. Read for anyone signed in; deletes
+ * (single or clear-all) reuse manageDelegates, same as the activity these
+ * entries come from (delegate add/edit/delete).
+ * ------------------------------------------------------------------------- */
+app.get("/api/activity", requireAuth(), wrap(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 200, 1000);
+  res.json({ activity: await getActivity(limit) });
+}));
+
+app.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const ok = await deleteActivity(req.params.id);
+  if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
+  res.json({ deleted: true });
+}));
+
+app.delete("/api/activity", requirePermission("manageDelegates"), wrap(async (_req, res) => {
+  const deleted = await deleteAllActivity();
+  res.json({ deleted });
 }));
 
 /* =============================================================================

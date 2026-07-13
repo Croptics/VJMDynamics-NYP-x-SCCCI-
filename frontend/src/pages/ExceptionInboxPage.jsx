@@ -14,6 +14,7 @@ import { AlertTriangle, Plus, UserCheck } from "lucide-react";
 import StatusBadge from "../components/StatusBadge.jsx";
 import LogExceptionModal from "../components/LogExceptionModal.jsx";
 import { getPermissions } from "../lib/api.js";
+import { useLang } from "../lib/i18n.jsx";
 import {
   listExceptions, resolveException, deleteException, manualOverride,
   subscribeStream, fmtTime, ISSUE_LABEL,
@@ -28,6 +29,7 @@ const TABS = [
 ];
 
 export default function ExceptionInboxPage() {
+  const { t } = useLang();
   const canEdit = getPermissions().manageExceptions; // view-for-all, edit-gated (see permissions.js)
   const [tab, setTab] = useState("All");
   const [tickets, setTickets] = useState([]);
@@ -48,7 +50,7 @@ export default function ExceptionInboxPage() {
       setTickets(tickets);
       setCounts(counts);
     } catch (e) {
-      setError(e.message || "Couldn't load tickets.");
+      setError(e.message || t("Couldn't load tickets."));
     } finally {
       setLoading(false);
     }
@@ -64,7 +66,7 @@ export default function ExceptionInboxPage() {
       if (event === "stream:error") { setLive(false); return; }
       setLive(true);
       load();
-      if (event === "exception:critical") flash("Critical alert pushed to all staff devices");
+      if (event === "exception:critical") flash(t("Critical alert pushed to all staff devices"));
     });
     return unsub;
   }, [load]);
@@ -78,7 +80,7 @@ export default function ExceptionInboxPage() {
       flash(okMsg);
       await load();
     } catch (e) {
-      flash(e.code === "ALREADY_RESOLVED" ? "That ticket was already resolved" : (e.message || "Action failed"));
+      flash(e.code === "ALREADY_RESOLVED" ? t("That ticket was already resolved") : (e.message || t("Action failed")));
       await load();
     } finally {
       setBusyId(null);
@@ -87,32 +89,32 @@ export default function ExceptionInboxPage() {
 
   function handleCreated(_t, wasCritical) {
     setModalOpen(false);
-    flash(wasCritical ? "Critical alert pushed to all staff devices" : "Exception logged");
+    flash(wasCritical ? t("Critical alert pushed to all staff devices") : t("Exception logged"));
     load();
   }
 
-  const critical = tickets.find((t) => t.priority === "CRITICAL" && t.status === "OPEN");
+  const critical = tickets.find((tk) => tk.priority === "CRITICAL" && tk.status === "OPEN");
 
-  const rowActions = (t) => canEdit && (
+  const rowActions = (tk) => canEdit && (
     <div className="exc-actions">
-      {t.status === "OPEN" && (
+      {tk.status === "OPEN" && (
         <>
-          <button className="exc-btn-sm resolve" disabled={busyId === t.id}
-            onClick={() => act(t.id, () => resolveException(t.id), "Ticket resolved")}>
-            Resolve
+          <button className="exc-btn-sm resolve" disabled={busyId === tk.id}
+            onClick={() => act(tk.id, () => resolveException(tk.id), t("Ticket resolved"))}>
+            {t("Resolve")}
           </button>
-          {t.delegateId && (
-            <button className="exc-btn-sm" disabled={busyId === t.id}
-              title="Count this delegate present without a scan"
-              onClick={() => act(t.id, () => manualOverride(t.delegateId), `${t.delegateName} marked present`)}>
-              <UserCheck size={14} /> Override
+          {tk.delegateId && (
+            <button className="exc-btn-sm" disabled={busyId === tk.id}
+              title={t("Count this delegate present without a scan")}
+              onClick={() => act(tk.id, () => manualOverride(tk.delegateId), `${tk.delegateName} ${t("marked present")}`)}>
+              <UserCheck size={14} /> {t("Override")}
             </button>
           )}
         </>
       )}
-      <button className="exc-btn-sm danger" disabled={busyId === t.id}
-        onClick={() => act(t.id, () => deleteException(t.id), "Ticket deleted")}>
-        Delete
+      <button className="exc-btn-sm danger" disabled={busyId === tk.id}
+        onClick={() => act(tk.id, () => deleteException(tk.id), t("Ticket deleted"))}>
+        {t("Delete")}
       </button>
     </div>
   );
@@ -122,11 +124,11 @@ export default function ExceptionInboxPage() {
       <div className="exc-header">
         <div>
           <div className="page-eyebrow">Beijing study mission · Day 3</div>
-          <h1 className="page-title">Exception inbox</h1>
-          <p className="page-sub">Log and resolve on-site exceptions; critical alerts push to all staff.</p>
+          <h1 className="page-title">{t("Exception inbox")}</h1>
+          <p className="page-sub">{t("Log and resolve on-site exceptions; critical alerts push to all staff.")}</p>
         </div>
         <span className={"exc-live" + (live ? "" : " off")}>
-          <span className="dot" /> {live ? "Live" : "Connecting…"}
+          <span className="dot" /> {live ? t("Live") : t("Connecting…")}
         </span>
       </div>
 
@@ -136,18 +138,18 @@ export default function ExceptionInboxPage() {
             <AlertTriangle size={22} color="var(--scc-red)" strokeWidth={2.2} />
             <div>
               <div className="exc-banner__title">
-                {counts.critical} critical exception{counts.critical === 1 ? "" : "s"} · pushed to all staff devices
+                {counts.critical} {t(counts.critical === 1 ? "critical exception" : "critical exceptions")} · {t("pushed to all staff devices")}
               </div>
               <div className="exc-banner__sub">
-                {ISSUE_LABEL[critical.type]} · {critical.coach || "Unassigned"} ·{" "}
-                {critical.delegateName || "Unidentified"} · raised {fmtTime(critical.createdAt)}
+                {t(ISSUE_LABEL[critical.type])} · {critical.coach || t("Unassigned")} ·{" "}
+                {critical.delegateName || t("Unidentified")} · {t("raised")} {fmtTime(critical.createdAt)}
               </div>
             </div>
           </div>
           {canEdit && (
             <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={busyId === critical.id}
-              onClick={() => act(critical.id, () => resolveException(critical.id), "Critical ticket resolved")}>
-              Resolve now
+              onClick={() => act(critical.id, () => resolveException(critical.id), t("Critical ticket resolved"))}>
+              {t("Resolve now")}
             </button>
           )}
         </div>
@@ -158,13 +160,13 @@ export default function ExceptionInboxPage() {
           {TABS.map(({ key, countKey }) => (
             <button key={key} role="tab" aria-selected={tab === key}
               className={"exc-tab" + (tab === key ? " active" : "")} onClick={() => setTab(key)}>
-              {key} <span className="count">· {counts[countKey] ?? 0}</span>
+              {t(key)} <span className="count">· {counts[countKey] ?? 0}</span>
             </button>
           ))}
         </div>
         {canEdit && (
           <button className="btn btn-primary" onClick={() => setModalOpen(true)}>
-            <Plus size={16} strokeWidth={2.5} /> Log exception
+            <Plus size={16} strokeWidth={2.5} /> {t("Log exception")}
           </button>
         )}
       </div>
@@ -174,8 +176,8 @@ export default function ExceptionInboxPage() {
         <table className="table">
           <thead>
             <tr>
-              <th>Priority</th><th>Issue</th><th>Delegate</th>
-              <th>Coach</th><th>Raised</th><th>Status</th><th></th>
+              <th>{t("Priority")}</th><th>{t("Issue")}</th><th>{t("Delegate")}</th>
+              <th>{t("Coach")}</th><th>{t("Raised")}</th><th>{t("Status")}</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -183,31 +185,31 @@ export default function ExceptionInboxPage() {
               <tr key={i}><td colSpan={7}><div className="exc-skeleton" /></td></tr>
             ))}
 
-            {!loading && !error && tickets.map((t) => (
-              <tr key={t.id}>
-                <td><StatusBadge state={t.priority} /></td>
+            {!loading && !error && tickets.map((tk) => (
+              <tr key={tk.id}>
+                <td><StatusBadge state={tk.priority} /></td>
                 <td>
                   <div className="exc-issue-title">
-                    {ISSUE_LABEL[t.type] || t.type}
-                    {t.delegateVip && <span className="exc-vip">VIP</span>}
+                    {t(ISSUE_LABEL[tk.type]) || tk.type}
+                    {tk.delegateVip && <span className="exc-vip">VIP</span>}
                   </div>
-                  <div className="exc-issue-sub">{t.note}</div>
+                  <div className="exc-issue-sub">{tk.note}</div>
                 </td>
-                <td>{t.delegateName || "Unidentified"}</td>
-                <td>{t.coach || "—"}</td>
-                <td className="muted">{fmtTime(t.createdAt)} · {t.raisedBy}</td>
-                <td><StatusBadge state={t.status} /></td>
-                <td>{rowActions(t)}</td>
+                <td>{tk.delegateName || t("Unidentified")}</td>
+                <td>{tk.coach || "—"}</td>
+                <td className="muted">{fmtTime(tk.createdAt)} · {tk.raisedBy}</td>
+                <td><StatusBadge state={tk.status} /></td>
+                <td>{rowActions(tk)}</td>
               </tr>
             ))}
 
             {!loading && !error && tickets.length === 0 && (
-              <tr><td colSpan={7}><div className="exc-state">All clear — no tickets in this view.</div></td></tr>
+              <tr><td colSpan={7}><div className="exc-state">{t("All clear — no tickets in this view.")}</div></td></tr>
             )}
             {error && (
               <tr><td colSpan={7}>
                 <div className="exc-state">
-                  {error} <button className="exc-btn-sm" onClick={load} style={{ marginLeft: 8 }}>Retry</button>
+                  {error} <button className="exc-btn-sm" onClick={load} style={{ marginLeft: 8 }}>{t("Retry")}</button>
                 </div>
               </td></tr>
             )}
@@ -220,24 +222,24 @@ export default function ExceptionInboxPage() {
         {loading && Array.from({ length: 3 }).map((_, i) => (
           <div className="exc-card" key={i}><div className="exc-skeleton" /></div>
         ))}
-        {!loading && !error && tickets.map((t) => (
-          <div className="exc-card" key={t.id}>
+        {!loading && !error && tickets.map((tk) => (
+          <div className="exc-card" key={tk.id}>
             <div className="exc-card__top">
-              <StatusBadge state={t.priority} />
-              <StatusBadge state={t.status} />
+              <StatusBadge state={tk.priority} />
+              <StatusBadge state={tk.status} />
             </div>
             <div className="exc-issue-title">
-              {ISSUE_LABEL[t.type] || t.type}
-              {t.delegateVip && <span className="exc-vip">VIP</span>}
+              {t(ISSUE_LABEL[tk.type]) || tk.type}
+              {tk.delegateVip && <span className="exc-vip">VIP</span>}
             </div>
-            <div className="exc-issue-sub">{t.note}</div>
-            <div className="exc-card__meta">{t.delegateName || "Unidentified"} · {t.coach || "—"}</div>
-            <div className="exc-card__meta">{fmtTime(t.createdAt)} · {t.raisedBy}</div>
-            {rowActions(t)}
+            <div className="exc-issue-sub">{tk.note}</div>
+            <div className="exc-card__meta">{tk.delegateName || t("Unidentified")} · {tk.coach || "—"}</div>
+            <div className="exc-card__meta">{fmtTime(tk.createdAt)} · {tk.raisedBy}</div>
+            {rowActions(tk)}
           </div>
         ))}
-        {!loading && !error && tickets.length === 0 && <div className="exc-state">All clear — no tickets in this view.</div>}
-        {error && <div className="exc-state">{error} <button className="exc-btn-sm" onClick={load}>Retry</button></div>}
+        {!loading && !error && tickets.length === 0 && <div className="exc-state">{t("All clear — no tickets in this view.")}</div>}
+        {error && <div className="exc-state">{error} <button className="exc-btn-sm" onClick={load}>{t("Retry")}</button></div>}
       </div>
 
       {modalOpen && <LogExceptionModal onClose={() => setModalOpen(false)} onCreated={handleCreated} />}

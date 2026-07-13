@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { RefreshCw, AlertTriangle } from "lucide-react";
 import { apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -8,9 +9,15 @@ const TRIP_ID = "t-1";
 /**
  * Mobile Home — pulls the same live summary as the desktop Dashboard
  * (GET /api/trips/:id/dashboard), condensed for a phone screen.
+ *
+ * Each KPI tile is a shortcut into the Attendance sheet pre-filtered to that
+ * status (e.g. tapping "20 missing" opens the roster already filtered to
+ * MISSING), so the tiles double as both an at-a-glance summary and
+ * navigation — no separate "who, specifically" list needed here anymore.
  */
 export default function MobileHomePage() {
   const { t, lang } = useLang();
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -33,6 +40,7 @@ export default function MobileHomePage() {
 
   const trip = data?.trip;
   const k = data?.kpis;
+  const goToAttendance = (status) => navigate(`/mobile/attendance?status=${status}`);
 
   return (
     <div>
@@ -68,10 +76,10 @@ export default function MobileHomePage() {
 
       {k && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-          <Stat label={t("Missing")} value={k.missing} tone="missing" />
-          <Stat label={t("Present")} value={k.present} tone="present" />
-          <Stat label={t("Unassigned")} value={k.unassigned} tone="unassigned" />
-          <Stat label={t("Total")} value={k.total} tone="neutral" />
+          <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
+          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("PRESENT")} />
+          <Stat label={t("Unassigned")} value={k.unassigned} tone="unassigned" onClick={() => goToAttendance("UNASSIGNED")} />
+          <Stat label={t("Total")} value={k.total} tone="neutral" onClick={() => goToAttendance("ALL")} />
         </div>
       )}
 
@@ -96,11 +104,15 @@ export default function MobileHomePage() {
   );
 }
 
-function Stat({ label, value, tone }) {
+function Stat({ label, value, tone, onClick }) {
   return (
-    <div className="mobile-card" style={{ margin: 0, textAlign: "center" }}>
+    <button
+      className="mobile-card"
+      onClick={onClick}
+      style={{ margin: 0, textAlign: "center", cursor: "pointer", border: "1px solid var(--line)" }}
+    >
       <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
       <div className="mono" style={{ fontSize: 26, fontWeight: 700, color: `var(--st-${tone})`, lineHeight: 1.3 }}>{value}</div>
-    </div>
+    </button>
   );
 }

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { X, UserX, BadgeX, BatteryLow, Accessibility, ScanLine } from "lucide-react";
 import { getDelegates, createException } from "../lib/exceptionsApi.js";
+import { useLang } from "../lib/i18n.jsx";
 
 const ISSUE_TYPES = [
   { value: "MISSING_PERSON",    label: "Missing person",    Icon: UserX },
@@ -19,6 +20,7 @@ const ISSUE_TYPES = [
  * pushes over SSE to every connected staff device.
  */
 export default function LogExceptionModal({ onClose, onCreated }) {
+  const { t } = useLang();
   const [delegates, setDelegates] = useState([]);
   const [type, setType] = useState("MISSING_PERSON");
   const [delegateId, setDelegateId] = useState("");
@@ -41,21 +43,21 @@ export default function LogExceptionModal({ onClose, onCreated }) {
       const created = await createException({ type, delegateId, note, markCritical: critical });
       onCreated(created, critical);
     } catch (e) {
-      setError(e.message || "Could not log the exception. Please try again.");
+      setError(e.message || t("Could not log the exception. Please try again."));
       setSaving(false);
     }
   }
 
   return (
-    <div className="exc-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Log exception">
+    <div className="exc-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label={t("Log exception")}>
       <div className="exc-modal" onClick={(e) => e.stopPropagation()}>
         <div className="exc-modal__head">
-          <h2>Log exception</h2>
-          <button className="exc-modal__x" onClick={onClose} aria-label="Close"><X size={20} /></button>
+          <h2>{t("Log exception")}</h2>
+          <button className="exc-modal__x" onClick={onClose} aria-label={t("Close")}><X size={20} /></button>
         </div>
 
         <div className="exc-modal__body">
-          <label className="field-label">Issue type</label>
+          <label className="field-label">{t("Issue type")}</label>
           <div className="exc-issue-grid">
             {ISSUE_TYPES.map(({ value, label, Icon }) => (
               <button
@@ -66,12 +68,12 @@ export default function LogExceptionModal({ onClose, onCreated }) {
                 aria-pressed={type === value}
               >
                 <Icon size={20} strokeWidth={2} />
-                {label}
+                {t(label)}
               </button>
             ))}
           </div>
 
-          <label className="field-label" htmlFor="exc-delegate">Delegate</label>
+          <label className="field-label" htmlFor="exc-delegate">{t("Delegate")}</label>
           <select
             id="exc-delegate"
             className="select"
@@ -79,7 +81,7 @@ export default function LogExceptionModal({ onClose, onCreated }) {
             onChange={(e) => setDelegateId(e.target.value)}
             style={{ marginBottom: 16 }}
           >
-            <option value="">Unidentified / not listed</option>
+            <option value="">{t("Unidentified / not listed")}</option>
             {delegates.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name}{d.vip ? " · VIP" : ""}
@@ -87,11 +89,11 @@ export default function LogExceptionModal({ onClose, onCreated }) {
             ))}
           </select>
 
-          <label className="field-label" htmlFor="exc-note">Quick note</label>
+          <label className="field-label" htmlFor="exc-note">{t("Quick note")}</label>
           <textarea
             id="exc-note"
             className="input exc-textarea"
-            placeholder="e.g. Phone unreachable. Last seen near gift shop at 14:08."
+            placeholder={t("e.g. Phone unreachable. Last seen near gift shop at 14:08.")}
             value={note}
             onChange={(e) => setNote(e.target.value)}
           />
@@ -108,8 +110,8 @@ export default function LogExceptionModal({ onClose, onCreated }) {
           >
             <span className={"exc-switch" + (critical ? " on" : "")}><span className="knob" /></span>
             <div>
-              <div className="exc-critical__title">Mark as critical</div>
-              <div className="exc-critical__sub">Alerts all staff devices instantly</div>
+              <div className="exc-critical__title">{t("Mark as critical")}</div>
+              <div className="exc-critical__sub">{t("Alerts all staff devices instantly")}</div>
             </div>
           </div>
 
@@ -120,7 +122,7 @@ export default function LogExceptionModal({ onClose, onCreated }) {
             onClick={submit}
             disabled={saving}
           >
-            {saving ? "Submitting…" : critical ? "Submit & alert team" : "Submit ticket"}
+            {saving ? t("Submitting…") : critical ? t("Submit & alert team") : t("Submit ticket")}
           </button>
         </div>
       </div>

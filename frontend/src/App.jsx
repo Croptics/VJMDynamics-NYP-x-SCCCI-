@@ -14,11 +14,12 @@ import TripCoachPage from "./pages/TripCoachPage.jsx";
 import QRCheckInPage from "./pages/QRCheckInPage.jsx";
 import ExceptionInboxPage from "./pages/ExceptionInboxPage.jsx";
 import AccountControlPage from "./pages/AccountControlPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
 import MobileHomePage from "./pages/mobile/MobileHomePage.jsx";
-import MobileMissingPage from "./pages/mobile/MobileMissingPage.jsx";
+import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
 import MobileAssistantPage from "./pages/mobile/MobileAssistantPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 
@@ -113,13 +114,16 @@ export default function App() {
           }
         />
 
+        {/* Settings — signed-in account info + theme/language preferences */}
+        <Route path="/settings" element={<SettingsPage />} />
+
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
 
       {/* Mobile UI — responsive pages with their own bottom-tab layout */}
       <Route element={<MobileLayout onLogout={handleLogout} />}>
         <Route path="/mobile" element={<MobileHomePage />} />
-        <Route path="/mobile/missing" element={<MobileMissingPage />} />
+        <Route path="/mobile/attendance" element={<MobileAttendancePage />} />
         <Route path="/mobile/assistant" element={<MobileAssistantPage />} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
       </Route>

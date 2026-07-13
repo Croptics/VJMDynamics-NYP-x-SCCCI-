@@ -28,18 +28,18 @@
 .exc-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
 .exc-tabs { display: flex; gap: 10px; flex-wrap: wrap; }
 .exc-tab {
-  border: 1px solid var(--line); background: #fff; color: var(--ink-2);
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
   border-radius: 999px; padding: 8px 16px; font-size: 14px; font-weight: 600;
 }
 .exc-tab:hover { background: var(--surface-2); }
-.exc-tab.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.exc-tab.active { background: var(--ink); color: var(--surface); border-color: var(--ink); }
 .exc-tab .count { opacity: 0.7; font-variant-numeric: tabular-nums; }
 
 /* ---- Row actions -------------------------------------------------------- */
 .exc-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .exc-btn-sm {
   font-size: 13px; padding: 6px 12px; border-radius: var(--r-sm);
-  border: 1px solid var(--line); background: #fff; font-weight: 600; color: var(--ink-2);
+  border: 1px solid var(--line); background: var(--surface); font-weight: 600; color: var(--ink-2);
 }
 .exc-btn-sm:hover { background: var(--surface-2); }
 .exc-btn-sm.resolve { color: var(--st-present); border-color: var(--st-present-bg); }
@@ -60,7 +60,7 @@
 
 .exc-toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: var(--ink); color: #fff; padding: 12px 20px; border-radius: 999px;
+  background: var(--ink); color: var(--surface); padding: 12px 20px; border-radius: 999px;
   font-size: 14px; font-weight: 500; box-shadow: var(--shadow-lg); z-index: 60;
 }
 
@@ -81,7 +81,7 @@
 .exc-issue-opt {
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   padding: 14px 8px; border: 1px solid var(--line); border-radius: var(--r-md);
-  background: #fff; font-size: 13px; font-weight: 600; color: var(--ink-2);
+  background: var(--surface); font-size: 13px; font-weight: 600; color: var(--ink-2);
 }
 .exc-issue-opt:hover { border-color: var(--ink-3); }
 .exc-issue-opt.selected { border-color: var(--scc-red); background: var(--scc-red-tint); color: var(--scc-red-700); }

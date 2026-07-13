@@ -186,7 +186,9 @@ Shared components (src/components/):
 
   Sidebar.jsx
       The left nav rail — links to every page, the EN/中文 toggle, and
-      the account/logout block at the bottom.
+      the account/logout block at the bottom. The account block (avatar +
+      name/role) links to /settings and has a hover highlight
+      (.sidebar-account); the sun/moon dark-mode toggle sits right beside it.
 
   StatusBadge.jsx
       Small reusable pill component for status labels (Present/Missing/
@@ -219,6 +221,16 @@ Library helpers (src/lib/):
       only — no data ever sent to a translation API, so delegate
       names/live data are never exposed.
 
+  theme.jsx
+      App-wide light/dark theme — ThemeProvider + useTheme() hook (returns
+      { theme, toggleTheme }), persisted to localStorage (mg_theme), stamps
+      data-theme="dark" on <html>. tokens.css's :root[data-theme="dark"]
+      block overrides the neutral/surface/status-tint variables everything
+      (.card/.btn/.input/the sidebar/etc.) is built on, so one toggle
+      re-themes every page. TripsListPage's useTfTheme() is now just a thin
+      wrapper around this (no more separate tf_theme localStorage key), so
+      the Trips/Coach board pages follow the same toggle too.
+
   claudeParse.js
       Vance's parse/confirm bridge for the Onboarding page — uploads a file
       to backend/routes/vance.js (POST /api/documents/parse), polls the
@@ -236,17 +248,55 @@ Pages (src/pages/) — one file per route:
 
   LoginPage.jsx            /login              Sign-in form.
   DashboardPage.jsx        /dashboard          Main admin screen — KPI tiles,
-                                                coach status, live activity,
-                                                missing list, delegate CRUD
-                                                table, Overview/Analytics tabs
+                                                coach status, History tracker,
+                                                delegate CRUD table,
+                                                Overview/Analytics tabs
                                                 (Analytics tab renders
-                                                AnalyticsPanel.jsx). The "All
-                                                delegates" table has a search
-                                                box + status filter + sort
-                                                (name/recently added/status/
-                                                coach) and an "Uploaded" column
-                                                (delegates.createdAt, set on
-                                                creation in data.js).
+                                                AnalyticsPanel.jsx).
+                                                • No standalone "Missing right
+                                                  now" table anymore — the
+                                                  KPI tile still shows the
+                                                  count; the reverse-headcount
+                                                  list itself was removed as
+                                                  redundant with "All delegates".
+                                                • "All delegates" caps to 10
+                                                  rows with a "Show all"
+                                                  toggle, has a search box, an
+                                                  "Uploaded" column
+                                                  (delegates.createdAt), status
+                                                  filter + sort. Coach status
+                                                  caps to 4 with "Show all".
+                                                • "History tracker" (was "Live
+                                                  activity") — persisted to the
+                                                  activity_log table (GET/DELETE
+                                                  /api/activity), not the old
+                                                  in-memory 8-entry array, so it
+                                                  survives backend restarts.
+                                                  Caps to 8 with "Show all";
+                                                  per-row delete + "Clear all",
+                                                  both gated on manageDelegates.
+                                                • Trip switcher (its own
+                                                  "Viewing trip" bar under the
+                                                  header, fixed position): a
+                                                  dropdown of all trips (from
+                                                  /api/all-trips) re-points the
+                                                  WHOLE dashboard to the chosen
+                                                  trip. The base Beijing trip
+                                                  ("t-1") is the unfiltered
+                                                  view (every delegate); any
+                                                  other trip scopes the
+                                                  dashboard to just that trip.
+                                                  Every trip is now editable —
+                                                  create/edit/delete/export are
+                                                  gated on permissions only
+                                                  (manageDelegates/exportData),
+                                                  not on which trip is selected.
+                                                  Backend scopes by trip via
+                                                  resolveTripUuid() in data.js.
+                                                • Clicking a coach in Coach
+                                                  status opens that trip's board
+                                                  on the Trips page
+                                                  (/trips?tripId=<uuid>).
   TripCoachPage.jsx        /trips              Desmond's Trips & Coaches board.
                                                 Renders TripsListPage (the trip
                                                 grid) when no ?tripId= is set,
@@ -292,15 +342,61 @@ Pages (src/pages/) — one file per route:
   AccountControlPage.jsx   /accounts           Create/edit/delete staff
                                                 accounts + permissions
                                                 (needs manageAccounts).
+                                                • Role selector (Staff/Admin)
+                                                  in the create/edit form —
+                                                  UI convenience only, no
+                                                  backend change: picking a
+                                                  role just pre-fills the
+                                                  permission checkboxes with
+                                                  that role's usual starting
+                                                  point (ROLE_PRESETS mirrors
+                                                  backend's defaultPermsForRole
+                                                  in data.js); the checkboxes
+                                                  remain what's actually
+                                                  submitted, so access is
+                                                  still tunable per account.
+                                                  Accounts already at "main"
+                                                  tier (manageAccounts) show a
+                                                  protective badge instead of
+                                                  the selector, so this can't
+                                                  accidentally demote the
+                                                  primary account.
+  SettingsPage.jsx         /settings           Signed-in account info
+                                                (avatar/name/role),
+                                                permissions list, and the
+                                                Theme + Language preference
+                                                controls. Reached via the
+                                                Sidebar's account block.
 
 Mobile pages (src/pages/mobile/):
 
   MobileLayout.jsx          (wraps /mobile/*)   Bottom tab-bar shell, incl.
                                                  the EN/中文 toggle.
   MobileHomePage.jsx        /mobile             Condensed KPI + coach-status
-                                                 summary.
-  MobileMissingPage.jsx     /mobile/missing     Card-list view of who's
-                                                 missing.
+                                                 summary. No delegate list of
+                                                 its own — each KPI tile
+                                                 (Missing/Present/Unassigned/
+                                                 Total) is a shortcut button
+                                                 into MobileAttendancePage,
+                                                 pre-filtered to that status
+                                                 (?status=MISSING etc).
+  MobileAttendancePage.jsx  /mobile/attendance  Full delegate roster — search
+                                                 + status filter chips (reads
+                                                 an initial ?status= from the
+                                                 URL, so Home's KPI tiles can
+                                                 deep-link straight into a
+                                                 filtered view). Status is
+                                                 editable inline via a
+                                                 Present/Missing/Unassigned
+                                                 <select> per row (optimistic,
+                                                 rolls back + shows an inline
+                                                 error on failure), gated on
+                                                 manageDelegates — read-only
+                                                 StatusBadge otherwise. Took
+                                                 over the tab slot the old
+                                                 standalone Missing tab used
+                                                 to occupy (now folded into
+                                                 Home, see above).
   MobileAssistantPage.jsx   /mobile/assistant   Mobile chat — same real AI
                                                  assistant as the desktop one
                                                  (Vance; POST /api/chat/messages).

@@ -215,6 +215,15 @@ async function createSchema() {
   await run(`CREATE INDEX IF NOT EXISTS idx_coaches_trip   ON coaches(trip_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_delegates_trip ON delegates(trip_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_itinerary_trip ON itinerary_items(trip_id, day_number, sort_order)`);
+
+  // History tracker: the Dashboard's activity feed. Previously an in-memory
+  // array capped at 8 entries — wiped on every backend restart. Now a real
+  // table so past activity survives restarts and accumulates indefinitely.
+  await run(`CREATE TABLE IF NOT EXISTS activity_log (
+    id VARCHAR(64) PRIMARY KEY, text TEXT NOT NULL, kind VARCHAR(32),
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log("createdAt" DESC)`);
 }
 
 async function seed() {
@@ -287,18 +296,45 @@ async function seedTransitFlow() {
   }
 }
 
-/* ---- In-memory activity log --------------------------------------------- */
-let ACTIVITY = [];
+/* ---- History tracker (persisted activity log) ---------------------------
+ * Was an in-memory array capped at 8 entries and wiped on every restart;
+ * now stored in activity_log so history survives restarts and accumulates
+ * over time (see getActivity/deleteActivity/deleteAllActivity below). */
+async function logActivity(text, kind) {
+  const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  await run(`INSERT INTO activity_log (id, text, kind) VALUES ($1,$2,$3)`, [id, text, kind]);
+}
 
-function logActivity(text, kind) {
-  ACTIVITY.unshift({
-    id: `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    text,
-    time: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+function rowToActivity(row) {
+  return {
+    id: row.id,
+    text: row.text,
+    kind: row.kind,
+    time: new Date(row.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
     via: "you",
-    kind,
-  });
-  ACTIVITY = ACTIVITY.slice(0, 8);
+    createdAt: row.createdAt,
+  };
+}
+
+/** Most recent activity entries, newest first. `limit` defaults to a small
+ *  preview (matches the old in-memory cap) — the Dashboard's History tracker
+ *  card asks for a much larger limit to show real history. */
+export async function getActivity(limit = 8) {
+  const rows = await all(`SELECT * FROM activity_log ORDER BY "createdAt" DESC LIMIT $1`, [limit]);
+  return rows.map(rowToActivity);
+}
+
+export async function deleteActivity(id) {
+  const existing = await get("SELECT id FROM activity_log WHERE id = $1", [id]);
+  if (!existing) return false;
+  await run("DELETE FROM activity_log WHERE id = $1", [id]);
+  return true;
+}
+
+export async function deleteAllActivity() {
+  const count = Number((await get("SELECT COUNT(*) AS c FROM activity_log"))?.c || 0);
+  await run("DELETE FROM activity_log");
+  return count;
 }
 
 /* ---- Helpers ------------------------------------------------------------ */
@@ -378,7 +414,10 @@ export async function upgradePasswordIfNeeded(account, plainPassword) {
 }
 
 /* ---- Delegate CRUD ------------------------------------------------------ */
-export async function listDelegates() {
+export async function listDelegates(tripUuid = null) {
+  if (tripUuid) {
+    return (await all('SELECT * FROM delegates WHERE trip_id = $1 ORDER BY id', [tripUuid])).map(rowToDelegate);
+  }
   return (await all('SELECT * FROM delegates ORDER BY id')).map(rowToDelegate);
 }
 
@@ -387,12 +426,13 @@ export async function getDelegateById(id) {
   return row ? rowToDelegate(row) : null;
 }
 
-export async function createDelegate(input) {
+export async function createDelegate(input, tripUuid = null) {
   const d = normalize(input, await nextId());
-  await run(`INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
-    d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen,
-  ]);
-  logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign");
+  await run(
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, tripUuid]
+  );
+  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign");
   return d;
 }
 
@@ -404,7 +444,7 @@ export async function updateDelegate(id, patch) {
     `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6 WHERE id=$7`,
     [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, id]
   );
-  logActivity(`${merged.name} updated`, "reassign");
+  await logActivity(`${merged.name} updated`, "reassign");
   return merged;
 }
 
@@ -412,34 +452,52 @@ export async function deleteDelegate(id) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return false;
   await run("DELETE FROM delegates WHERE id = $1", [id]);
-  logActivity(`${existing.name} removed`, "exception");
+  await logActivity(`${existing.name} removed`, "exception");
   return true;
 }
 
-/* ---- Bulk delete (dashboard "Delete all") ------------------------------- */
-export async function deleteAllDelegates() {
-  const count = Number((await get("SELECT COUNT(*) AS c FROM delegates"))?.c || 0);
-  await run("DELETE FROM delegates");
-  if (count > 0) logActivity(`All delegates removed (${count})`, "exception");
+/* ---- Bulk delete (dashboard "Delete all") -------------------------------
+ * tripUuid scopes the wipe to just that trip's delegates; null (the base t-1
+ * unfiltered view) keeps the original behaviour of clearing every delegate. */
+export async function deleteAllDelegates(tripUuid = null) {
+  const where = tripUuid ? "WHERE trip_id = $1" : "";
+  const params = tripUuid ? [tripUuid] : [];
+  const count = Number((await get(`SELECT COUNT(*) AS c FROM delegates ${where}`, params))?.c || 0);
+  await run(`DELETE FROM delegates ${where}`, params);
+  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception");
   return count;
 }
 
 /* ---- Derived views ------------------------------------------------------ */
-export async function getTrip() {
+export async function getTrip(tripUuid = null) {
+  if (tripUuid) {
+    const t = await get("SELECT * FROM trips WHERE uuid_id = $1", [tripUuid]);
+    if (t) return t;
+  }
   return (await get("SELECT * FROM trips LIMIT 1")) || TRIP;
 }
 
-export function getActivity() {
-  return ACTIVITY;
+/** Resolve a dashboard :id param to the trip uuid to scope by, or null for the
+ *  default unfiltered ("all delegates") view. "t-1" (the base Beijing trip) →
+ *  null, so the main dashboard keeps showing every delegate exactly as before;
+ *  a real trip uuid → that uuid, so the dashboard scopes to that trip. */
+export async function resolveTripUuid(tripId) {
+  if (!tripId || tripId === "t-1") return null;
+  const t = await get("SELECT uuid_id FROM trips WHERE uuid_id = $1", [tripId]);
+  return t?.uuid_id || null;
 }
 
-export async function getDashboard() {
-  const d = await listDelegates();
+export async function getDashboard(tripUuid = null) {
+  const d = await listDelegates(tripUuid);
+  const activity = await getActivity(8); // small preview — full history lives on its own endpoint
   const present = d.filter((x) => x.status === "PRESENT").length;
   const missing = d.filter((x) => x.status === "MISSING").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
 
-  const coaches = (await all("SELECT * FROM coaches ORDER BY id")).map((c) => {
+  const coachRows = tripUuid
+    ? await all("SELECT * FROM coaches WHERE trip_id = $1 ORDER BY sort_order NULLS LAST, id", [tripUuid])
+    : await all("SELECT * FROM coaches ORDER BY id");
+  const coaches = coachRows.map((c) => {
     const assigned = d.filter((x) => x.coachId === c.id);
     return {
       id: c.id,
@@ -454,7 +512,7 @@ export async function getDashboard() {
   });
 
   return {
-    trip: await getTrip(),
+    trip: await getTrip(tripUuid),
     kpis: {
       total: d.length,
       present,
@@ -463,16 +521,16 @@ export async function getDashboard() {
       openExceptions: 0,
       criticalExceptions: 0,
       normalExceptions: 0,
-      presentDelta: ACTIVITY.filter((a) => a.kind === "checkin").length,
+      presentDelta: activity.filter((a) => a.kind === "checkin").length,
     },
     coaches,
-    activity: ACTIVITY,
+    activity,
   };
 }
 
-export async function getMissing() {
+export async function getMissing(tripUuid = null) {
   const coaches = await all("SELECT * FROM coaches");
-  return (await listDelegates())
+  return (await listDelegates(tripUuid))
     .filter((x) => x.status === "MISSING")
     .map((x) => {
       const coach = coaches.find((c) => c.id === x.coachId);
@@ -484,12 +542,13 @@ export async function getMissing() {
         coach: coach ? [coach.name, coach.city].filter(Boolean).join(" · ") : "Unassigned",
         vip: x.vip,
         lastSeen: x.lastSeen,
+        createdAt: x.createdAt,
       };
     });
 }
 
-export async function getDelegates() {
-  return listDelegates();
+export async function getDelegates(tripUuid = null) {
+  return listDelegates(tripUuid);
 }
 
 /* ---- Accounts + permissions -------------------------------------------- *

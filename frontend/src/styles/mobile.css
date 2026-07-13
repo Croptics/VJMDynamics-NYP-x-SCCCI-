@@ -41,6 +41,14 @@
   box-shadow: var(--shadow-sm);
   padding: 16px;
   margin-bottom: 12px;
+  /* .mobile-card is also used on <button> (e.g. the clickable Home KPI
+     tiles) — buttons don't inherit `color`/`font` from ancestors by default,
+     so without this they'd fall back to the UA default black button text
+     in dark mode instead of following the theme. Harmless on plain <div>s. */
+  color: inherit;
+  text-align: inherit;
+  font: inherit;
+  width: 100%;
 }
 
 .mobile-tabbar {

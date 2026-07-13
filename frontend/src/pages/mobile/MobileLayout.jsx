@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Home, AlertTriangle, MessageSquare, User, Languages } from "lucide-react";
+import { Home, ClipboardList, MessageSquare, User, Languages } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import "../../styles/mobile.css";
 
@@ -7,12 +7,16 @@ import "../../styles/mobile.css";
  * Mobile UI shell — bottom tab-bar layout for the responsive /mobile/* pages.
  * Parallel to (and independent of) the desktop Layout/Sidebar; touches no
  * desktop routes or styles.
+ *
+ * The standalone "Missing" tab was folded into Home (see MobileHomePage) so
+ * first-time users have one obvious starting point instead of hunting across
+ * tabs; this freed slot now points at the Attendance sheet instead.
  */
 export default function MobileLayout({ onLogout }) {
   const { lang, toggleLang, t } = useLang();
   const tabs = [
     { to: "/mobile", label: "Home", icon: Home, end: true },
-    { to: "/mobile/missing", label: "Missing", icon: AlertTriangle },
+    { to: "/mobile/attendance", label: "Attendance", icon: ClipboardList },
     { to: "/mobile/assistant", label: "Assistant", icon: MessageSquare },
     { to: "/mobile/profile", label: "Profile", icon: User },
   ];

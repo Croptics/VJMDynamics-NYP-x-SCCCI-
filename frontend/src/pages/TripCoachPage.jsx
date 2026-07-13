@@ -63,7 +63,7 @@ import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
   ArrowRight, Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare,
-  Moon, Sun, Search, Activity, MapPin, Building2, Landmark, UtensilsCrossed,
+  Search, Activity, MapPin, Building2, Landmark, UtensilsCrossed,
   Factory, Plane, Accessibility, Clock, Navigation, Gauge,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
@@ -540,7 +540,7 @@ function JourneyTimeline({ items, dayNumber, onAddClick, coachCount, delegateCou
  *  the only thing it surfaces proactively is a red "N missing" pill, and only
  *  when N > 0, so the header stays calm when there's nothing to flag.
  * ========================================================================== */
-function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, dark, toggleDark, onEditItinerary, onAddDelegate, canEdit = true }) {
+function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, onEditItinerary, onAddDelegate, canEdit = true }) {
   const { t } = useLang();
   const [clock, setClock] = useState(() => new Date());
   useEffect(() => { const iv = setInterval(() => setClock(new Date()), 1000); return () => clearInterval(iv); }, []);
@@ -557,11 +557,6 @@ function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coa
             )}
           </div>
           <div className="tf-hero-title">{trip.name}</div>
-        </div>
-        <div className="tf-flex tf-gap-8">
-          <button className="tf-icon-toggle" style={{ background: "rgba(255,255,255,0.16)", borderColor: "rgba(255,255,255,0.35)", color: "#fff" }} onClick={toggleDark} title={t(dark ? "Light mode" : "Dark mode")}>
-            {dark ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
         </div>
       </div>
 
@@ -963,7 +958,7 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
 function CoachBoardView({ tripId }) {
   const navigate = useNavigate();
   const { t } = useLang();
-  const [dark, toggleDark] = useTfTheme();
+  const [dark] = useTfTheme();
   const canEdit = getPermissions().manageTrips; // "View for all, edit gated" (see permissions.js)
 
   const [trip, setTrip] = useState(null);
@@ -1208,7 +1203,7 @@ function CoachBoardView({ tripId }) {
         <Hero
           trip={trip} currentStop={currentStop} nextStop={nextStop} progressFraction={tripProgress}
           missingCount={missingCount} coachCount={coaches.length} delegateCount={delegates.length}
-          dark={dark} toggleDark={toggleDark} canEdit={canEdit}
+          canEdit={canEdit}
           onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
         />
 

@@ -28,6 +28,26 @@ const EMPTY_FORM = {
   perms: { ...DEFAULT_PERMISSIONS },
 };
 
+// Role is a UI convenience only — the backend still derives the account's
+// actual role from whichever permission checkboxes are ticked (see
+// roleFromPerms/defaultPermsForRole in backend/data.js). Picking a role here
+// just pre-fills the checkboxes with that role's usual starting point; the
+// checkboxes themselves remain what's actually submitted, so admins can
+// still fine-tune access per account exactly as before.
+const ROLE_PRESETS = {
+  staff: { manageDelegates: true, manageTrips: false, manageExceptions: false, exportData: false, manageAccounts: false },
+  admin: { manageDelegates: true, manageTrips: false, manageExceptions: false, exportData: true, manageAccounts: false },
+};
+
+// Best-effort read of an account's current role from its permissions, purely
+// to preselect the dropdown when editing. "main" (manageAccounts) accounts
+// aren't offered Staff/Admin here — see the disabled-selector note below.
+function roleFromPerms(p) {
+  if (p.manageAccounts) return "main";
+  if (p.exportData) return "admin";
+  return "staff";
+}
+
 const ERR_TEXT = {
   USERNAME_TAKEN: "That username is already taken.",
   USERNAME_REQUIRED: "Username is required.",
@@ -81,25 +101,31 @@ export default function AccountControlPage() {
 
   function openCreate() {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms } });
+    setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms }, role: roleFromPerms(EMPTY_FORM.perms) });
     setFormErr("");
     setModalOpen(true);
   }
 
   function openEdit(a) {
     setEditingId(a.id);
+    const perms = Object.fromEntries(PERMISSIONS.map((p) => [p.key, !!a.permissions?.[p.key]]));
     setForm({
       username: a.username,
       name: a.name || "",
       password: "",
-      perms: Object.fromEntries(PERMISSIONS.map((p) => [p.key, !!a.permissions?.[p.key]])),
+      perms,
+      role: roleFromPerms(perms),
     });
     setFormErr("");
     setModalOpen(true);
   }
 
   function togglePerm(key) {
-    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] } }));
+    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] }, role: roleFromPerms({ ...f.perms, [key]: !f.perms[key] }) }));
+  }
+
+  function selectRole(role) {
+    setForm((f) => ({ ...f, role, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
   }
 
   function mapError(e, fallbackCode) {
@@ -299,6 +325,29 @@ export default function AccountControlPage() {
               </p>
             )}
 
+            <label className="field-label" style={{ marginTop: 18 }}>{t("Role")}</label>
+            {form.role === "main" ? (
+              <div className="row" style={{ gap: 8 }}>
+                <span className="badge badge-missing">{t("Main")}</span>
+                <span className="muted" style={{ fontSize: 12 }}>{t("This is the primary account — its access is managed via the checkboxes below.")}</span>
+              </div>
+            ) : (
+              <div className="row" style={{ gap: 8 }}>
+                {["staff", "admin"].map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    className={"btn " + (form.role === r ? "btn-primary" : "btn-ghost")}
+                    style={{ flex: 1 }}
+                    onClick={() => selectRole(r)}
+                  >
+                    {t(r === "staff" ? "Staff" : "Admin")}
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>{t("Sets a starting point for the checkboxes below — you can still fine-tune each one.")}</p>
+
             <label className="field-label" style={{ marginTop: 18 }}>{t("Access rights")}</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {PERMISSIONS.map((p) => (
@@ -337,7 +386,7 @@ export default function AccountControlPage() {
 const S = {
   iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },
   overlay: { position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 },
-  modal: { width: "min(460px, 100%)", padding: 24, background: "#fff", maxHeight: "90vh", overflowY: "auto" },
+  modal: { width: "min(460px, 100%)", padding: 24, background: "var(--surface)", maxHeight: "90vh", overflowY: "auto" },
   permRow: {
     display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
     padding: "10px 12px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)",

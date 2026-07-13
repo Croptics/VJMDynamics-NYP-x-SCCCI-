@@ -57,7 +57,7 @@ export default function MobileAssistantPage() {
             </div>
           ) : (
             <div key={i} className="row" style={{ alignItems: "flex-start", gap: 8, maxWidth: "90%" }}>
-              <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={14} /></span>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={14} /></span>
               <div style={{
                 background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
                 border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)",
