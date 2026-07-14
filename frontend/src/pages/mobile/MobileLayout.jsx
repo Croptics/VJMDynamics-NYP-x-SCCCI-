@@ -32,7 +32,7 @@ export default function MobileLayout({ onLogout }) {
       <div className="mobile-page">
         <Outlet context={{ onLogout }} />
       </div>
-      <nav className="mobile-tabbar" aria-label="Mobile navigation">
+      <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>
         {tabs.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}

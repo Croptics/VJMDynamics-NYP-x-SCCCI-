@@ -435,7 +435,7 @@ router.get("/api/delegates", readAccess, wrap(async (req, res) => {
   const { tripId } = req.query;
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId query param is required." });
   const delegates = await all(
-    `SELECT id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes"
+    `SELECT id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl"
        FROM delegates WHERE trip_id = $1 ORDER BY name`,
     [tripId]
   );
@@ -451,7 +451,7 @@ router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
   const delegate = await get(
     `INSERT INTO delegates (id, trip_id, name, initials, "coachId", status, vip, notes, company, accessibility_notes)
      VALUES ($1,$2,$3,$4,NULL,'UNASSIGNED',$5,$6,$7,$8)
-     RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes"`,
+     RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl"`,
     [id, tripId, name.trim(), initialsOf(name), !!vip, (notes || "").trim() || null, (company || "").trim() || null, (accessibilityNotes || "").trim() || null]
   );
   logActivity(tripId, `${delegate.name} was added${vip ? " (VIP)" : ""}.`, "delegate");

@@ -27,6 +27,7 @@ import {
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
+import DelegateAvatar from "../components/DelegateAvatar.jsx";
 import { useLang } from "../lib/i18n.jsx";
 
 /**
@@ -86,6 +87,9 @@ export default function DashboardPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState("");
+  const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoErr, setPhotoErr] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -163,6 +167,8 @@ export default function DashboardPage() {
     setEditingId(null);
     setForm(EMPTY_FORM);
     setFormErr("");
+    setEditingPhotoUrl(null);
+    setPhotoErr("");
     setModalOpen(true);
   }
 
@@ -175,8 +181,41 @@ export default function DashboardPage() {
       vip: !!d.vip,
       lastSeen: d.lastSeen || "",
     });
+    setEditingPhotoUrl(d.photoUrl || null);
     setFormErr("");
     setModalOpen(true);
+  }
+
+  async function handlePhotoChange(file) {
+    if (!file || !editingId) return;
+    setPhotoErr("");
+    setPhotoBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("photo", file);
+      const { photoUrl } = await apiPost(`/delegates/${editingId}/photo`, fd, true);
+      setEditingPhotoUrl(photoUrl);
+      await load();
+    } catch (e) {
+      setPhotoErr(e.message || "Upload failed.");
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+
+  async function handleRemovePhoto() {
+    if (!editingId) return;
+    setPhotoErr("");
+    setPhotoBusy(true);
+    try {
+      await apiDelete(`/delegates/${editingId}/photo`);
+      setEditingPhotoUrl(null);
+      await load();
+    } catch (e) {
+      setPhotoErr(e.message || "Remove failed.");
+    } finally {
+      setPhotoBusy(false);
+    }
   }
 
   async function saveForm() {
@@ -393,7 +432,7 @@ export default function DashboardPage() {
             <AlertTriangle size={18} /> {t("Couldn't reach the backend")}
           </div>
           <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
-            {t(error)} — make sure it’s running (<code>cd backend &amp;&amp; npm run dev</code>), then hit Refresh.
+            {t(error)} — {t("make sure it’s running (")}<code>cd backend &amp;&amp; npm run dev</code>{t("), then hit Refresh.")}
           </p>
         </div>
       )}
@@ -426,7 +465,7 @@ export default function DashboardPage() {
 
       {/* ---- Coach status + Live activity -------------------------------- */}
       {data && (
-        <div style={S.twoCol}>
+        <div className="dash-two-col" style={S.twoCol}>
           <div className="card" style={{ padding: 22 }}>
             <div className="row between" style={{ marginBottom: 16 }}>
               <h2 style={{ fontSize: 16 }}>{t("Coach status")}</h2>
@@ -564,11 +603,11 @@ export default function DashboardPage() {
                   <tr key={d.id}>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
-                        <span className="avatar">{d.initials}</span>
+                        <DelegateAvatar delegate={d} />
                         <span style={{ fontWeight: 500 }}>{d.name}</span>
                         {d.vip && (
                           <span className="badge badge-review" style={{ padding: "2px 8px" }}>
-                            <Crown size={12} /> VIP
+                            <Crown size={12} /> {t("VIP")}
                           </span>
                         )}
                       </div>
@@ -580,11 +619,11 @@ export default function DashboardPage() {
                     <td>
                       {perms.manageDelegates ? (
                         <div className="row" style={{ gap: 6 }}>
-                          <button onClick={() => openEdit(d)} aria-label={`Edit ${d.name}`}
+                          <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
                             style={S.iconBtn}>
                             <Pencil size={16} />
                           </button>
-                          <button onClick={() => remove(d)} aria-label={`Delete ${d.name}`}
+                          <button onClick={() => remove(d)} aria-label={`${t("Delete")} ${d.name}`}
                             style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
                             <Trash2 size={16} />
                           </button>
@@ -621,14 +660,44 @@ export default function DashboardPage() {
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
               <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit delegate") : t("Add delegate")}</h2>
-              <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label="Close">
+              <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label={t("Close")}>
                 <X size={18} />
               </button>
             </div>
 
+            {editingId && (
+              <div className="row" style={{ gap: 14, marginBottom: 18 }}>
+                {editingPhotoUrl ? (
+                  <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                ) : (
+                  <span className="avatar" style={{ width: 56, height: 56, fontSize: 20 }}>
+                    {form.name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?"}
+                  </span>
+                )}
+                <div>
+                  <label className="btn btn-ghost" style={{ cursor: "pointer", display: "inline-flex" }}>
+                    {photoBusy ? t("Saving…") : t("Upload photo")}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      disabled={photoBusy}
+                      style={{ display: "none" }}
+                      onChange={(e) => { handlePhotoChange(e.target.files?.[0]); e.target.value = ""; }}
+                    />
+                  </label>
+                  {editingPhotoUrl && (
+                    <button className="btn btn-ghost" style={{ marginLeft: 8, color: "var(--st-missing)" }} disabled={photoBusy} onClick={handleRemovePhoto}>
+                      {t("Remove")}
+                    </button>
+                  )}
+                  {photoErr && <div style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(photoErr)}</div>}
+                </div>
+              </div>
+            )}
+
             <label className="field-label">{t("Full name")}</label>
             <input className="input" autoFocus value={form.name}
-              placeholder="e.g. Lim Wei Jie"
+              placeholder={t("e.g. Lim Wei Jie")}
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>{t("Status")}</label>
@@ -653,7 +722,7 @@ export default function DashboardPage() {
 
             <label className="field-label" style={{ marginTop: 14 }}>{t("Last seen (optional)")}</label>
             <input className="input" value={form.lastSeen}
-              placeholder="e.g. Lobby · 14:08"
+              placeholder={t("e.g. Lobby · 14:08")}
               onChange={(e) => setForm({ ...form, lastSeen: e.target.value })} />
 
             <label className="row" style={{ gap: 8, marginTop: 16, fontSize: 14, cursor: "pointer" }}>

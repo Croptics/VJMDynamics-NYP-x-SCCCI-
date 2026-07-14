@@ -214,9 +214,13 @@ function DelegateCard({ delegate, ghost = false, dragging = false, onPointerDown
       className={`tf-delegate-card${dragging && !ghost ? " is-dragging" : ""}${isMissing ? " is-missing" : ""}${delegate.vip ? " is-vip" : ""}`}
     >
       <GripVertical size={13} style={{ color: "var(--tf-text-3)", flexShrink: 0, marginTop: 2 }} />
-      <div className="tf-avatar" style={{ background: isMissing ? "var(--tf-red-bg)" : `var(--tf-${colorKey}-bg)`, color: isMissing ? "var(--tf-red)" : `var(--tf-${colorKey})` }}>
-        {initials(delegate.name)}
-      </div>
+      {delegate.photoUrl ? (
+        <img src={delegate.photoUrl} alt="" className="tf-avatar" style={{ objectFit: "cover" }} />
+      ) : (
+        <div className="tf-avatar" style={{ background: isMissing ? "var(--tf-red-bg)" : `var(--tf-${colorKey}-bg)`, color: isMissing ? "var(--tf-red)" : `var(--tf-${colorKey})` }}>
+          {initials(delegate.name)}
+        </div>
+      )}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="tf-delegate-name">
           {delegate.name}
@@ -359,9 +363,13 @@ function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, o
         </div>
 
         <div className="tf-flex tf-gap-12" style={{ marginBottom: 18 }}>
-          <div className="tf-avatar" style={{ width: 46, height: 46, fontSize: 16, background: `var(--tf-${colorKey}-bg)`, color: `var(--tf-${colorKey})` }}>
-            {initials(delegate.name)}
-          </div>
+          {delegate.photoUrl ? (
+            <img src={delegate.photoUrl} alt="" className="tf-avatar" style={{ width: 46, height: 46, objectFit: "cover" }} />
+          ) : (
+            <div className="tf-avatar" style={{ width: 46, height: 46, fontSize: 16, background: `var(--tf-${colorKey}-bg)`, color: `var(--tf-${colorKey})` }}>
+              {initials(delegate.name)}
+            </div>
+          )}
           <div>
             <div style={{ fontSize: 16, fontWeight: 800 }}>
               {delegate.name}

@@ -123,7 +123,7 @@ export default function ExceptionInboxPage() {
     <div className="page">
       <div className="exc-header">
         <div>
-          <div className="page-eyebrow">Beijing study mission · Day 3</div>
+          <div className="page-eyebrow">{t("Beijing study mission · Day 3")}</div>
           <h1 className="page-title">{t("Exception inbox")}</h1>
           <p className="page-sub">{t("Log and resolve on-site exceptions; critical alerts push to all staff.")}</p>
         </div>
@@ -191,7 +191,7 @@ export default function ExceptionInboxPage() {
                 <td>
                   <div className="exc-issue-title">
                     {t(ISSUE_LABEL[tk.type]) || tk.type}
-                    {tk.delegateVip && <span className="exc-vip">VIP</span>}
+                    {tk.delegateVip && <span className="exc-vip">{t("VIP")}</span>}
                   </div>
                   <div className="exc-issue-sub">{tk.note}</div>
                 </td>

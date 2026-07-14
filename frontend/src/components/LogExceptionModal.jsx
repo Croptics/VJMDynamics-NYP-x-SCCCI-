@@ -84,7 +84,7 @@ export default function LogExceptionModal({ onClose, onCreated }) {
             <option value="">{t("Unidentified / not listed")}</option>
             {delegates.map((d) => (
               <option key={d.id} value={d.id}>
-                {d.name}{d.vip ? " · VIP" : ""}
+                {d.name}{d.vip ? ` · ${t("VIP")}` : ""}
               </option>
             ))}
           </select>

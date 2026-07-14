@@ -4,6 +4,7 @@ import { RefreshCw, AlertTriangle, Crown, Search } from "lucide-react";
 import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import StatusBadge from "../../components/StatusBadge.jsx";
+import DelegateAvatar from "../../components/DelegateAvatar.jsx";
 
 const TRIP_ID = "t-1";
 const FILTERS = ["ALL", "PRESENT", "MISSING", "UNASSIGNED"];
@@ -149,7 +150,7 @@ export default function MobileAttendancePage() {
         <div key={d.id} className="mobile-card" style={{ padding: 14 }}>
           <div className="row between">
             <div className="row" style={{ gap: 8, minWidth: 0 }}>
-              <span className="avatar">{d.initials}</span>
+              <DelegateAvatar delegate={d} />
               <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
               {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
             </div>

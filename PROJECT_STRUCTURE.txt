@@ -59,6 +59,20 @@ data.js
     tables and the extra trip/coach/delegate columns his Trips board needs) —
     folded into createSchema()/seed() so it auto-applies on startup, instead
     of the standalone SQL migration files his feature originally shipped with.
+    delegates."photoUrl"/"photoPublicId" (profile photos, see cloudinary.js
+    below) are set ONLY via setDelegatePhoto()/clearDelegatePhoto() — never
+    through the generic createDelegate/updateDelegate path — so a client
+    can't PATCH in an arbitrary external image URL and skip the upload
+    validation.
+
+cloudinary.js
+    Thin wrapper around the Cloudinary SDK for delegate profile photos.
+    uploadImage() forces resource_type:"image", so Cloudinary itself
+    decodes/validates the bytes are a real image — not just trusting the
+    client's declared Content-Type. Needs CLOUDINARY_CLOUD_NAME/API_KEY/
+    API_SECRET in backend/.env (sign up at cloudinary.com — free tier is
+    plenty); isConfigured() lets server.js return a clear "not configured"
+    503 instead of failing oddly when those aren't set.
 
 routes/desmond.js
     Desmond's "TransitFlow" API — the Trips & Coaches board (list trips,
@@ -183,16 +197,44 @@ Shared components (src/components/):
       polls lib/exceptionsApi.js's getCriticalOpenCount() every 15s to
       drive the Sidebar's live "Exceptions" badge (used to be hardcoded
       demo state).
+      • Collapsible sidebar (<=1024px, i.e. tablet and narrower): owns the
+        sidebarOpen state, renders the .app-topbar-collapsed hamburger bar
+        and the .app-sidebar-backdrop (click-to-close), and auto-closes the
+        drawer on every route change. Above 1024px none of this renders
+        visibly — the sidebar stays exactly as it always was (sticky,
+        always open, no hamburger). See tokens.css's collapsible-sidebar
+        block for the actual open/closed CSS.
 
   Sidebar.jsx
       The left nav rail — links to every page, the EN/中文 toggle, and
       the account/logout block at the bottom. The account block (avatar +
       name/role) links to /settings and has a hover highlight
       (.sidebar-account); the sun/moon dark-mode toggle sits right beside it.
+      Takes an `open` prop from Layout.jsx (applies the .sidebar.open class);
+      unused/ignored above the 1024px breakpoint.
 
   StatusBadge.jsx
       Small reusable pill component for status labels (Present/Missing/
       Unassigned/etc.) and confidence-score badges.
+
+  DelegateAvatar.jsx
+      Renders a delegate's photoUrl if they have one (POST/DELETE
+      /api/delegates/:id/photo, see server.js + cloudinary.js), otherwise
+      falls back to the existing initials-in-a-circle look — same size/shape
+      either way, drops in anywhere a plain .avatar span was used. Used on
+      the Dashboard's "All delegates" table and MobileAttendancePage.jsx.
+      Photo upload/remove itself lives in the Dashboard's edit-delegate
+      modal (create flow doesn't get one — a delegate needs to exist first).
+      Desmond's Trips board (TripCoachPage.jsx's DelegateCard + the
+      DelegateDetailPanel slide-out) shows the same photo too — inline
+      <img className="tf-avatar"> there rather than this component, since
+      that page's avatars use their own per-id color scheme when there's no
+      photo. Required adding "photoUrl" to desmond.js's own GET/POST
+      /api/delegates SELECT/RETURNING column list (it queries the shared
+      delegates table directly with its own SQL, not through data.js).
+      cloudinary.js's uploadImage() returns a delivery URL with
+      f_auto,q_auto (auto format/compression) baked in, not the raw
+      upload result — so every place a photo renders gets that for free.
 
   AnalyticsPanel.jsx
       Rendered inside the Dashboard's "Analytics" tab. Contains: the

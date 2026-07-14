@@ -7,10 +7,11 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
+import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
 import { apiGet, getUser, getPermissions } from "../lib/api.js";
-import { translate } from "../lib/i18n.jsx";
+import { translate, useLang } from "../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 
 // How often (ms) to re-check whether an admin changed our own account while
@@ -34,8 +35,18 @@ const EXCEPTION_BADGE_INTERVAL_MS = 15000;
  * carrying on with stale, out-of-date permissions.
  */
 export default function Layout({ onLogout }) {
+  const { t } = useLang();
   const [openExceptions, setOpenExceptions] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const checkingRef = useRef(false);
+  const location = useLocation();
+
+  // Close the drawer automatically on every navigation (tablet/narrow
+  // screens only — CSS keeps the sidebar always-visible on desktop widths
+  // regardless of this state, see tokens.css's collapsible-sidebar block).
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,7 +109,26 @@ export default function Layout({ onLogout }) {
 
   return (
     <div className="app-shell">
-      <Sidebar exceptionCount={openExceptions} onLogout={onLogout} />
+      {/* Hamburger topbar — hidden on desktop widths via CSS, only rendered
+         visibly at tablet/narrow widths where the sidebar collapses into an
+         off-canvas drawer instead of staying pinned open. */}
+      <div className="app-topbar-collapsed">
+        <button
+          className="app-hamburger"
+          onClick={() => setSidebarOpen((v) => !v)}
+          aria-label={t("Toggle navigation")}
+          aria-expanded={sidebarOpen}
+        >
+          <Menu size={20} />
+        </button>
+        <span className="app-topbar-brand wordmark">
+          <ClipboardCheck size={18} strokeWidth={2.4} /> MusterGo
+        </span>
+      </div>
+
+      {sidebarOpen && <div className="app-sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+
+      <Sidebar exceptionCount={openExceptions} onLogout={onLogout} open={sidebarOpen} />
       <main className="main">
         <Outlet />
       </main>

@@ -23,6 +23,16 @@ import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
 import MobileAssistantPage from "./pages/mobile/MobileAssistantPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 
+// Same device guess used by handleSignIn() below — a phone-sized viewport
+// goes to the mobile section, anything wider goes to the desktop dashboard.
+// Also used for the bare "/" route so an ALREADY-authenticated visit (token
+// already stored, e.g. "keep me signed in" on a phone) lands in the right
+// place too — not just a brand-new login, which is the only place this
+// device check used to run.
+function pickHomeRoute() {
+  return window.innerWidth <= 720 ? "/mobile" : "/dashboard";
+}
+
 /**
  * Top-level router for MusterGo.
  *
@@ -57,10 +67,8 @@ export default function App() {
     }
     // Otherwise (a brand-new session that opened straight on /login — the
     // common case when a teammate visits the site fresh on their phone) fall
-    // back to a device guess: a phone-sized viewport goes to the mobile
-    // section, anything wider goes to the desktop dashboard.
-    const isPhoneSized = window.innerWidth <= 720;
-    navigate(wasMobileRef.current || isPhoneSized ? "/mobile" : "/dashboard", { replace: true });
+    // back to a device guess.
+    navigate(wasMobileRef.current ? "/mobile" : pickHomeRoute(), { replace: true });
   };
 
   if (!authed) {
@@ -75,7 +83,7 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Layout onLogout={handleLogout} />}>
-        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route index element={<Navigate to={pickHomeRoute()} replace />} />
 
         {/* Jun Qi — Admin Dashboard & Analytics (Screen 2) */}
         <Route path="/dashboard" element={<DashboardPage />} />
@@ -117,7 +125,7 @@ export default function App() {
         {/* Settings — signed-in account info + theme/language preferences */}
         <Route path="/settings" element={<SettingsPage />} />
 
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        <Route path="*" element={<Navigate to={pickHomeRoute()} replace />} />
       </Route>
 
       {/* Mobile UI — responsive pages with their own bottom-tab layout */}

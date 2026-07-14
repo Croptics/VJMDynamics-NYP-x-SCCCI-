@@ -21,6 +21,7 @@
 import "dotenv/config"; // loads backend/.env into process.env — MUST be first
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import ExcelJS from "exceljs";
 import {
   initDb,
@@ -34,6 +35,8 @@ import {
   updateDelegate,
   deleteDelegate,
   deleteAllDelegates,
+  setDelegatePhoto,
+  clearDelegatePhoto,
   getActivity,
   deleteActivity,
   deleteAllActivity,
@@ -49,6 +52,7 @@ import {
   resolveTripUuid,
 } from "./data.js";
 import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
+import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "./cloudinary.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -66,6 +70,21 @@ app.use((req, _res, next) => {
 // Wrap async handlers so a rejected promise becomes an Express error (500)
 // instead of crashing the process.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// Delegate photo uploads — memory storage (never touches local disk; the
+// buffer goes straight to Cloudinary). 5MB cap and an image-only MIME
+// filter are the first layer of validation; Cloudinary's own image decode
+// (resource_type: "image" in cloudinary.js) is the second, real one — it
+// rejects anything that isn't actually a valid image regardless of what
+// the client claimed.
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) return cb(new Error("UNSUPPORTED_TYPE"));
+    cb(null, true);
+  },
+});
 
 /* ---- Health ------------------------------------------------------------- */
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "mustergo-backend" }));
@@ -228,8 +247,46 @@ app.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async
 }));
 
 app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const existing = await getDelegateById(req.params.id);
   const ok = await deleteDelegate(req.params.id);
   if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
+  if (existing?.photoPublicId) await destroyImage(existing.photoPublicId); // clean up Cloudinary too
+  res.json({ deleted: true });
+}));
+
+/* ---- Delegate profile photo (Cloudinary) ----------------------------------
+ * Separate from the JSON PATCH route above on purpose — see the comment on
+ * the "photoUrl" column in data.js's createSchema(). multer parses the
+ * multipart body into req.file (memory buffer, never written to disk).
+ * ------------------------------------------------------------------------- */
+app.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (req, res, next) => {
+  photoUpload.single("photo")(req, res, (err) => {
+    if (err) {
+      const code = err.message === "UNSUPPORTED_TYPE" ? "UNSUPPORTED_TYPE" : "UPLOAD_FAILED";
+      const message = code === "UNSUPPORTED_TYPE" ? "Please upload an image file." : "Upload too large (5MB max) or failed.";
+      return res.status(400).json({ error: code, message });
+    }
+    next();
+  });
+}, wrap(async (req, res) => {
+  if (!photoStorageConfigured()) {
+    return res.status(503).json({ error: "PHOTO_STORAGE_NOT_CONFIGURED", message: "Photo storage isn't set up on this server yet." });
+  }
+  if (!req.file) return res.status(400).json({ error: "FILE_REQUIRED", message: "Please choose an image." });
+  const existing = await getDelegateById(req.params.id);
+  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+
+  const { url, publicId } = await uploadImage(req.file.buffer, "mustergo/delegates");
+  const oldPublicId = await setDelegatePhoto(req.params.id, url, publicId);
+  if (oldPublicId) await destroyImage(oldPublicId); // replacing a photo — clean up the old asset
+
+  res.json({ photoUrl: url });
+}));
+
+app.delete("/api/delegates/:id/photo", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const oldPublicId = await clearDelegatePhoto(req.params.id);
+  if (oldPublicId === null) return res.status(404).json({ error: "NOT_FOUND" });
+  if (oldPublicId) await destroyImage(oldPublicId);
   res.json({ deleted: true });
 }));
 

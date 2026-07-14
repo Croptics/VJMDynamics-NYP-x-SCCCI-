@@ -155,6 +155,15 @@ async function createSchema() {
   // NOT NULL DEFAULT now() means existing rows get the migration time and new
   // rows default to their insert time (createDelegate doesn't set it).
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()`);
+  // Profile photo — set only via POST /api/delegates/:id/photo (uploads
+  // through Cloudinary, see uploadDelegatePhoto below), never via the plain
+  // PATCH /api/delegates/:id JSON route, so a client can't just PATCH in an
+  // arbitrary external URL and bypass the upload validation entirely.
+  // photoPublicId is Cloudinary's asset id, kept so the old image can be
+  // destroyed on Cloudinary when replaced or removed (otherwise it's an
+  // orphaned asset forever).
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
@@ -454,6 +463,27 @@ export async function deleteDelegate(id) {
   await run("DELETE FROM delegates WHERE id = $1", [id]);
   await logActivity(`${existing.name} removed`, "exception");
   return true;
+}
+
+/* ---- Profile photo (Cloudinary) -----------------------------------------
+ * Deliberately separate from updateDelegate/normalize — see the comment on
+ * the "photoUrl" column in createSchema() for why the plain JSON PATCH route
+ * must never be able to set these fields. The actual Cloudinary upload/
+ * destroy calls live in backend/cloudinary.js and are made by the route
+ * handler in server.js; these two just persist the resulting URL/id (or
+ * clear them) and return the old publicId so the caller can clean it up. */
+export async function setDelegatePhoto(id, url, publicId) {
+  const existing = await get('SELECT "photoPublicId" FROM delegates WHERE id = $1', [id]);
+  if (!existing) return null;
+  await run('UPDATE delegates SET "photoUrl" = $1, "photoPublicId" = $2 WHERE id = $3', [url, publicId, id]);
+  return existing.photoPublicId || null;
+}
+
+export async function clearDelegatePhoto(id) {
+  const existing = await get('SELECT "photoPublicId" FROM delegates WHERE id = $1', [id]);
+  if (!existing) return null;
+  await run('UPDATE delegates SET "photoUrl" = NULL, "photoPublicId" = NULL WHERE id = $1', [id]);
+  return existing.photoPublicId || null;
 }
 
 /* ---- Bulk delete (dashboard "Delete all") -------------------------------

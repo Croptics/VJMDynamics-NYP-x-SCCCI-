@@ -277,10 +277,10 @@ export default function AccountControlPage() {
                     </td>
                     <td>
                       <div className="row" style={{ gap: 6 }}>
-                        <button onClick={() => openEdit(a)} aria-label={`Edit ${a.username}`} style={S.iconBtn}>
+                        <button onClick={() => openEdit(a)} aria-label={`${t("Edit")} ${a.username}`} style={S.iconBtn}>
                           <Pencil size={16} />
                         </button>
-                        <button onClick={() => remove(a)} aria-label={`Delete ${a.username}`} style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+                        <button onClick={() => remove(a)} aria-label={`${t("Delete")} ${a.username}`} style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
                           <Trash2 size={16} />
                         </button>
                       </div>
@@ -299,17 +299,17 @@ export default function AccountControlPage() {
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
               <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit account") : t("New account")}</h2>
-              <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label="Close"><X size={18} /></button>
+              <button onClick={() => setModalOpen(false)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
             </div>
 
             <label className="field-label">{t("Username")}</label>
             <input className="input mono" autoFocus value={form.username}
-              placeholder="e.g. staff_123"
+              placeholder={t("e.g. staff_123")}
               onChange={(e) => setForm({ ...form, username: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>{t("Name")} <span className="muted">({t("display only")})</span></label>
             <input className="input" value={form.name}
-              placeholder="e.g. John Tan"
+              placeholder={t("e.g. John Tan")}
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>

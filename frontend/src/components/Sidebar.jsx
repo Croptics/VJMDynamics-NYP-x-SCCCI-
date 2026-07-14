@@ -21,7 +21,7 @@ import { useTheme } from "../lib/theme.jsx";
  * `exceptionCount` drives the red pill on the Exceptions item.
  * The account block + Log out button sit pinned to the bottom.
  */
-export default function Sidebar({ exceptionCount = 0, onLogout }) {
+export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) {
   const perms = getPermissions();
   const isMain = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
@@ -59,7 +59,7 @@ export default function Sidebar({ exceptionCount = 0, onLogout }) {
   }
 
   return (
-    <nav className="sidebar" aria-label="Primary">
+    <nav className={"sidebar" + (open ? " open" : "")} aria-label={t("Primary")}>
       <div className="sidebar-brand wordmark">
         <ClipboardCheck size={22} strokeWidth={2.4} /> MusterGo
       </div>
