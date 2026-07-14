@@ -243,6 +243,49 @@ router.get("/api/attendance/:trip_id/coach/:coach_id", requireAuth(), wrap(async
 }));
 
 /* ============================================================================
+ * GET /api/attendance/headcount            (?coachId=c2 to scope to one coach)
+ * The Reverse-Headcount stats endpoint from the assignment brief: overall
+ * boarded/missing/unassigned stats PLUS the list of delegates still missing,
+ * so a single call powers both the "STILL MISSING — 5 of 25 expected" hero
+ * card and the missing-delegate call list.
+ * ========================================================================== */
+router.get("/api/attendance/headcount", requireAuth(), wrap(async (req, res) => {
+  const { coachId } = req.query;
+  const dash = await liveDashboard();
+
+  if (coachId && !(dash.coaches || []).some((c) => c.id === coachId)) {
+    return fail(res, 404, "NOT_FOUND", "Unknown coach.");
+  }
+
+  const all = await listDelegates();
+  const scoped = coachId ? all.filter((d) => d.coachId === coachId) : all.filter((d) => d.status !== "UNASSIGNED");
+  const missingDelegates = scoped
+    .filter((d) => d.status === "MISSING")
+    .map((d) => ({
+      delegateId: d.id,
+      name: d.name,
+      initials: d.initials,
+      vip: !!d.vip,
+      coachId: d.coachId,
+      lastSeen: d.lastSeen || "No status",
+      consent: consentFor(d.id).status,
+    }));
+
+  const trip = dash.trip || (await getTrip());
+  res.json({
+    tripId: trip.id,
+    coachId: coachId || null,
+    stats: {
+      expected: scoped.length,
+      boarded: scoped.filter((d) => d.status === "PRESENT").length,
+      missing: missingDelegates.length,
+      unassigned: dash.kpis ? dash.kpis.unassigned : 0,
+    },
+    missingDelegates,
+  });
+}));
+
+/* ============================================================================
  * POST /api/attendance/consent   (create/update the consent lifecycle)
  * Body: { delegateId, consent: "GRANTED" | "REVOKED", method? }
  *

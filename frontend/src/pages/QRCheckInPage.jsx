@@ -8,7 +8,9 @@
 //   (tap)     → View 1: Reverse Headcount for that coach (Figma Screen 7)
 //   Scan      → View 2: dark Face scanner with reticle + boarded strip
 //               (Figma Screen 8) · QR/Manual left as templates for Jayden ·
-//               low-light audio voiceprint fallback
+//               AUTOMATIC low-light audio voiceprint fallback (a live
+//               luminance sensor on the camera feed trips it hands-free;
+//               a "Simulate low light" button demos it on demand)
 //   Me        → privacy consent lifecycle + per-delegate check-in history
 //
 // INTEGRATION: reads/writes the REAL shared delegate list through my own
@@ -53,25 +55,84 @@ const COLLAPSED_MISSING = 3; // Figma shows 3 cards + "+ N more"
  *     therefore never sees, stores, or can leak an image.
  * ========================================================================== */
 function vectorizeFaceLandmarks(imageData) {
-  const px = imageData.data; // raw RGBA pixel matrix — the "photo"
-  const vector = [];
+  const px = imageData.data; // raw RGBA pixel matrix — the only copy of the photo in JS memory.
+  const width = imageData.width;
+  const height = imageData.height;
 
-  // Sample 32 evenly spaced regions; reduce each to a luminance landmark.
-  const step = Math.max(4, Math.floor(px.length / 32 / 4) * 4);
-  for (let i = 0; i < px.length && vector.length < 32; i += step) {
-    const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-    vector.push(Math.round(luma));
+  // Convert to a small grayscale frame and derive a compact feature vector
+  // from stable regions of the face area. This is a privacy-first proxy for
+  // landmark-based vectorization: the raw image never leaves the device.
+  const gray = new Uint8ClampedArray(width * height);
+  for (let y = 0, idx = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1, idx += 4) {
+      const luma = 0.299 * px[idx] + 0.587 * px[idx + 1] + 0.114 * px[idx + 2];
+      gray[y * width + x] = Math.round(luma);
+    }
   }
 
-  // Fold landmarks into a one-way hash (FNV-1a variant) — irreversible.
-  let h = 2166136261;
-  for (const v of vector) h = ((h ^ v) * 16777619) >>> 0;
-  const token = `face:v1:${h.toString(16)}:${vector.slice(0, 8).join(".")}`;
+  const vector = [];
+  const rows = 4;
+  const cols = 8;
+  const cellW = Math.max(1, Math.floor(width / cols));
+  const cellH = Math.max(1, Math.floor(height / rows));
 
-  // *** PDPA PURGE — happens BEFORE this function returns. ***
-  px.fill(0);          // physically zero every pixel byte of the raw photo
-  vector.length = 0;   // drop landmark intermediates too
-  return token;        // only anonymous math leaves this function
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      let sum = 0;
+      let count = 0;
+      const startY = row * cellH;
+      const endY = Math.min(height, startY + cellH);
+      const startX = col * cellW;
+      const endX = Math.min(width, startX + cellW);
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = startX; x < endX; x += 1) {
+          sum += gray[y * width + x];
+          count += 1;
+        }
+      }
+      vector.push(count > 0 ? Math.round(sum / count) : 0);
+    }
+  }
+
+  // Add simple gradient-based structure features to capture facial geometry
+  // without storing an actual picture.
+  let horEdge = 0;
+  let verEdge = 0;
+  let symmetry = 0;
+  let contrast = 0;
+  for (let y = 2; y < height - 2; y += 4) {
+    for (let x = 2; x < width - 2; x += 4) {
+      const center = gray[y * width + x];
+      const right = gray[y * width + x + 2];
+      const left = gray[y * width + x - 2];
+      const down = gray[(y + 2) * width + x];
+      const up = gray[(y - 2) * width + x];
+      horEdge += Math.abs(center - right);
+      verEdge += Math.abs(center - down);
+      contrast += Math.abs(right - left) + Math.abs(up - down);
+      symmetry += Math.abs(left - right);
+    }
+  }
+
+  vector.push(
+    Math.round(horEdge / 32),
+    Math.round(verEdge / 32),
+    Math.round(contrast / 32),
+    Math.round(symmetry / 32),
+  );
+
+  // Derive the anonymous token string from the feature vector.
+  const featureString = vector.map((value) => value.toString(16).padStart(2, "0")).join("");
+  let h = 2166136261;
+  for (let i = 0; i < featureString.length; i += 1) {
+    h = ((h ^ featureString.charCodeAt(i)) * 16777619) >>> 0;
+  }
+  const token = `face:v2:${h.toString(16)}:${vector.slice(0, 8).join(".")}`;
+
+  // *** PDPA ZERO-IMAGE PURGE: wipe every raw byte before returning. ***
+  gray.fill(0);
+  px.fill(0);
+  return token;
 }
 
 /* LOW-LIGHT MULTI-MODAL FALLBACK (model fairness):
@@ -156,12 +217,18 @@ export default function QRCheckInPage() {
 
   // scanner
   const [scanMode, setScanMode] = useState("face"); // face | qr | manual
-  const [lowLight, setLowLight] = useState(false);  // simulated light sensor
+  const [lowLight, setLowLight] = useState(false);  // low-light state (auto or simulated)
+  const [autoLowLight, setAutoLowLight] = useState(false); // true when the SENSOR tripped it
   const [simulateSlow, setSimulateSlow] = useState(false); // demo the >1s SLA breach
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null); // { name, time }
   const [scanError, setScanError] = useState("");
   const [passphrase, setPassphrase] = useState("");
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState("");
+  const [voiceError, setVoiceError] = useState("");
+  const [voiceFinal, setVoiceFinal] = useState(false);
   const [camError, setCamError] = useState("");
   const [enrollOk, setEnrollOk] = useState(false);
   const [lastToken, setLastToken] = useState(null);
@@ -173,6 +240,8 @@ export default function QRCheckInPage() {
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const voiceTimeoutRef = useRef(null);
   const staffName = getUser()?.name || "Staff";
 
   /* ----------------------- live trip + coach overview -------------------- */
@@ -206,6 +275,105 @@ export default function QRCheckInPage() {
       setCoach(null);
       setLoadErr("Could not load the coach's headcount.");
     }
+  }, []);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      return undefined;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-SG";
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0].transcript)
+        .join(" ")
+        .trim();
+      setPassphrase(transcript);
+      setVoiceStatus("Listening…");
+      setVoiceFinal(false);
+      setVoiceError("");
+
+      if (event.results[event.results.length - 1]?.isFinal) {
+        const finalPhrase = transcript.trim();
+        setVoiceListening(false);
+        clearTimeout(voiceTimeoutRef.current);
+        voiceTimeoutRef.current = null;
+
+        if (!finalPhrase) {
+          setVoiceStatus("No speech detected.");
+          setVoiceError("No speech was captured. Tap Record passphrase again.");
+          return;
+        }
+
+        if (finalPhrase.length < 4) {
+          setVoiceStatus(`Heard: ${finalPhrase}`);
+          setVoiceError("Spoken passphrase is too short — speak the full phrase.");
+          return;
+        }
+
+        setVoiceStatus(`Heard: ${finalPhrase}`);
+        setVoiceFinal(true);
+        setVoiceError("");
+      }
+    };
+
+    recognition.onstart = () => {
+      setVoiceListening(true);
+      setVoiceStatus("Listening…");
+      setVoiceError("");
+      setVoiceFinal(false);
+      clearTimeout(voiceTimeoutRef.current);
+      voiceTimeoutRef.current = window.setTimeout(() => {
+        if (recognitionRef.current && voiceListening) {
+          recognitionRef.current.stop();
+          setVoiceError("No speech detected in time. Please tap Record passphrase and try again.");
+          setVoiceStatus("");
+          setVoiceListening(false);
+        }
+      }, 8000);
+    };
+
+    recognition.onnomatch = () => {
+      setVoiceError("Could not recognize speech. Please try again clearly.");
+      setVoiceStatus("");
+      setVoiceListening(false);
+    };
+
+    recognition.onerror = (event) => {
+      setVoiceListening(false);
+      clearTimeout(voiceTimeoutRef.current);
+      voiceTimeoutRef.current = null;
+      if (event.error === "not-allowed") {
+        setVoiceError("Microphone access was denied. Allow mic access to speak the passphrase.");
+      } else if (event.error === "no-speech") {
+        setVoiceError("No speech heard. Tap Speak now and try again.");
+      } else if (event.error === "audio-capture") {
+        setVoiceError("Microphone not available. Check your device settings.");
+      } else if (event.error !== "aborted") {
+        setVoiceError(`Voice capture error: ${event.error}`);
+      }
+      setVoiceStatus("");
+    };
+
+    recognition.onend = () => {
+      setVoiceListening(false);
+      clearTimeout(voiceTimeoutRef.current);
+      voiceTimeoutRef.current = null;
+    };
+
+    recognitionRef.current = recognition;
+    setVoiceSupported(true);
+    return () => {
+      recognition.stop();
+      recognitionRef.current = null;
+    };
   }, []);
 
   useEffect(() => { fetchOverview(); }, [fetchOverview]);
@@ -244,6 +412,47 @@ export default function QRCheckInPage() {
 
     if (wantCamera) start(); else stop();
     return () => { cancelled = true; stop(); };
+  }, [view, scanMode, lowLight]);
+
+  /* --------------- AUTOMATIC LOW-LIGHT MULTI-MODAL FALLBACK --------------
+   * Ambient-light sensor loop: while the face camera is live, we sample a
+   * TINY (24×18) frame every ~1.2s, average its luminance, then zero the
+   * sample's pixel bytes IN PLACE (same Zero-Image purge as the vectorizer —
+   * not even the light meter keeps a photo). Two consecutive dark readings
+   * (avg luma < 30/255 ≈ inside a dark coach bus at night) automatically
+   * disable the camera and activate the audio voiceprint scanner, so
+   * delegates keep checking in without any staff action. */
+  useEffect(() => {
+    if (!(view === "scan" && scanMode === "face" && !lowLight)) return;
+    let darkStreak = 0;
+    const meter = document.createElement("canvas");
+    meter.width = 24; meter.height = 18;
+    const mctx = meter.getContext("2d", { willReadFrequently: true });
+
+    const id = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || !video.videoWidth) return;
+      mctx.drawImage(video, 0, 0, meter.width, meter.height);
+      const sample = mctx.getImageData(0, 0, meter.width, meter.height);
+      const px = sample.data;
+      let sum = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+      }
+      const avgLuma = sum / (px.length / 4);
+      px.fill(0); // PDPA purge — the light-meter frame never outlives this tick
+
+      darkStreak = avgLuma < 30 ? darkStreak + 1 : 0;
+      if (darkStreak >= 2) {
+        // Ambient light dropped: camera off, voiceprint scanner on. The
+        // camera-lifecycle effect above reacts to lowLight and stops tracks.
+        setAutoLowLight(true);
+        setLowLight(true);
+        setScanError("");
+      }
+    }, 1200);
+
+    return () => { clearInterval(id); meter.width = 0; meter.height = 0; };
   }, [view, scanMode, lowLight]);
 
   /* ------------------------------- scanning ------------------------------ */
@@ -313,13 +522,49 @@ export default function QRCheckInPage() {
     submitScan(token);
   }
 
-  function handleVoiceScan() {
-    if (passphrase.trim().length < 4) {
-      setScanError("Passphrase too short — ask the delegate to speak their full passphrase.");
+  async function startVoiceCapture() {
+    if (!recognitionRef.current) {
+      setVoiceError("Speech recognition is not available in this browser. Use the typed passphrase instead or open the app in Chrome/Edge.");
       return;
     }
-    submitScan(vectorizeVoiceprint(passphrase.trim()));
+
+    if (voiceListening) {
+      recognitionRef.current.stop();
+      setVoiceListening(false);
+      setVoiceStatus("Stopped recording.");
+      return;
+    }
+
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      setVoiceError("Microphone access is required for spoken check-in. Allow the browser to use your mic.");
+      return;
+    }
+
+    setScanError("");
+    setVoiceError("");
+    setVoiceStatus("Listening…");
+    setVoiceFinal(false);
     setPassphrase("");
+    recognitionRef.current.start();
+  }
+
+  function handleVoiceScan(overridePhrase) {
+    const phrase = (overridePhrase ?? passphrase).trim();
+    if (phrase.length < 4) {
+      setVoiceError("Passphrase too short — ask the delegate to speak the full passphrase.");
+      return;
+    }
+    if (!voiceFinal && recognitionRef.current && !voiceListening) {
+      setVoiceError("No confirmed spoken passphrase was captured. Record again or type the phrase manually.");
+      return;
+    }
+    setVoiceError("");
+    submitScan(vectorizeVoiceprint(phrase));
+    setPassphrase("");
+    setVoiceStatus("");
+    setVoiceFinal(false);
   }
 
   /* --------------------------- consent lifecycle ------------------------- */
@@ -728,20 +973,37 @@ export default function QRCheckInPage() {
         {scanMode === "face" && lowLight && (
           <div style={{ ...S.overlay, flexDirection: "column", gap: 10 }}>
             <Mic size={34} style={{ color: "var(--st-review)" }} />
-            <div style={{ fontWeight: 700 }}>Low light detected</div>
-            <div style={{ fontSize: 12.5, color: "var(--line)", maxWidth: 240 }}>
-              Camera paused for fairness — face matching degrades unevenly in the dark.
-              Ask the delegate for their audio passphrase instead.
+            <div style={{ fontWeight: 700 }}>
+              {autoLowLight ? "Low light detected — sensor" : "Low light detected"}
             </div>
+            <div style={{ fontSize: 12.5, color: "var(--line)", maxWidth: 240 }}>
+              {autoLowLight
+                ? "Ambient light dropped below threshold, so the camera switched itself off. "
+                : "Camera paused for fairness — face matching degrades unevenly in the dark. "}
+              Ask the delegate to <strong>say their passphrase</strong> instead.
+            </div>
+            <button className="btn btn-primary" onClick={startVoiceCapture} disabled={scanning}>
+              {voiceListening ? "Stop voice capture" : voiceSupported ? "Start voice capture" : "Use text fallback"}
+            </button>
             <input
-              className="input" placeholder="Delegate passphrase…" value={passphrase}
+              className="input" placeholder="Or type the passphrase…" value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleVoiceScan(); }}
               style={{ maxWidth: 230, textAlign: "center" }}
             />
-            <button className="btn btn-primary" onClick={handleVoiceScan} disabled={scanning}>
-              {scanning ? "Matching voiceprint…" : "Verify voiceprint"}
+            <button className="btn btn-primary" onClick={() => handleVoiceScan()} disabled={scanning || !passphrase.trim()}>
+              {scanning ? "Submitting passphrase…" : "Submit passphrase"}
             </button>
+            <div style={{ fontSize: 12.2, color: "var(--surface)", marginTop: 8, maxWidth: 240, textAlign: "center" }}>
+              {voiceListening
+                ? "Listening for spoken passphrase. Speak clearly, then wait for confirmation."
+                : "Tap Start voice capture and say the delegate's passphrase, or type it manually."}
+            </div>
+            {(voiceStatus || voiceError || scanError) && (
+              <div style={{ fontSize: 12.2, color: voiceError ? "#f87171" : "var(--surface)", marginTop: 8 }}>
+                {voiceError || voiceStatus || scanError}
+              </div>
+            )}
           </div>
         )}
 
@@ -846,7 +1108,7 @@ export default function QRCheckInPage() {
       {/* Simulated sensors — for demoing the fairness fallback + the 1s SLA */}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button className="btn btn-ghost" style={{ flex: 1, fontSize: 12.5, padding: "8px 6px" }}
-                onClick={() => { setLowLight(!lowLight); setScanError(""); }}>
+                onClick={() => { setAutoLowLight(false); setLowLight(!lowLight); setScanError(""); }}>
           {lowLight ? <Sun size={14} /> : <Moon size={14} />}
           {lowLight ? "Normal light" : "Simulate low light"}
         </button>
