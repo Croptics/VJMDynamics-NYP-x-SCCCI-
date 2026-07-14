@@ -126,6 +126,15 @@ export function getOnboardingContext(tripId) {
   return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
 }
 
+/* ---- Boarding passes (QR) + on-site check-in ---------------------------- */
+export function getBadges(tripId) {
+  return apiGet(`/onboarding/badges?tripId=${encodeURIComponent(tripId || "")}`); // { delegates, coaches, total, present }
+}
+
+export function qrCheckin({ code, tripId, coachId }) {
+  return apiPost("/onboarding/checkin", { code, tripId, coachId }); // { ok, alreadyBoarded, delegate, total, present }
+}
+
 /* ---- CSV export (opens in Excel) ---------------------------------------- */
 const CSV_COLUMNS = [
   ["fullName", "Name"], ["role", "Role"], ["company", "Company"], ["industry", "Industry"],

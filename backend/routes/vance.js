@@ -89,6 +89,10 @@ async function init() {
   await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS email           VARCHAR(191)`);
   await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS phone           VARCHAR(64)`);
   await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS website         VARCHAR(255)`);
+  // Unique boarding-pass token per delegate → encoded in their QR badge and
+  // resolved by the on-site scanner to check them in.
+  await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS qr_code         VARCHAR(64)`);
+  await q(`CREATE UNIQUE INDEX IF NOT EXISTS idx_delegates_qr ON delegates(qr_code) WHERE qr_code IS NOT NULL`);
 
   // Saved assistant chats for the desktop sidebar.
   await q(`CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -706,12 +710,13 @@ router.post(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,
                company = COALESCE($4, company), role = $5, industry = $6,
-               email = $7, phone = $8, website = $9, trip_id = COALESCE($10, trip_id)
-         WHERE id = $11`,
+               email = $7, phone = $8, website = $9, qr_code = $10,
+               trip_id = COALESCE($11, trip_id)
+         WHERE id = $12`,
         [
           r.passportNumber || null, r.nationality || null, r.passportExpiry || null,
           r.company || null, r.role || null, r.industry || null,
-          r.email || null, r.phone || null, r.website || null,
+          r.email || null, r.phone || null, r.website || null, newQrCode(),
           tripUuid, delegate.id,
         ]
       );
@@ -720,6 +725,80 @@ router.post(
     res.status(201).json({ added: added.length, delegates: added });
   })
 );
+
+/* =============================================================================
+ *  BOARDING PASSES + QR CHECK-IN  (document reader → on-site scanner → coach board)
+ *  Each onboarded delegate gets a unique qr_code. The on-site scanner resolves a
+ *  scanned code and flips the delegate to PRESENT (+ coach), writing the shared
+ *  delegates + check_in_logs tables — which Desmond's coach board already reads.
+ * ========================================================================== */
+function newQrCode() {
+  return "MG-" + randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
+}
+
+async function backfillQrCodes(tripUuid) {
+  const rows = tripUuid
+    ? (await q(`SELECT id FROM delegates WHERE qr_code IS NULL AND trip_id = $1`, [tripUuid])).rows
+    : (await q(`SELECT id FROM delegates WHERE qr_code IS NULL`)).rows;
+  for (const row of rows) await q(`UPDATE delegates SET qr_code = $1 WHERE id = $2`, [newQrCode(), row.id]);
+}
+
+// Delegates (with QR tokens) for a trip — powers the printable boarding passes
+// and the scanner's roster/headcount.
+router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const tripId = req.query.tripId;
+  const tripRow = tripId ? await q(`SELECT uuid_id FROM trips WHERE id = $1`, [tripId]) : null;
+  const tripUuid = tripRow?.rows?.[0]?.uuid_id || null;
+  await backfillQrCodes(tripUuid);
+  const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
+  const r = tripUuid
+    ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
+    : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
+  const coaches = (await q(`SELECT id, label, name, city FROM coaches ORDER BY sort_order NULLS LAST, id`)).rows;
+  const present = r.rows.filter((d) => d.status === "PRESENT").length;
+  res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
+}));
+
+// Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
+// the scan. This is what the on-site scanner calls.
+router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const code = (req.body?.code || "").toString().trim();
+  const tripId = (req.body?.tripId || "t-1").toString();
+  const coachOverride = req.body?.coachId || null;
+  if (!code) return res.status(400).json({ error: "NO_CODE", message: "No badge code provided." });
+
+  const d = await q(`SELECT id, name, "coachId" AS coach_id, status FROM delegates WHERE qr_code = $1`, [code]);
+  if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
+  const del = d.rows[0];
+  const alreadyBoarded = del.status === "PRESENT";
+  const coachId = coachOverride || del.coach_id || null;
+  const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+  try {
+    await q(
+      `INSERT INTO check_in_logs (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts)
+       VALUES ($1,$2,$3,$4,'QR',$5,$6,false,$7)`,
+      [randomUUID(), del.id, tripId, coachId, req.account.id, randomUUID(), new Date().toISOString()]
+    );
+  } catch (err) {
+    console.error("  QR check-in log failed (continuing to update delegate):", err.message || err);
+  }
+  await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
+    [coachOverride, `QR check-in · ${nowStr}`, del.id]);
+
+  const counts = await q(
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
+       FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
+  res.json({
+    ok: true,
+    alreadyBoarded,
+    delegate: { id: del.id, name: del.name, coachId },
+    total: counts.rows[0]?.total ?? null,
+    present: counts.rows[0]?.present ?? null,
+  });
+}));
 
 /* =============================================================================
  *  FEATURE 2 — TRIP ASSISTANT  (Use Case 2)
