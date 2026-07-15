@@ -326,22 +326,35 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (re
   wb.creator = "MusterGo";
   wb.created = new Date();
 
+  // Row-background tint per status, so a printed/scrolled sheet is scannable
+  // at a glance without reading the Status column text — mirrors the app's
+  // StatusBadge colors (present=green, missing=red, unassigned=amber).
+  const STATUS_FILL = {
+    PRESENT: "FFE7F5EC",
+    MISSING: "FFFDECEC",
+    UNASSIGNED: "FFFDF3E3",
+  };
+  const BORDER = { style: "thin", color: { argb: "FFE5E7EB" } };
+  const THIN_BORDER = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER };
+
   const ws = wb.addWorksheet("Attendance");
-  ws.mergeCells("A1:E1");
+  ws.mergeCells("A1:G1");
   ws.getCell("A1").value = `${trip.name} — Attendance Report`;
   ws.getCell("A1").font = { size: 14, bold: true };
-  ws.mergeCells("A2:E2");
+  ws.mergeCells("A2:G2");
   ws.getCell("A2").value = `${trip.dateRange} · Day ${trip.dayOf} of ${trip.totalDays} · Lead: ${trip.lead}`;
   ws.getCell("A2").font = { size: 10, color: { argb: "FF6B7280" } };
 
   ws.addRow([]);
-  ws.addRow(["#", "Name", "Coach", "Status", "Last seen"]);
+  ws.addRow(["#", "Name", "VIP", "Coach", "Status", "Last seen", "Uploaded"]);
   const head = ws.getRow(4);
   head.font = { bold: true, color: { argb: "FFFFFFFF" } };
   head.eachCell((cell) => {
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE1232A" } };
     cell.alignment = { vertical: "middle" };
+    cell.border = THIN_BORDER;
   });
+  ws.views = [{ state: "frozen", ySplit: 4 }]; // header stays visible while scrolling
 
   // Look up live from the coaches table (a hardcoded c1-c4 map here used to
   // export any newer coach's delegates as "Unassigned").
@@ -349,12 +362,30 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (re
     const c = coaches.find((x) => x.id === id);
     return c ? [c.name, c.city].filter(Boolean).join(" · ") : "Unassigned";
   };
+  const fmtUploaded = (v) => {
+    if (!v) return "—";
+    const d = new Date(v);
+    return isNaN(d) ? "—" : d.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  };
 
   delegates.forEach((d, i) => {
-    ws.addRow([i + 1, d.name, coachName(d.coachId), d.status, d.lastSeen || "—"]);
+    const row = ws.addRow([
+      i + 1, d.name, d.vip ? "VIP" : "", coachName(d.coachId), d.status,
+      d.lastSeen || "—", fmtUploaded(d.createdAt),
+    ]);
+    const fill = STATUS_FILL[d.status];
+    row.eachCell((cell) => {
+      cell.border = THIN_BORDER;
+      if (fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+    });
+    row.getCell(3).font = { bold: true, color: { argb: "FFB45309" } }; // VIP, if set
+    row.alignment = { vertical: "middle" };
   });
 
-  ws.columns = [{ width: 5 }, { width: 22 }, { width: 20 }, { width: 14 }, { width: 24 }];
+  ws.columns = [
+    { width: 5 }, { width: 22 }, { width: 8 }, { width: 20 },
+    { width: 14 }, { width: 24 }, { width: 18 },
+  ];
 
   const fileName = `attendance_${trip.name.replace(/\s+/g, "_").toLowerCase()}_day${trip.dayOf}.xlsx`;
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
