@@ -16,7 +16,7 @@ import LogExceptionModal from "../components/LogExceptionModal.jsx";
 import { getPermissions } from "../lib/api.js";
 import {
   listExceptions, resolveException, deleteException, manualOverride,
-  subscribeStream, fmtTime, ISSUE_LABEL,
+  subscribeStream, fmtTime, issueLabel,
 } from "../lib/exceptionsApi.js";
 import "./ExceptionInboxPage.css";
 
@@ -139,7 +139,7 @@ export default function ExceptionInboxPage() {
                 {counts.critical} critical exception{counts.critical === 1 ? "" : "s"} · pushed to all staff devices
               </div>
               <div className="exc-banner__sub">
-                {ISSUE_LABEL[critical.type]} · {critical.coach || "Unassigned"} ·{" "}
+                {issueLabel(critical)} · {critical.coach || "Unassigned"} ·{" "}
                 {critical.delegateName || "Unidentified"} · raised {fmtTime(critical.createdAt)}
               </div>
             </div>
@@ -188,7 +188,7 @@ export default function ExceptionInboxPage() {
                 <td><StatusBadge state={t.priority} /></td>
                 <td>
                   <div className="exc-issue-title">
-                    {ISSUE_LABEL[t.type] || t.type}
+                    {issueLabel(t)}
                     {t.delegateVip && <span className="exc-vip">VIP</span>}
                   </div>
                   <div className="exc-issue-sub">{t.note}</div>
@@ -227,7 +227,7 @@ export default function ExceptionInboxPage() {
               <StatusBadge state={t.status} />
             </div>
             <div className="exc-issue-title">
-              {ISSUE_LABEL[t.type] || t.type}
+              {issueLabel(t)}
               {t.delegateVip && <span className="exc-vip">VIP</span>}
             </div>
             <div className="exc-issue-sub">{t.note}</div>

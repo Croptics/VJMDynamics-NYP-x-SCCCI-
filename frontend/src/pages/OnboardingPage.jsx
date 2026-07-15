@@ -1,29 +1,37 @@
-import { useRef, useState, useCallback, useMemo } from "react";
+import { useRef, useState, useCallback, useMemo, useEffect } from "react";
 import {
   UploadCloud,
-  FileCheck2,
   AlertCircle,
-  Loader2,
   CheckCircle2,
   Pencil,
   Trash2,
+  Search,
+  Download,
+  Star,
+  Users,
+  Building2,
+  Briefcase,
+  Loader2,
 } from "lucide-react";
 import { ConfidenceBadge } from "../components/StatusBadge.jsx";
-import { parseDocument } from "../lib/claudeParse.js";
+import {
+  startParseJob,
+  getParseJob,
+  getOnboardingContext,
+  confirmDelegates,
+  exportRowsCsv,
+} from "../lib/claudeParse.js";
 import { useLang } from "../lib/i18n.jsx";
+import BoardingPassesView from "./BoardingPassesView.jsx";
+import ScanToBoardView from "./ScanToBoardView.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
  *
- * Use Case 1 — Automated Attendee Onboarding via AI Document Parsing:
- *   1. Drop / select passport PDFs.
- *   2. Claude (server-side) extracts each passport → preview rows.
- *   3. Low-confidence rows are flagged for manual review (blurry-doc flow).
- *   4. Admin edits if needed, then Confirm & add to the delegate list.
- *
- * Fully self-contained: uses built-in React state and the simulated parser in
- * lib/claudeParse.js, so it runs immediately. Swap USE_SIMULATION off there to
- * hit the real backend.
+ * The document is read by a server-side JOB (page by page), so this page can be
+ * left and re-attached — the parse keeps going in the background. Extracted
+ * rows stream in with a progress bar, then the admin can review, flag VIPs,
+ * assign coaches, search/export and Confirm into the shared delegate list.
  */
 
 const TRIPS = [
@@ -32,66 +40,121 @@ const TRIPS = [
   { id: "t-3", name: "Shenzhen tech tour · 17 Sep 2026" },
 ];
 
-const STATUS_META = {
-  EXTRACTING: { cls: "badge-review", icon: Loader2, label: "Extracting", spin: true },
-  NEEDS_REVIEW: { cls: "badge-review", icon: AlertCircle, label: "Review" },
-  EXTRACTED: { cls: "badge-present", icon: FileCheck2, label: "Done" },
-  FAILED: { cls: "badge-missing", icon: AlertCircle, label: "Failed" },
-};
+// Optional columns rendered only when at least one row has data for them.
+const OPTIONAL_COLUMNS = [
+  { key: "role", label: "Role" },
+  { key: "company", label: "Company" },
+  { key: "industry", label: "Industry" },
+  { key: "email", label: "Email" },
+  { key: "phone", label: "Phone" },
+  { key: "website", label: "Website" },
+  { key: "passportNumber", label: "Passport", mono: true },
+  { key: "nationality", label: "Nationality" },
+  { key: "passportExpiry", label: "Expiry", type: "date", mono: true },
+];
 
-let fileSeq = 0;
+const LS_JOB = "mg_parse_job";
+const LS_ROWS = "mg_parse_rows";
+const LS_TRIP = "mg_parse_trip";
+const POLL_MS = 2500;
+
+const keyOf = (name) => (name || "").trim().toLowerCase();
 
 export default function OnboardingPage() {
   const { t } = useLang();
   const inputRef = useRef(null);
+  const pollRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
-  const [tripId, setTripId] = useState("");
-  const [files, setFiles] = useState([]); // {id,name,status,totalCount,extractedCount,reviewCount}
-  const [rows, setRows] = useState([]); // extracted delegate rows
+  const [tripId, setTripId] = useState(() => localStorage.getItem(LS_TRIP) || "");
+  const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
+  const [rows, setRows] = useState([]);
   const [editAll, setEditAll] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const [view, setView] = useState("parse"); // parse | passes | scan
+  const [context, setContext] = useState({ existingNames: [], coaches: [] });
 
-  const reviewNeeded = useMemo(() => rows.filter((r) => r.needsReview).length, [rows]);
-
-  /* ---- file intake ----------------------------------------------------- */
-  const ingest = useCallback(
-    async (fileList) => {
-      const incoming = Array.from(fileList).slice(0, 20); // max 20 files
-      for (const file of incoming) {
-        const id = `f-${++fileSeq}`;
-        setFiles((prev) => [
-          ...prev,
-          { id, name: file.name, status: "EXTRACTING", totalCount: 0, extractedCount: 0, reviewCount: 0 },
-        ]);
-
-        try {
-          const { rows: parsed, totalCount } = await parseDocument(file, { tripId });
-          const review = parsed.filter((r) => r.needsReview).length;
-          setRows((prev) => [
-            ...prev,
-            ...parsed.map((r) => ({ ...r, _id: `${id}-${r.id}` })),
-          ]);
-          setFiles((prev) =>
-            prev.map((f) =>
-              f.id === id
-                ? {
-                    ...f,
-                    status: review > 0 ? "NEEDS_REVIEW" : "EXTRACTED",
-                    totalCount,
-                    extractedCount: parsed.length,
-                    reviewCount: review,
-                  }
-                : f
-            )
-          );
-        } catch {
-          setFiles((prev) =>
-            prev.map((f) => (f.id === id ? { ...f, status: "FAILED" } : f))
-          );
-        }
-      }
-    },
-    [tripId]
+  /* ---- duplicate set (names already in the selected trip) --------------- */
+  const existingSet = useMemo(
+    () => new Set((context.existingNames || []).map(keyOf)),
+    [context]
   );
+  const isDup = useCallback((r) => existingSet.has(keyOf(r.fullName)), [existingSet]);
+
+  /* ---- persistence ----------------------------------------------------- */
+  useEffect(() => { localStorage.setItem(LS_TRIP, tripId); }, [tripId]);
+  useEffect(() => {
+    try { localStorage.setItem(LS_ROWS, JSON.stringify(rows)); } catch { /* quota */ }
+  }, [rows]);
+  useEffect(() => {
+    if (job?.id) localStorage.setItem(LS_JOB, JSON.stringify({ id: job.id, fileName: job.fileName, status: job.status }));
+  }, [job]);
+
+  /* ---- onboarding context (existing names + coaches) ------------------- */
+  useEffect(() => {
+    let alive = true;
+    getOnboardingContext(tripId).then((c) => alive && setContext(c)).catch(() => {});
+    return () => { alive = false; };
+  }, [tripId]);
+
+  /* ---- merge server rows into client rows (preserving edits) ----------- */
+  const mergeRows = (client, server) => {
+    const map = new Map(client.map((r) => [r._key, r]));
+    for (const sr of server) {
+      const k = keyOf(sr.fullName);
+      if (!k) continue;
+      if (!map.has(k)) map.set(k, { ...sr, _key: k, _id: k, vip: false, coachId: "" });
+    }
+    return [...map.values()];
+  };
+
+  /* ---- polling --------------------------------------------------------- */
+  const poll = useCallback(async (jobId) => {
+    try {
+      const j = await getParseJob(jobId);
+      setJob((prev) => (prev ? { ...prev, status: j.status, done: j.done, total: j.total, method: j.method, error: j.error } : prev));
+      setRows((prev) => mergeRows(prev, j.rows || []));
+      if (j.status !== "running") { clearInterval(pollRef.current); pollRef.current = null; }
+    } catch {
+      clearInterval(pollRef.current); pollRef.current = null;
+      setJob((prev) => (prev ? { ...prev, status: "error", error: t("This parse job expired. Please upload again.") } : prev));
+    }
+  }, [t]);
+
+  const startPolling = useCallback((jobId) => {
+    clearInterval(pollRef.current);
+    poll(jobId);
+    pollRef.current = setInterval(() => poll(jobId), POLL_MS);
+  }, [poll]);
+
+  /* ---- resume any job in progress after navigating back / reloading ---- */
+  useEffect(() => {
+    const savedRows = JSON.parse(localStorage.getItem(LS_ROWS) || "[]");
+    if (savedRows.length) setRows(savedRows);
+    const saved = JSON.parse(localStorage.getItem(LS_JOB) || "null");
+    if (saved?.id) { setJob(saved); startPolling(saved.id); }
+    return () => clearInterval(pollRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ---- upload / start a job -------------------------------------------- */
+  const ingest = useCallback(async (fileList) => {
+    const file = Array.from(fileList)[0];
+    if (!file) return;
+    clearInterval(pollRef.current);
+    setRows([]);
+    setSearch("");
+    setEditAll(false);
+    setJob({ id: null, fileName: file.name, status: "running", done: 0, total: 0, method: null, error: null });
+    try {
+      const { jobId } = await startParseJob(file);
+      setJob((j) => ({ ...j, id: jobId }));
+      localStorage.setItem(LS_JOB, JSON.stringify({ id: jobId, fileName: file.name, status: "running" }));
+      startPolling(jobId);
+    } catch (err) {
+      setJob((j) => ({ ...j, status: "error", error: err.message }));
+    }
+  }, [startPolling]);
 
   const onDrop = (e) => {
     e.preventDefault();
@@ -99,35 +162,75 @@ export default function OnboardingPage() {
     if (e.dataTransfer.files?.length) ingest(e.dataTransfer.files);
   };
 
-  /* ---- row editing ----------------------------------------------------- */
-  const updateRow = (rid, field, value) =>
-    setRows((prev) =>
-      prev.map((r) =>
-        r._id === rid
-          ? { ...r, [field]: value, needsReview: false } // editing resolves the flag
-          : r
-      )
-    );
+  /* ---- row edits ------------------------------------------------------- */
+  const updateField = (k, field, value) =>
+    setRows((prev) => prev.map((r) => (r._key === k ? { ...r, [field]: value, needsReview: false } : r)));
+  const setVip = (k, val) => setRows((prev) => prev.map((r) => (r._key === k ? { ...r, vip: val } : r)));
+  const setCoach = (k, val) => setRows((prev) => prev.map((r) => (r._key === k ? { ...r, coachId: val } : r)));
+  const removeRow = (k) => setRows((prev) => prev.filter((r) => r._key !== k));
 
-  const removeRow = (rid) => setRows((prev) => prev.filter((r) => r._id !== rid));
+  /* ---- derived --------------------------------------------------------- */
+  const reviewNeeded = useMemo(() => rows.filter((r) => r.needsReview).length, [rows]);
+  const dupCount = useMemo(() => rows.filter(isDup).length, [rows, isDup]);
+  const activeColumns = useMemo(
+    () => OPTIONAL_COLUMNS.filter((c) => rows.some((r) => r[c.key])),
+    [rows]
+  );
+  const companies = useMemo(() => new Set(rows.map((r) => (r.company || "").trim()).filter(Boolean)).size, [rows]);
+  const industries = useMemo(() => new Set(rows.map((r) => (r.industry || "").trim()).filter(Boolean)).size, [rows]);
+  const visibleRows = useMemo(() => {
+    const s = search.trim().toLowerCase();
+    if (!s) return rows;
+    return rows.filter((r) => [r.fullName, r.company, r.role, r.email, r.industry].some((v) => (v || "").toLowerCase().includes(s)));
+  }, [rows, search]);
 
   /* ---- confirm --------------------------------------------------------- */
   const confirmAndAdd = async () => {
-    // Production: POST /api/documents/:id/confirm or /trips/:id/delegates/bulk
-    // Demo: clear the preview to simulate a successful commit.
-    alert(`Added ${rows.length} delegates to the trip.`);
-    setRows([]);
-    setFiles((prev) => prev.map((f) => ({ ...f, status: "EXTRACTED" })));
+    if (!tripId) { alert(t("Please choose a trip to assign these delegates to first.")); return; }
+    if (reviewNeeded > 0 && !window.confirm(t("Some rows still need review. Add them anyway?"))) return;
+    const toAdd = rows.filter((r) => !isDup(r));
+    const skipped = rows.length - toAdd.length;
+    if (toAdd.length === 0) { alert(t("Every extracted delegate is already in this trip.")); return; }
+    setSaving(true);
+    try {
+      const { added } = await confirmDelegates(tripId, toAdd);
+      alert(`${added} ${t("delegates added to the trip.")}${skipped ? ` (${skipped} ${t("duplicates skipped")})` : ""}`);
+      setRows([]);
+      setJob(null);
+      localStorage.removeItem(LS_JOB);
+      localStorage.removeItem(LS_ROWS);
+      getOnboardingContext(tripId).then(setContext).catch(() => {});
+    } catch (err) {
+      alert(err.message || t("Couldn't save the delegates. Please try again."));
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const pct = job && job.total ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0;
 
   /* --------------------------------------------------------------------- */
   return (
     <div className="page">
       <div className="page-eyebrow">{t("Onboarding")}</div>
       <h1 className="page-title">{t("Document parsing")}</h1>
-      <p className="page-sub">{t("Drop passport PDFs — AI extracts and populates the delegate list.")}</p>
+      <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
 
-      {/* Upload + file list */}
+      {/* Tabs */}
+      <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
+        {[["parse", "Document parsing"], ["passes", "Boarding passes"], ["scan", "Scan to board"]].map(([k, label]) => (
+          <button key={k} onClick={() => setView(k)} className="btn btn-ghost"
+            style={{ borderRadius: 0, borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
+            {t(label)}
+          </button>
+        ))}
+      </div>
+
+      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} /></div>}
+      {view === "scan" && <div style={{ marginTop: 20 }}><ScanToBoardView tripId={tripId} /></div>}
+
+      {view === "parse" && (<>
+      {/* Upload + job status */}
       <div className="card" style={{ padding: 24, marginTop: 20 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 24 }}>
           {/* Dropzone */}
@@ -137,10 +240,7 @@ export default function OnboardingPage() {
               tabIndex={0}
               onClick={() => inputRef.current?.click()}
               onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && inputRef.current?.click()}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(true);
-              }}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
               onDrop={onDrop}
               style={{
@@ -154,17 +254,12 @@ export default function OnboardingPage() {
               }}
             >
               <UploadCloud size={34} color="var(--ink-3)" />
-              <p style={{ margin: "12px 0 4px", fontWeight: 600 }}>
-                {t("Drop files or click to upload")}
-              </p>
-              <p className="muted" style={{ fontSize: 13 }}>
-                {t("PDF or scanned image · Max 20 files · 10 MB each")}
-              </p>
+              <p style={{ margin: "12px 0 4px", fontWeight: 600 }}>{t("Drop a file or click to upload")}</p>
+              <p className="muted" style={{ fontSize: 13 }}>{t("PDF or scanned image · reads in the background")}</p>
               <input
                 ref={inputRef}
                 type="file"
                 accept="application/pdf,image/*"
-                multiple
                 hidden
                 onChange={(e) => e.target.files?.length && ingest(e.target.files)}
               />
@@ -179,78 +274,86 @@ export default function OnboardingPage() {
             </select>
           </div>
 
-          {/* File status list */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {files.length === 0 && (
+          {/* Job status / progress */}
+          <div>
+            {!job && (
               <div className="muted" style={{ fontSize: 13, paddingTop: 8 }}>
-                {t("Uploaded files appear here with their extraction status.")}
+                {t("Uploaded documents appear here with live extraction progress. You can leave this page while it reads.")}
               </div>
             )}
-            {files.map((f) => {
-              const meta = STATUS_META[f.status];
-              const Icon = meta.icon;
-              return (
-                <div
-                  key={f.id}
-                  className="card"
-                  style={{
-                    padding: 14,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                    borderColor: f.status === "NEEDS_REVIEW" ? "var(--st-review)" : "var(--line)",
-                  }}
-                >
-                  <Icon
-                    size={20}
-                    className={meta.spin ? "spin" : ""}
-                    color={`var(--st-${f.status === "EXTRACTED" ? "present" : f.status === "FAILED" ? "missing" : "review"})`}
-                  />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {f.name}
+            {job && (
+              <div className="card" style={{ padding: 16, borderColor: job.status === "error" ? "var(--st-missing)" : job.status === "done" ? "var(--st-present)" : "var(--st-review)" }}>
+                <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                  {job.status === "running" ? <Loader2 size={18} className="spin" color="var(--st-review)" />
+                    : job.status === "done" ? <CheckCircle2 size={18} color="var(--st-present)" />
+                    : <AlertCircle size={18} color="var(--st-missing)" />}
+                  <div style={{ flex: 1, minWidth: 0, fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {job.fileName}
+                  </div>
+                  {job.method && <span className="badge badge-present" style={{ fontSize: 11 }}>{job.method}</span>}
+                </div>
+
+                {job.status === "running" && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ height: 8, borderRadius: 999, background: "var(--surface-2)", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${job.total ? pct : 8}%`, background: "var(--scc-red)", transition: "width 0.4s", borderRadius: 999 }} />
                     </div>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {f.status === "EXTRACTING"
-                        ? `Extracting · ${f.extractedCount}/${f.totalCount || "…"} done`
-                        : f.status === "NEEDS_REVIEW"
-                        ? `${f.totalCount} passports · ${f.reviewCount} need review`
-                        : f.status === "FAILED"
-                        ? "Could not read — enter details manually"
-                        : `${f.totalCount} passports · all extracted`}
+                    <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                      {job.total
+                        ? `${t("Reading page")} ${job.done}/${job.total} · ${rows.length} ${t("found so far")}`
+                        : t("Starting…")}
+                      {" · "}{t("you can leave this page")}
                     </div>
                   </div>
-                  <span className={"badge " + meta.cls}>
-                    {f.status === "EXTRACTED" ? `${f.extractedCount}/${f.totalCount}` : meta.label}
-                  </span>
-                </div>
-              );
-            })}
+                )}
+                {job.status === "done" && (
+                  <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                    {rows.length} {t("delegates extracted")}{reviewNeeded ? ` · ${reviewNeeded} ${t("need review")}` : ""}
+                  </div>
+                )}
+                {job.status === "error" && (
+                  <div style={{ fontSize: 12, marginTop: 8, color: "var(--st-missing)" }}>{job.error}</div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Recently extracted table */}
+      {/* Summary strip */}
       {rows.length > 0 && (
-        <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
-          <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
-            <div>
-              <h2 style={{ fontSize: 16 }}>{t("Recently extracted")}</h2>
-              <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                {t("Review and confirm before adding to the delegate list")}
-                {reviewNeeded > 0 && (
-                  <span style={{ color: "var(--st-review)", fontWeight: 600 }}>
-                    {" "}· {reviewNeeded} need manual review
-                  </span>
-                )}
-              </p>
+        <div className="row" style={{ gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+          <SummaryChip icon={Users} label={t("Delegates")} value={rows.length} />
+          <SummaryChip icon={Building2} label={t("Companies")} value={companies} />
+          <SummaryChip icon={Briefcase} label={t("Industries")} value={industries} />
+          <SummaryChip icon={AlertCircle} label={t("Need review")} value={reviewNeeded} tone={reviewNeeded ? "review" : undefined} />
+          <SummaryChip icon={Trash2} label={t("Already in trip")} value={dupCount} tone={dupCount ? "missing" : undefined} />
+        </div>
+      )}
+
+      {/* Extracted table */}
+      {rows.length > 0 && (
+        <div className="card" style={{ marginTop: 16, overflow: "hidden" }}>
+          <div className="row between" style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ position: "relative", minWidth: 220, flex: 1 }}>
+              <Search size={15} style={{ position: "absolute", left: 10, top: 10, color: "var(--ink-3)" }} />
+              <input
+                className="input"
+                placeholder={t("Search extracted delegates…")}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ paddingLeft: 32 }}
+              />
             </div>
             <div className="row" style={{ gap: 10 }}>
               <button className="btn btn-ghost" onClick={() => setEditAll((v) => !v)}>
                 <Pencil size={15} /> {editAll ? t("Done editing") : t("Edit all")}
               </button>
-              <button className="btn btn-primary" onClick={confirmAndAdd}>
-                <CheckCircle2 size={16} /> {t("Confirm & add")} {rows.length}
+              <button className="btn btn-ghost" onClick={() => exportRowsCsv(rows, "delegates.csv")}>
+                <Download size={15} /> {t("Export")}
+              </button>
+              <button className="btn btn-primary" onClick={confirmAndAdd} disabled={saving || job?.status === "running"}>
+                <CheckCircle2 size={16} /> {saving ? t("Adding…") : `${t("Confirm & add")} ${rows.length - dupCount}`}
               </button>
             </div>
           </div>
@@ -260,91 +363,74 @@ export default function OnboardingPage() {
               <thead>
                 <tr>
                   <th>{t("Name")}</th>
-                  <th>{t("Passport")}</th>
-                  <th>{t("Nationality")}</th>
-                  <th>{t("Expiry")}</th>
+                  {activeColumns.map((c) => (
+                    <th key={c.key}>{t(c.label)}</th>
+                  ))}
+                  <th>{t("VIP")}</th>
+                  <th>{t("Coach")}</th>
                   <th>{t("Confidence")}</th>
                   <th style={{ width: 44 }} />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
+                {visibleRows.map((r) => {
                   const editing = editAll || r.needsReview;
                   const flagged = r.needsReview;
-                  const initials = r.fullName.split(" ").map((s) => s[0]).slice(0, 2).join("");
+                  const dup = isDup(r);
+                  const initials = (r.fullName || "?").split(" ").map((s) => s[0]).slice(0, 2).join("");
                   return (
-                    <tr key={r._id} style={flagged ? { background: "var(--st-review-bg)" } : undefined}>
+                    <tr key={r._key} style={flagged ? { background: "var(--st-review-bg)" } : dup ? { opacity: 0.6 } : undefined}>
                       <td>
                         <div className="row" style={{ gap: 10 }}>
-                          <span
-                            className="avatar"
-                            style={flagged ? { background: "var(--st-review-bg)", color: "var(--st-review)" } : undefined}
-                          >
+                          <span className="avatar" style={flagged ? { background: "var(--st-review-bg)", color: "var(--st-review)" } : undefined}>
                             {initials}
                           </span>
-                          {editing ? (
-                            <input
-                              className="input"
-                              style={{ padding: "6px 8px", maxWidth: 180 }}
-                              value={r.fullName}
-                              onChange={(e) => updateRow(r._id, "fullName", e.target.value)}
-                            />
-                          ) : (
-                            <span style={{ fontWeight: 500 }}>{r.fullName}</span>
-                          )}
+                          <div style={{ minWidth: 0 }}>
+                            {editing ? (
+                              <input className="input" style={{ padding: "6px 8px", maxWidth: 160 }}
+                                value={r.fullName} onChange={(e) => updateField(r._key, "fullName", e.target.value)} />
+                            ) : (
+                              <span style={{ fontWeight: 500 }}>{r.fullName}</span>
+                            )}
+                            {dup && <div style={{ fontSize: 11, color: "var(--st-missing)", fontWeight: 600 }}>{t("already in trip")}</div>}
+                          </div>
                         </div>
                       </td>
-                      <td className="mono">
-                        {editing ? (
-                          <input
-                            className="input"
-                            style={{ padding: "6px 8px", maxWidth: 140 }}
-                            value={r.passportNumber || ""}
-                            placeholder="e.g. S1234567A"
-                            onChange={(e) => updateRow(r._id, "passportNumber", e.target.value)}
-                          />
-                        ) : (
-                          <span style={flagged ? { color: "var(--st-review)" } : undefined}>
-                            {r.passportNumber} {flagged && "?"}
-                          </span>
-                        )}
+                      {activeColumns.map((c) => (
+                        <td key={c.key} className={c.mono ? "mono" : undefined}>
+                          {editing ? (
+                            <input className="input" type={c.type || "text"}
+                              style={{ padding: "6px 8px", maxWidth: c.type === "date" ? 150 : 160 }}
+                              value={r[c.key] || ""} onChange={(e) => updateField(r._key, c.key, e.target.value)} />
+                          ) : c.type === "date" && r[c.key] ? (
+                            new Date(r[c.key]).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+                          ) : (
+                            <span style={!r[c.key] ? { color: "var(--ink-3)" } : undefined}>{r[c.key] || "—"}</span>
+                          )}
+                        </td>
+                      ))}
+                      <td>
+                        <button
+                          onClick={() => setVip(r._key, !r.vip)}
+                          aria-label={r.vip ? "Unmark VIP" : "Mark VIP"}
+                          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", color: r.vip ? "#e0a800" : "var(--ink-3)" }}
+                        >
+                          <Star size={17} fill={r.vip ? "#e0a800" : "none"} />
+                        </button>
                       </td>
                       <td>
-                        {editing ? (
-                          <input
-                            className="input"
-                            style={{ padding: "6px 8px", maxWidth: 120 }}
-                            value={r.nationality || ""}
-                            onChange={(e) => updateRow(r._id, "nationality", e.target.value)}
-                          />
-                        ) : (
-                          r.nationality
-                        )}
-                      </td>
-                      <td className="mono">
-                        {editing ? (
-                          <input
-                            className="input"
-                            type="date"
-                            style={{ padding: "6px 8px", maxWidth: 150 }}
-                            value={r.passportExpiry || ""}
-                            onChange={(e) => updateRow(r._id, "passportExpiry", e.target.value)}
-                          />
-                        ) : r.passportExpiry ? (
-                          new Date(r.passportExpiry).toLocaleDateString("en-GB", {
-                            day: "2-digit", month: "short", year: "numeric",
-                          })
-                        ) : (
-                          <span style={{ color: "var(--st-review)" }}>—</span>
-                        )}
+                        <select className="select" style={{ padding: "6px 8px", minWidth: 110 }}
+                          value={r.coachId || ""} onChange={(e) => setCoach(r._key, e.target.value)}>
+                          <option value="">{t("—")}</option>
+                          {context.coaches.map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}{c.city ? ` (${c.city})` : ""}</option>
+                          ))}
+                        </select>
                       </td>
                       <td><ConfidenceBadge value={r.confidence} /></td>
                       <td>
-                        <button
-                          onClick={() => removeRow(r._id)}
-                          aria-label={`Remove ${r.fullName}`}
-                          style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex" }}
-                        >
+                        <button onClick={() => removeRow(r._key)} aria-label={`Remove ${r.fullName}`}
+                          style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex" }}>
                           <Trash2 size={16} />
                         </button>
                       </td>
@@ -357,8 +443,22 @@ export default function OnboardingPage() {
         </div>
       )}
 
-      {/* tiny inline keyframe for the extracting spinner */}
+      </>)}
+
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+function SummaryChip({ icon: Icon, label, value, tone }) {
+  const color = tone === "review" ? "var(--st-review)" : tone === "missing" ? "var(--st-missing)" : "var(--ink)";
+  return (
+    <div className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, minWidth: 130 }}>
+      <Icon size={18} color={color} />
+      <div>
+        <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1, color }}>{value}</div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{label}</div>
+      </div>
     </div>
   );
 }

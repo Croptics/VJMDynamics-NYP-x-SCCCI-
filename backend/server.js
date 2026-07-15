@@ -295,6 +295,15 @@ app.use(desmondRouter);
 import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
 app.use(exceptionsRouter);
 
+import vimalRouter from "./routes/vimal.js";
+app.use(vimalRouter);
+
+// Vance — DocuSync (document parsing / onboarding) + Trip Assistant (chatbot).
+// Self-contained: makes its own pool and lazily creates its own schema on first
+// use (ensureReady), so it needs no entry in the startup chain below.
+import vanceRouter from "./routes/vance.js";
+app.use(vanceRouter);
+
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {

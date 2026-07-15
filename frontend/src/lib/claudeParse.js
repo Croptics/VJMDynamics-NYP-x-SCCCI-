@@ -1,63 +1,161 @@
-import { apiPost } from "./api.js";
-
+/* =============================================================================
+ *  OWNED BY:  Vance — DocuSync AI (Document Parsing)
+ * ============================================================================= */
 /**
- * Document parsing bridge (Vance's enhanced capability).
+ * Document-parsing bridge for the Onboarding page (Use Case 1).
  *
- * PRODUCTION PATH
- * ---------------
- * The PDF is uploaded to the backend, which calls the Anthropic Claude API
- * **server-side** (the API key never touches the browser). Claude reads each
- * passport page and returns structured rows. The server prompt instructs Claude
- * to return ONLY JSON:
+ * The PDF/image is uploaded to OUR backend, which calls the Anthropic Claude
+ * API **server-side** — the API key never touches the browser. Claude reads the
+ * document and returns structured delegate rows, each with a confidence score.
+ * Rows below the review threshold are flagged so the admin can fix them (the
+ * "blurry document" alternative flow).
  *
- *   [{ "fullName", "passportNumber", "nationality", "passportExpiry", "confidence" }]
- *
- * Low-confidence rows (< 0.85) are flagged for manual review, satisfying the
- * "blurry document" alternative flow from Use Case 1.
- *
- * DEMO PATH
- * ---------
- * When no backend is reachable (USE_SIMULATION = true), we return realistic
- * dummy rows so the page is immediately runnable with built-in state.
+ * DEMO SWITCH
+ * -----------
+ * Set USE_SIMULATION = true to run the page with built-in dummy rows and no
+ * backend/API key (handy for UI work or a no-network demo). Set it to false —
+ * the default now — to hit the real backend.
  */
 
-const USE_SIMULATION = true; // flip to false once the backend is live
+import { apiPost, apiGet, getToken } from "./api.js";
 
+const USE_SIMULATION = false; // real backend by default; flip to true for offline UI demo
+
+const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+
+/* ---- Demo data (only used when USE_SIMULATION = true) -------------------- */
 const SIMULATED_ROWS = [
   { fullName: "Lim Wei Jie",   passportNumber: "S1234567A", nationality: "Singapore", passportExpiry: "2029-08-12", confidence: 0.99 },
   { fullName: "Chen Hao Ming", passportNumber: "E2233445C", nationality: "China",     passportExpiry: null,         confidence: 0.62 },
   { fullName: "Tan Siew Ling", passportNumber: "S9876543B", nationality: "Singapore", passportExpiry: "2031-03-04", confidence: 0.92 },
-  { fullName: "Ng Soo Peng",   passportNumber: "S4456781C", nationality: "Singapore", passportExpiry: "2028-11-20", confidence: 0.97 },
-  { fullName: "Wong Pei Shan", passportNumber: "S5567892D", nationality: "Singapore", passportExpiry: "2030-06-15", confidence: 0.94 },
-  { fullName: "Goh Mei Ling",  passportNumber: "S6678903E", nationality: "Singapore", passportExpiry: "2027-02-28", confidence: 0.88 },
-  { fullName: "Koh Siew Wah",  passportNumber: "K9012345F", nationality: "Malaysia",  passportExpiry: null,         confidence: 0.71 },
-  { fullName: "Phua Yong Min", passportNumber: "S7789014G", nationality: "Singapore", passportExpiry: "2032-09-09", confidence: 0.96 },
-  { fullName: "Sim Tian Kee",  passportNumber: "S8890125H", nationality: "Singapore", passportExpiry: "2029-12-01", confidence: 0.91 },
-  { fullName: "Yeo Pei Lin",   passportNumber: "S9901236J", nationality: "Singapore", passportExpiry: "2030-04-17", confidence: 0.95 },
-  { fullName: "Wong Hui Bin",  passportNumber: "S1012347K", nationality: "Singapore", passportExpiry: "2028-07-22", confidence: 0.93 },
-  { fullName: "Guo Wei Jian",  passportNumber: "G2123458L", nationality: "China",     passportExpiry: "2031-01-30", confidence: 0.69 },
 ];
-
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Parse a single uploaded file into delegate rows.
+ * Parse ONE uploaded file into delegate rows.
+ * @param {File} file
  * @returns {Promise<{rows: Array, totalCount: number}>}
  */
-export async function parseDocument(file, { documentId, tripId } = {}) {
-  if (!USE_SIMULATION && documentId) {
-    const data = await apiPost(`/documents/${documentId}/parse`, { tripId });
-    return { rows: data.rows, totalCount: data.rows.length };
+export async function parseDocument(file) {
+  if (USE_SIMULATION) {
+    await wait(1200 + Math.random() * 900);
+    const rows = SIMULATED_ROWS.map((r, i) => ({ id: `${file?.name || "file"}-${i}`, needsReview: r.confidence < 0.85, ...r }));
+    return { rows, totalCount: rows.length };
   }
 
-  // --- simulated extraction (immediately runnable) ---
-  await wait(1400 + Math.random() * 1200); // mimic network + model latency
-  // Vary how many rows each file "contains" so multiple uploads look distinct.
-  const count = file?.name?.includes("batch_2") ? 12 : SIMULATED_ROWS.length;
-  const rows = SIMULATED_ROWS.slice(0, count).map((r, i) => ({
-    id: `${file?.name || "file"}-${i}`,
-    needsReview: r.confidence < 0.85,
-    ...r,
+  // Send the raw file bytes. We can't use apiPost() here because it JSON- or
+  // FormData-encodes the body; the parse route reads the raw buffer instead.
+  const type = file.type || "application/pdf";
+  const token = getToken();
+  const res = await fetch(
+    `${BASE_URL}/documents/parse?name=${encodeURIComponent(file.name || "file")}&type=${encodeURIComponent(type)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": type, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: file,
+    }
+  );
+
+  if (!res.ok) {
+    let msg = `Upload failed (${res.status})`;
+    try { msg = (await res.json()).message || msg; } catch { /* ignore */ }
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  return { rows: data.rows, totalCount: data.totalCount ?? data.rows.length };
+}
+
+/**
+ * Commit reviewed rows into the SHARED delegate list (writes through the
+ * backend, which uses JQ's createDelegate() so the rows match the whole app).
+ * @param {string} tripId
+ * @param {Array} rows
+ * @returns {Promise<{added:number}>}
+ */
+export async function confirmDelegates(tripId, rows) {
+  const clean = rows.map((r) => ({
+    fullName: r.fullName,
+    role: r.role || null,
+    company: r.company || null,
+    industry: r.industry || null,
+    email: r.email || null,
+    phone: r.phone || null,
+    website: r.website || null,
+    passportNumber: r.passportNumber || null,
+    nationality: r.nationality || null,
+    passportExpiry: r.passportExpiry || null,
+    vip: !!r.vip,
+    coachId: r.coachId || null,
   }));
-  return { rows, totalCount: count };
+  return apiPost(`/trips/${tripId}/onboarding/confirm`, { rows: clean });
+}
+
+/* ---- Async parsing (background job) -------------------------------------- *
+ * Starts a server-side parse job and returns its id. The document is read
+ * page-by-page in the background, so the page can be left and re-attached.
+ */
+export async function startParseJob(file) {
+  const type = file.type || "application/pdf";
+  const token = getToken();
+  const res = await fetch(
+    `${BASE_URL}/documents/parse-async?name=${encodeURIComponent(file.name || "file")}&type=${encodeURIComponent(type)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": type, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: file,
+    }
+  );
+  if (!res.ok) {
+    let msg = `Upload failed (${res.status})`;
+    try { msg = (await res.json()).message || msg; } catch { /* ignore */ }
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json(); // { jobId }
+}
+
+export function getParseJob(jobId) {
+  return apiGet(`/documents/parse-async/${jobId}`); // { status, done, total, method, rows, error }
+}
+
+export function getOnboardingContext(tripId) {
+  const qs = tripId ? `?tripId=${encodeURIComponent(tripId)}` : "";
+  return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
+}
+
+/* ---- Boarding passes (QR) + on-site check-in ---------------------------- */
+export function getBadges(tripId) {
+  return apiGet(`/onboarding/badges?tripId=${encodeURIComponent(tripId || "")}`); // { delegates, coaches, total, present }
+}
+
+export function qrCheckin({ code, tripId, coachId }) {
+  return apiPost("/onboarding/checkin", { code, tripId, coachId }); // { ok, alreadyBoarded, delegate, total, present }
+}
+
+/* ---- CSV export (opens in Excel) ---------------------------------------- */
+const CSV_COLUMNS = [
+  ["fullName", "Name"], ["role", "Role"], ["company", "Company"], ["industry", "Industry"],
+  ["email", "Email"], ["phone", "Phone"], ["website", "Website"],
+  ["passportNumber", "Passport"], ["nationality", "Nationality"], ["passportExpiry", "Expiry"],
+  ["confidence", "Confidence"],
+];
+
+export function exportRowsCsv(rows, filename = "delegates.csv") {
+  const esc = (v) => {
+    const s = v == null ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = CSV_COLUMNS.map(([, label]) => label).join(",");
+  const lines = rows.map((r) => CSV_COLUMNS.map(([key]) => esc(r[key])).join(","));
+  const csv = [header, ...lines].join("\r\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" }); // BOM so Excel reads UTF-8
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

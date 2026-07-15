@@ -25,6 +25,38 @@ export const ISSUE_LABEL = {
 };
 
 /**
+ * Max characters for the free-text label on the "Others" issue type.
+ * Mirrors TYPE_OTHER_MAX in backend/routes/exceptions.js and the
+ * exception_tickets.type_other column width. Change all three together.
+ */
+export const TYPE_OTHER_MAX = 20;
+
+/**
+ * Selectable priorities, in the order the buttons appear.
+ * `cls` maps onto the badge classes already in tokens.css, so the colours match
+ * the pills used in the inbox: CRITICAL red, NORMAL violet, LOW slate.
+ */
+export const PRIORITIES = [
+  { value: "CRITICAL", label: "Critical", cls: "badge-missing", colour: "var(--st-missing)", bg: "var(--st-missing-bg)" },
+  { value: "NORMAL",   label: "Normal",   cls: "badge-normal",  colour: "var(--st-normal)",  bg: "var(--st-normal-bg)" },
+  { value: "LOW",      label: "Low",      cls: "badge-neutral", colour: "var(--st-neutral)", bg: "var(--st-neutral-bg)" },
+];
+
+/** The two non-critical options, for the buttons under the Critical toggle. */
+export const BASE_PRIORITIES = PRIORITIES.filter((p) => p.value !== "CRITICAL");
+
+/**
+ * Display label for a ticket's issue type.
+ * A type='OTHER' ticket carries its own free-text label in `typeOther`; show
+ * that rather than the generic word "Other".
+ */
+export function issueLabel(ticket) {
+  if (!ticket) return "";
+  if (ticket.type === "OTHER" && ticket.typeOther) return ticket.typeOther;
+  return ISSUE_LABEL[ticket.type] || ticket.type;
+}
+
+/**
  * List tickets for the active trip.
  * @param {{status?: string, priority?: string}} filter
  * @returns {Promise<{tickets: Array, counts: {all:number,critical:number,open:number,resolved:number}}>}
@@ -62,13 +94,31 @@ export async function getCoaches() {
  * Raise a ticket. `markCritical` maps to priority CRITICAL, which the server
  * pushes to every connected staff device.
  */
-export async function createException({ type, delegateId, coachId, note, markCritical }) {
+/**
+ * Raise a ticket.
+ *
+ * @param {object}  o
+ * @param {string}  o.type          one of the exception_type enum values
+ * @param {string} [o.typeOther]    free-text label, required when type === 'OTHER'
+ * @param {string} [o.priority]     'CRITICAL' | 'NORMAL' | 'LOW'
+ * @param {boolean}[o.markCritical] legacy shorthand — forces CRITICAL
+ *
+ * `markCritical` is honoured for backwards compatibility and always wins, since
+ * the Critical toggle is the escalation switch. Otherwise the explicit
+ * `priority` is used, defaulting to NORMAL.
+ */
+export async function createException({ type, typeOther, delegateId, coachId, note, priority, markCritical }) {
+  const finalPriority = markCritical
+    ? "CRITICAL"
+    : (["CRITICAL", "NORMAL", "LOW"].includes(priority) ? priority : "NORMAL");
+
   return apiPost(`/trips/${TRIP_ID}/exceptions`, {
     type,
+    typeOther: type === "OTHER" ? (typeOther || "").trim().slice(0, TYPE_OTHER_MAX) : null,
     delegateId: delegateId || null,
     coachId: coachId || null,
     note: note || null,
-    priority: markCritical ? "CRITICAL" : "NORMAL",
+    priority: finalPriority,
     clientEventId: crypto.randomUUID(), // idempotency key (offline outbox)
   });
 }
@@ -93,6 +143,22 @@ export async function manualOverride(delegateId) {
   return apiPost(`/checkins/manual`, {
     tripId: TRIP_ID,
     delegateId,
+    clientEventId: crypto.randomUUID(),
+    clientTs: new Date().toISOString(),
+  });
+}
+
+/**
+ * QR badge check-in — count a delegate present from a scanned delegate badge.
+ * Writes a method='QR' row to check_in_logs and flips the delegate to PRESENT,
+ * so JQ's dashboard head-count updates live. Returns { delegateId, name,
+ * status, method, duplicate }.
+ */
+export async function checkInByQR({ tripId = TRIP_ID, delegateId, coachId = null }) {
+  return apiPost(`/checkins/qr`, {
+    tripId,
+    delegateId,
+    coachId,
     clientEventId: crypto.randomUUID(),
     clientTs: new Date().toISOString(),
   });

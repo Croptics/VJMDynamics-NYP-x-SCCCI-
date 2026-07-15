@@ -88,6 +88,44 @@
 
 .exc-textarea { resize: vertical; min-height: 64px; }
 
+/* ---- "Others" free-text issue label ------------------------------------- */
+.exc-other-wrap { margin: -8px 0 18px; }
+.exc-other-row { display: flex; align-items: center; gap: 10px; }
+.exc-other-row .input { flex: 1; }
+.exc-other-count {
+  font-size: 12px; font-weight: 600; color: var(--ink-3);
+  font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 42px; text-align: right;
+}
+.exc-other-count.at-limit { color: var(--scc-red); }
+
+/* ---- Priority selector (under the Critical toggle) ---------------------- */
+.exc-prio-label {
+  font-size: 12px; font-weight: 600; color: var(--ink-3);
+  margin: 0 0 8px; display: block;
+}
+.exc-prio-row { display: flex; gap: 8px; }
+.exc-prio-btn {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 9px 12px; border-radius: var(--r-sm); font-size: 13.5px; font-weight: 600;
+  border: 1.5px solid var(--line); background: #fff; color: var(--ink-2);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.exc-prio-btn:hover:not(:disabled) { border-color: var(--ink-3); }
+.exc-prio-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.exc-prio-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Selected states pull straight from the five-state palette, so a Normal
+   button matches the violet "Normal" pill in the inbox, and Low matches slate. */
+.exc-prio-btn[data-p="NORMAL"].selected {
+  color: var(--st-normal); background: var(--st-normal-bg); border-color: var(--st-normal);
+}
+.exc-prio-btn[data-p="LOW"].selected {
+  color: var(--st-neutral); background: var(--st-neutral-bg); border-color: var(--st-neutral);
+}
+
+/* When Critical is on it overrides the choice — show the row as superseded. */
+.exc-prio-row.superseded { opacity: 0.5; }
+
 .exc-critical {
   display: flex; align-items: center; gap: 12px; padding: 12px 14px;
   border: 1px solid var(--scc-red-tint-2); background: var(--scc-red-tint);
