@@ -363,4 +363,48 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
   res.status(201).json({ id, delegateId, status: "PRESENT", duplicate: false, method: "MANUAL" });
 }));
 
+/* ---------------------------------------------------------------------------
+ * POST /api/checkins/qr
+ * The QR half of HLD §3.5 (check_in_logs). A delegate badge scanned in the
+ * /checkin screen posts here; we write a method='QR' row and flip the delegate
+ * to PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
+ *
+ * Gated on requireAuth() (any signed-in staff), NOT on manageExceptions — a QR
+ * scan is a primary field check-in, exactly like Vimal's face scan, so it uses
+ * the same auth level rather than the elevated manual-override permission.
+ * Idempotent on client_event_id so an offline retry can't double-insert.
+ * Body: { tripId, delegateId, coachId?, clientEventId?, clientTs? }
+ * ------------------------------------------------------------------------- */
+router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
+  const { tripId, delegateId, clientEventId, clientTs } = req.body || {};
+  if (!tripId || !delegateId) {
+    return res.status(400).json({ error: "MISSING_FIELDS", message: "tripId and delegateId are required." });
+  }
+  const d = await q('SELECT id, name, "coachId", status FROM delegates WHERE id = $1', [delegateId]);
+  if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
+
+  const eventId = clientEventId || randomUUID();
+  const dup = await q("SELECT id FROM check_in_logs WHERE client_event_id = $1", [eventId]);
+  if (dup.rows.length) {
+    return res.json({ id: dup.rows[0].id, delegateId, name: d.rows[0].name, status: "PRESENT", method: "QR", duplicate: true });
+  }
+
+  // Log against the badge's own coach (fall back to the scoped coach hint).
+  const coachId = d.rows[0].coachId || (req.body && req.body.coachId) || null;
+  const id = randomUUID();
+  await q(
+    `INSERT INTO check_in_logs
+       (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts)
+     VALUES ($1,$2,$3,$4,'QR',$5,$6,$7,$8)`,
+    [id, delegateId, tripId, coachId, req.account.id, eventId,
+     !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
+  );
+
+  await q(`UPDATE delegates SET status='PRESENT', "lastSeen"=$1 WHERE id=$2`,
+    [`QR check-in · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
+
+  broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "QR" });
+  res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "PRESENT", duplicate: false, method: "QR" });
+}));
+
 export default router;

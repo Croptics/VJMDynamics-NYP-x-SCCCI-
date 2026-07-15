@@ -164,6 +164,14 @@ async function createSchema() {
   // orphaned asset forever).
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
+  // Last known location — a free-text place/address (e.g. "Novotel Beijing,
+  // Lobby" or a full street address), staff-entered, separate from
+  // "lastSeen" (which is a time/note, not a lookup-able place). Rendered as
+  // an embedded Google Map (Maps Embed API — a static <iframe>, no live
+  // tracking) wherever a delegate's location matters, especially the
+  // missing-delegates list. Not geocoded/validated server-side; the Embed
+  // API's `q=` param accepts free text and looks it up itself.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "lastLocation" VARCHAR(255)`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
@@ -373,6 +381,7 @@ function normalize(input, id) {
     status,
     vip: !!input.vip,
     lastSeen: (input.lastSeen || "").trim() || null,
+    lastLocation: (input.lastLocation || "").trim() || null,
   };
 }
 
@@ -438,8 +447,8 @@ export async function getDelegateById(id) {
 export async function createDelegate(input, tripUuid = null) {
   const d = normalize(input, await nextId());
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, tripUuid]
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid]
   );
   await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign");
   return d;
@@ -450,8 +459,8 @@ export async function updateDelegate(id, patch) {
   if (!existing) return null;
   const merged = normalize({ ...rowToDelegate(existing), ...patch }, id);
   await run(
-    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6 WHERE id=$7`,
-    [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, id]
+    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7 WHERE id=$8`,
+    [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation, id]
   );
   await logActivity(`${merged.name} updated`, "reassign");
   return merged;
@@ -572,6 +581,7 @@ export async function getMissing(tripUuid = null) {
         coach: coach ? [coach.name, coach.city].filter(Boolean).join(" · ") : "Unassigned",
         vip: x.vip,
         lastSeen: x.lastSeen,
+        lastLocation: x.lastLocation,
         createdAt: x.createdAt,
       };
     });
@@ -699,6 +709,30 @@ export async function updateAccount(id, patch) {
     username, name, password, role, JSON.stringify(perms), id,
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/**
+ * "Forgot password" self-service reset — username + new password, no
+ * identity verification (no old password, no email/OTP). Intentionally
+ * simple for this project's small trusted-team context; NOT safe as-is for
+ * a real public deployment, where anyone who knows a username could take
+ * over that account. Bumps token_version so any existing session for that
+ * account is invalidated by the reset (same pattern as a fresh login).
+ */
+export async function resetPassword(username, newPassword) {
+  const pwProblem = passwordProblem(newPassword);
+  if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
+
+  const existing = await getAccountByUsername(username);
+  if (!existing) {
+    // Generic error either way — avoids confirming which usernames exist.
+    return { error: "RESET_FAILED" };
+  }
+
+  await run(`UPDATE accounts SET password = $1, token_version = token_version + 1 WHERE id = $2`, [
+    await hashPassword(newPassword), existing.id,
+  ]);
+  return { ok: true };
 }
 
 export async function deleteAccount(id) {

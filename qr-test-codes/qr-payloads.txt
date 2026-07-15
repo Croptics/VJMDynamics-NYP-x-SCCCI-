@@ -1,0 +1,5 @@
+VALID  (-> "Attendance registered"):
+{"sys":"MUSTERGO","v":1,"typ":"DELEGATE_BADGE","tripId":"t-1","delegateId":"d-1","name":"Lim Wei Jie","sig":"7F3A9C2E"}
+
+INVALID (-> "QR code invalid"):
+NOT-A-BADGE::sc-cci-visitor-pass::9931

@@ -23,6 +23,12 @@ README.md / HIGH_LEVEL_DESIGN.md / PROJECT_IMPLEMENTATION_PHASE.md
     My (Claude Code) own tooling config — dev-server launch settings etc.
     Not part of the app itself; gitignored, never pushed to GitHub.
 
+qr-test-codes/
+    Two ready-made QR images for testing the /checkin screen's QR pill
+    (qr-attendance-registered.png = a valid MusterGo delegate badge,
+    qr-code-invalid.png = junk that should show "QR code invalid") plus
+    qr-payloads.txt with the raw JSON each one encodes.
+
 
 BACKEND/  (Express API, port 4000)
 -----------------------------------
@@ -64,6 +70,12 @@ data.js
     through the generic createDelegate/updateDelegate path — so a client
     can't PATCH in an arbitrary external image URL and skip the upload
     validation.
+    delegates."lastLocation" — a free-text place/address, staff-entered via
+    the normal create/edit path (normalize()/createDelegate/updateDelegate),
+    unlike photoUrl. Not geocoded server-side; the frontend's
+    DelegateLocationMap component hands the raw text straight to the Google
+    Maps Embed API's `q=` param, which does its own lookup. getMissing() also
+    includes it in its output alongside lastSeen.
 
 cloudinary.js
     Thin wrapper around the Cloudinary SDK for delegate profile photos.
@@ -100,20 +112,65 @@ routes/exceptions.js
     manual override use requirePermission("manageExceptions"). Its original
     auth code decoded the old pre-JWT token format by hand — rewritten at
     merge time to use auth.js's requireAuth/requirePermission like every
-    other route.
+    other route. Also has POST /api/checkins/qr (Jayden's QR half of the
+    /checkin screen — writes a method='QR' row to the shared check_in_logs
+    table and flips the delegate PRESENT) — gated on requireAuth() only,
+    same level as Vimal's face scan, not the elevated manageExceptions used
+    by manual overrides. Idempotent on client_event_id.
+
+routes/vimal.js
+    Vimal's FaceCheck-Pro — Privacy-First Biometric & Multi-Modal Fusion
+    Scanner. Powers the /checkin screen's "Trips" (reverse-headcount muster
+    view), "Scan → Face" tab, and "Me" (consent + history) tab. Self-
+    contained: imports JQ's own listDelegates/getDelegateById/updateDelegate/
+    createDelegate/getTrip/getDashboard from data.js (never edits it), so a
+    face check-in writes through to the REAL shared delegates table and
+    every other screen (dashboard, mobile, Trips board) sees it instantly.
+    Coach lookups go through getDashboard(), so coaches added later by
+    Desmond's module work here automatically. PDPA-by-design: the server
+    NEVER receives or stores an image/audio clip — the browser vectorizes
+    one off-DOM camera frame into an irreversible token ("face:v1:<hex>:…"),
+    zeroes the raw pixel buffer in place, and only the token is ever sent.
+    Consent lifecycle + per-delegate check-in history are kept in-memory
+    (Maps, not the DB) — Vimal-owned bookkeeping, separate from the shared
+    delegate records. Endpoints: GET /api/attendance/coaches, POST /api/
+    attendance/scan, GET /api/attendance/:trip_id/coach/:coach_id, GET /api/
+    attendance/headcount, POST /api/attendance/consent, GET /api/attendance/
+    history/:delegate_id, POST /api/attendance/assign-unassigned (muster
+    UNASSIGNED delegates onto a coach), POST /api/attendance/demo-seed. All
+    gated on requireAuth() only — any signed-in staff can scan, matching the
+    QR check-in's auth level rather than the elevated manageExceptions tier.
+    Shares the /checkin screen with Jayden's QR/Manual/Issues panels (see
+    QRCheckInPage.jsx below) — the two features were built independently
+    against reserved slots in the same shell and verified not to collide
+    (own camera streams, no shared re-fetching, namespaced CSS/routes).
 
 routes/vance.js
-    Vance's DocuSync AI + Trip Assistant API — two AI features. (1) Document
+    Vance's DocuSync AI + Trip Assistant API — three features. (1) Document
     parsing: an uploaded directory / attendee list / spreadsheet / scanned
     passport is read (text via the `unpdf` package, or Claude vision for
     scans/images) and turned into structured delegate rows with a confidence
     score; on confirm they're written to the SHARED delegates table via
-    data.js's createDelegate(). (2) Trip assistant chatbot: answers questions
-    over a live snapshot of everyone's data (delegates/coaches/exceptions/
-    check-ins/itinerary), streaming replies token-by-token, with saved chat
-    history. Self-contained: own pg pool, own tables created lazily on first
-    use via ensureReady() (extra delegate columns + chat_sessions/
-    chat_messages). Parsing requires manageDelegates; the chatbot is any
+    data.js's createDelegate(), and each gets a unique `qr_code` (e.g.
+    "MG-86B620A4") minted by newQrCode(). (2) QR boarding passes + on-site
+    check-in: GET /api/onboarding/badges returns every delegate + their QR
+    token for a trip (auto-backfills a qr_code for any delegate that predates
+    this feature, via backfillQrCodes()); POST /api/onboarding/checkin
+    resolves a scanned/tapped code, flips the delegate PRESENT (+ coach), and
+    logs a QR row to the SHARED check_in_logs table — the same table Jayden's
+    manual override and Vimal's face scan write to, and the one Desmond's
+    coach board reads, so a boarding-pass scan shows up everywhere instantly.
+    Both gated on requireAuth() only (any signed-in staff), matching Vimal's
+    face-scan auth level rather than the elevated manageExceptions tier.
+    (3) Trip assistant chatbot: answers questions over a live snapshot of
+    everyone's data (delegates/coaches/exceptions/check-ins/itinerary),
+    streaming replies token-by-token, with saved chat history. The prompt is
+    strict about not mixing up present/missing/unassigned and about not
+    volunteering unrequested detail (answer only what was asked, then stop).
+    Self-contained: own pg pool, own tables created lazily on first use via
+    ensureReady() (extra delegate columns incl. qr_code + a partial unique
+    index + chat_sessions/chat_messages). Parsing and confirming require
+    manageDelegates; the chatbot and the boarding-pass/scan endpoints are any
     signed-in user. Parsing prefers Claude (needs ANTHROPIC_API_KEY; required
     for scans); the chatbot is Ollama-first then Claude, like insights.js.
 
@@ -151,7 +208,11 @@ routes/insights.js
     (needs ANTHROPIC_API_KEY in .env). If neither is available, returns a
     clear "not configured" message instead of erroring. Also honors the
     current UI language — asks the model to write directly in English or
-    Chinese, so no separate translation step is needed.
+    Chinese, so no separate translation step is needed. buildPrompt() now
+    forces a fixed 3-point structure — "1. Overall: ... / 2. Missing: ... /
+    3. Advice: ..." (translated labels in SECTION_LABELS for zh) — instead
+    of freeform 3-5 points, so staff always get the same read: attendance
+    health, who's missing, then concrete next actions/who to contact.
 
 package.json / package-lock.json
     Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
@@ -211,7 +272,8 @@ Shared components (src/components/):
       name/role) links to /settings and has a hover highlight
       (.sidebar-account); the sun/moon dark-mode toggle sits right beside it.
       Takes an `open` prop from Layout.jsx (applies the .sidebar.open class);
-      unused/ignored above the 1024px breakpoint.
+      unused/ignored above the 1024px breakpoint. "Check-in" nav item links
+      to /checkin (QRCheckInPage.jsx) — ungated, any signed-in staff.
 
   StatusBadge.jsx
       Small reusable pill component for status labels (Present/Missing/
@@ -236,12 +298,27 @@ Shared components (src/components/):
       f_auto,q_auto (auto format/compression) baked in, not the raw
       upload result — so every place a photo renders gets that for free.
 
+  DelegateLocationMap.jsx
+      Renders a delegate's "lastLocation" (see data.js) as a static embedded
+      Google Map — a single <iframe> via the Maps Embed API, not live
+      tracking. Needs VITE_GOOGLE_MAPS_API_KEY in frontend/.env (see
+      .env_Future.example); degrades to a plain text line instead of a
+      broken iframe when the key isn't set. Used by the Dashboard's
+      create/edit delegate modal (live preview as you type) and the "All
+      delegates" table's map-pin button (DashboardPage.jsx), and by
+      MobileAttendancePage.jsx's per-row map-pin. The pin only appears when
+      a delegate has a location set, and is tinted red for MISSING delegates.
+
   AnalyticsPanel.jsx
       Rendered inside the Dashboard's "Analytics" tab. Contains: the
       charts + "Customize" widget-toggle UI, and the "AI Insights" card
       with the "Generate Insights" button (calls backend/routes/insights.js,
       shows which source answered — local Ollama or Claude — and respects
-      the current language).
+      the current language). While a request is in flight, shows 3 shimmer
+      skeleton bars (.skeleton-line, tokens.css) in the results area instead
+      of leaving it blank. splitInsightPoints() now splits each returned
+      line into a bold "Label:" (Overall/Missing/Advice) + body, matching
+      insights.js's fixed 3-point prompt structure.
 
   LogExceptionModal.jsx
       Jayden — the "Log exception" create form (issue type, delegate
@@ -285,10 +362,70 @@ Library helpers (src/lib/):
       errors for free) plus subscribeStream() for the live SSE channel
       (EventSource, token passed as ?token= since it can't set headers)
       and getCriticalOpenCount() (used by Layout.jsx's sidebar badge).
+      checkInByQR() (POST /api/checkins/qr) added for the /checkin screen's
+      QR pill — QRScannerPanel.jsx is its only caller.
+
+  useSessionGuard.js
+      Shared hook (Layout.jsx + MobileLayout.jsx): polls GET /api/auth/
+      session every 15s + on window focus, force-logs-out on a 401 (token
+      invalidated — renamed/deleted account, or a newer login elsewhere
+      bumped token_version) or a permissions/username change. Extracted
+      from Layout.jsx so mobile gets the same behavior — see the note on
+      MobileLayout.jsx above for why that mattered.
 
 Pages (src/pages/) — one file per route:
 
-  LoginPage.jsx            /login              Sign-in form.
+  LoginPage.jsx            /login              Sign-in form. Two explicit
+                                                submit buttons — "Sign in"
+                                                and "Login for Mobile" — call
+                                                onSignIn("desktop"/"mobile")
+                                                in App.jsx; which UI you land
+                                                in is no longer guessed from
+                                                screen width (that auto-detect
+                                                was removed). Also owns the
+                                                "Forgot password?" flow
+                                                (ForgotPasswordModal in this
+                                                same file): username + new
+                                                password + confirm, calls
+                                                POST /api/auth/reset-password.
+                                                No identity verification
+                                                beyond the username existing —
+                                                see the comment on
+                                                resetPassword() in data.js;
+                                                fine for this project's small
+                                                trusted-team context, NOT
+                                                production-safe as-is.
+                                                Now imports useTheme() and
+                                                renders a sun/moon toggle
+                                                beside the EN/中文 button
+                                                (top-right); fixed the dark-
+                                                theme card/modal — S.card and
+                                                the ForgotPasswordModal's
+                                                S.modal used a hardcoded
+                                                background: "#fff" so dark
+                                                mode's near-white --ink text
+                                                rendered nearly invisible on
+                                                a still-white card — both now
+                                                use var(--surface).
+"Keep me signed in" was briefly renamed to
+                                                "Stay signed in" with the
+                                                plaintext-password-remembering
+                                                code removed (a real security
+                                                gap — anything with JS access
+                                                to this origin could read a
+                                                saved password), then restored
+                                                to "Remember password" at the
+                                                user's explicit request after
+                                                being flagged. mg_remember_v2
+                                                in localStorage again stores
+                                                {staffId, password} in plain
+                                                text when ticked, prefilling
+                                                the form on return — see the
+                                                comment on readRemembered() in
+                                                this file; documented as fine
+                                                for a school demo/small
+                                                trusted team, NOT
+                                                production-safe.
   DashboardPage.jsx        /dashboard          Main admin screen — KPI tiles,
                                                 coach status, History tracker,
                                                 delegate CRUD table,
@@ -306,17 +443,70 @@ Pages (src/pages/) — one file per route:
                                                   toggle, has a search box, an
                                                   "Uploaded" column
                                                   (delegates.createdAt), status
-                                                  filter + sort. Coach status
-                                                  caps to 4 with "Show all".
+                                                  filter + sort, and a map-pin
+                                                  button per row (only shown
+                                                  when that delegate has a
+                                                  lastLocation) opening a small
+                                                  DelegateLocationMap popup —
+                                                  tinted red for MISSING
+                                                  delegates. Coach status caps
+                                                  to 4 with "Show all", now
+                                                  pushed to the bottom of its
+                                                  card (flex column +
+                                                  marginTop:"auto") instead of
+                                                  sitting right under a short
+                                                  list, so its position matches
+                                                  History tracker's.
                                                 • "History tracker" (was "Live
                                                   activity") — persisted to the
                                                   activity_log table (GET/DELETE
                                                   /api/activity), not the old
                                                   in-memory 8-entry array, so it
                                                   survives backend restarts.
-                                                  Caps to 8 with "Show all";
-                                                  per-row delete + "Clear all",
-                                                  both gated on manageDelegates.
+                                                  No longer caps with a "Show
+                                                  all" button — the list itself
+                                                  scrolls (maxHeight:360,
+                                                  overflowY:auto) so every entry
+                                                  is reachable. Per-row delete +
+                                                  "Clear all", both gated on
+                                                  manageDelegates.
+                                                • Create/edit delegate modal has
+                                                  a "Last known location"
+                                                  field (delegates.lastLocation,
+                                                  now REQUIRED when status is
+                                                  Missing — saveForm() blocks
+                                                  submit with an inline error
+                                                  if left blank) separate from
+                                                  "Last seen" (which is a
+                                                  time/note, not an address) —
+                                                  shows a live
+                                                  DelegateLocationMap preview
+                                                  as you type. Both fields only
+                                                  appear in the modal when
+                                                  status is Missing; saving
+                                                  with any other status clears
+                                                  both, so switching away from
+                                                  Missing doesn't silently
+                                                  carry stale data forward.
+                                                  S.modal now has
+                                                  maxHeight/overflowY:auto (the
+                                                  modal previously had no
+                                                  internal scroll, so adding
+                                                  the map made it taller than
+                                                  the viewport with no way to
+                                                  reach the Save button).
+                                                • The "All delegates" table's
+                                                  map-pin now renders on EVERY
+                                                  row (not just when a location
+                                                  is set) but is disabled/greyed
+                                                  (opacity 0.35) unless that
+                                                  delegate is Missing — clicking
+                                                  a Missing delegate's pin with
+                                                  no location recorded yet shows
+                                                  "No location has been
+                                                  recorded..." instead of a
+                                                  blank map. Same pattern on
+                                                  MobileAttendancePage.jsx.
                                                 • Trip switcher (its own
                                                   "Viewing trip" bar under the
                                                   header, fixed position): a
@@ -348,15 +538,38 @@ Pages (src/pages/) — one file per route:
                                                 backend/routes/desmond.js.
   TripsListPage.jsx        (/trips grid)       Desmond — the trip grid + the
                                                 shared useTfTheme dark-mode hook.
-  OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — upload a
-                                                directory / attendee list /
-                                                scanned passport, AI extracts
-                                                delegate rows (confidence-
-                                                scored, editable), confirm to
-                                                add them to the shared list.
-                                                Gated behind manageDelegates
-                                                (route + sidebar item), since
-                                                it bulk-creates delegates.
+  OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — three
+                                                tabs. "Document parsing"
+                                                (default): upload a directory
+                                                / attendee list / scanned
+                                                passport, AI extracts delegate
+                                                rows (confidence-scored,
+                                                editable), confirm to add them
+                                                to the shared list — each gets
+                                                a QR boarding-pass token.
+                                                "Boarding passes"
+                                                (BoardingPassesView.jsx):
+                                                every delegate's printable QR
+                                                badge (rendered client-side
+                                                with the `qrcode` package),
+                                                grouped/status-tinted, "Print
+                                                all". "Scan to board"
+                                                (ScanToBoardView.jsx): a
+                                                camera-based QR scanner
+                                                (`html5-qrcode`) with a
+                                                tap-to-simulate fallback when
+                                                no camera — resolves a badge,
+                                                flips the delegate PRESENT
+                                                (+ optional coach override),
+                                                updates the live boarded
+                                                count. The route + sidebar
+                                                item stay gated behind
+                                                manageDelegates (parsing bulk-
+                                                creates delegates); the two
+                                                new tabs just reuse the same
+                                                page-level gate — boarding-
+                                                pass/scan themselves need only
+                                                requireAuth() on the backend.
                                                 Calls backend/routes/vance.js.
   ExceptionInboxPage.jsx   /exceptions         Jayden's exception inbox —
                                                 All/Critical/Open/Resolved
@@ -379,8 +592,81 @@ Pages (src/pages/) — one file per route:
                                                 clickable delegate names. Any
                                                 signed-in user. Calls
                                                 backend/routes/vance.js.
-  QRCheckInPage.jsx        /checkin            Placeholder — Vimal's QR
-                                                check-in screen.
+  QRCheckInPage.jsx        /checkin            FULL — Vimal's phone-frame
+                                                staff check-in app, rendered
+                                                inside the desktop Layout.
+                                                Four tabs: Trips (live per-
+                                                coach mobile dashboard, tap a
+                                                coach to muster it), Scan
+                                                (Face / QR / Manual pills —
+                                                Face is Vimal's own camera +
+                                                zero-image vectorizer, low-
+                                                light auto-falls-back to a
+                                                voiceprint token, "Simulate
+                                                low light" demos it), Issues
+                                                (exception logging), Me
+                                                (consent lifecycle + per-
+                                                delegate check-in history).
+                                                Jayden's QR and Manual panels
+                                                and the Issues tab plug into
+                                                three slots this file already
+                                                reserved (3 import lines +
+                                                swapping the placeholders) —
+                                                nothing else in the file
+                                                changed. Calls backend/
+                                                routes/vimal.js. Not linked
+                                                from the sidebar before this
+                                                merge (was reachable only by
+                                                URL); now has a "Check-in"
+                                                nav item, ungated (any signed-
+                                                in staff).
+  QRScannerPanel.jsx       (Scan → QR pill)    Jayden — live camera QR
+                                                scanner (jsQR,
+                                                inversionAttempts:
+                                                "attemptBoth" so codes
+                                                scanned off another screen
+                                                still decode reliably), with
+                                                a manual paste-the-badge-JSON
+                                                fallback when the camera is
+                                                unavailable. Opens its OWN
+                                                camera stream, stops every
+                                                track on unmount — never
+                                                contends with Vimal's face
+                                                camera since the two modes
+                                                are mutually exclusive. Posts
+                                                to POST /api/checkins/qr via
+                                                exceptionsApi.js's
+                                                checkInByQR(). Expects a
+                                                MusterGo delegate badge JSON
+                                                shape (see qr-test-codes/ for
+                                                two ready-made test images);
+                                                anything else → "QR code
+                                                invalid."
+  ManualTrackingPanel.jsx  (Scan → Manual)     Jayden — mark a delegate
+                                                present by hand when a scan
+                                                isn't possible. Reads the
+                                                roster from the `coach` prop
+                                                the shell already loaded (no
+                                                re-fetch), search box, "Mark
+                                                present" per row. Calls
+                                                exceptionsApi.js's
+                                                manualOverride() → POST /api/
+                                                checkins/manual, gated on
+                                                manageExceptions (read-only
+                                                notice otherwise).
+  IssuesPanel.jsx          (Me → Issues tab)   Jayden — mobile exception
+                                                logging: issue-type tiles
+                                                (Missing person / Lost badge
+                                                / Dead phone / VIP request),
+                                                delegate picker, note, "Mark
+                                                as critical", plus the open-
+                                                ticket list for this trip.
+                                                Same data layer as the
+                                                desktop ExceptionInboxPage.jsx
+                                                (exceptionsApi.js), including
+                                                the live SSE "● Live"
+                                                indicator. Logging/resolving
+                                                needs manageExceptions.
   AccountControlPage.jsx   /accounts           Create/edit/delete staff
                                                 accounts + permissions
                                                 (needs manageAccounts).
@@ -413,7 +699,19 @@ Pages (src/pages/) — one file per route:
 Mobile pages (src/pages/mobile/):
 
   MobileLayout.jsx          (wraps /mobile/*)   Bottom tab-bar shell, incl.
-                                                 the EN/中文 toggle.
+                                                 the EN/中文 toggle and (now)
+                                                 a sun/moon useTheme() toggle
+                                                 beside it in the topbar.
+                                                 Runs useSessionGuard() (see
+                                                 lib/useSessionGuard.js) —
+                                                 previously only the desktop
+                                                 Layout did, so a mobile
+                                                 session never noticed being
+                                                 invalidated (e.g. by a newer
+                                                 login elsewhere) and just
+                                                 kept failing every API call
+                                                 instead of cleanly logging
+                                                 out.
   MobileHomePage.jsx        /mobile             Condensed KPI + coach-status
                                                  summary. No delegate list of
                                                  its own — each KPI tile
@@ -438,7 +736,13 @@ Mobile pages (src/pages/mobile/):
                                                  over the tab slot the old
                                                  standalone Missing tab used
                                                  to occupy (now folded into
-                                                 Home, see above).
+                                                 Home, see above). Each row
+                                                 also shows a map-pin button
+                                                 when that delegate has a
+                                                 lastLocation set (tinted red
+                                                 for MISSING), opening the same
+                                                 DelegateLocationMap component
+                                                 used on desktop.
   MobileAssistantPage.jsx   /mobile/assistant   Mobile chat — same real AI
                                                  assistant as the desktop one
                                                  (Vance; POST /api/chat/messages).
@@ -448,7 +752,13 @@ Styles (src/styles/):
 
   tokens.css
       The whole design system — colors, buttons, cards, badges, tables,
-      the sidebar/page layout. Loaded globally.
+      the sidebar/page layout. Loaded globally. .select now gets a custom
+      chevron-down icon (appearance:none + an inline SVG background-image)
+      instead of each browser's own native arrow — any inline style on a
+      <select className="select"> that overrides padding must leave room on
+      the right (padding-right >= ~28px) or the icon will overlap the text;
+      see OnboardingPage.jsx's coach-picker and MobileAttendancePage.jsx's
+      status <select> for the pattern.
 
   mobile.css
       Mobile-only classes (.mobile-shell, .mobile-card, .mobile-tabbar,

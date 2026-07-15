@@ -132,6 +132,15 @@ a { color: inherit; }
 .btn-block { width: 100%; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* ---- Skeletons ----------------------------------------------------------- */
+.skeleton-line {
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--surface-2) 37%, var(--line) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+@keyframes skeleton-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
 /* ---- Cards ------------------------------------------------------------- */
 .card {
   background: var(--surface);
@@ -333,6 +342,16 @@ a { color: inherit; }
   font-family: inherit;
   background: var(--surface);
   color: var(--ink);
+}
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
 }
 .input:focus, .select:focus { outline: 2px solid var(--scc-red-tint-2); border-color: var(--scc-red); }
 .field-label { font-size: 13px; font-weight: 600; margin-bottom: 6px; display: block; }

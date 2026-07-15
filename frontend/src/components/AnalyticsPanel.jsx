@@ -35,12 +35,19 @@ const WIDGETS = [
 
 /** Split the AI-generated insights text into individual points, stripping
  *  whatever numbering/bullet marker the model used (we render our own via
- *  an <ol>, so "1. ", "- ", "• " etc. at the start of a line are redundant). */
+ *  an <ol>, so "1. ", "- ", "• " etc. at the start of a line are redundant).
+ *  Each point is expected to lead with a "Label: " prefix (Overall/Missing/
+ *  Advice, per backend/routes/insights.js's buildPrompt) — split that off so
+ *  it can be rendered bold, separate from the rest of the sentence. */
 function splitInsightPoints(text) {
   return String(text || "")
     .split(/\r?\n/)
     .map((line) => line.replace(/^\s*(?:\d+[.)]|[-•*])\s*/, "").trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((line) => {
+      const m = line.match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+      return m ? { label: m[1].trim(), body: m[2].trim() } : { label: null, body: line };
+    });
 }
 
 function prefsKey() {
@@ -161,11 +168,25 @@ export default function AnalyticsPanel({ data, missing }) {
           </div>
         )}
 
-        {insights && !insightsError && (
+        {insightsLoading && (
+          <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="skeleton-line" style={{
+                height: 14, borderRadius: 4, marginBottom: i < 2 ? 10 : 0,
+                width: i === 2 ? "60%" : "100%",
+              }} />
+            ))}
+          </div>
+        )}
+
+        {insights && !insightsError && !insightsLoading && (
           <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
             <ol style={{ margin: 0, paddingLeft: 20, fontSize: 14, lineHeight: 1.7 }}>
               {splitInsightPoints(insights).map((point, i) => (
-                <li key={i} style={{ marginBottom: 4 }}>{point}</li>
+                <li key={i} style={{ marginBottom: 4 }}>
+                  {point.label && <strong>{point.label}: </strong>}
+                  {point.body}
+                </li>
               ))}
             </ol>
             {insightsAsOf && (

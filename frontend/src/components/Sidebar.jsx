@@ -11,6 +11,7 @@ import {
   Languages,
   Sun,
   Moon,
+  QrCode,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -31,6 +32,8 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     { to: "/trips", label: "Trips", icon: MapPin },
     // Onboarding (document parsing) bulk-creates delegates → manageDelegates.
     ...(perms.manageDelegates ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
+    // Face/QR/Manual check-in — not permission-gated, any signed-in staff can scan.
+    { to: "/checkin", label: "Check-in", icon: QrCode },
     { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
     { to: "/assistant", label: "Chat assistant", icon: MessageSquare },
     ...(isMain ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),

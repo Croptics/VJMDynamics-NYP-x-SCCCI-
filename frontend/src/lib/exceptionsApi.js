@@ -99,6 +99,22 @@ export async function manualOverride(delegateId) {
 }
 
 /**
+ * QR badge check-in — count a delegate present from a scanned delegate badge.
+ * Writes a method='QR' row to check_in_logs and flips the delegate to PRESENT,
+ * so JQ's dashboard head-count updates live. Returns { delegateId, name,
+ * status, method, duplicate }.
+ */
+export async function checkInByQR({ tripId = TRIP_ID, delegateId, coachId = null }) {
+  return apiPost(`/checkins/qr`, {
+    tripId,
+    delegateId,
+    coachId,
+    clientEventId: crypto.randomUUID(),
+    clientTs: new Date().toISOString(),
+  });
+}
+
+/**
  * Subscribe to live ticket events (Server-Sent Events).
  * EventSource cannot send an Authorization header, so the token goes in the
  * query string; the server accepts either.

@@ -7,9 +7,10 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useState } from "react";
-import { ClipboardCheck, Eye, EyeOff, Fingerprint, AlertCircle, Languages } from "lucide-react";
+import { ClipboardCheck, Eye, EyeOff, Smartphone, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { useTheme } from "../lib/theme.jsx";
 
 const REMEMBER_KEY = "mg_remember_v2";
 
@@ -20,8 +21,12 @@ const REMEMBER_KEY = "mg_remember_v2";
 try { localStorage.removeItem("mg_remember"); } catch { /* ignore */ }
 
 // Read remembered login (used to prefill the form). Stored only when the user
-// ticked "Keep me signed in". NOTE: this includes the password in localStorage,
-// which is fine for a school demo but is NOT production-safe.
+// ticked "Remember password". NOTE: this includes the password in plaintext in
+// localStorage — readable by anything with JS access to this origin (an XSS
+// bug, a malicious browser extension, physical device access). Restored at
+// the user's explicit request after being flagged; fine for a school demo on
+// a small trusted team, but NOT production-safe. Same disclosed-limitation
+// pattern used elsewhere in this codebase (e.g. the forgot-password flow).
 function readRemembered() {
   try {
     return JSON.parse(localStorage.getItem(REMEMBER_KEY)) || null;
@@ -35,11 +40,16 @@ function readRemembered() {
  * Split layout: SCCCI-Red brand panel + sign-in form.
  *
  * Login validates against the backend (POST /api/auth/login) using accounts
- * managed on the Account control page. If "Keep me signed in" was ticked, the
+ * managed on the Account control page. If "Remember password" was ticked, the
  * previous username + password are pre-filled so you can re-login in one click.
+ *
+ * Which UI you land in (desktop or mobile) is now an explicit choice — "Sign
+ * in" vs "Login for Mobile" — instead of guessed from screen width, so
+ * onSignIn is called with "desktop" or "mobile" (see App.jsx's handleSignIn).
  */
 export default function LoginPage({ onSignIn }) {
   const { lang, toggleLang, t } = useLang();
+  const { theme, toggleTheme } = useTheme();
   const remembered = readRemembered();
   const [staffId, setStaffId] = useState(remembered?.staffId || "");
   const [password, setPassword] = useState(remembered?.password || "");
@@ -47,8 +57,9 @@ export default function LoginPage({ onSignIn }) {
   const [keep, setKeep] = useState(!!remembered); // ticked only if a login was remembered
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [forgotOpen, setForgotOpen] = useState(false);
 
-  async function handleSignIn() {
+  async function submit(mode) {
     setError("");
 
     if (!staffId.trim() || !password) {
@@ -63,7 +74,7 @@ export default function LoginPage({ onSignIn }) {
         password,
       });
       if (token) {
-        setToken(token, keep); // keep = "Keep me signed in" checkbox
+        setToken(token, keep); // keep = "Remember password" checkbox
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
         // Remember (or forget) the login for one-click re-login next time.
         if (keep) {
@@ -72,7 +83,7 @@ export default function LoginPage({ onSignIn }) {
           localStorage.removeItem(REMEMBER_KEY);
         }
       }
-      onSignIn?.(); // success -> enter the app
+      onSignIn?.(mode); // success -> enter the app
     } catch (e) {
       // e.status comes from lib/api.js's toError; message-text matching broke
       // once the backend started sending real messages instead of bare codes.
@@ -88,23 +99,24 @@ export default function LoginPage({ onSignIn }) {
     }
   }
 
-  function handleWorkpass() {
-    setError("Workpass sign-in isn't set up in this build — please use your Staff ID and password.");
-  }
-
   function onKeyDown(e) {
-    if (e.key === "Enter") handleSignIn();
+    if (e.key === "Enter") submit("desktop");
   }
 
   return (
     <div style={S.wrap}>
-      <button
-        onClick={toggleLang}
-        className="btn btn-ghost"
-        style={{ position: "absolute", top: 20, right: 20, background: "#fff" }}
-      >
-        <Languages size={16} /> {lang === "en" ? "中文" : "English"}
-      </button>
+      <div className="row" style={{ position: "absolute", top: 20, right: 20, gap: 10 }}>
+        <button
+          onClick={toggleTheme}
+          className="btn btn-ghost"
+          aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
+        >
+          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+        </button>
+        <button onClick={toggleLang} className="btn btn-ghost">
+          <Languages size={16} /> {lang === "en" ? "中文" : "English"}
+        </button>
+      </div>
       <div className="login-card" style={S.card}>
         {/* Brand panel */}
         <div className="login-panel" style={S.brand}>
@@ -169,18 +181,22 @@ export default function LoginPage({ onSignIn }) {
           <div className="row between" style={{ margin: "14px 0 22px" }}>
             <label className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
               <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
-              {t("Keep me signed in")}
+              {t("Remember password")}
             </label>
-            <a href="#" style={{ color: "var(--scc-red)", fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+            <button
+              type="button"
+              onClick={() => setForgotOpen(true)}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 13, fontWeight: 600, textDecoration: "none" }}
+            >
               {t("Forgot password?")}
-            </a>
+            </button>
           </div>
 
-          <button className="btn btn-primary btn-block" onClick={handleSignIn} disabled={submitting}>
+          <button className="btn btn-primary btn-block" onClick={() => submit("desktop")} disabled={submitting}>
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
-          <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={handleWorkpass} disabled={submitting}>
-            <Fingerprint size={18} color="var(--scc-red)" /> {t("Sign in with Workpass")}
+          <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={() => submit("mobile")} disabled={submitting}>
+            <Smartphone size={18} color="var(--scc-red)" /> {t("Login for Mobile")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
@@ -188,6 +204,8 @@ export default function LoginPage({ onSignIn }) {
           </p>
         </div>
       </div>
+
+      {forgotOpen && <ForgotPasswordModal onClose={() => setForgotOpen(false)} />}
 
       <style>{`
         .login-card { display: grid; grid-template-columns: 1fr 1fr; }
@@ -200,12 +218,103 @@ export default function LoginPage({ onSignIn }) {
   );
 }
 
+/**
+ * "Forgot password" self-service reset — Username, New Password, Confirm
+ * New Password. Note: unlike everything else in this app, this route is
+ * intentionally reachable WITHOUT being signed in (that's the point of a
+ * forgot-password flow) and does not verify identity beyond the username
+ * existing — no old password, no email/OTP. That's a real gap for a public
+ * deployment (anyone who knows a username could take over that account);
+ * it's accepted here for this project's small trusted-team context. See the
+ * matching comment on resetPassword() in backend/data.js.
+ */
+function ForgotPasswordModal({ onClose }) {
+  const { t } = useLang();
+  const [username, setUsername] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function handleSubmit() {
+    setError("");
+    if (!username.trim() || !newPassword || !confirmPassword) {
+      setError("Please fill in every field.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords don't match.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await apiPost("/auth/reset-password", { username: username.trim(), newPassword });
+      setDone(true);
+    } catch (e) {
+      setError(e.message || "Couldn't reset that account. Check the username and try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={S.overlay} onClick={() => !submitting && onClose()}>
+      <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
+        <div className="row between" style={{ marginBottom: 18 }}>
+          <h2 style={{ fontSize: 18 }}>{t("Reset password")}</h2>
+          <button onClick={onClose} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+        </div>
+
+        {done ? (
+          <div style={{ textAlign: "center", padding: "12px 0" }}>
+            <CheckCircle2 size={32} color="var(--st-present)" style={{ marginBottom: 10 }} />
+            <p style={{ fontSize: 14, fontWeight: 600 }}>{t("Password reset. You can sign in with it now.")}</p>
+            <button className="btn btn-primary btn-block" style={{ marginTop: 18 }} onClick={onClose}>{t("Back to sign in")}</button>
+          </div>
+        ) : (
+          <>
+            <label className="field-label">{t("Username")}</label>
+            <input className="input mono" autoFocus value={username}
+              placeholder="e.g. staff_123"
+              onChange={(e) => setUsername(e.target.value)} />
+
+            <label className="field-label" style={{ marginTop: 14 }}>{t("New password")}</label>
+            <input className="input" type="password" value={newPassword}
+              placeholder="············"
+              onChange={(e) => setNewPassword(e.target.value)} />
+
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Confirm new password")}</label>
+            <input className="input" type="password" value={confirmPassword}
+              placeholder="············"
+              onChange={(e) => setConfirmPassword(e.target.value)} />
+            <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>{t("At least 8 characters, including a letter and a number.")}</p>
+
+            {error && (
+              <div style={S.error}>
+                <AlertCircle size={15} /> {t(error)}
+              </div>
+            )}
+
+            <div className="row" style={{ gap: 10, marginTop: 22, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>{t("Cancel")}</button>
+              <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting}>
+                {submitting ? t("Saving…") : t("Reset password")}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const S = {
   wrap: { minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "var(--bg)" },
   card: {
     width: "min(880px, 100%)",
     maxHeight: "calc(100vh - 48px)",
-    background: "#fff",
+    background: "var(--surface)",
     borderRadius: "var(--r-lg)",
     overflow: "hidden",
     overflowY: "auto",
@@ -234,4 +343,7 @@ const S = {
     background: "var(--st-missing-bg)", color: "var(--st-missing)",
     borderRadius: "var(--r-sm)", fontSize: 13, fontWeight: 600,
   },
+  overlay: { position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 },
+  modal: { width: "min(420px, 100%)", padding: 24, background: "var(--surface)" },
+  iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },
 };

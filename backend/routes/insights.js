@@ -22,10 +22,20 @@ const router = Router();
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// Fixed 3-section structure the model must follow, per language — the
+// frontend (AnalyticsPanel.jsx) bolds whatever text comes before the first
+// colon on each line, so keeping these exact label strings is what makes
+// the rendered output look like "Overall: ... / Missing: ... / Advice: ...".
+const SECTION_LABELS = {
+  en: { overall: "Overall", missing: "Missing", advice: "Advice" },
+  zh: { overall: "总体情况", missing: "缺席情况", advice: "建议" },
+};
+
 function buildPrompt(snapshot, lang) {
+  const labels = SECTION_LABELS[lang] || SECTION_LABELS.en;
   const languageInstruction =
     lang === "zh"
-      ? "Write your entire response in Simplified Chinese (简体中文)."
+      ? "Write your entire response in Simplified Chinese (简体中文), including the three labels below exactly as given."
       : "Write your entire response in English.";
 
   return `You are generating a short internal briefing for SCCCI delegation staff, based on a live attendance snapshot taken at ${snapshot.asOf}.
@@ -40,7 +50,12 @@ ${snapshot.coaches.map((c) => `- ${c.name}${c.city ? ` (${c.city})` : ""}: ${c.b
 Missing delegates (${snapshot.missing.length}):
 ${snapshot.missing.length === 0 ? "(none)" : snapshot.missing.map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""} · ${m.coach} · last seen: ${m.lastSeen || "unknown"}`).join("\n")}
 
-Write 3-5 short numbered points (one per line, formatted like "1. ...", "2. ...") covering: overall attendance health, which coach(es) need attention, and anything notable about VIP delegates. Each point should be a single, direct sentence and include the specific numbers it's based on (counts, coach names) rather than vague language. No markdown, no headers, no intro/closing sentence — just the numbered points. Be direct and factual — this is read by busy staff, not a general audience. ${languageInstruction}`;
+Write EXACTLY 3 numbered points, one per line, in this fixed structure:
+1. ${labels.overall}: overall attendance health — the specific numbers present/missing/unassigned out of the total, and whether that's on track for departure.
+2. ${labels.missing}: which delegates and/or coaches are missing, naming the ones with the most missing (coach names, delegate names) and flagging any VIP delegates among them.
+3. ${labels.advice}: concrete next actions staff should take right now — e.g. which coach's guide to contact first, whether to call a delegate directly using their last-seen location, or escalate a VIP delegate's absence.
+
+Each point must start with "N. ${"{Label}"}: " using the exact label text given above, then one or two direct sentences with the specific numbers/names it's based on — no vague language. No markdown, no headers, no intro/closing sentence — just the 3 numbered points. Be direct and factual — this is read by busy staff, not a general audience. ${languageInstruction}`;
 }
 
 /** Try a local Ollama server. Returns the generated text, or null if Ollama isn't reachable. */

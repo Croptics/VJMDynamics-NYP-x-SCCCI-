@@ -23,11 +23,13 @@ import {
   X,
   BarChart3,
   ChevronRight,
+  MapPin,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
 import DelegateAvatar from "../components/DelegateAvatar.jsx";
+import DelegateLocationMap from "../components/DelegateLocationMap.jsx";
 import { useLang } from "../lib/i18n.jsx";
 
 /**
@@ -52,7 +54,7 @@ import { useLang } from "../lib/i18n.jsx";
 const TRIP_ID = "t-1";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastSeen: "" };
+const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastSeen: "", lastLocation: "" };
 
 export default function DashboardPage() {
   const perms = getPermissions();
@@ -77,7 +79,6 @@ export default function DashboardPage() {
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
   const [showAllDelegates, setShowAllDelegates] = useState(false);
   const [showAllCoaches, setShowAllCoaches] = useState(false);
-  const [showAllHistory, setShowAllHistory] = useState(false);
   const [history, setHistory] = useState([]);
 
 
@@ -90,6 +91,7 @@ export default function DashboardPage() {
   const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoErr, setPhotoErr] = useState("");
+  const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -180,6 +182,7 @@ export default function DashboardPage() {
       status: d.status || "PRESENT",
       vip: !!d.vip,
       lastSeen: d.lastSeen || "",
+      lastLocation: d.lastLocation || "",
     });
     setEditingPhotoUrl(d.photoUrl || null);
     setFormErr("");
@@ -225,6 +228,13 @@ export default function DashboardPage() {
       setFormErr("Please select a coach, or set status to Unassigned.");
       return;
     }
+    // A last known location is required once a delegate is marked Missing —
+    // it's the whole point of the field (finding them), so it can't be left
+    // blank the way "Last seen" (a free-text note) can.
+    if (form.status === "MISSING" && !form.lastLocation.trim()) {
+      setFormErr("Please enter a last known location for a missing delegate.");
+      return;
+    }
     setFormErr("");
     setSaving(true);
     const payload = {
@@ -232,7 +242,11 @@ export default function DashboardPage() {
       coachId: form.status === "UNASSIGNED" ? null : form.coachId || null,
       status: form.status,
       vip: form.vip,
-      lastSeen: form.lastSeen.trim(),
+      // Last seen / location only ever apply while a delegate is missing —
+      // cleared on save otherwise so switching status away from Missing
+      // doesn't silently carry stale data forward into a later Missing spell.
+      lastSeen: form.status === "MISSING" ? form.lastSeen.trim() : "",
+      lastLocation: form.status === "MISSING" ? form.lastLocation.trim() : "",
     };
     try {
       if (editingId) {
@@ -342,7 +356,6 @@ export default function DashboardPage() {
 
   const TOP_N = 10;
   const COACH_TOP_N = 4;
-  const HISTORY_TOP_N = 8;
   const openCoachBoard = () => { if (currentTripUuid) navigate(`/trips?tripId=${currentTripUuid}`); };
 
   return (
@@ -466,7 +479,7 @@ export default function DashboardPage() {
       {/* ---- Coach status + Live activity -------------------------------- */}
       {data && (
         <div className="dash-two-col" style={S.twoCol}>
-          <div className="card" style={{ padding: 22 }}>
+          <div className="card" style={{ padding: 22, display: "flex", flexDirection: "column" }}>
             <div className="row between" style={{ marginBottom: 16 }}>
               <h2 style={{ fontSize: 16 }}>{t("Coach status")}</h2>
               <span className="muted" style={{ fontSize: 13 }}>{coaches.length} {t("coaches")}</span>
@@ -481,7 +494,7 @@ export default function DashboardPage() {
               </div>
             )}
             {coaches.length > COACH_TOP_N && (
-              <div style={{ marginTop: 16, textAlign: "center" }}>
+              <div style={{ marginTop: "auto", paddingTop: 16, textAlign: "center" }}>
                 <button className="btn btn-ghost" onClick={() => setShowAllCoaches((v) => !v)}>
                   {showAllCoaches ? t("Show less") : `${t("Show all")} ${coaches.length}`}
                 </button>
@@ -489,7 +502,7 @@ export default function DashboardPage() {
             )}
           </div>
 
-          <div className="card" style={{ padding: 22 }}>
+          <div className="card" style={{ padding: 22, display: "flex", flexDirection: "column" }}>
             <div className="row between" style={{ marginBottom: 16 }}>
               <div className="row" style={{ gap: 8 }}>
                 <Activity size={18} color="var(--ink-3)" />
@@ -506,33 +519,24 @@ export default function DashboardPage() {
                 {t("No activity yet. Add or update a delegate to see events here.")}
               </div>
             ) : (
-              <>
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  {(showAllHistory ? history : history.slice(0, HISTORY_TOP_N)).map((a) => (
-                    <div key={a.id} className="row between" style={{ gap: 12, alignItems: "flex-start" }}>
-                      <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
-                        <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
-                        <div>
-                          <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
-                          <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
-                        </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: 360, overflowY: "auto", paddingRight: 4 }}>
+                {history.map((a) => (
+                  <div key={a.id} className="row between" style={{ gap: 12, alignItems: "flex-start", flexShrink: 0 }}>
+                    <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+                      <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
+                      <div>
+                        <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
                       </div>
-                      {perms.manageDelegates && (
-                        <button onClick={() => removeHistoryEntry(a.id)} aria-label="Delete" style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
-                          <Trash2 size={14} />
-                        </button>
-                      )}
                     </div>
-                  ))}
-                </div>
-                {history.length > HISTORY_TOP_N && (
-                  <div style={{ marginTop: 16, textAlign: "center" }}>
-                    <button className="btn btn-ghost" onClick={() => setShowAllHistory((v) => !v)}>
-                      {showAllHistory ? t("Show less") : `${t("Show all")} ${history.length}`}
-                    </button>
+                    {perms.manageDelegates && (
+                      <button onClick={() => removeHistoryEntry(a.id)} aria-label="Delete" style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
-                )}
-              </>
+                ))}
+              </div>
             )}
           </div>
         </div>
@@ -614,23 +618,36 @@ export default function DashboardPage() {
                     </td>
                     <td>{coachName(d.coachId)}</td>
                     <td><StatusBadge state={d.status} /></td>
-                    <td className="muted">{d.lastSeen || "—"}</td>
+                    <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>
                     <td className="muted">{fmtUploadDate(d.createdAt)}</td>
                     <td>
-                      {perms.manageDelegates ? (
-                        <div className="row" style={{ gap: 6 }}>
-                          <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
-                            style={S.iconBtn}>
-                            <Pencil size={16} />
-                          </button>
-                          <button onClick={() => remove(d)} aria-label={`${t("Delete")} ${d.name}`}
-                            style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="muted" style={{ fontSize: 12 }}>—</span>
-                      )}
+                      <div className="row" style={{ gap: 6 }}>
+                        <button
+                          onClick={() => d.status === "MISSING" && setMapDelegate(d)}
+                          disabled={d.status !== "MISSING"}
+                          aria-label={`${t("View location")} — ${d.name}`}
+                          title={d.status === "MISSING" ? t("View location") : t("Only available while a delegate is Missing")}
+                          style={{
+                            ...S.iconBtn,
+                            color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
+                            opacity: d.status === "MISSING" ? 1 : 0.35,
+                            cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
+                          }}>
+                          <MapPin size={16} />
+                        </button>
+                        {perms.manageDelegates && (
+                          <>
+                            <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
+                              style={S.iconBtn}>
+                              <Pencil size={16} />
+                            </button>
+                            <button onClick={() => remove(d)} aria-label={`${t("Delete")} ${d.name}`}
+                              style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+                              <Trash2 size={16} />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -720,10 +737,26 @@ export default function DashboardPage() {
               ))}
             </select>
 
-            <label className="field-label" style={{ marginTop: 14 }}>{t("Last seen (optional)")}</label>
-            <input className="input" value={form.lastSeen}
-              placeholder={t("e.g. Lobby · 14:08")}
-              onChange={(e) => setForm({ ...form, lastSeen: e.target.value })} />
+            {form.status === "MISSING" && (
+              <>
+                <label className="field-label" style={{ marginTop: 14 }}>{t("Last seen (optional)")}</label>
+                <input className="input" value={form.lastSeen}
+                  placeholder={t("e.g. Lobby · 14:08")}
+                  onChange={(e) => setForm({ ...form, lastSeen: e.target.value })} />
+
+                <label className="field-label" style={{ marginTop: 14 }}>
+                  {t("Last known location")} <span className="muted">({t("required")})</span>
+                </label>
+                <input className="input" value={form.lastLocation}
+                  placeholder={t("e.g. Novotel Beijing Sanyuan, Lobby")}
+                  onChange={(e) => setForm({ ...form, lastLocation: e.target.value })} />
+                {form.lastLocation.trim() && (
+                  <div style={{ marginTop: 8 }}>
+                    <DelegateLocationMap location={form.lastLocation.trim()} height={160} />
+                  </div>
+                )}
+              </>
+            )}
 
             <label className="row" style={{ gap: 8, marginTop: 16, fontSize: 14, cursor: "pointer" }}>
               <input type="checkbox" checked={form.vip}
@@ -753,6 +786,29 @@ export default function DashboardPage() {
         </div>
       )}
       </>
+      )}
+
+      {mapDelegate && (
+        <div style={S.overlay} onClick={() => setMapDelegate(null)}>
+          <div className="card" style={{ ...S.modal, width: "min(480px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 14 }}>
+              <div>
+                <h2 style={{ fontSize: 16 }}>{mapDelegate.name}</h2>
+                <p className="muted" style={{ fontSize: 12, marginTop: 2 }}>{mapDelegate.lastLocation}</p>
+              </div>
+              <button onClick={() => setMapDelegate(null)} style={S.iconBtn} aria-label={t("Close")}>
+                <X size={18} />
+              </button>
+            </div>
+            {mapDelegate.lastLocation ? (
+              <DelegateLocationMap location={mapDelegate.lastLocation} height={280} />
+            ) : (
+              <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
+                {t("No location has been recorded for this delegate yet.")}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
@@ -876,5 +932,5 @@ const S = {
   fill: { height: "100%", borderRadius: 999, transition: "width 0.4s ease" },
   iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },
   overlay: { position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 },
-  modal: { width: "min(440px, 100%)", padding: 24, background: "var(--surface)" },
+  modal: { width: "min(440px, 100%)", maxHeight: "calc(100vh - 48px)", overflowY: "auto", padding: 24, background: "var(--surface)" },
 };

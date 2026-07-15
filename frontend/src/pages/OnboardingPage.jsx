@@ -22,6 +22,8 @@ import {
   exportRowsCsv,
 } from "../lib/claudeParse.js";
 import { useLang } from "../lib/i18n.jsx";
+import BoardingPassesView from "./BoardingPassesView.jsx";
+import ScanToBoardView from "./ScanToBoardView.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -70,6 +72,7 @@ export default function OnboardingPage() {
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [context, setContext] = useState({ existingNames: [], coaches: [] });
+  const [view, setView] = useState("parse"); // parse | passes | scan
 
   /* ---- duplicate set (names already in the selected trip) --------------- */
   const existingSet = useMemo(
@@ -212,6 +215,21 @@ export default function OnboardingPage() {
       <div className="page-eyebrow">{t("Onboarding")}</div>
       <h1 className="page-title">{t("Document parsing")}</h1>
       <p className="page-sub">{t("Drop a delegate directory, attendee list, or passport scan — AI reads it and builds your delegate list.")}</p>
+
+      {/* Tabs */}
+      <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
+        {[["parse", "Document parsing"], ["passes", "Boarding passes"], ["scan", "Scan to board"]].map(([k, label]) => (
+          <button key={k} onClick={() => setView(k)} className="btn btn-ghost"
+            style={{ borderRadius: 0, borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
+            {t(label)}
+          </button>
+        ))}
+      </div>
+
+      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} /></div>}
+      {view === "scan" && <div style={{ marginTop: 20 }}><ScanToBoardView tripId={tripId} /></div>}
+
+      {view === "parse" && (<>
 
       {/* Upload + job status */}
       <div className="card" style={{ padding: 24, marginTop: 20 }}>
@@ -402,7 +420,7 @@ export default function OnboardingPage() {
                         </button>
                       </td>
                       <td>
-                        <select className="select" style={{ padding: "6px 8px", minWidth: 110 }}
+                        <select className="select" style={{ padding: "6px 28px 6px 8px", minWidth: 110 }}
                           value={r.coachId || ""} onChange={(e) => setCoach(r._key, e.target.value)}>
                           <option value="">{t("—")}</option>
                           {context.coaches.map((c) => (
@@ -425,6 +443,8 @@ export default function OnboardingPage() {
           </div>
         </div>
       )}
+
+      </>)}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
     </div>

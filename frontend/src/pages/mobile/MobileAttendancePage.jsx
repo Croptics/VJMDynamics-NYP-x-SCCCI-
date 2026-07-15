@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search } from "lucide-react";
+import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X } from "lucide-react";
 import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import DelegateAvatar from "../../components/DelegateAvatar.jsx";
+import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 
 const TRIP_ID = "t-1";
 const FILTERS = ["ALL", "PRESENT", "MISSING", "UNASSIGNED"];
@@ -38,6 +39,7 @@ export default function MobileAttendancePage() {
   });
   const [rowError, setRowError] = useState(null); // { id, message }
   const [savingId, setSavingId] = useState(null);
+  const [mapDelegate, setMapDelegate] = useState(null);
 
   useEffect(() => {
     load();
@@ -157,7 +159,7 @@ export default function MobileAttendancePage() {
             {canEdit ? (
               <select
                 className="select"
-                style={{ width: "auto", padding: "4px 8px", fontSize: 12.5, fontWeight: 600 }}
+                style={{ width: "auto", padding: "4px 28px 4px 8px", fontSize: 12.5, fontWeight: 600 }}
                 value={d.status}
                 disabled={savingId === d.id}
                 onChange={(e) => changeStatus(d, e.target.value)}
@@ -170,14 +172,53 @@ export default function MobileAttendancePage() {
               <StatusBadge state={d.status} />
             )}
           </div>
-          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-            {coachName(d.coachId)} · {t("last seen")} {d.lastSeen || "—"}
+          <div className="row between" style={{ marginTop: 6 }}>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {coachName(d.coachId)}
+              {d.status === "MISSING" && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+            </div>
+            <button
+              onClick={() => d.status === "MISSING" && setMapDelegate(d)}
+              disabled={d.status !== "MISSING"}
+              aria-label={`${t("View location")} — ${d.name}`}
+              style={{
+                background: "none", border: "none", padding: 0, display: "flex", flexShrink: 0,
+                color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
+                opacity: d.status === "MISSING" ? 1 : 0.35,
+                cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
+              }}
+            >
+              <MapPin size={16} />
+            </button>
           </div>
           {rowError?.id === d.id && (
             <div style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(rowError.message)}</div>
           )}
         </div>
       ))}
+
+      {mapDelegate && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }} onClick={() => setMapDelegate(null)}>
+          <div className="card" style={{ width: "min(420px, 100%)", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 12 }}>
+              <div>
+                <h2 style={{ fontSize: 15 }}>{mapDelegate.name}</h2>
+                <p className="muted" style={{ fontSize: 12, marginTop: 2 }}>{mapDelegate.lastLocation}</p>
+              </div>
+              <button onClick={() => setMapDelegate(null)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+                <X size={18} />
+              </button>
+            </div>
+            {mapDelegate.lastLocation ? (
+              <DelegateLocationMap location={mapDelegate.lastLocation} height={220} />
+            ) : (
+              <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
+                {t("No location has been recorded for this delegate yet.")}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
     </div>

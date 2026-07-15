@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import { getToken, clearToken, getUser, getPermissions } from "./lib/api.js";
@@ -23,14 +23,21 @@ import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
 import MobileAssistantPage from "./pages/mobile/MobileAssistantPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 
-// Same device guess used by handleSignIn() below — a phone-sized viewport
-// goes to the mobile section, anything wider goes to the desktop dashboard.
-// Also used for the bare "/" route so an ALREADY-authenticated visit (token
-// already stored, e.g. "keep me signed in" on a phone) lands in the right
-// place too — not just a brand-new login, which is the only place this
-// device check used to run.
+// Which UI (desktop or mobile) to land in — set explicitly by which button
+// the user clicked on the login page ("Sign in" vs "Login for Mobile"), NOT
+// guessed from screen width. Persisted so an ALREADY-authenticated visit to
+// the bare "/" (token already stored, e.g. "keep me signed in") lands in the
+// same place chosen at login, not just a brand-new sign-in.
+const UI_MODE_KEY = "mg_ui_mode";
+
+function getUiMode() {
+  try { return localStorage.getItem(UI_MODE_KEY) || "desktop"; } catch { return "desktop"; }
+}
+function setUiMode(mode) {
+  try { localStorage.setItem(UI_MODE_KEY, mode); } catch { /* ignore */ }
+}
 function pickHomeRoute() {
-  return window.innerWidth <= 720 ? "/mobile" : "/dashboard";
+  return getUiMode() === "mobile" ? "/mobile" : "/dashboard";
 }
 
 /**
@@ -44,31 +51,32 @@ export default function App() {
   const [authed, setAuthed] = useState(() => !!getToken());
   const location = useLocation();
   const navigate = useNavigate();
-  // Remembers whether you were in the mobile section when you logged out, so
-  // signing back in returns you to /mobile instead of always landing on the
-  // desktop /dashboard.
-  const wasMobileRef = useRef(false);
 
   const handleLogout = () => {
-    wasMobileRef.current = location.pathname.startsWith("/mobile");
     clearToken();
     setAuthed(false);
   };
 
-  const handleSignIn = () => {
+  // `mode` is "desktop" or "mobile" — whichever button the user clicked on
+  // the login page. Persisted (see setUiMode) so it's remembered next time
+  // too, not just for this sign-in.
+  const handleSignIn = (mode = "desktop") => {
     setAuthed(true);
+    setUiMode(mode);
     // If we got bounced to /login from a specific URL (e.g. someone opened
     // /mobile/profile while logged out, or logged out while on it), go back
-    // to exactly that page.
+    // to exactly that page — but ONLY if it's in the same namespace as the
+    // mode just chosen. Otherwise this would silently override an explicit
+    // "Login for Mobile" click: visiting the bare "/" while logged out bounces
+    // here with from="/", which isn't a mobile path, so it must not win over
+    // the button the user just clicked.
     const from = location.state?.from;
-    if (from && from !== "/login") {
+    const fromMatchesMode = from && from !== "/login" && from.startsWith("/mobile") === (mode === "mobile");
+    if (fromMatchesMode) {
       navigate(from, { replace: true });
       return;
     }
-    // Otherwise (a brand-new session that opened straight on /login — the
-    // common case when a teammate visits the site fresh on their phone) fall
-    // back to a device guess.
-    navigate(wasMobileRef.current ? "/mobile" : pickHomeRoute(), { replace: true });
+    navigate(mode === "mobile" ? "/mobile" : "/dashboard", { replace: true });
   };
 
   if (!authed) {

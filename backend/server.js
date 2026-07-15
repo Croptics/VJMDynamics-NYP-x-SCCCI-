@@ -42,6 +42,7 @@ import {
   deleteAllActivity,
   getAccountByUsername,
   accountPermissions,
+  resetPassword,
   listAccounts,
   createAccount,
   updateAccount,
@@ -121,6 +122,26 @@ app.post("/api/auth/login", wrap(async (req, res) => {
     username: acc.username,
     permissions: accountPermissions(acc),
   });
+}));
+
+// "Forgot password" self-service reset. Public (no token — you don't have a
+// valid session, that's the point), username + new password only. See the
+// comment on resetPassword() in data.js for why this is intentionally simple
+// and not safe as-is for a real public deployment.
+app.post("/api/auth/reset-password", wrap(async (req, res) => {
+  const { username, newPassword } = req.body || {};
+  if (!username || !newPassword) {
+    return res.status(400).json({ error: "MISSING_FIELDS", message: "Username and new password are required." });
+  }
+  const result = await resetPassword(username, newPassword);
+  if (result.error) {
+    const status = result.error === "WEAK_PASSWORD" ? 400 : 400;
+    return res.status(status).json({
+      error: result.error,
+      message: result.message || "Couldn't reset that account. Check the username and try again.",
+    });
+  }
+  res.json({ ok: true });
 }));
 
 /**
@@ -393,6 +414,9 @@ app.use(exceptionsRouter);
 
 import vanceRouter from "./routes/vance.js";
 app.use(vanceRouter);
+
+import vimalRouter from "./routes/vimal.js";
+app.use(vimalRouter);
 
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
