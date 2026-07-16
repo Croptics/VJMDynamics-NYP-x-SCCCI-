@@ -14,33 +14,58 @@
  *   - Styling uses ONLY tokens.css variables; the one <style> block is
  *     namespaced `jayden-*` so it can't collide with Vimal's `vimal-*` rules.
  *
- *  BADGE FORMAT (what the two generated QR codes encode):
- *    {"sys":"MUSTERGO","v":1,"typ":"DELEGATE_BADGE",
- *     "tripId":"t-1","delegateId":"d-1","name":"Lim Wei Jie","sig":"…"}
- *  Anything that is not this shape → "QR code invalid".
+ *  TWO BADGE FORMATS ARE ACCEPTED:
+ *
+ *   1. Self-describing badge (the qr-test-codes/ pair) — carries the delegate
+ *      inline, registered via Jayden's POST /api/checkins/qr:
+ *        {"sys":"MUSTERGO","v":1,"typ":"DELEGATE_BADGE",
+ *         "tripId":"t-1","delegateId":"d-1","name":"Lim Wei Jie","sig":"…"}
+ *
+ *   2. Boarding pass (Vance's Documents → Boarding passes) — encodes only the
+ *      delegate's opaque qr_code, e.g. "MG-A1B2C3D4". The code is meaningless
+ *      on its own, so it is resolved server-side by Vance's
+ *      POST /api/onboarding/checkin, which owns the qr_code → delegate lookup.
+ *
+ *  Both paths end with the delegate flipped to PRESENT and a 'QR' row in
+ *  check_in_logs. Anything else → "QR code invalid".
  * ============================================================================= */
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import jsQR from "jsqr";
 import { QrCode, CheckCircle2, AlertTriangle, Keyboard, RotateCcw } from "lucide-react";
 import { checkInByQR } from "../lib/exceptionsApi.js";
+import { qrCheckin } from "../lib/claudeParse.js";
 
 const RESULT_MS = 3200;          // how long a result card stays up
 const RESCAN_COOLDOWN_MS = 3500; // ignore the same code re-appearing this soon
 const SCAN_INTERVAL_MS = 200;    // decode cadence
 
-/* Validate a decoded string as a MusterGo delegate badge. Pure + exported so
- * it can be unit-tested independently of the camera. */
+/* A boarding-pass code as minted by newQrCode() in backend/routes/vance.js:
+ * "MG-" + 8 hex chars. Matched case-insensitively so a hand-typed code still
+ * works; it is upper-cased before lookup because that is how it is stored. */
+const BADGE_CODE_RE = /^MG-[0-9A-F]{8}$/i;
+
+/* Validate a decoded string as a MusterGo delegate badge, in either accepted
+ * format (see header). Pure + exported so it can be unit-tested independently
+ * of the camera. `kind` tells register() which check-in route resolves it. */
 export function parseBadge(raw) {
   if (typeof raw !== "string" || !raw.trim()) return { ok: false };
+  const text = raw.trim();
+
+  // Vance's boarding pass: the QR holds nothing but the delegate's qr_code.
+  if (BADGE_CODE_RE.test(text)) {
+    return { ok: true, kind: "BADGE_CODE", code: text.toUpperCase(), name: null };
+  }
+
   let data;
-  try { data = JSON.parse(raw.trim()); } catch { return { ok: false }; }
+  try { data = JSON.parse(text); } catch { return { ok: false }; }
   if (!data || typeof data !== "object") return { ok: false };
   if (data.sys !== "MUSTERGO" || data.typ !== "DELEGATE_BADGE") return { ok: false };
   if (typeof data.tripId !== "string" || !data.tripId) return { ok: false };
   if (typeof data.delegateId !== "string" || !data.delegateId) return { ok: false };
   return {
     ok: true,
+    kind: "MUSTERGO",
     tripId: data.tripId,
     delegateId: data.delegateId,
     name: typeof data.name === "string" ? data.name : null,
@@ -112,12 +137,22 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     busyRef.current = true;
     setSubmitting(true);
     try {
-      const res = await checkInByQR({ tripId, delegateId: badge.delegateId, coachId });
+      let name, duplicate;
+      if (badge.kind === "BADGE_CODE") {
+        // Opaque code — only Vance's route can map it to a delegate.
+        const res = await qrCheckin({ code: badge.code, tripId, coachId: coachId || undefined });
+        name = res.delegate?.name || badge.code;
+        duplicate = res.alreadyBoarded;
+      } else {
+        const res = await checkInByQR({ tripId, delegateId: badge.delegateId, coachId });
+        name = res.name || badge.name || badge.delegateId;
+        duplicate = res.duplicate;
+      }
       playTone(true);
       setResult({
         kind: "success",
         title: "Attendance registered",
-        sub: `${res.name || badge.name || badge.delegateId}${res.duplicate ? " · already checked in" : " · marked present"}`,
+        sub: `${name}${duplicate ? " · already checked in" : " · marked present"}`,
       });
       onCheckedIn?.();
     } catch (e) {
@@ -309,10 +344,10 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
       {/* Manual entry (also handy on a laptop with no webcam during a demo) */}
       {(showManual || camState === "error") && !result && (
         <div style={S.manualWrap}>
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter badge contents</div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter badge code or contents</div>
           <input
             className="input" autoFocus value={manualText}
-            placeholder='{"sys":"MUSTERGO",…}'
+            placeholder='MG-A1B2C3D4  ·  or  {"sys":"MUSTERGO",…}'
             onChange={(e) => setManualText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submitManual(); }}
           />
