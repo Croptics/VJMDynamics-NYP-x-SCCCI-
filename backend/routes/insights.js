@@ -55,7 +55,7 @@ Write EXACTLY 3 numbered points, one per line, in this fixed structure:
 2. ${labels.missing}: which delegates and/or coaches are missing, naming the ones with the most missing (coach names, delegate names) and flagging any VIP delegates among them.
 3. ${labels.advice}: concrete next actions staff should take right now — e.g. which coach's guide to contact first, whether to call a delegate directly using their last-seen location, or escalate a VIP delegate's absence.
 
-Each point must start with "N. ${"{Label}"}: " using the exact label text given above, then one or two direct sentences with the specific numbers/names it's based on — no vague language. No markdown, no headers, no intro/closing sentence — just the 3 numbered points. Be direct and factual — this is read by busy staff, not a general audience. ${languageInstruction}`;
+Each point must start with its real number (1, 2, or 3), a period, a space, the exact label text given above, then a colon — for example the first point must literally begin "1. ${labels.overall}: " (substitute the real digit and label for points 2 and 3 the same way; never write the letter N or the word "Label" — those are not real output). Follow the label with one or two direct sentences containing the specific numbers/names it's based on — no vague language. No markdown, no headers, no intro/closing sentence — just the 3 numbered points. Be direct and factual — this is read by busy staff, not a general audience. ${languageInstruction}`;
 }
 
 /** Try a local Ollama server. Returns the generated text, or null if Ollama isn't reachable. */

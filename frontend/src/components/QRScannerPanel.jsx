@@ -8,43 +8,41 @@
  *     scanMode === "qr", so it never runs at the same time as Vimal's face
  *     camera. Nothing in his face / voice / low-light pipeline is touched.
  *   - It decodes with jsQR on an off-DOM canvas (no frame is persisted).
- *   - A valid MusterGo delegate badge is registered through Jayden's own
- *     backend route POST /api/checkins/qr (method = 'QR'); the delegate flips
- *     to PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
+ *   - A scanned badge is registered through Vance's boarding-pass endpoint
+ *     (POST /api/onboarding/checkin via qrCheckin()); the delegate flips to
+ *     PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
  *   - Styling uses ONLY tokens.css variables; the one <style> block is
  *     namespaced `jayden-*` so it can't collide with Vimal's `vimal-*` rules.
  *
- *  BADGE FORMAT (what the two generated QR codes encode):
- *    {"sys":"MUSTERGO","v":1,"typ":"DELEGATE_BADGE",
- *     "tripId":"t-1","delegateId":"d-1","name":"Lim Wei Jie","sig":"…"}
- *  Anything that is not this shape → "QR code invalid".
+ *  BADGE FORMAT: originally this scanner expected its own JSON payload
+ *  ({"sys":"MUSTERGO","typ":"DELEGATE_BADGE","delegateId":"d-1",…}), but
+ *  nothing in the app actually printed that shape — the only real badge
+ *  source is Vance's "Boarding passes" tab (OnboardingPage.jsx), which
+ *  encodes the delegate's plain `qr_code` string (e.g. "MG-86B620A4") from
+ *  the shared `delegates` table. Rather than keep two incompatible QR
+ *  systems, this scanner now reads that same plain code and resolves it the
+ *  same way ScanToBoardView.jsx does — see QR_BADGE_MISMATCH.md for the
+ *  history of why this changed. The old JSON badge / qr-test-codes/ images
+ *  no longer scan successfully; re-print/re-share badges from "Boarding
+ *  passes" instead.
  * ============================================================================= */
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import jsQR from "jsqr";
 import { QrCode, CheckCircle2, AlertTriangle, Keyboard, RotateCcw } from "lucide-react";
-import { checkInByQR } from "../lib/exceptionsApi.js";
+import { qrCheckin } from "../lib/claudeParse.js";
 
 const RESULT_MS = 3200;          // how long a result card stays up
 const RESCAN_COOLDOWN_MS = 3500; // ignore the same code re-appearing this soon
 const SCAN_INTERVAL_MS = 200;    // decode cadence
 
-/* Validate a decoded string as a MusterGo delegate badge. Pure + exported so
- * it can be unit-tested independently of the camera. */
+/* A "badge" is just the delegate's plain qr_code string (see the file banner
+ * above) — trimmed and non-empty is the only client-side shape check;
+ * whether it actually matches a delegate is resolved server-side. Kept as a
+ * named export (not inlined) so it stays independently testable like before. */
 export function parseBadge(raw) {
   if (typeof raw !== "string" || !raw.trim()) return { ok: false };
-  let data;
-  try { data = JSON.parse(raw.trim()); } catch { return { ok: false }; }
-  if (!data || typeof data !== "object") return { ok: false };
-  if (data.sys !== "MUSTERGO" || data.typ !== "DELEGATE_BADGE") return { ok: false };
-  if (typeof data.tripId !== "string" || !data.tripId) return { ok: false };
-  if (typeof data.delegateId !== "string" || !data.delegateId) return { ok: false };
-  return {
-    ok: true,
-    tripId: data.tripId,
-    delegateId: data.delegateId,
-    name: typeof data.name === "string" ? data.name : null,
-  };
+  return { ok: true, code: raw.trim() };
 }
 
 /* Short confirmation / error tone via Web Audio — mirrors the scanner's audio
@@ -106,27 +104,30 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     resultTimerRef.current = setTimeout(() => setResult(null), RESULT_MS);
   }, []);
 
-  /* Register a valid badge, or surface a clear failure. */
+  /* Register a scanned/typed code, or surface a clear failure. */
   const register = useCallback(async (badge) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setSubmitting(true);
     try {
-      const res = await checkInByQR({ tripId, delegateId: badge.delegateId, coachId });
+      const res = await qrCheckin({ code: badge.code, tripId, coachId });
       playTone(true);
       setResult({
         kind: "success",
         title: "Attendance registered",
-        sub: `${res.name || badge.name || badge.delegateId}${res.duplicate ? " · already checked in" : " · marked present"}`,
+        sub: `${res.delegate?.name || badge.code}${res.alreadyBoarded ? " · already checked in" : " · marked present"}`,
       });
       onCheckedIn?.();
     } catch (e) {
       playTone(false);
+      // Log the exact bytes jsQR handed us — invaluable if a real badge is
+      // ever mis-scanned (partial read, wrong QR, stale/reprinted code, etc.).
+      console.debug("[QRScannerPanel] rejected scan:", JSON.stringify(badge.code));
       const msg =
-        e.status === 404 ? "Badge not recognised on this trip."
+        e.status === 404 ? "That badge isn't recognised. Make sure it's from the Boarding passes tab."
         : e.status === 401 ? "Session expired — sign in again."
         : e.message || "Check-in failed — retry, or use Manual.";
-      setResult({ kind: "error", title: "Check-in failed", sub: msg });
+      setResult({ kind: "error", title: "QR code invalid", sub: msg });
     } finally {
       setSubmitting(false);
       busyRef.current = false;
@@ -141,22 +142,9 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     lastScanRef.current = { value: raw, at: now };
 
     const badge = parseBadge(raw);
-    if (!badge.ok) {
-      playTone(false);
-      // Log the exact bytes jsQR handed us — invaluable if a real badge is
-      // ever mis-scanned (partial read, wrong QR, stale code, etc.).
-      console.debug("[QRScannerPanel] rejected scan:", JSON.stringify(raw));
-      const preview = raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
-      setResult({
-        kind: "error",
-        title: "QR code invalid",
-        sub: `Not a MusterGo delegate badge. Read: "${preview}"`,
-      });
-      clearResultSoon();
-      return;
-    }
+    if (!badge.ok) return; // empty scan noise — nothing worth showing an error for
     register(badge);
-  }, [register, clearResultSoon]);
+  }, [register]);
 
   /* Camera + decode loop. Runs only while this component is mounted (i.e. only
    * in QR mode), and fully tears down on unmount. */
@@ -312,7 +300,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
           <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter badge contents</div>
           <input
             className="input" autoFocus value={manualText}
-            placeholder='{"sys":"MUSTERGO",…}'
+            placeholder="e.g. MG-86B620A4"
             onChange={(e) => setManualText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submitManual(); }}
           />

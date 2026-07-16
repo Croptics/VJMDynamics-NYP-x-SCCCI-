@@ -765,13 +765,26 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
 router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const code = (req.body?.code || "").toString().trim();
-  const tripId = (req.body?.tripId || "t-1").toString();
+  const requestedTripId = (req.body?.tripId || "t-1").toString();
   const coachOverride = req.body?.coachId || null;
   if (!code) return res.status(400).json({ error: "NO_CODE", message: "No badge code provided." });
 
-  const d = await q(`SELECT id, name, "coachId" AS coach_id, status FROM delegates WHERE qr_code = $1`, [code]);
+  // Resolve the delegate by their OWN unique qr_code, and join through to their
+  // real trip (trips.id string, via the delegate's trip_id uuid). We log the
+  // check-in against THAT trip rather than the client-supplied tripId, so a
+  // mistyped/mismatched tripId in the request body can't file a check-in
+  // against the wrong trip. Base-pool delegates (trip_id NULL) have no resolved
+  // trip, so they fall back to the requested tripId (defaulting "t-1").
+  const d = await q(
+    `SELECT dg.id, dg.name, dg."coachId" AS coach_id, dg.status, t.id AS trip_str
+       FROM delegates dg
+       LEFT JOIN trips t ON t.uuid_id = dg.trip_id
+      WHERE dg.qr_code = $1`,
+    [code]
+  );
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
+  const tripId = del.trip_str || requestedTripId;
   const alreadyBoarded = del.status === "PRESENT";
   const coachId = coachOverride || del.coach_id || null;
   const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });

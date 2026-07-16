@@ -89,6 +89,8 @@ export default function LoginPage({ onSignIn }) {
       // once the backend started sending real messages instead of bare codes.
       if (e?.status === 401) {
         setError("Incorrect Staff ID or password.");
+      } else if (e?.status === 429) {
+        setError("Too many attempts. Please wait a few minutes and try again.");
       } else if (e?.status === 400) {
         setError("Please enter your Staff ID and password.");
       } else {
@@ -252,7 +254,11 @@ function ForgotPasswordModal({ onClose }) {
       await apiPost("/auth/reset-password", { username: username.trim(), newPassword });
       setDone(true);
     } catch (e) {
-      setError(e.message || "Couldn't reset that account. Check the username and try again.");
+      setError(
+        e?.status === 429
+          ? "Too many attempts. Please wait a few minutes and try again."
+          : e.message || "Couldn't reset that account. Check the username and try again."
+      );
     } finally {
       setSubmitting(false);
     }

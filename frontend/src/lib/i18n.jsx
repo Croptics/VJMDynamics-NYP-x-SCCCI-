@@ -50,6 +50,7 @@ const DICT = {
   "Please enter your Staff ID and password.": "请输入员工编号和密码。",
   "Incorrect Staff ID or password.": "员工编号或密码不正确。",
   "Can't reach the server. Make sure the backend is running.": "无法连接服务器。请确认后端已启动。",
+  "Too many attempts. Please wait a few minutes and try again.": "尝试次数过多，请稍等几分钟后重试。",
   "Workpass sign-in isn't set up in this build — please use your Staff ID and password.": "此版本尚未支持 Workpass 登录 — 请使用员工编号和密码登录。",
   "Your account access was updated. Please sign in again.": "您的账户权限已被更新，请重新登录。",
   "Your account is no longer valid. Please sign in again.": "您的账户已失效，请重新登录。",

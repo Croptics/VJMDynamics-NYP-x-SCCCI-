@@ -58,10 +58,64 @@ import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } fro
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Allow the frontend origin. In production set FRONTEND_URL (e.g. the Vercel URL);
-// locally, no origin means "allow all", which is fine for the Vite dev proxy.
+// Allow the frontend origin. In production set FRONTEND_URL (e.g. the Vercel
+// URL) so only your own site can call the API with credentials. Without it we
+// fall back to reflecting any origin, which is fine for the local Vite dev
+// proxy but NOT safe to leave that way in production — warn loudly so it isn't
+// forgotten (mirrors the JWT_SECRET warning in auth.js).
+if (!process.env.FRONTEND_URL) {
+  console.warn(
+    "  WARNING: FRONTEND_URL is not set in backend/.env — CORS will allow ANY origin.\n" +
+    "  Set FRONTEND_URL to your deployed frontend URL before deploying anywhere public.\n"
+  );
+}
 app.use(cors({ origin: process.env.FRONTEND_URL || true, credentials: true }));
 app.use(express.json());
+
+/* ---- Rate limiting (in-memory) ------------------------------------------- *
+ * A tiny fixed-window limiter for the auth routes, to blunt password brute-
+ * forcing. No dependency and no shared store — fine for this single-instance
+ * app; if this were ever scaled to multiple instances behind a load balancer
+ * each would keep its own count, so a real deployment would move this to a
+ * shared store (Redis) or a library like express-rate-limit. Keyed by client
+ * IP; a successful login clears that IP's counter so normal use is unaffected.
+ * ------------------------------------------------------------------------- */
+function rateLimit({ windowMs, max, message }) {
+  const hits = new Map(); // ip -> { count, resetAt }
+  // Opportunistic cleanup so the Map can't grow unbounded over a long uptime.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [ip, rec] of hits) if (rec.resetAt <= now) hits.delete(ip);
+  }, windowMs).unref?.();
+
+  const mw = (req, res, next) => {
+    const ip = req.ip || req.socket?.remoteAddress || "unknown";
+    const now = Date.now();
+    const rec = hits.get(ip);
+    if (!rec || rec.resetAt <= now) {
+      hits.set(ip, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    if (rec.count >= max) {
+      const retryAfter = Math.ceil((rec.resetAt - now) / 1000);
+      res.setHeader("Retry-After", String(retryAfter));
+      return res.status(429).json({ error: "RATE_LIMITED", message });
+    }
+    rec.count += 1;
+    next();
+  };
+  // Let a route clear an IP's counter on success (so a legit user who just
+  // signed in isn't penalised for their earlier typos).
+  mw.clear = (req) => hits.delete(req.ip || req.socket?.remoteAddress || "unknown");
+  return mw;
+}
+
+// 10 attempts per 10 minutes per IP on the credential endpoints.
+const authLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  message: "Too many attempts. Please wait a few minutes and try again.",
+});
 
 app.use((req, _res, next) => {
   console.log(`${new Date().toLocaleTimeString()}  ${req.method} ${req.url}`);
@@ -99,7 +153,7 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, service: "mustergo-ba
  * signed JWT (see auth.js) — set JWT_SECRET in backend/.env for production.
  * ------------------------------------------------------------------------- */
 
-app.post("/api/auth/login", wrap(async (req, res) => {
+app.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
   const { staffId, password } = req.body || {};
 
   if (!staffId || !password) {
@@ -111,6 +165,7 @@ app.post("/api/auth/login", wrap(async (req, res) => {
     return res.status(401).json({ error: "INVALID_CREDENTIALS", message: "Incorrect Staff ID or password." });
   }
   await upgradePasswordIfNeeded(acc, password);
+  authLimiter.clear(req); // successful login — reset this IP's attempt counter
 
   // Start a fresh session — invalidates any token held by an older browser.
   const tokenVersion = await startNewSession(acc.id);
@@ -128,7 +183,7 @@ app.post("/api/auth/login", wrap(async (req, res) => {
 // valid session, that's the point), username + new password only. See the
 // comment on resetPassword() in data.js for why this is intentionally simple
 // and not safe as-is for a real public deployment.
-app.post("/api/auth/reset-password", wrap(async (req, res) => {
+app.post("/api/auth/reset-password", authLimiter, wrap(async (req, res) => {
   const { username, newPassword } = req.body || {};
   if (!username || !newPassword) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Username and new password are required." });

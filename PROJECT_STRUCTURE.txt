@@ -41,6 +41,15 @@ server.js
     "TEAMMATE ZONE" comment near the bottom — the sanctioned spot for
     teammates to plug in their own route files (e.g. routes/insights.js
     is mounted here).
+    The credential endpoints (POST /api/auth/login and /api/auth/reset-
+    password) are wrapped in a tiny in-memory rateLimit() middleware —
+    10 attempts per 10 minutes per IP, returns 429 + Retry-After when
+    exceeded, and a successful login clears that IP's counter so normal use
+    is unaffected. No dependency and no shared store (fine for this single-
+    instance app; a multi-instance deploy would move it to Redis / express-
+    rate-limit). Also warns at startup if FRONTEND_URL isn't set, because
+    CORS then reflects ANY origin — fine for the local Vite proxy, must be
+    set before a public deploy (mirrors auth.js's JWT_SECRET warning).
 
 auth.js
     Session tokens + auth middleware, shared by server.js and any
@@ -160,6 +169,11 @@ routes/vance.js
     logs a QR row to the SHARED check_in_logs table — the same table Jayden's
     manual override and Vimal's face scan write to, and the one Desmond's
     coach board reads, so a boarding-pass scan shows up everywhere instantly.
+    The logged trip is derived from the DELEGATE's own trip (JOIN through
+    trips.uuid_id), not the client-supplied tripId — so a mistyped/mismatched
+    tripId in the request can't file a check-in against the wrong trip; it
+    only falls back to the request's tripId for base-pool delegates with no
+    trip set.
     Both gated on requireAuth() only (any signed-in staff), matching Vimal's
     face-scan auth level rather than the elevated manageExceptions tier.
     (3) Trip assistant chatbot: answers questions over a live snapshot of
@@ -212,7 +226,14 @@ routes/insights.js
     forces a fixed 3-point structure — "1. Overall: ... / 2. Missing: ... /
     3. Advice: ..." (translated labels in SECTION_LABELS for zh) — instead
     of freeform 3-5 points, so staff always get the same read: attendance
-    health, who's missing, then concrete next actions/who to contact.
+    health, who's missing, then concrete next actions/who to contact. Found
+    via live testing (local Ollama): the instruction telling the model the
+    label-prefix pattern used a literal meta-placeholder — `"N. ${"{Label}"}:
+    "` — which a weak local model echoed VERBATIM into every point ("N.
+    Overall: ...") instead of substituting a real digit. Fixed by spelling
+    out the substitution rule in plain English with a concrete worked example
+    ("the first point must literally begin '1. Overall: '") and an explicit
+    "never write the letter N" instruction.
 
 package.json / package-lock.json
     Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
@@ -362,8 +383,9 @@ Library helpers (src/lib/):
       errors for free) plus subscribeStream() for the live SSE channel
       (EventSource, token passed as ?token= since it can't set headers)
       and getCriticalOpenCount() (used by Layout.jsx's sidebar badge).
-      checkInByQR() (POST /api/checkins/qr) added for the /checkin screen's
-      QR pill — QRScannerPanel.jsx is its only caller.
+      checkInByQR() (POST /api/checkins/qr) was added for the /checkin
+      screen's QR pill, but QRScannerPanel.jsx no longer calls it — see the
+      QRScannerPanel.jsx entry below for why (unused, left in place).
 
   useSessionGuard.js
       Shared hook (Layout.jsx + MobileLayout.jsx): polls GET /api/auth/
@@ -626,22 +648,48 @@ Pages (src/pages/) — one file per route:
                                                 "attemptBoth" so codes
                                                 scanned off another screen
                                                 still decode reliably), with
-                                                a manual paste-the-badge-JSON
+                                                a manual paste-the-code
                                                 fallback when the camera is
                                                 unavailable. Opens its OWN
                                                 camera stream, stops every
                                                 track on unmount — never
                                                 contends with Vimal's face
                                                 camera since the two modes
-                                                are mutually exclusive. Posts
-                                                to POST /api/checkins/qr via
-                                                exceptionsApi.js's
-                                                checkInByQR(). Expects a
-                                                MusterGo delegate badge JSON
-                                                shape (see qr-test-codes/ for
-                                                two ready-made test images);
-                                                anything else → "QR code
-                                                invalid."
+                                                are mutually exclusive.
+                                                Originally expected its own
+                                                JSON delegate-badge shape and
+                                                posted to Jayden's own
+                                                POST /api/checkins/qr — but
+                                                nothing in the app printed
+                                                that JSON shape (the only
+                                                real badge source is Vance's
+                                                "Boarding passes" tab, which
+                                                encodes the plain qr_code
+                                                string), so scanning a real
+                                                badge always failed with "QR
+                                                code invalid". Fixed by
+                                                switching this panel to read
+                                                the plain qr_code string and
+                                                post to Vance's existing
+                                                POST /api/onboarding/checkin
+                                                via claudeParse.js's
+                                                qrCheckin() — same endpoint
+                                                ScanToBoardView.jsx uses, so
+                                                there's one badge format, one
+                                                resolution path. See
+                                                QR_BADGE_MISMATCH.md for the
+                                                history. Jayden's own
+                                                checkInByQR()/POST /api/
+                                                checkins/qr (exceptions.js)
+                                                are now unused dead code —
+                                                left in place, not deleted,
+                                                since nothing else calls them
+                                                and removing backend routes
+                                                wasn't asked for. The old
+                                                qr-test-codes/ JSON images no
+                                                longer scan successfully;
+                                                print a real badge from
+                                                "Boarding passes" instead.
   ManualTrackingPanel.jsx  (Scan → Manual)     Jayden — mark a delegate
                                                 present by hand when a scan
                                                 isn't possible. Reads the
