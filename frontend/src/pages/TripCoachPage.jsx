@@ -1031,8 +1031,16 @@ function CoachBoardView({ tripId }) {
     } catch (e) { setLoadError(e.message); }
   }, [tripId]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
-  useEffect(() => { const iv = setInterval(() => { apiGet(`/trips/${tripId}/activity`).then((d) => setActivity(d.activity || [])).catch(() => {}); }, 15000); return () => clearInterval(iv); }, [tripId]);
+  // 2s auto-refresh (was a one-shot load + a separate 15s activity-only
+  // poll) so a change made by another signed-in staff member — a coach
+  // capacity edit, a delegate reassignment, an itinerary update — shows up
+  // here without a manual refresh. fetchAll() already covers activity too,
+  // so the old dedicated activity interval is now redundant and removed.
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 2000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
 
   const refreshCoaches = useCallback(async () => { const cd = await apiGet(`/trips/${tripId}/coaches`); setCoaches(cd.coaches); }, [tripId]);
   const refreshItinerary = useCallback(async () => { const data = await apiGet(`/trips/${tripId}/itinerary`); setItinerary(data.items); }, [tripId]);

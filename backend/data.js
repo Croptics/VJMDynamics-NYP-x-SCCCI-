@@ -181,6 +181,12 @@ async function createSchema() {
   // browser invalidates the token held by any older one (which then gets
   // logged out by the session poll in the frontend Layout).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
+  // Stamped on every GET /api/auth/session call — every signed-in client
+  // already polls that endpoint every 15s for the force-logout guard, so this
+  // piggybacks on existing traffic instead of adding new polling. Powers the
+  // Staff Operations dashboard's "active now" list (accounts seen in the last
+  // ~45s, comfortably wider than the 15s poll interval).
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`);
 
   /* ---- Desmond "TransitFlow" schema (Trip Booking & Coach Management) ----
    * Folded in from what originally shipped as database/003_*.sql + 004_*.sql.
@@ -240,6 +246,11 @@ async function createSchema() {
     id VARCHAR(64) PRIMARY KEY, text TEXT NOT NULL, kind VARCHAR(32),
     "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  // actor = the account name that performed the action, so the History
+  // tracker can show WHO made each change instead of a generic "you".
+  // Nullable: rows created before this column (and any write that doesn't
+  // pass an actor) fall back to "you" in rowToActivity().
+  await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor TEXT`);
   await run(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log("createdAt" DESC)`);
 }
 
@@ -317,9 +328,9 @@ async function seedTransitFlow() {
  * Was an in-memory array capped at 8 entries and wiped on every restart;
  * now stored in activity_log so history survives restarts and accumulates
  * over time (see getActivity/deleteActivity/deleteAllActivity below). */
-async function logActivity(text, kind) {
+async function logActivity(text, kind, actor = null) {
   const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  await run(`INSERT INTO activity_log (id, text, kind) VALUES ($1,$2,$3)`, [id, text, kind]);
+  await run(`INSERT INTO activity_log (id, text, kind, actor) VALUES ($1,$2,$3,$4)`, [id, text, kind, actor || null]);
 }
 
 function rowToActivity(row) {
@@ -328,7 +339,9 @@ function rowToActivity(row) {
     text: row.text,
     kind: row.kind,
     time: new Date(row.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
-    via: "you",
+    // Who did it — the acting account's name. Legacy rows (and writes with no
+    // actor) have none; fall back to "you" (the frontend translates that).
+    via: row.actor || "you",
     createdAt: row.createdAt,
   };
 }
@@ -444,17 +457,17 @@ export async function getDelegateById(id) {
   return row ? rowToDelegate(row) : null;
 }
 
-export async function createDelegate(input, tripUuid = null) {
+export async function createDelegate(input, tripUuid = null, actor = null) {
   const d = normalize(input, await nextId());
   await run(
     `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid]
   );
-  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign");
+  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor);
   return d;
 }
 
-export async function updateDelegate(id, patch) {
+export async function updateDelegate(id, patch, actor = null) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return null;
   const merged = normalize({ ...rowToDelegate(existing), ...patch }, id);
@@ -462,15 +475,15 @@ export async function updateDelegate(id, patch) {
     `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7 WHERE id=$8`,
     [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation, id]
   );
-  await logActivity(`${merged.name} updated`, "reassign");
+  await logActivity(`${merged.name} updated`, "reassign", actor);
   return merged;
 }
 
-export async function deleteDelegate(id) {
+export async function deleteDelegate(id, actor = null) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return false;
   await run("DELETE FROM delegates WHERE id = $1", [id]);
-  await logActivity(`${existing.name} removed`, "exception");
+  await logActivity(`${existing.name} removed`, "exception", actor);
   return true;
 }
 
@@ -498,12 +511,12 @@ export async function clearDelegatePhoto(id) {
 /* ---- Bulk delete (dashboard "Delete all") -------------------------------
  * tripUuid scopes the wipe to just that trip's delegates; null (the base t-1
  * unfiltered view) keeps the original behaviour of clearing every delegate. */
-export async function deleteAllDelegates(tripUuid = null) {
+export async function deleteAllDelegates(tripUuid = null, actor = null) {
   const where = tripUuid ? "WHERE trip_id = $1" : "";
   const params = tripUuid ? [tripUuid] : [];
   const count = Number((await get(`SELECT COUNT(*) AS c FROM delegates ${where}`, params))?.c || 0);
   await run(`DELETE FROM delegates ${where}`, params);
-  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception");
+  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor);
   return count;
 }
 
@@ -516,12 +529,28 @@ export async function getTrip(tripUuid = null) {
   return (await get("SELECT * FROM trips LIMIT 1")) || TRIP;
 }
 
-/** Resolve a dashboard :id param to the trip uuid to scope by, or null for the
- *  default unfiltered ("all delegates") view. "t-1" (the base Beijing trip) →
- *  null, so the main dashboard keeps showing every delegate exactly as before;
- *  a real trip uuid → that uuid, so the dashboard scopes to that trip. */
+/** Resolve a dashboard :id param to the trip uuid to scope every read/write by.
+ *  "t-1" (the base Beijing trip) now resolves to the REAL Beijing trip uuid,
+ *  not null.
+ *
+ *  WHY (this fixed two linked bugs): "t-1" used to mean "null = show every
+ *  delegate/coach across ALL trips". That was fine while only Beijing had data,
+ *  but once other trips got their own coaches/delegates it meant (a) the base
+ *  dashboard's Coach status listed coaches that belong to OTHER trips (looked
+ *  like stray "placeholder" coaches), and (b) a delegate added on the base
+ *  dashboard was created with trip_id = NULL, so it showed on the dashboard
+ *  (null = everything) but NEVER on Desmond's Trips board (which filters by the
+ *  trip uuid) — e.g. "desmond" was missing there. Scoping "t-1" to the real
+ *  Beijing uuid makes the base dashboard and the Trips board the exact same
+ *  dataset, so they stay in sync. The startup backfill in seedTransitFlow()
+ *  already attaches any legacy NULL-trip rows to Beijing, so nothing vanishes.
+ *  Falls back to null only if the Beijing trip somehow has no uuid yet. */
 export async function resolveTripUuid(tripId) {
-  if (!tripId || tripId === "t-1") return null;
+  if (!tripId) return null;
+  if (tripId === "t-1") {
+    const t = await get("SELECT uuid_id FROM trips WHERE id = 't-1'");
+    return t?.uuid_id || null;
+  }
   const t = await get("SELECT uuid_id FROM trips WHERE uuid_id = $1", [tripId]);
   return t?.uuid_id || null;
 }
@@ -577,6 +606,8 @@ export async function getMissing(tripUuid = null) {
         id: x.id,
         name: x.name,
         initials: x.initials,
+        status: x.status, // always "MISSING" here, but carried so DelegateAvatar can tint red
+        coachId: x.coachId,
         // Coaches added outside the seed may have no city — don't render "null".
         coach: coach ? [coach.name, coach.city].filter(Boolean).join(" · ") : "Unassigned",
         vip: x.vip,
@@ -645,6 +676,32 @@ function accountPublic(row) {
 export async function startNewSession(id) {
   const row = await get(`UPDATE accounts SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`, [id]);
   return row?.token_version ?? 0;
+}
+
+/** Stamp "seen right now" on an account — called from GET /api/auth/session,
+ *  which every signed-in client already polls every 15s. Powers the Staff
+ *  Operations "active now" list; fire-and-forget from the caller's side (a
+ *  failed stamp shouldn't fail the session check itself). */
+export async function touchLastSeen(id) {
+  await run(`UPDATE accounts SET last_seen_at = now() WHERE id = $1`, [id]);
+}
+
+/** Clears "seen right now" on explicit logout, so the Staff Operations
+ *  "active now" list drops the account immediately instead of waiting up to
+ *  45s for last_seen_at to age out. Called from POST /api/auth/logout. */
+export async function clearLastSeen(id) {
+  await run(`UPDATE accounts SET last_seen_at = NULL WHERE id = $1`, [id]);
+}
+
+/** Accounts considered "active now" — seen within the last `withinSeconds`.
+ *  Same accountPublic() shape as listAccounts(), so the frontend can reuse
+ *  the existing role/permission-chip rendering. */
+export async function listActiveAccounts(withinSeconds = 45) {
+  const rows = await all(
+    `SELECT * FROM accounts WHERE last_seen_at IS NOT NULL AND last_seen_at > now() - ($1 || ' seconds')::interval ORDER BY last_seen_at DESC`,
+    [withinSeconds]
+  );
+  return rows.map(accountPublic);
 }
 
 async function nextAccountId() {

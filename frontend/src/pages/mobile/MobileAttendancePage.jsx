@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X } from "lucide-react";
 import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
@@ -41,11 +41,25 @@ export default function MobileAttendancePage() {
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
 
+  // Guards a poll tick against (a) overlapping with a still-in-flight
+  // previous poll, and (b) landing while a row's status edit is mid-save —
+  // savingId is read via a ref since the interval's closure is set up once
+  // and wouldn't otherwise see later state updates.
+  const loadingRef = useRef(false);
+  const savingIdRef = useRef(null);
+  useEffect(() => { savingIdRef.current = savingId; }, [savingId]);
+
   useEffect(() => {
     load();
+    // 2s auto-refresh so a status change made by another signed-in staff
+    // member shows up here without needing to tap the manual Refresh button.
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
   }, []);
 
   async function load() {
+    if (loadingRef.current || savingIdRef.current) return;
+    loadingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -59,6 +73,7 @@ export default function MobileAttendancePage() {
       setError(e.message || "Could not reach the backend.");
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }
 

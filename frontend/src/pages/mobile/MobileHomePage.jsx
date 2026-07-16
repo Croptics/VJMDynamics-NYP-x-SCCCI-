@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { RefreshCw, AlertTriangle } from "lucide-react";
 import { apiGet } from "../../lib/api.js";
@@ -22,11 +22,21 @@ export default function MobileHomePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Guards against overlapping polls (a slow response still in flight when
+  // the next tick fires) — same pattern as the desktop Dashboard.
+  const loadingRef = useRef(false);
+
   useEffect(() => {
     load();
+    // 2s auto-refresh so a change made by another signed-in staff member
+    // shows up here without needing to tap the manual Refresh button.
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
   }, []);
 
   async function load() {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -35,6 +45,7 @@ export default function MobileHomePage() {
       setError(e.message || "Could not reach the backend.");
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }
 

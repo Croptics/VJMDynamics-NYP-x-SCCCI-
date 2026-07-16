@@ -51,6 +51,13 @@ server.js
     CORS then reflects ANY origin — fine for the local Vite proxy, must be
     set before a public deploy (mirrors auth.js's JWT_SECRET warning).
 
+    POST /api/auth/logout — requireAuth()-gated; calls clearLastSeen() on the
+    caller's own account so Staff Operations' "active now" list reflects an
+    explicit logout right away. Frontend fires this best-effort (fire-and-
+    forget, errors ignored) from App.jsx's handleLogout BEFORE clearToken()
+    wipes the JWT it needs — the local logout (clearToken + redirect to
+    /login) proceeds regardless of whether this call succeeds.
+
 auth.js
     Session tokens + auth middleware, shared by server.js and any
     teammate route file that needs to require a signed-in caller (e.g.
@@ -84,7 +91,49 @@ data.js
     unlike photoUrl. Not geocoded server-side; the frontend's
     DelegateLocationMap component hands the raw text straight to the Google
     Maps Embed API's `q=` param, which does its own lookup. getMissing() also
-    includes it in its output alongside lastSeen.
+    includes it in its output alongside lastSeen. getMissing() also now
+    returns each delegate's coachId (needed so DashboardPage.jsx's Reverse
+    headcount tab can group missing delegates by coach; it previously only
+    returned a pre-formatted "Coach 7 · Suzhou" display string with no id).
+    getMissing() also now carries each row's status (always "MISSING" there,
+    but DelegateAvatar reads it to tint the avatar red).
+    activity_log.actor — the account name that performed each change, so the
+    History tracker / History log show WHO did it instead of a generic "you".
+    logActivity(text, kind, actor) records it; createDelegate/updateDelegate/
+    deleteDelegate/deleteAllDelegates take an optional actor param that
+    server.js's delegate routes fill from req.account (actorOf() =
+    name || username). rowToActivity() returns it as `via`, falling back to
+    "you" for legacy rows / writes with no actor (e.g. teammate modules like
+    vimal.js/vance.js that call createDelegate/updateDelegate directly for
+    check-ins don't pass one — those show "you"). Nullable column, added via
+    ALTER ... ADD COLUMN IF NOT EXISTS, so existing rows aren't attributed
+    retroactively (they keep showing "you").
+    resolveTripUuid("t-1") now returns the REAL Beijing trip uuid instead of
+    null. WHY (fixed two linked bugs): "t-1" used to mean null = "every
+    delegate/coach across ALL trips". Fine while only Beijing had data, but
+    once other trips got their own coaches/delegates it meant (a) the base
+    Dashboard's Coach status listed OTHER trips' coaches (looked like stray
+    placeholders — e.g. 8 coaches shown when Beijing has 7) and (b) a delegate
+    added on the base Dashboard was created with trip_id = NULL, so it showed
+    on the Dashboard but NEVER on Desmond's Trips board (which filters by trip
+    uuid) — e.g. "desmond" was missing from Trips. Scoping "t-1" to Beijing
+    makes the base Dashboard and the Trips board the exact same dataset
+    (verified: both 34 delegates / 7 coaches, desmond on both). The existing
+    seedTransitFlow() startup backfill still attaches legacy NULL-trip rows to
+    Beijing so nothing vanishes. Every base-Dashboard read/write (getDashboard,
+    getMissing, listDelegates, createDelegate, deleteAllDelegates, export) goes
+    through resolveTripUuid, so this single change scopes them all — no
+    per-route edits. Note the semantic shift: "Delete all" and "Add delegate"
+    on the base Dashboard now act on the Beijing trip specifically, not
+    literally every trip's delegates.
+    accounts.last_seen_at — stamped by touchLastSeen() every time GET
+    /api/auth/session is called (every signed-in client already polls that
+    every 15s for the force-logout guard), so this adds no new client
+    traffic. listActiveAccounts(withinSeconds=45) returns accounts seen
+    within that window — powers the Dashboard's "Staff operations" tab
+    "active now" list. clearLastSeen(id) sets it back to NULL — called by
+    POST /api/auth/logout so an explicit logout drops off the active list
+    immediately instead of waiting up to 45s to age out.
 
 cloudinary.js
     Thin wrapper around the Cloudinary SDK for delegate profile photos.
@@ -304,7 +353,17 @@ Shared components (src/components/):
       Renders a delegate's photoUrl if they have one (POST/DELETE
       /api/delegates/:id/photo, see server.js + cloudinary.js), otherwise
       falls back to the existing initials-in-a-circle look — same size/shape
-      either way, drops in anywhere a plain .avatar span was used. Used on
+      either way, drops in anywhere a plain .avatar span was used.
+      Status-tinted: a MISSING delegate's avatar (placeholder OR photo) is
+      coloured/ringed RED (var(--st-missing)); everyone else keeps the
+      standard GREEN, so it reverts automatically once marked PRESENT. Reads
+      delegate.status — so any caller passing a delegate that carries status
+      gets it for free (the "All delegates" table, the reverse-headcount
+      modal — getMissing() now includes status for this — and Mobile
+      attendance). The ring uses boxShadow, not border, so it never changes
+      the box size / breaks table alignment. The Dashboard edit-delegate
+      modal's large preview avatar tints the same way off form.status, so it
+      flips red↔green live as you change the status field. Used on
       the Dashboard's "All delegates" table and MobileAttendancePage.jsx.
       Photo upload/remove itself lives in the Dashboard's edit-delegate
       modal (create flow doesn't get one — a delegate needs to exist first).
@@ -340,6 +399,26 @@ Shared components (src/components/):
       of leaving it blank. splitInsightPoints() now splits each returned
       line into a bold "Label:" (Overall/Missing/Advice) + body, matching
       insights.js's fixed 3-point prompt structure.
+      • 4th customizable widget: "Delegates onboarded over time" — a
+        Recharts AreaChart (gradient-filled) showing cumulative delegate
+        count by day, built purely on the frontend from the `delegates`
+        prop's own `createdAt` timestamps (bucketed by day, running total
+        carried forward across gap days) — no new backend endpoint. Takes
+        a new `delegates` prop from DashboardPage.jsx. The two existing pie
+        charts (Attendance breakdown / VIP vs. non-VIP missing) were
+        already doughnut-style (innerRadius/outerRadius set).
+      • "Filter" and "Sort" buttons (next to "Customize") — same collapsible-
+        panel pattern, each its own toggle state. Filter: a coach <select>
+        ("All coaches" or one specific coach) that scopes both "Coach load"
+        and "VIP vs. non-VIP missing" to that coach (coachLoad filters
+        data.coaches by id; vipMissing filters the `missing` array by
+        coachId). Sort: a <select> reordering "Coach load"'s bars — by
+        coach name (default), most boarded, most remaining capacity, or
+        most missing (missing count per coach computed by grouping the
+        `missing` array's coachId). Both are pure frontend reads over data
+        already fetched by DashboardPage — no new endpoint or params. The
+        "Coach load" card heading appends the coach's name when a filter is
+        active (e.g. "Coach load — Coach 5").
 
   LogExceptionModal.jsx
       Jayden — the "Log exception" create form (issue type, delegate
@@ -451,15 +530,104 @@ Pages (src/pages/) — one file per route:
   DashboardPage.jsx        /dashboard          Main admin screen — KPI tiles,
                                                 coach status, History tracker,
                                                 delegate CRUD table,
-                                                Overview/Analytics tabs
-                                                (Analytics tab renders
-                                                AnalyticsPanel.jsx).
+                                                Delegate/Analytics tabs (was
+                                                "Overview", renamed to
+                                                "Delegate" — internal tab-state
+                                                key is now "delegate" not
+                                                "overview"; Analytics tab
+                                                renders AnalyticsPanel.jsx).
                                                 • No standalone "Missing right
-                                                  now" table anymore — the
-                                                  KPI tile still shows the
-                                                  count; the reverse-headcount
-                                                  list itself was removed as
-                                                  redundant with "All delegates".
+                                                  now" TABLE on the Delegate
+                                                  tab anymore — the KPI tile
+                                                  still shows the count; that
+                                                  old flat list was removed as
+                                                  redundant with "All
+                                                  delegates".
+                                                • "Reverse headcount" — NOT a
+                                                  tab anymore. Was briefly its
+                                                  own persistent Dashboard tab;
+                                                  the user liked the content
+                                                  but not that UX ("hide the
+                                                  reverse headcount tab, i want
+                                                  it to display when i click a
+                                                  button"), so it's now an
+                                                  on-demand modal
+                                                  (`headcountOpen` state)
+                                                  opened via a "Reverse
+                                                  headcount" button in the
+                                                  "Coach status" card header,
+                                                  using the same overlay/modal
+                                                  pattern (S.overlay/S.modal)
+                                                  as the create/edit delegate
+                                                  and map-preview modals.
+                                                  Content unchanged: one card
+                                                  per coach (boarded/capacity
+                                                  progress bar, "All in" badge
+                                                  or "N missing"), each listing
+                                                  its still-missing delegates
+                                                  (avatar, VIP flag, last seen)
+                                                  with the same map-pin →
+                                                  DelegateLocationMap popup
+                                                  pattern as "All delegates".
+                                                  Reuses data already fetched
+                                                  for the Delegate tab
+                                                  (data.coaches + missing, the
+                                                  latter carrying coachId from
+                                                  getMissing() in data.js so it
+                                                  can group by coach) — no new
+                                                  endpoint.
+                                                • "Staff operations" tab —
+                                                  admin-only (manageAccounts),
+                                                  gated the same as Account
+                                                  control since it's about who
+                                                  is using the app, not
+                                                  delegate attendance. Was
+                                                  briefly its own page/route
+                                                  (/operations) but the user
+                                                  asked for it to live on this
+                                                  same page so admins don't
+                                                  have to leave the Dashboard
+                                                  — folded in as a 4th tab,
+                                                  route removed. Two KPI tiles
+                                                  (Active now / Total staff
+                                                  accounts) + a live "Active
+                                                  sessions" list (avatar,
+                                                  name, role, "Ns/Nm ago").
+                                                  "Active" = an account whose
+                                                  last_seen_at (see data.js) is
+                                                  within the last 45s. Only
+                                                  polls GET /api/staff/active-
+                                                  sessions every 2s (was 15s —
+                                                  tightened so a login/logout
+                                                  elsewhere shows up here
+                                                  almost immediately; still
+                                                  scoped to only fire while
+                                                  this tab is open AND the
+                                                  account has manageAccounts,
+                                                  so no wasted load for anyone
+                                                  else) while this tab is
+                                                  open, and non-admins never
+                                                  see the tab button at all.
+                                                  The top "Refresh" button now
+                                                  also re-fetches this data
+                                                  when the Staff operations tab
+                                                  is active (it previously only
+                                                  refreshed dashboard/missing/
+                                                  delegates/activity, so
+                                                  clicking Refresh here did
+                                                  nothing until the next 15s/2s
+                                                  poll tick or a full page
+                                                  reload — loadStaffOps() was
+                                                  pulled out of the polling
+                                                  effect into its own function
+                                                  so both call it). An explicit
+                                                  logout also clears the
+                                                  account's last_seen_at
+                                                  server-side (see server.js's
+                                                  POST /api/auth/logout above)
+                                                  so it drops off this list
+                                                  immediately instead of
+                                                  lingering for up to 45s.
                                                 • "All delegates" caps to 10
                                                   rows with a "Show all"
                                                   toggle, has a search box, an
@@ -551,6 +719,24 @@ Pages (src/pages/) — one file per route:
                                                   status opens that trip's board
                                                   on the Trips page
                                                   (/trips?tripId=<uuid>).
+                                                • Auto-refreshes every 2s (was
+                                                  a one-time load on mount/trip
+                                                  switch, plus the manual
+                                                  Refresh button) so a change
+                                                  made by another signed-in
+                                                  staff member — a status edit,
+                                                  a new upload, a coach
+                                                  reassignment — shows up
+                                                  without needing to click
+                                                  Refresh. load() is guarded by
+                                                  a loadingRef so an overlapping
+                                                  poll tick is skipped rather
+                                                  than racing a slow response;
+                                                  safe against the create/edit
+                                                  delegate modal, whose form
+                                                  state is a separate local
+                                                  copy seeded once when it
+                                                  opens.
   TripCoachPage.jsx        /trips              Desmond's Trips & Coaches board.
                                                 Renders TripsListPage (the trip
                                                 grid) when no ?tripId= is set,
@@ -558,6 +744,18 @@ Pages (src/pages/) — one file per route:
                                                 board when one is. Styled by
                                                 TripCoachPage.css; calls
                                                 backend/routes/desmond.js.
+                                                • The per-trip board's fetchAll()
+                                                  (summary/coaches/itinerary/
+                                                  delegates/activity) now polls
+                                                  every 2s instead of loading
+                                                  once on mount — the old
+                                                  separate 15s activity-only
+                                                  poll was folded in/removed
+                                                  since fetchAll already covers
+                                                  activity. Same "another staff
+                                                  member's change shows up
+                                                  automatically" fix as the
+                                                  Dashboard.
   TripsListPage.jsx        (/trips grid)       Desmond — the trip grid + the
                                                 shared useTfTheme dark-mode hook.
   OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — three
@@ -743,6 +941,32 @@ Pages (src/pages/) — one file per route:
                                                 Theme + Language preference
                                                 controls. Reached via the
                                                 Sidebar's account block.
+  HistoryLogPage.jsx       /history            Standalone audit-log page —
+                                                the same activity_log data as
+                                                the Dashboard's inline
+                                                "History tracker" card (GET
+                                                /api/activity), but expanded
+                                                with chronological DATE
+                                                stamping: entries grouped into
+                                                one card per calendar day
+                                                (newest first, "Today"/
+                                                "Yesterday"/full weekday-date
+                                                labels), mirroring the
+                                                per-coach card layout of the
+                                                Reverse headcount view. Each
+                                                entry keeps its exact time +
+                                                actor; per-entry delete +
+                                                "Clear all" gated on
+                                                manageDelegates (DELETE
+                                                /api/activity/:id and
+                                                /api/activity). Auto-refreshes
+                                                every 2s (loadingRef-guarded).
+                                                Reached from a "View full log"
+                                                button in the Dashboard's
+                                                History tracker card header
+                                                (not a Sidebar item — same
+                                                button-launch pattern as
+                                                Reverse headcount).
 
 Mobile pages (src/pages/mobile/):
 
@@ -768,6 +992,12 @@ Mobile pages (src/pages/mobile/):
                                                  into MobileAttendancePage,
                                                  pre-filtered to that status
                                                  (?status=MISSING etc).
+                                                 Auto-refreshes every 2s (same
+                                                 pattern/loadingRef guard as
+                                                 the desktop Dashboard) so
+                                                 another staff member's change
+                                                 shows up without a manual tap
+                                                 on the Refresh icon.
   MobileAttendancePage.jsx  /mobile/attendance  Full delegate roster — search
                                                  + status filter chips (reads
                                                  an initial ?status= from the
@@ -791,6 +1021,16 @@ Mobile pages (src/pages/mobile/):
                                                  for MISSING), opening the same
                                                  DelegateLocationMap component
                                                  used on desktop.
+                                                 Auto-refreshes every 2s; the
+                                                 poll is paused (via a
+                                                 savingIdRef) while a row's
+                                                 status edit is still being
+                                                 saved, so a background refresh
+                                                 can't land mid-save and briefly
+                                                 flash the pre-edit status back
+                                                 in before the optimistic
+                                                 update's own rollback/confirm
+                                                 logic resolves.
   MobileAssistantPage.jsx   /mobile/assistant   Mobile chat — same real AI
                                                  assistant as the desktop one
                                                  (Vance; POST /api/chat/messages).

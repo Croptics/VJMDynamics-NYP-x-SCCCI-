@@ -51,6 +51,9 @@ import {
   upgradePasswordIfNeeded,
   startNewSession,
   resolveTripUuid,
+  touchLastSeen,
+  clearLastSeen,
+  listActiveAccounts,
 } from "./data.js";
 import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
 import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "./cloudinary.js";
@@ -211,12 +214,38 @@ app.post("/api/auth/reset-password", authLimiter, wrap(async (req, res) => {
 app.get("/api/auth/session", wrap(async (req, res) => {
   const acc = await accountFromReq(req);
   if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Your session is no longer valid." });
+  await touchLastSeen(acc.id); // powers the Staff Operations "active now" list
   res.json({
     username: acc.username,
     name: acc.name,
     role: acc.role,
     permissions: accountPermissions(acc),
   });
+}));
+
+/**
+ * POST /api/auth/logout — clears this account's last_seen_at immediately, so
+ * the Staff Operations "active now" list reflects an explicit logout right
+ * away instead of showing the account as still active until the 45s window
+ * lapses. Best-effort from the frontend's side (the client clears its own
+ * token regardless of whether this call succeeds).
+ */
+app.post("/api/auth/logout", requireAuth(), wrap(async (req, res) => {
+  const acc = await accountFromReq(req);
+  if (acc) await clearLastSeen(acc.id);
+  res.json({ ok: true });
+}));
+
+/**
+ * GET /api/staff/active-sessions — Staff Operations dashboard. Requires
+ * manageAccounts (staff-facing, not delegate data — most signed-in accounts
+ * shouldn't see who else is logged in). "Active" = last_seen_at stamped
+ * within the last 45s by the existing 15s session-poll every client already
+ * makes (see touchLastSeen() in data.js) — no new client-side polling infra.
+ */
+app.get("/api/staff/active-sessions", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+  const [all, active] = await Promise.all([listAccounts(), listActiveAccounts()]);
+  res.json({ totalStaff: all.length, activeCount: active.length, active });
 }));
 
 /* ---- Accounts (requires manageAccounts) --------------------------------- */
@@ -287,8 +316,13 @@ app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
 // DELETE all delegates (dashboard "Delete all" button) — scoped to whichever
 // trip is currently selected; the base t-1 view (resolveTripUuid -> null)
 // keeps the original "clear everything" behaviour.
+// Display name of the account performing a write, recorded on each activity_log
+// entry so the History tracker shows WHO made the change (not a generic "you").
+// requirePermission()/requireAuth() set req.account (see auth.js).
+const actorOf = (req) => req.account?.name || req.account?.username || null;
+
 app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const deleted = await deleteAllDelegates(await resolveTripUuid(req.params.id));
+  const deleted = await deleteAllDelegates(await resolveTripUuid(req.params.id), actorOf(req));
   res.json({ deleted });
 }));
 
@@ -301,7 +335,7 @@ app.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(
   if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
     return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
   }
-  const delegate = await createDelegate(body, await resolveTripUuid(req.params.id));
+  const delegate = await createDelegate(body, await resolveTripUuid(req.params.id), actorOf(req));
   res.status(201).json(delegate);
 }));
 
@@ -317,14 +351,14 @@ app.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async
   if (nextStatus !== "UNASSIGNED" && !nextCoachId) {
     return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
   }
-  const updated = await updateDelegate(req.params.id, patch);
+  const updated = await updateDelegate(req.params.id, patch, actorOf(req));
   if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
   res.json(updated);
 }));
 
 app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
   const existing = await getDelegateById(req.params.id);
-  const ok = await deleteDelegate(req.params.id);
+  const ok = await deleteDelegate(req.params.id, actorOf(req));
   if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
   if (existing?.photoPublicId) await destroyImage(existing.photoPublicId); // clean up Cloudinary too
   res.json({ deleted: true });

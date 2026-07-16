@@ -6,7 +6,7 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Download,
@@ -24,6 +24,8 @@ import {
   BarChart3,
   ChevronRight,
   MapPin,
+  Users,
+  Radio,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
@@ -60,7 +62,7 @@ export default function DashboardPage() {
   const perms = getPermissions();
   const { t, lang } = useLang();
   const navigate = useNavigate();
-  const [tab, setTab] = useState("overview"); // "overview" | "analytics"
+  const [tab, setTab] = useState("delegate"); // "delegate" | "analytics" | "headcount" | "staffops"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
   const [delegates, setDelegates] = useState([]);
@@ -81,6 +83,17 @@ export default function DashboardPage() {
   const [showAllCoaches, setShowAllCoaches] = useState(false);
   const [history, setHistory] = useState([]);
 
+  // "Staff operations" tab — admin-only (manageAccounts), lives on this same
+  // page rather than a separate route so admins don't have to leave the
+  // Dashboard to see who's currently signed in.
+  const [staffOps, setStaffOps] = useState(null); // { totalStaff, activeCount, active }
+  const [staffOpsError, setStaffOpsError] = useState(null);
+
+  // Reverse headcount — opened on demand from a button on the "Coach status"
+  // card, not a persistent tab (was one; the user liked the content but not
+  // that UX, so it moved to an on-demand modal instead).
+  const [headcountOpen, setHeadcountOpen] = useState(false);
+
 
   // modal state
   const [modalOpen, setModalOpen] = useState(false);
@@ -93,7 +106,13 @@ export default function DashboardPage() {
   const [photoErr, setPhotoErr] = useState("");
   const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null
 
+  // Guards against overlapping polls (e.g. a slow response still in flight
+  // when the next 2s tick fires) — same pattern as useSessionGuard's
+  // checkingRef, so a late response can't stomp a more recent one.
+  const loadingRef = useRef(false);
   const load = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -116,17 +135,48 @@ export default function DashboardPage() {
       setError(e.message || "Could not reach the backend.");
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }, [selectedTripId]);
 
+  // Auto-refresh every 2s so a change made by another signed-in staff member
+  // (a status edit, a new upload, a coach reassignment, etc.) shows up here
+  // without anyone having to hit the manual Refresh button. Safe against the
+  // create/edit delegate modal's own form state, which is a separate local
+  // copy seeded once when the modal opens — a background refresh of the
+  // underlying `delegates` list doesn't touch it.
   useEffect(() => {
     load();
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
   }, [load]);
 
   // Trip list for the switcher (Desmond's all-trips), fetched once.
   useEffect(() => {
     apiGet("/all-trips").then((r) => setTrips(r.trips || [])).catch(() => {});
   }, []);
+
+  // "Staff operations" tab data — only polled while that tab is open (no
+  // point hitting the endpoint for admins looking at Delegate/Analytics),
+  // and only for accounts that can actually see the tab. Pulled out of the
+  // effect (rather than defined inline) so the top "Refresh" button can also
+  // call it directly instead of only refreshing dashboard/missing/delegates.
+  const loadStaffOps = useCallback(() => {
+    if (!perms.manageAccounts) return;
+    apiGet("/staff/active-sessions")
+      .then((r) => { setStaffOps(r); setStaffOpsError(null); })
+      .catch((e) => setStaffOpsError(e.message || "Could not reach the backend."));
+  }, [perms.manageAccounts]);
+
+  useEffect(() => {
+    if (tab !== "staffops" || !perms.manageAccounts) return;
+    loadStaffOps();
+    // 2s so a login/logout elsewhere shows up here almost immediately —
+    // scoped to only fire while an admin actually has this tab open, so it
+    // doesn't add load for anyone else.
+    const id = setInterval(loadStaffOps, 2000);
+    return () => clearInterval(id);
+  }, [tab, perms.manageAccounts, loadStaffOps]);
 
   async function exportXlsx() {
     // Fetch with the auth header (the export route requires the "exportData"
@@ -382,7 +432,11 @@ export default function DashboardPage() {
               <span style={S.dot} /> {t("Live · synced")}
             </span>
           )}
-          <button className="btn btn-ghost" onClick={load} title={t("Refresh")}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => { load(); if (tab === "staffops") loadStaffOps(); }}
+            title={t("Refresh")}
+          >
             <RefreshCw size={16} className={loading ? "spin" : ""} /> {t("Refresh")}
           </button>
           <button className="btn btn-primary" onClick={exportXlsx} disabled={!data} style={{ display: perms.exportData ? undefined : "none" }}>
@@ -413,14 +467,14 @@ export default function DashboardPage() {
       <div className="row" style={{ gap: 8, marginTop: 18 }}>
         <button
           className="btn"
-          onClick={() => setTab("overview")}
+          onClick={() => setTab("delegate")}
           style={{
-            background: tab === "overview" ? "var(--scc-red-tint)" : "transparent",
-            color: tab === "overview" ? "var(--scc-red)" : "var(--ink-2)",
-            border: `1px solid ${tab === "overview" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            background: tab === "delegate" ? "var(--scc-red-tint)" : "transparent",
+            color: tab === "delegate" ? "var(--scc-red)" : "var(--ink-2)",
+            border: `1px solid ${tab === "delegate" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
           }}
         >
-          {t("Overview")}
+          {t("Delegate")}
         </button>
         <button
           className="btn"
@@ -433,6 +487,19 @@ export default function DashboardPage() {
         >
           <BarChart3 size={16} /> {t("Analytics")}
         </button>
+        {perms.manageAccounts && (
+          <button
+            className="btn"
+            onClick={() => setTab("staffops")}
+            style={{
+              background: tab === "staffops" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "staffops" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "staffops" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            }}
+          >
+            <Radio size={16} /> {t("Staff operations")}
+          </button>
+        )}
       </div>
 
       {/* ---- Error banner (shared by both tabs) --------------------------- */}
@@ -456,11 +523,157 @@ export default function DashboardPage() {
 
       {tab === "analytics" && (
         <div style={{ marginTop: 20 }}>
-          <AnalyticsPanel data={data} missing={missing} />
+          <AnalyticsPanel data={data} missing={missing} delegates={delegates} />
         </div>
       )}
 
-      {tab === "overview" && (
+      {headcountOpen && (
+        <div style={S.overlay} onClick={() => setHeadcountOpen(false)}>
+          <div className="card" style={{ ...S.modal, width: "min(1000px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 4 }}>
+              <h2 style={{ fontSize: 17 }}>{t("Reverse headcount")}</h2>
+              <button onClick={() => setHeadcountOpen(false)} style={S.iconBtn} aria-label={t("Close")}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="page-sub" style={{ margin: 0 }}>
+              {t("Who's still missing, per coach — the same view staff see on the Check-in screen.")}
+            </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 16 }}>
+            {coaches.map((c) => {
+              const coachMissing = missing.filter((m) => m.coachId === c.id);
+              const boardedPct = c.capacity ? Math.round((c.boarded / c.capacity) * 100) : 0;
+              return (
+                <div key={c.id} className="card" style={{ padding: 20 }}>
+                  <div className="row between" style={{ alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 15 }}>{coachDisplayName(c)}</div>
+                      <div className="muted" style={{ fontSize: 12 }}>{c.boarded}/{c.capacity} {t("boarded")}</div>
+                    </div>
+                    {coachMissing.length === 0 ? (
+                      <span className="badge badge-present">{t("All in")}</span>
+                    ) : (
+                      <span className="badge badge-missing">{coachMissing.length} {t("missing")}</span>
+                    )}
+                  </div>
+                  <div style={S.track}>
+                    <div style={{ ...S.fill, width: `${boardedPct}%`, background: coachMissing.length > 0 ? "var(--st-missing)" : "var(--st-present)" }} />
+                  </div>
+
+                  {coachMissing.length === 0 ? (
+                    <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("Everyone on this coach is accounted for.")}</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+                      {coachMissing.map((m) => (
+                        <div key={m.id} className="row between" style={{ gap: 10 }}>
+                          <div className="row" style={{ gap: 10, minWidth: 0 }}>
+                            <DelegateAvatar delegate={m} style={{ flexShrink: 0 }} />
+                            <div style={{ minWidth: 0 }}>
+                              <div className="row" style={{ gap: 6 }}>
+                                <span style={{ fontWeight: 500, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
+                                {m.vip && <Crown size={13} color="var(--st-review)" style={{ flexShrink: 0 }} />}
+                              </div>
+                              <div className="muted" style={{ fontSize: 12 }}>{m.lastSeen || t("No status")}</div>
+                            </div>
+                          </div>
+                          {m.lastLocation && (
+                            <button
+                              onClick={() => setMapDelegate(m)}
+                              aria-label={`${t("View location")} — ${m.name}`}
+                              title={t("View location")}
+                              style={{ ...S.iconBtn, color: "var(--st-missing)", flexShrink: 0 }}
+                            >
+                              <MapPin size={16} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {coaches.length === 0 && (
+              <div className="muted" style={{ fontSize: 14 }}>{t("No coaches for this trip yet.")}</div>
+            )}
+          </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "staffops" && perms.manageAccounts && (
+        <div style={{ marginTop: 20 }}>
+          <p className="page-sub" style={{ margin: 0 }}>
+            {t("Who's signed in right now, across the whole team.")}
+          </p>
+
+          {staffOpsError && (
+            <div className="card" style={{ marginTop: 16, padding: 16, borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
+              <p style={{ fontSize: 13, color: "var(--st-missing)", fontWeight: 600 }}>{t(staffOpsError)}</p>
+            </div>
+          )}
+
+          {!staffOps && !staffOpsError && (
+            <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
+          )}
+
+          {staffOps && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginTop: 16 }}>
+                <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <span style={{ ...S.iconBadge, background: "var(--st-present-bg)", color: "var(--st-present)" }}>
+                      <Radio size={16} />
+                    </span>
+                    <span className="muted" style={{ fontSize: 13, fontWeight: 600 }}>{t("Active now")}</span>
+                  </div>
+                  <div style={{ fontSize: 30, fontWeight: 700 }}>{staffOps.activeCount}</div>
+                </div>
+                <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <span style={{ ...S.iconBadge, background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+                      <Users size={16} />
+                    </span>
+                    <span className="muted" style={{ fontSize: 13, fontWeight: 600 }}>{t("Total staff accounts")}</span>
+                  </div>
+                  <div style={{ fontSize: 30, fontWeight: 700 }}>{staffOps.totalStaff}</div>
+                </div>
+              </div>
+
+              <div className="card" style={{ marginTop: 16, padding: 20 }}>
+                <h2 style={{ fontSize: 15, marginBottom: 14 }}>{t("Active sessions")}</h2>
+                {staffOps.active.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 13 }}>{t("No one is currently active.")}</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {staffOps.active.map((acc) => (
+                      <div key={acc.id} className="row between">
+                        <div className="row" style={{ gap: 10 }}>
+                          <span className="avatar" style={{ background: "var(--st-present-bg)", color: "var(--st-present)" }}>
+                            {(acc.name || acc.username).trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
+                          </span>
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 500 }}>{acc.name || acc.username}</div>
+                            <div className="muted" style={{ fontSize: 12 }}>
+                              {t(acc.role ? acc.role.charAt(0).toUpperCase() + acc.role.slice(1) : "Staff")}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="row" style={{ gap: 6 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--st-present)", flexShrink: 0 }} />
+                          <span className="muted" style={{ fontSize: 12 }}>{staffOpsTimeAgo(acc.last_seen_at, t)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {tab === "delegate" && (
       <>
       {/* ---- KPI tiles ---------------------------------------------------- */}
       {k && (
@@ -482,7 +695,17 @@ export default function DashboardPage() {
           <div className="card" style={{ padding: 22, display: "flex", flexDirection: "column" }}>
             <div className="row between" style={{ marginBottom: 16 }}>
               <h2 style={{ fontSize: 16 }}>{t("Coach status")}</h2>
-              <span className="muted" style={{ fontSize: 13 }}>{coaches.length} {t("coaches")}</span>
+              <div className="row" style={{ gap: 10 }}>
+                <span className="muted" style={{ fontSize: 13 }}>{coaches.length} {t("coaches")}</span>
+                <button
+                  className="btn btn-ghost"
+                  style={{ padding: "4px 10px", fontSize: 12.5 }}
+                  onClick={() => setHeadcountOpen(true)}
+                  title={t("Who's still missing, per coach — the same view staff see on the Check-in screen.")}
+                >
+                  <Users size={13} /> {t("Reverse headcount")}
+                </button>
+              </div>
             </div>
             {coaches.length === 0 ? (
               <div className="muted" style={{ fontSize: 13 }}>{t("No coaches for this trip yet.")}</div>
@@ -508,11 +731,21 @@ export default function DashboardPage() {
                 <Activity size={18} color="var(--ink-3)" />
                 <h2 style={{ fontSize: 16 }}>{t("History tracker")}</h2>
               </div>
-              {perms.manageDelegates && history.length > 0 && (
-                <button className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12.5 }} onClick={clearHistory}>
-                  <Trash2 size={13} /> {t("Clear all")}
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  className="btn btn-ghost"
+                  style={{ padding: "4px 10px", fontSize: 12.5 }}
+                  onClick={() => navigate("/history")}
+                  title={t("Open the full date-stamped audit log")}
+                >
+                  <ChevronRight size={13} /> {t("View full log")}
                 </button>
-              )}
+                {perms.manageDelegates && history.length > 0 && (
+                  <button className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12.5 }} onClick={clearHistory}>
+                    <Trash2 size={13} /> {t("Clear all")}
+                  </button>
+                )}
+              </div>
             </div>
             {history.length === 0 ? (
               <div className="muted" style={{ fontSize: 13 }}>
@@ -685,9 +918,17 @@ export default function DashboardPage() {
             {editingId && (
               <div className="row" style={{ gap: 14, marginBottom: 18 }}>
                 {editingPhotoUrl ? (
-                  <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                  <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: `0 0 0 2px ${form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)"}` }} />
                 ) : (
-                  <span className="avatar" style={{ width: 56, height: 56, fontSize: 20 }}>
+                  <span
+                    className="avatar"
+                    style={{
+                      width: 56, height: 56, fontSize: 20,
+                      background: form.status === "MISSING" ? "var(--st-missing-bg)" : "var(--st-present-bg)",
+                      color: form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)",
+                      boxShadow: `inset 0 0 0 1.5px ${form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)"}`,
+                    }}
+                  >
                     {form.name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?"}
                   </span>
                 )}
@@ -860,6 +1101,15 @@ function fmtUploadDate(v) {
   return d.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+/** "Staff operations" active-sessions relative time, e.g. "15s ago" / "2m ago". */
+function staffOpsTimeAgo(iso, t) {
+  if (!iso) return "";
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 10) return t("just now");
+  if (secs < 60) return `${secs}${t("s ago")}`;
+  return `${Math.round(secs / 60)}${t("m ago")}`;
+}
+
 /* ---- Coach progress bar -------------------------------------------------
  * When onOpen is provided the whole row is clickable and navigates to that
  * trip's board on the Trips (Desmond) page.
@@ -933,4 +1183,5 @@ const S = {
   iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },
   overlay: { position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 },
   modal: { width: "min(440px, 100%)", maxHeight: "calc(100vh - 48px)", overflowY: "auto", padding: 24, background: "var(--surface)" },
+  iconBadge: { width: 32, height: 32, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
 };

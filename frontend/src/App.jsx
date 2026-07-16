@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
-import { getToken, clearToken, getUser, getPermissions } from "./lib/api.js";
+import { getToken, clearToken, getUser, getPermissions, apiPost } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
@@ -15,6 +15,7 @@ import QRCheckInPage from "./pages/QRCheckInPage.jsx";
 import ExceptionInboxPage from "./pages/ExceptionInboxPage.jsx";
 import AccountControlPage from "./pages/AccountControlPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
+import HistoryLogPage from "./pages/HistoryLogPage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
@@ -53,6 +54,12 @@ export default function App() {
   const navigate = useNavigate();
 
   const handleLogout = () => {
+    // Best-effort — clears last_seen_at server-side so Staff Operations'
+    // "active now" list drops this account immediately instead of waiting
+    // for the 45s window to lapse. Must fire before clearToken() wipes the
+    // JWT this call needs to authenticate; the local logout proceeds either
+    // way even if this fails (e.g. backend briefly unreachable).
+    apiPost("/auth/logout", {}).catch(() => {});
     clearToken();
     setAuthed(false);
   };
@@ -129,6 +136,14 @@ export default function App() {
               : <Navigate to="/dashboard" replace />
           }
         />
+
+        {/* Staff Operations lives INSIDE DashboardPage.jsx as an admin-only
+            tab (manageAccounts) — not a separate route, so admins see it
+            without leaving the Dashboard. */}
+
+        {/* History log — standalone audit trail (date-grouped activity_log),
+            reached from the Dashboard's History tracker card */}
+        <Route path="/history" element={<HistoryLogPage />} />
 
         {/* Settings — signed-in account info + theme/language preferences */}
         <Route path="/settings" element={<SettingsPage />} />

@@ -94,6 +94,24 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Themed scrollbars — the default OS scrollbar renders as a bright white bar
+   in dark mode, which looks out of place. Tie the track/thumb to theme tokens
+   so it stays dark in dark mode and light in light mode, everywhere (the page
+   itself and any overflow:auto container like the History tracker list). */
+* {
+  scrollbar-width: thin;                       /* Firefox */
+  scrollbar-color: var(--line) transparent;    /* Firefox: thumb, track */
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
+
 h1, h2, h3 { margin: 0; font-weight: 600; }
 button { font-family: inherit; cursor: pointer; }
 a { color: inherit; }

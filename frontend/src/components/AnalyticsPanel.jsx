@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
-import { BarChart3, Eye, EyeOff, Sparkles } from "lucide-react";
+import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area,
 } from "recharts";
 import { apiPost, getUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -31,6 +32,7 @@ const WIDGETS = [
   { key: "breakdown", label: "Attendance breakdown" },
   { key: "coachLoad", label: "Coach load" },
   { key: "vipMissing", label: "VIP vs. non-VIP missing" },
+  { key: "onboardingTrend", label: "Delegates onboarded over time" },
 ];
 
 /** Split the AI-generated insights text into individual points, stripping
@@ -64,10 +66,14 @@ function loadPrefs() {
   }
 }
 
-export default function AnalyticsPanel({ data, missing }) {
+export default function AnalyticsPanel({ data, missing, delegates = [] }) {
   const { t, lang } = useLang();
   const [visible, setVisible] = useState(loadPrefs);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [coachFilter, setCoachFilter] = useState("ALL");
+  const [coachSort, setCoachSort] = useState("name"); // name | boarded | remaining | missing
   const [insights, setInsights] = useState(null);
   const [insightsAsOf, setInsightsAsOf] = useState(null);
   const [insightsSource, setInsightsSource] = useState(null);
@@ -113,29 +119,78 @@ export default function AnalyticsPanel({ data, missing }) {
     ].filter((d) => d.value > 0);
   }, [data, t]);
 
+  // "Filter" scopes both this chart and VIP-missing to one coach; "Sort"
+  // reorders this chart's bars. Both are UI-only reads over the same data
+  // DashboardPage already fetched — no new endpoint or params.
   const coachLoad = useMemo(() => {
     if (!data) return [];
-    return (data.coaches || []).map((c) => ({
-      name: c.label,
-      boarded: c.boarded,
-      remaining: Math.max(c.capacity - c.boarded, 0),
-    }));
-  }, [data]);
+    const missingByCoach = new Map();
+    missing.forEach((m) => missingByCoach.set(m.coachId, (missingByCoach.get(m.coachId) || 0) + 1));
+    const rows = (data.coaches || [])
+      .filter((c) => coachFilter === "ALL" || c.id === coachFilter)
+      .map((c) => ({
+        id: c.id,
+        name: c.label,
+        boarded: c.boarded,
+        remaining: Math.max(c.capacity - c.boarded, 0),
+        missingCount: missingByCoach.get(c.id) || 0,
+      }));
+    const sorters = {
+      name: (a, b) => a.name.localeCompare(b.name),
+      boarded: (a, b) => b.boarded - a.boarded,
+      remaining: (a, b) => b.remaining - a.remaining,
+      missing: (a, b) => b.missingCount - a.missingCount,
+    };
+    return rows.sort(sorters[coachSort] || sorters.name);
+  }, [data, missing, coachFilter, coachSort]);
 
   const vipMissing = useMemo(() => {
-    const vip = missing.filter((m) => m.vip).length;
-    const nonVip = missing.length - vip;
+    const scoped = coachFilter === "ALL" ? missing : missing.filter((m) => m.coachId === coachFilter);
+    const vip = scoped.filter((m) => m.vip).length;
+    const nonVip = scoped.length - vip;
     return [
       { name: "VIP", value: vip, color: COLORS.vip },
       { name: t("Non-VIP"), value: nonVip, color: COLORS.nonVip },
     ];
-  }, [missing, t]);
+  }, [missing, coachFilter, t]);
+
+  // Cumulative headcount over time, from each delegate's real createdAt
+  // (upload timestamp) — no separate tracking needed, this is the same
+  // column that already drives the "Uploaded" column on "All delegates".
+  // Bucketed by day; a day with zero uploads carries the running total
+  // forward flat rather than dropping to zero, so the line reads as "team
+  // size over time" rather than "uploads per day".
+  const onboardingTrend = useMemo(() => {
+    const withDates = delegates
+      .filter((d) => d.createdAt)
+      .map((d) => new Date(d.createdAt))
+      .filter((d) => !isNaN(d))
+      .sort((a, b) => a - b);
+    if (withDates.length === 0) return [];
+    const dayKey = (d) => d.toLocaleDateString([], { day: "2-digit", month: "short" });
+    const counts = new Map();
+    withDates.forEach((d) => {
+      const k = dayKey(d);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    });
+    let running = 0;
+    return [...counts.entries()].map(([date, added]) => {
+      running += added;
+      return { date, total: running };
+    });
+  }, [delegates]);
 
   return (
     <div>
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16, marginBottom: 4 }}>
         <p className="page-sub" style={{ margin: 0 }}>{t("Attendance breakdown, coach load, and VIP visibility — live from the trip data.")}</p>
         <div className="row" style={{ gap: 10 }}>
+          <button className="btn btn-ghost" onClick={() => setFilterOpen((v) => !v)}>
+            <Filter size={16} /> {t("Filter")}
+          </button>
+          <button className="btn btn-ghost" onClick={() => setSortOpen((v) => !v)}>
+            <ArrowUpDown size={16} /> {t("Sort")}
+          </button>
           <button className="btn btn-ghost" onClick={() => setPanelOpen((v) => !v)}>
             <BarChart3 size={16} /> {t("Customize")}
           </button>
@@ -200,6 +255,43 @@ export default function AnalyticsPanel({ data, missing }) {
         )}
       </div>
 
+      {filterOpen && (
+        <div className="card" style={{ marginTop: 16, padding: 16 }}>
+          <div className="page-eyebrow" style={{ marginBottom: 10 }}>{t("Filter by coach")}</div>
+          <select
+            className="select"
+            style={{ maxWidth: 260 }}
+            value={coachFilter}
+            onChange={(e) => setCoachFilter(e.target.value)}
+          >
+            <option value="ALL">{t("All coaches")}</option>
+            {(data?.coaches || []).map((c) => (
+              <option key={c.id} value={c.id}>{c.label}</option>
+            ))}
+          </select>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+            {t('Scopes "Coach load" and "VIP vs. non-VIP missing" to the selected coach.')}
+          </div>
+        </div>
+      )}
+
+      {sortOpen && (
+        <div className="card" style={{ marginTop: 16, padding: 16 }}>
+          <div className="page-eyebrow" style={{ marginBottom: 10 }}>{t("Sort coach load by")}</div>
+          <select
+            className="select"
+            style={{ maxWidth: 260 }}
+            value={coachSort}
+            onChange={(e) => setCoachSort(e.target.value)}
+          >
+            <option value="name">{t("Coach name")}</option>
+            <option value="boarded">{t("Most boarded")}</option>
+            <option value="remaining">{t("Most remaining capacity")}</option>
+            <option value="missing">{t("Most missing")}</option>
+          </select>
+        </div>
+      )}
+
       {panelOpen && (
         <div className="card" style={{ marginTop: 16, padding: 16 }}>
           <div className="page-eyebrow" style={{ marginBottom: 10 }}>{t("Visible widgets")}</div>
@@ -234,7 +326,10 @@ export default function AnalyticsPanel({ data, missing }) {
 
           {visible.coachLoad && (
             <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Coach load")}</h2>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>
+                {t("Coach load")}
+                {coachFilter !== "ALL" && coachLoad[0] && ` — ${coachLoad[0].name}`}
+              </h2>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={coachLoad}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -263,6 +358,31 @@ export default function AnalyticsPanel({ data, missing }) {
                     <Tooltip />
                     <Legend />
                   </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+
+          {visible.onboardingTrend && (
+            <div className="card" style={{ padding: 20 }}>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Delegates onboarded over time")}</h2>
+              {onboardingTrend.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No upload history yet.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={onboardingTrend}>
+                    <defs>
+                      <linearGradient id="mgTrendFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--scc-red)" stopOpacity={0.28} />
+                        <stop offset="100%" stopColor="var(--scc-red)" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="date" fontSize={12} />
+                    <YAxis fontSize={12} allowDecimals={false} />
+                    <Tooltip formatter={(v) => [v, t("Total delegates")]} />
+                    <Area type="monotone" dataKey="total" stroke="var(--scc-red)" strokeWidth={2} fill="url(#mgTrendFill)" name={t("Total delegates")} />
+                  </AreaChart>
                 </ResponsiveContainer>
               )}
             </div>
