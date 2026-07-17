@@ -693,6 +693,25 @@ router.post(
   })
 );
 
+/* Guard against stray/junk rows at confirm time. A real delegate needs a name
+ * with at least two letters; a very short single-token name (<=2 chars, e.g.
+ * "jq") that carries NO company/role/email/phone/passport is treated as a test
+ * entry, not a person. Deliberately conservative — genuine short names like
+ * "Wu" or "Ng" still pass as long as the row has any supporting detail, which a
+ * directory row almost always does. */
+function isPlausibleDelegate(r) {
+  const name = (r.fullName || "").toString().trim();
+  const letters = (name.match(/\p{L}/gu) || []).length;
+  if (letters < 2) return false;
+  const hasSupport = !!(r.company || r.role || r.email || r.phone || r.passportNumber || r.nationality);
+  const compact = name.replace(/\s+/g, "");
+  // A 2-char CJK name (e.g. 陈伟) is a complete name, so the "too short" check
+  // only applies to Latin-script tokens like "jq".
+  const hasCJK = /\p{Script=Han}/u.test(name);
+  if (!hasCJK && compact.length <= 2 && !name.includes(" ") && !hasSupport) return false;
+  return true;
+}
+
 router.post(
   "/api/trips/:id/onboarding/confirm",
   requirePermission("manageDelegates"),
@@ -711,9 +730,10 @@ router.post(
     }
 
     const added = [];
+    let skippedInvalid = 0;
     for (const r of rows) {
+      if (!isPlausibleDelegate(r)) { skippedInvalid++; continue; }
       const name = (r.fullName || "").toString().trim();
-      if (!name) continue;
       // A coach assignment means the delegate is expected on that coach but not
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
@@ -740,7 +760,7 @@ router.post(
       );
       added.push({ ...delegate, company: r.company || null, role: r.role || null });
     }
-    res.status(201).json({ added: added.length, delegates: added });
+    res.status(201).json({ added: added.length, skippedInvalid, delegates: added });
   })
 );
 

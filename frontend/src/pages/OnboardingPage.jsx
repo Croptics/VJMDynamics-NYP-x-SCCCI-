@@ -210,8 +210,11 @@ export default function OnboardingPage() {
     if (toAdd.length === 0) { alert(t("Every extracted delegate is already in this trip.")); return; }
     setSaving(true);
     try {
-      const { added } = await confirmDelegates(tripId, toAdd);
-      alert(`${added} ${t("delegates added to the trip.")}${skipped ? ` (${skipped} ${t("duplicates skipped")})` : ""}`);
+      const { added, skippedInvalid = 0 } = await confirmDelegates(tripId, toAdd);
+      const notes = [];
+      if (skipped) notes.push(`${skipped} ${t("duplicates skipped")}`);
+      if (skippedInvalid) notes.push(`${skippedInvalid} ${t("invalid skipped")}`);
+      alert(`${added} ${t("delegates added to the trip.")}${notes.length ? ` (${notes.join(", ")})` : ""}`);
       setRows([]);
       setJob(null);
       localStorage.removeItem(LS_JOB);

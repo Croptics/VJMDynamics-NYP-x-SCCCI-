@@ -121,6 +121,11 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   re-attach — parsing continues server-side.
 - **Duplicates:** rows already in the trip are flagged and skipped on confirm; the
   Confirm button disables when there's nothing new to add.
+- **Junk rows:** `onboarding/confirm` skips implausible rows (a name needs ≥2
+  letters; a ≤2-char single-token name with no company/role/email/phone/passport
+  is treated as a stray test entry) and returns `skippedInvalid` alongside `added`
+  so the UI can report how many were dropped. Conservative — real short names
+  like "Wu"/"Ng" pass whenever the row carries any supporting field.
 - **Unknown / already-scanned QR:** check-in returns a clear message (404 unknown,
   "already boarded" otherwise), and resolves the trip from the delegate's own record
   so a mistyped `tripId` can't file a check-in against the wrong trip.
