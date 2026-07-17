@@ -79,7 +79,10 @@ export default function BoardingPassesView({ tripId }) {
   }, [visible, data.coaches]);
 
   /* ---- printing --------------------------------------------------------- */
-  const printList = printOne ? [printOne] : data.delegates;
+  // "Print all" prints whatever the list is currently showing — so filtering to
+  // e.g. "Not boarded" and printing gives just those passes, not the whole trip.
+  const filtered = search.trim() !== "" || filter !== "all";
+  const printList = printOne ? [printOne] : visible;
   const doPrint = (one) => {
     setPrintOne(one || null);
     setTimeout(() => { window.print(); setPrintOne(null); }, 80);
@@ -114,8 +117,8 @@ export default function BoardingPassesView({ tripId }) {
         </div>
         <div className="row" style={{ gap: 10 }}>
           <button className="btn btn-ghost" onClick={load}><RefreshCw size={15} /> {t("Refresh")}</button>
-          <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!data.total}>
-            <Printer size={15} /> {t("Print all")}
+          <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
+            <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
           </button>
         </div>
       </div>
