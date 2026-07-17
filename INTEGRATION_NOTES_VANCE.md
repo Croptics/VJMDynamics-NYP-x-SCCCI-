@@ -4,26 +4,25 @@
 **Use cases:**
 - **UC1** Automated Attendee Onboarding via AI Document Parsing.
 - **UC2** Real-Time Attendance & Exception Tracking via AI Chatbot.
-- **Cross-feature:** onboarded delegates get a unique **QR boarding pass**; an
-  on-site **scan** boards them, flowing straight into Desmond's coach board.
+- **Cross-feature:** onboarded delegates get a unique **QR boarding pass** — the
+  hand-off to Vimal's on-site scanner, which boards them into Desmond's coach board.
 
 Self-contained module — it does **not** modify JQ's base files (`server.js`
 beyond the two-line TEAMMATE-ZONE mount, `data.js`, `auth.js`, `permissions.js`)
 and edits **no** teammate feature files. Everything lives in:
 
 ```
-backend/routes/vance.js                    ← all APIs (parsing, assistant, QR)
-frontend/src/lib/claudeParse.js            ← parse/confirm/badge/check-in bridge
-frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (3 tabs: parse / passes / scan)
+backend/routes/vance.js                    ← all APIs (parsing, assistant, QR passes)
+frontend/src/lib/claudeParse.js            ← parse / confirm / badges bridge
+frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (2 tabs: parse / boarding passes)
 frontend/src/pages/BoardingPassesView.jsx  ← printable QR badge per delegate
-frontend/src/pages/ScanToBoardView.jsx     ← on-site scan → check-in (camera + tap)
 frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6 (streaming AI + saved history)
 frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
 ```
 
 Mounted with two lines in `server.js`'s TEAMMATE ZONE, exactly like `desmond.js`
-and `exceptions.js`. Dependencies added: `unpdf` (backend PDF text extraction),
-`qrcode` + `html5-qrcode` (frontend QR generate/scan).
+and `exceptions.js`. Dependencies added: `unpdf` (backend PDF text extraction)
+and `qrcode` (frontend QR-pass generation).
 
 ## API endpoints
 
@@ -36,11 +35,10 @@ and `exceptions.js`. Dependencies added: `unpdf` (backend PDF text extraction),
 | GET | `/api/onboarding/context` | signed-in | Existing delegate names (dedup) + coaches |
 | POST | `/api/trips/:id/onboarding/confirm` | `manageDelegates` | Commit rows to shared `delegates`; mints a `qr_code` each |
 
-### QR boarding passes & on-site check-in
+### QR boarding passes
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/onboarding/badges` | signed-in | Delegates + `qr_code` + live headcount for a trip |
-| POST | `/api/onboarding/checkin` | signed-in | Resolve a scanned QR → mark PRESENT (+coach) → log to `check_in_logs` |
+| GET | `/api/onboarding/badges` | signed-in | Delegates + generated `qr_code` for the printable boarding passes |
 
 ### Trip assistant (chatbot)
 | Method | Path | Auth | Purpose |
@@ -60,15 +58,13 @@ and `exceptions.js`. Dependencies added: `unpdf` (backend PDF text extraction),
 - **Onboarding writes to the SHARED `delegates` table** via JQ's `createDelegate()`
   — so a parsed delegate appears on JQ's dashboard, is linked to the trip
   (`trip_id`), and is available to everyone. No separate table, no sync step.
-- **QR → coach board loop:** each delegate gets a unique `qr_code`. The on-site
-  scanner (`ScanToBoardView`) resolves a scan via `POST /api/onboarding/checkin`,
-  which sets the delegate to `status='PRESENT'` (+ the boarding coach) and writes
-  a `check_in_logs` QR row. **Desmond's coach board counts `status='PRESENT'`
-  grouped by coach**, so a scan lands on his board automatically — and JQ's
-  dashboard head-count updates too. (Note: a delegate only shows on a *specific
-  coach* once it has a `coachId` — assign one during onboarding, or let the scan
-  assign it via the "Boarding → Coach X" selector.) This mirrors the future split
-  where Vimal owns the standalone on-site scanner app.
+- **QR boarding passes → Vimal's scanner:** each onboarded delegate gets a unique
+  `qr_code`, rendered as a printable QR pass. That pass is the **hand-off point** —
+  Vimal's on-site scanner reads the code (`POST /api/checkins`) and flips the
+  delegate to `status='PRESENT'`, which **Desmond's coach board counts by coach**
+  and JQ's dashboard head-count reflects. The shared `qr_code` is the contract
+  between onboarding and the scanner; the scanning/check-in itself is **not owned
+  here**.
 - **The chatbot reads a live snapshot assembled from everyone's data:** delegate
   roster + coach counts (JQ/Desmond), open exception tickets (Jayden), check-in
   method breakdown (`check_in_logs`, shared with Vimal/Jayden), and today's
