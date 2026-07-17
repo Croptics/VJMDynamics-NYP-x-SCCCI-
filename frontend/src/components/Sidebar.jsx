@@ -4,7 +4,6 @@ import {
   MapPin,
   FileText,
   AlertTriangle,
-  MessageSquare,
   ClipboardCheck,
   LogOut,
   ShieldCheck,
@@ -35,7 +34,8 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     // Face/QR/Manual check-in — not permission-gated, any signed-in staff can scan.
     { to: "/checkin", label: "Check-in", icon: QrCode },
     { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
-    { to: "/assistant", label: "Chat assistant", icon: MessageSquare },
+    // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
+    // Layout.jsx on every route) instead of a dedicated destination.
     ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
   ];
 

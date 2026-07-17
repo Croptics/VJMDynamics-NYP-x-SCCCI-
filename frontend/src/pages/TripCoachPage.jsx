@@ -349,8 +349,11 @@ function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, o
     finally { setMoving(false); }
   }
 
-  const STATUS_LABEL = { PRESENT: "Present", MISSING: "Missing", UNASSIGNED: "Unassigned" };
-  const STATUS_COLOR2 = { PRESENT: "green", MISSING: "red", UNASSIGNED: "yellow" };
+  // PRESENT kept as a legacy alias — some check-in routes still write it
+  // directly (see normalize() in backend/data.js), not yet migrated to
+  // ARRIVED (deferred, see the 5-status plan).
+  const STATUS_LABEL = { PRESENT: "Arrived", ARRIVED: "Arrived", ASSIGNED: "Assigned", LATE: "Late", MISSING: "Missing", UNASSIGNED: "Unassigned" };
+  const STATUS_COLOR2 = { PRESENT: "green", ARRIVED: "green", ASSIGNED: "blue", LATE: "orange", MISSING: "red", UNASSIGNED: "yellow" };
   const colorKey = avatarColorKey(delegate.id);
 
   return (
@@ -1084,7 +1087,15 @@ function CoachBoardView({ tripId }) {
   async function handleReassign(delegate, toCoachId) {
     if (!canEdit) return; // reassign needs the manageTrips permission
     if (toCoachId === delegate.coachId) return;
-    const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "MISSING" : delegate.status);
+    // Dropping onto a coach means "expected on this coach, not yet checked
+    // in" — that's ASSIGNED in the 5-status model, not MISSING. MISSING is
+    // reserved for a genuine failure to show (a real check-in/scan miss, or
+    // an explicit staff override), not just "hasn't boarded yet because they
+    // were only just assigned a minute ago". Only UNASSIGNED delegates get
+    // this default; a delegate who already has a real status (ARRIVED/LATE/
+    // MISSING/ASSIGNED) keeps it when moved between coaches — being dragged
+    // to a different coach doesn't reset their arrival state.
+    const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "ASSIGNED" : delegate.status);
     const prevSnapshot = delegate;
     setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? { ...d, coachId: toCoachId, status: nextStatus } : d)));
     try {
@@ -1140,7 +1151,10 @@ function CoachBoardView({ tripId }) {
     let list = delegates;
     const q = query.trim().toLowerCase();
     if (q) list = list.filter((d) => d.name.toLowerCase().includes(q) || (d.company || "").toLowerCase().includes(q));
-    if (statusFilter !== "ALL") list = list.filter((d) => d.status === statusFilter);
+    // Legacy rows may still hold "PRESENT" (routes that haven't migrated to
+    // writing "ARRIVED" yet) — alias so they show up under "Arrived" instead
+    // of vanishing from that filter.
+    if (statusFilter !== "ALL") list = list.filter((d) => (d.status === "PRESENT" ? "ARRIVED" : d.status) === statusFilter);
     list = [...list].sort((a, b) => {
       if (sortMode === "vip") return (b.vip ? 1 : 0) - (a.vip ? 1 : 0) || a.name.localeCompare(b.name);
       if (sortMode === "status") return a.status.localeCompare(b.status) || a.name.localeCompare(b.name);
@@ -1254,9 +1268,11 @@ function CoachBoardView({ tripId }) {
               <div className="tf-search"><Search size={14} color="var(--tf-text-3)" /><input placeholder={t("Search delegates or company…")} value={query} onChange={(e) => setQuery(e.target.value)} /></div>
               <select className="tf-select-pill" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                 <option value="ALL">{t("All statuses")}</option>
-                <option value="PRESENT">{t("Present")}</option>
-                <option value="MISSING">{t("Missing")}</option>
                 <option value="UNASSIGNED">{t("Unassigned")}</option>
+                <option value="ASSIGNED">{t("Assigned")}</option>
+                <option value="ARRIVED">{t("Arrived")}</option>
+                <option value="LATE">{t("Late")}</option>
+                <option value="MISSING">{t("Missing")}</option>
               </select>
               <select className="tf-select-pill" value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
                 <option value="name">{t("Sort: Name")}</option>

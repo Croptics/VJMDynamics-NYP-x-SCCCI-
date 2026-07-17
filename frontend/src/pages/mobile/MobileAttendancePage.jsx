@@ -7,8 +7,22 @@ import DelegateAvatar from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 
 const TRIP_ID = "t-1";
-const FILTERS = ["ALL", "PRESENT", "MISSING", "UNASSIGNED"];
-const STATUS_OPTIONS = ["PRESENT", "MISSING", "UNASSIGNED"];
+// UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
+// staff on the desktop admin pages BEFORE the event; mobile's job during the
+// event is tracking who's arrived/late/missing, not doing the assignment
+// itself, so unassigned delegates don't belong on this list or its filters.
+const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+// Same reasoning as FILTERS above — the "Update status" sheet only offers
+// active operational states during the event, not the pre-event Unassigned
+// state (that's set by staff on desktop before delegates ever board).
+const STATUS_OPTIONS = ["ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+// Legacy alias — some check-in routes still write "PRESENT" directly (see
+// normalize() in backend/data.js), not yet migrated to "ARRIVED".
+const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
+const STATUS_BADGE_CLASS = {
+  PRESENT: "badge-arrived", ARRIVED: "badge-arrived", ASSIGNED: "badge-assigned",
+  LATE: "badge-late", MISSING: "badge-missing", UNASSIGNED: "badge-unassigned",
+};
 
 /**
  * Mobile Attendance sheet — the full delegate roster (GET /api/trips/:id/
@@ -44,6 +58,9 @@ export default function MobileAttendancePage() {
     const s = (searchParams.get("status") || "ALL").toUpperCase();
     return FILTERS.includes(s) ? s : "ALL";
   });
+  // ?coach=<id> — set when the Home page's Coach status card links to one
+  // specific coach's missing list instead of everyone's.
+  const [coachFilter, setCoachFilter] = useState(() => searchParams.get("coach") || null);
   const [rowError, setRowError] = useState(null); // { id, message }
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
@@ -110,16 +127,21 @@ export default function MobileAttendancePage() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return delegates
-      .filter((d) => filter === "ALL" || d.status === filter)
+      .filter((d) => effectiveStatus(d) !== "UNASSIGNED") // see the FILTERS comment above
+      .filter((d) => filter === "ALL" || effectiveStatus(d) === filter)
+      .filter((d) => !coachFilter || d.coachId === coachFilter)
       .filter((d) => !q || (d.name || "").toLowerCase().includes(q))
       .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-  }, [delegates, query, filter]);
+  }, [delegates, query, filter, coachFilter]);
 
-  const FILTER_LABEL = { ALL: "All statuses", PRESENT: "Present", MISSING: "Missing", UNASSIGNED: "Unassigned" };
+  const FILTER_LABEL = {
+    ALL: "All statuses", UNASSIGNED: "Unassigned", ASSIGNED: "Assigned",
+    ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing",
+  };
 
   return (
     <div>
-      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 14 }}>
+      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 18 }}>
         <div>
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
             {t("Attendance sheet")}
@@ -140,7 +162,7 @@ export default function MobileAttendancePage() {
         </div>
       )}
 
-      <div style={{ position: "relative", marginBottom: 10 }}>
+      <div style={{ position: "relative", marginBottom: 14 }}>
         <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
         <input
           className="input"
@@ -151,17 +173,49 @@ export default function MobileAttendancePage() {
         />
       </div>
 
-      <div className="row" style={{ gap: 6, marginBottom: 12, overflowX: "auto", paddingBottom: 2 }}>
-        {FILTERS.map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={"badge " + (filter === f ? "badge-present" : "badge-neutral")}
-            style={{ flexShrink: 0, border: "none", cursor: "pointer", fontSize: 12.5, padding: "6px 12px" }}
-          >
-            {t(FILTER_LABEL[f])}
+      <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+        <select
+          className="select"
+          value={coachFilter || ""}
+          onChange={(e) => setCoachFilter(e.target.value || null)}
+          style={{ flex: 1, fontSize: 13 }}
+        >
+          <option value="">{t("All coaches")}</option>
+          {coaches.map((c) => (
+            <option key={c.id} value={c.id}>{[c.name, c.city].filter(Boolean).join(" · ")}</option>
+          ))}
+        </select>
+        {coachFilter && (
+          <button onClick={() => setCoachFilter(null)} aria-label={t("Clear coach filter")}
+            className="btn btn-ghost" style={{ padding: "8px 10px", flexShrink: 0 }}>
+            <X size={14} />
           </button>
-        ))}
+        )}
+      </div>
+
+      <div className="row" style={{ gap: 8, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
+        {FILTERS.map((f) => {
+          // Missing stays red at all times, active or not — it's the one
+          // status that needs to read as urgent on sight, not just when
+          // selected, so it doesn't blend in as just another neutral tab.
+          const isMissing = f === "MISSING";
+          const active = filter === f;
+          const cls = isMissing ? "badge-missing" : active ? "badge-present" : "badge-neutral";
+          return (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={"badge " + cls}
+              style={{
+                flexShrink: 0, cursor: "pointer", fontSize: 12.5, padding: "7px 13px",
+                border: active ? "1.5px solid currentColor" : "1.5px solid transparent",
+                opacity: isMissing && !active ? 0.75 : 1,
+              }}
+            >
+              {t(FILTER_LABEL[f])}
+            </button>
+          );
+        })}
       </div>
 
       {loading && delegates.length === 0 && !error && <div className="muted">{t("Loading…")}</div>}
@@ -175,8 +229,8 @@ export default function MobileAttendancePage() {
       {visible.map((d) => {
         const missing = d.status === "MISSING";
         return (
-          <div key={d.id} className="mobile-card" style={{ padding: 14 }}>
-            <div className="row" style={{ gap: 10, minWidth: 0 }}>
+          <div key={d.id} className="mobile-card" style={{ padding: 16 }}>
+            <div className="row" style={{ gap: 12, minWidth: 0 }}>
               <DelegateAvatar delegate={d} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="row" style={{ gap: 6 }}>
@@ -217,8 +271,8 @@ export default function MobileAttendancePage() {
             </div>
 
             <div className="row between" style={{ marginTop: 10, gap: 8 }}>
-              <span className={"badge " + (d.status === "PRESENT" ? "badge-present" : d.status === "MISSING" ? "badge-missing" : "badge-unassigned")}>
-                {savingId === d.id ? t("Saving…") : t(FILTER_LABEL[d.status] || d.status)}
+              <span className={"badge " + (STATUS_BADGE_CLASS[d.status] || "badge-unassigned")}>
+                {savingId === d.id ? t("Saving…") : t(FILTER_LABEL[effectiveStatus(d)] || d.status)}
               </span>
               {canEdit && (
                 <button
@@ -281,7 +335,8 @@ export default function MobileAttendancePage() {
  *  of a cramped inline <select>, same "one clear action per row" spirit as
  *  Manual check-in's own "Mark present" button. */
 function StatusSheet({ delegate, onPick, onClose, t }) {
-  const FILTER_LABEL = { PRESENT: "Present", MISSING: "Missing", UNASSIGNED: "Unassigned" };
+  const FILTER_LABEL = { UNASSIGNED: "Unassigned", ASSIGNED: "Assigned", ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
+  const current = effectiveStatus(delegate);
   return (
     <div
       style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
@@ -303,7 +358,7 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
           {STATUS_OPTIONS.map((status) => {
-            const active = delegate.status === status;
+            const active = current === status;
             return (
               <button
                 key={status}

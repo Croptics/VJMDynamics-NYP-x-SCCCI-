@@ -258,6 +258,13 @@ async function createSchema() {
   // Nullable: rows created before this column (and any write that doesn't
   // pass an actor) fall back to "you" in rowToActivity().
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor TEXT`);
+  // Field-level rollback support: delegate_id ties an entry back to the row
+  // it changed; changes is {field: {from, to}} for whatever actually
+  // differed in that one update (see updateDelegate()'s diff below). Only
+  // ever set on delegate-edit entries — add/remove entries stay
+  // non-rollbackable (out of scope for this pass; see AI Log).
+  await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS delegate_id VARCHAR(64)`);
+  await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS changes JSONB`);
   await run(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log("createdAt" DESC)`);
 }
 
@@ -342,9 +349,14 @@ async function seedTransitFlow() {
  * Was an in-memory array capped at 8 entries and wiped on every restart;
  * now stored in activity_log so history survives restarts and accumulates
  * over time (see getActivity/deleteActivity/deleteAllActivity below). */
-async function logActivity(text, kind, actor = null) {
+async function logActivity(text, kind, actor = null, meta = null) {
   const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  await run(`INSERT INTO activity_log (id, text, kind, actor) VALUES ($1,$2,$3,$4)`, [id, text, kind, actor || null]);
+  const delegateId = meta?.delegateId || null;
+  const changes = meta?.changes && Object.keys(meta.changes).length ? meta.changes : null;
+  await run(
+    `INSERT INTO activity_log (id, text, kind, actor, delegate_id, changes) VALUES ($1,$2,$3,$4,$5,$6)`,
+    [id, text, kind, actor || null, delegateId, changes ? JSON.stringify(changes) : null]
+  );
 }
 
 function rowToActivity(row) {
@@ -357,6 +369,11 @@ function rowToActivity(row) {
     // actor) have none; fall back to "you" (the frontend translates that).
     via: row.actor || "you",
     createdAt: row.createdAt,
+    // Rollback support — present only on delegate-edit entries that changed
+    // at least one field (see updateDelegate()). The frontend only offers a
+    // Rollback button when both are set.
+    delegateId: row.delegate_id || null,
+    changes: row.changes || null,
   };
 }
 
@@ -396,10 +413,15 @@ function rowToDelegate(row) {
   return { ...row, vip: !!row.vip };
 }
 
+const VALID_STATUSES = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+
 function normalize(input, id) {
-  const status = ["PRESENT", "MISSING", "UNASSIGNED"].includes(input.status)
-    ? input.status
-    : "UNASSIGNED";
+  // "PRESENT" is the pre-5-status value that QR/face-scan/manual check-in
+  // routes still write directly (not yet migrated — see AI Log). Treat it as
+  // a legacy alias for ARRIVED so those rows/writes keep working instead of
+  // silently falling back to UNASSIGNED.
+  const raw = input.status === "PRESENT" ? "ARRIVED" : input.status;
+  const status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
   return {
     id,
     name: (input.name || "").trim() || "Unnamed delegate",
@@ -473,24 +495,130 @@ export async function getDelegateById(id) {
 
 export async function createDelegate(input, tripUuid = null, actor = null) {
   const d = normalize(input, await nextId());
+  // Optional — most callers (vance.js's bulk onboarding, vimal.js's scan
+  // flow, seed scripts) never pass these and they land as null, same as
+  // before. The Dashboard's Add-delegate modal shares its form with Edit
+  // (see the PROFILE_FIELDS note on updateDelegate() below), so it can now
+  // send them directly instead of needing a separate follow-up PATCH.
+  const profile = {};
+  for (const [key, col] of PROFILE_FIELDS) profile[col] = input[key] || null;
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id, "createdBy") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid, actor]
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id, "createdBy",
+       company, role, industry, email, phone, website, passport_no, nationality, passport_expiry, accessibility_notes, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+    [
+      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid, actor,
+      profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
+      profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
+    ]
   );
   await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor);
-  return { ...d, createdBy: actor };
+  return {
+    ...d, createdBy: actor,
+    company: profile.company, role: profile.role, industry: profile.industry,
+    email: profile.email, phone: profile.phone, website: profile.website,
+    passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
+    accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+  };
 }
+
+// Extended profile fields the Dashboard's Edit modal can now set — added
+// alongside the core CRUD fields below rather than through normalize()
+// (which only ever returns the fixed 8-field shape used for validation), so
+// a PATCH carrying these previously landed here, matched nothing in the
+// UPDATE statement, and was silently dropped — the delegate stayed NULL on
+// company/role/industry/etc. forever, even after "saving" from the modal.
+// Same COALESCE-style "only touch what's provided" pattern vance.js's own
+// onboarding/confirm UPDATE already uses for these same columns.
+// Frontend field names match the ones vance.js's onboarding/confirm route
+// already established for these same columns (e.g. "passportNumber", not
+// "passportNo") — one convention per column across the app.
+const PROFILE_FIELDS = [
+  ["company", "company"], ["role", "role"], ["industry", "industry"],
+  ["email", "email"], ["phone", "phone"], ["website", "website"],
+  ["passportNumber", "passport_no"], ["nationality", "nationality"],
+  ["passportExpiry", "passport_expiry"],
+  ["accessibilityNotes", "accessibility_notes"], ["notes", "notes"],
+];
 
 export async function updateDelegate(id, patch, actor = null) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return null;
   const merged = normalize({ ...rowToDelegate(existing), ...patch }, id);
+  const profile = {};
+  for (const [key, col] of PROFILE_FIELDS) {
+    profile[col] = patch[key] !== undefined ? (patch[key] || null) : existing[col];
+  }
   await run(
-    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7 WHERE id=$8`,
-    [merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation, id]
+    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7,
+       company=$8, role=$9, industry=$10, email=$11, phone=$12, website=$13,
+       passport_no=$14, nationality=$15, passport_expiry=$16, accessibility_notes=$17, notes=$18
+     WHERE id=$19`,
+    [
+      merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation,
+      profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
+      profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
+      id,
+    ]
   );
-  await logActivity(`${merged.name} updated`, "reassign", actor);
-  return merged;
+  // Field-level diff for the History Log's rollback feature — compares the
+  // row as it was (existing) against what we just wrote (merged/profile),
+  // using the SAME patch-shape keys updateDelegate() itself accepts, so a
+  // rollback can just feed `changes[field].from` straight back in as a new
+  // patch. Only fields that actually differ are recorded — a save that only
+  // touched, say, status doesn't manufacture no-op "changes" for everything
+  // else.
+  const before = {
+    name: existing.name, coachId: existing.coachId, status: existing.status, vip: existing.vip,
+    lastSeen: existing.lastSeen, lastLocation: existing.lastLocation,
+    company: existing.company, role: existing.role, industry: existing.industry,
+    email: existing.email, phone: existing.phone, website: existing.website,
+    passportNumber: existing.passport_no, nationality: existing.nationality, passportExpiry: existing.passport_expiry,
+    accessibilityNotes: existing.accessibility_notes, notes: existing.notes,
+  };
+  const after = {
+    name: merged.name, coachId: merged.coachId, status: merged.status, vip: merged.vip,
+    lastSeen: merged.lastSeen, lastLocation: merged.lastLocation,
+    company: profile.company, role: profile.role, industry: profile.industry,
+    email: profile.email, phone: profile.phone, website: profile.website,
+    passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
+    accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+  };
+  const changes = {};
+  for (const key of Object.keys(before)) {
+    if (String(before[key] ?? "") !== String(after[key] ?? "")) changes[key] = { from: before[key], to: after[key] };
+  }
+  await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes });
+  return {
+    ...merged,
+    company: profile.company, role: profile.role, industry: profile.industry,
+    email: profile.email, phone: profile.phone, website: profile.website,
+    passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
+    accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+  };
+}
+
+/** Field-level rollback for a single History Log entry — reverts a delegate
+ *  to the values it had immediately before that one edit, by feeding the
+ *  entry's stored `changes[field].from` back in as a new patch through
+ *  updateDelegate() (so the rollback itself is logged as a normal edit too —
+ *  it can be rolled back again, no special-casing needed). Add/remove
+ *  activity entries have no delegate_id/changes and are never rollbackable
+ *  (out of scope for this pass — see AI Log). Known limitation: if only
+ *  SOME fields changed in the original edit (e.g. just status, not coachId)
+ *  and coachId has since changed independently, reverting just those fields
+ *  could theoretically leave an inconsistent combination — accepted for a
+ *  field-level (not full-snapshot) rollback design. */
+export async function rollbackActivity(activityLogId, actor = null) {
+  const entry = await get("SELECT * FROM activity_log WHERE id = $1", [activityLogId]);
+  if (!entry) return { error: "NOT_FOUND" };
+  if (!entry.delegate_id || !entry.changes) return { error: "NOT_ROLLBACKABLE" };
+  const target = await get("SELECT id FROM delegates WHERE id = $1", [entry.delegate_id]);
+  if (!target) return { error: "DELEGATE_GONE" };
+  const patch = {};
+  for (const [field, { from }] of Object.entries(entry.changes)) patch[field] = from;
+  const delegate = await updateDelegate(entry.delegate_id, patch, actor);
+  return { ok: true, delegate };
 }
 
 export async function deleteDelegate(id, actor = null) {
@@ -559,12 +687,21 @@ export async function getTrip(tripUuid = null) {
  *  dataset, so they stay in sync. The startup backfill in seedTransitFlow()
  *  already attaches any legacy NULL-trip rows to Beijing, so nothing vanishes.
  *  Falls back to null only if the Beijing trip somehow has no uuid yet. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function resolveTripUuid(tripId) {
   if (!tripId) return null;
   if (tripId === "t-1") {
     const t = await get("SELECT uuid_id FROM trips WHERE id = 't-1'");
     return t?.uuid_id || null;
   }
+  // A malformed/garbage tripId (not "t-1" and not a real uuid) used to throw
+  // ("invalid input syntax for type uuid") instead of just not matching, since
+  // Postgres validates the $1 parameter's shape against the uuid_id column's
+  // type before it even gets to compare values. Callers that pass through a
+  // client-supplied id (e.g. a stale/tampered URL param) need this to resolve
+  // to null like any other non-match, not 500.
+  if (!UUID_RE.test(tripId)) return null;
   const t = await get("SELECT uuid_id FROM trips WHERE uuid_id = $1", [tripId]);
   return t?.uuid_id || null;
 }

@@ -56,7 +56,11 @@ import { useLang } from "../lib/i18n.jsx";
 const TRIP_ID = "t-1";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastSeen: "", lastLocation: "" };
+const EMPTY_FORM = {
+  name: "", coachId: "", status: "ARRIVED", vip: false, lastSeen: "", lastLocation: "",
+  company: "", role: "", industry: "", email: "", phone: "", website: "",
+  passportNumber: "", nationality: "", passportExpiry: "", accessibilityNotes: "", notes: "",
+};
 
 export default function DashboardPage() {
   const perms = getPermissions();
@@ -118,6 +122,7 @@ export default function DashboardPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState(null); // null = creating
   const [form, setForm] = useState(EMPTY_FORM);
+  const [showMoreFields, setShowMoreFields] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState("");
   const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
@@ -240,6 +245,7 @@ export default function DashboardPage() {
     setFormErr("");
     setEditingPhotoUrl(null);
     setPhotoErr("");
+    setShowMoreFields(false);
     setModalOpen(true);
   }
 
@@ -248,13 +254,24 @@ export default function DashboardPage() {
     setForm({
       name: d.name || "",
       coachId: d.coachId || "",
-      status: d.status || "PRESENT",
+      // Legacy rows may still say "PRESENT" (some check-in routes haven't
+      // migrated to writing "ARRIVED" yet) — alias it here so the status
+      // <select> (which only lists the 5 current values) always has a
+      // matching option instead of silently showing blank.
+      status: d.status === "PRESENT" ? "ARRIVED" : (d.status || "UNASSIGNED"),
       vip: !!d.vip,
       lastSeen: d.lastSeen || "",
       lastLocation: d.lastLocation || "",
+      company: d.company || "", role: d.role || "", industry: d.industry || "",
+      email: d.email || "", phone: d.phone || "", website: d.website || "",
+      // GET returns raw DB column names (snake_case) for these three — the
+      // rest are already single-word/camelCase-compatible either way.
+      passportNumber: d.passport_no || "", nationality: d.nationality || "", passportExpiry: d.passport_expiry || "",
+      accessibilityNotes: d.accessibility_notes || "", notes: d.notes || "",
     });
     setEditingPhotoUrl(d.photoUrl || null);
     setFormErr("");
+    setShowMoreFields(false);
     setModalOpen(true);
   }
 
@@ -316,6 +333,11 @@ export default function DashboardPage() {
       // doesn't silently carry stale data forward into a later Missing spell.
       lastSeen: form.status === "MISSING" ? form.lastSeen.trim() : "",
       lastLocation: form.status === "MISSING" ? form.lastLocation.trim() : "",
+      company: form.company.trim(), role: form.role.trim(), industry: form.industry.trim(),
+      email: form.email.trim(), phone: form.phone.trim(), website: form.website.trim(),
+      passportNumber: form.passportNumber.trim(), nationality: form.nationality.trim(),
+      passportExpiry: form.passportExpiry.trim(),
+      accessibilityNotes: form.accessibilityNotes.trim(), notes: form.notes.trim(),
     };
     try {
       if (editingId) {
@@ -418,11 +440,16 @@ export default function DashboardPage() {
     return c ? coachDisplayName(c) : t("Unassigned");
   };
 
+  // Legacy rows may still hold "PRESENT" (routes that haven't migrated to
+  // writing "ARRIVED" yet) — alias for filtering/sorting so those rows show
+  // up under "Arrived" instead of silently vanishing from that filter.
+  const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
+
   // The "All delegates" table, after the search box, status filter and sort.
   const visibleDelegates = useMemo(() => {
     const query = delegateQuery.trim().toLowerCase();
     let list = delegates.filter((d) => {
-      if (statusFilter !== "ALL" && d.status !== statusFilter) return false;
+      if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
       if (query) {
         const hay = `${d.name || ""} ${d.company || ""}`.toLowerCase();
         if (!hay.includes(query)) return false;
@@ -876,9 +903,11 @@ export default function DashboardPage() {
               />
               <select className="select" style={{ maxWidth: 170 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                 <option value="ALL">{t("All statuses")}</option>
-                <option value="PRESENT">{t("Present")}</option>
-                <option value="MISSING">{t("Missing")}</option>
                 <option value="UNASSIGNED">{t("Unassigned")}</option>
+                <option value="ASSIGNED">{t("Assigned")}</option>
+                <option value="ARRIVED">{t("Arrived")}</option>
+                <option value="LATE">{t("Late")}</option>
+                <option value="MISSING">{t("Missing")}</option>
               </select>
               <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
                 <option value="name">{t("Sort: Name")}</option>
@@ -1052,9 +1081,11 @@ export default function DashboardPage() {
             <label className="field-label" style={{ marginTop: 14 }}>{t("Status")}</label>
             <select className="select" value={form.status}
               onChange={(e) => setForm({ ...form, status: e.target.value })}>
-              <option value="PRESENT">{t("Present")}</option>
-              <option value="MISSING">{t("Missing")}</option>
               <option value="UNASSIGNED">{t("Unassigned")}</option>
+              <option value="ASSIGNED">{t("Assigned")}</option>
+              <option value="ARRIVED">{t("Arrived")}</option>
+              <option value="LATE">{t("Late")}</option>
+              <option value="MISSING">{t("Missing")}</option>
             </select>
 
             <label className="field-label" style={{ marginTop: 14 }}>
@@ -1095,6 +1126,66 @@ export default function DashboardPage() {
                 onChange={(e) => setForm({ ...form, vip: e.target.checked })} />
               {t("Mark as VIP")}
             </label>
+
+            <button
+              type="button"
+              onClick={() => setShowMoreFields((v) => !v)}
+              className="row"
+              style={{ gap: 6, marginTop: 16, background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 13, fontWeight: 600 }}
+            >
+              <ChevronRight size={15} style={{ transform: showMoreFields ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
+              {t("More details")}
+            </button>
+
+            {showMoreFields && (
+              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label className="field-label">{t("Role")}</label>
+                  <input className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Company")}</label>
+                  <input className="input" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Industry")}</label>
+                  <input className="input" value={form.industry} onChange={(e) => setForm({ ...form, industry: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Nationality")}</label>
+                  <input className="input" value={form.nationality} onChange={(e) => setForm({ ...form, nationality: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Email")}</label>
+                  <input className="input" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Phone")}</label>
+                  <input className="input" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Website")}</label>
+                  <input className="input" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Passport number")}</label>
+                  <input className="input mono" value={form.passportNumber} onChange={(e) => setForm({ ...form, passportNumber: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Passport expiry")}</label>
+                  <input className="input" type="date" value={form.passportExpiry} onChange={(e) => setForm({ ...form, passportExpiry: e.target.value })} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label className="field-label">{t("Accessibility notes")}</label>
+                  <input className="input" value={form.accessibilityNotes} onChange={(e) => setForm({ ...form, accessibilityNotes: e.target.value })} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label className="field-label">{t("Notes")}</label>
+                  <textarea className="input" rows={2} style={{ resize: "vertical", fontFamily: "inherit" }}
+                    value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+                </div>
+              </div>
+            )}
 
             {formErr && (
               <div style={{

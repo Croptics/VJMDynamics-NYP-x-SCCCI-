@@ -12,19 +12,22 @@ import {
   Building2,
   Briefcase,
   Loader2,
+  Mail,
+  Phone,
+  Globe,
+  Check,
 } from "lucide-react";
 import { ConfidenceBadge } from "../components/StatusBadge.jsx";
 import {
   startParseJob,
   getParseJob,
   getOnboardingContext,
+  getTrips,
   confirmDelegates,
   exportRowsCsv,
 } from "../lib/claudeParse.js";
-import { apiGet } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
-import ScanToBoardView from "./ScanToBoardView.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -33,16 +36,6 @@ import ScanToBoardView from "./ScanToBoardView.jsx";
  * left and re-attached — the parse keeps going in the background. Extracted
  * rows stream in with a progress bar, then the admin can review, flag VIPs,
  * assign coaches, search/export and Confirm into the shared delegate list.
- *
- * "Assign to trip" used to be a hardcoded stub list (t-1/t-2/t-3, only one of
- * which — t-1 — was ever a real trip) totally disconnected from the actual
- * trips table. Assigning an upload to "Shanghai"/"Shenzhen" from that stub
- * silently created delegates with no real trip attached — invisible on the
- * Trips board and the arrival check-in module, since neither one ever
- * queries for an unscoped/orphaned delegate. Fixed by fetching the REAL trip
- * list the same way DashboardPage.jsx's trip switcher does (GET /all-trips +
- * the base trip's own name), so every trip actually in the database is a
- * real, working option here.
  */
 
 // Optional columns rendered only when at least one row has data for them.
@@ -71,40 +64,14 @@ export default function OnboardingPage() {
   const pollRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [tripId, setTripId] = useState(() => localStorage.getItem(LS_TRIP) || "");
+  const [trips, setTrips] = useState([]);
   const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
   const [rows, setRows] = useState([]);
   const [editAll, setEditAll] = useState(false);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
-  const [context, setContext] = useState({ existingNames: [], coaches: [] });
   const [view, setView] = useState("parse"); // parse | passes | scan
-  const [baseTrip, setBaseTrip] = useState(null); // the real base ("t-1") trip's own name/uuid
-  const [otherTrips, setOtherTrips] = useState([]); // every OTHER real trip, from /api/all-trips
-
-  /* ---- real trip list (replaces the old hardcoded t-1/t-2/t-3 stub) ----- */
-  useEffect(() => {
-    apiGet("/trips/t-1").then(setBaseTrip).catch(() => {});
-    apiGet("/all-trips").then((r) => setOtherTrips(r.trips || [])).catch(() => {});
-  }, []);
-
-  const tripOptions = useMemo(() => {
-    const opts = [{ id: "t-1", name: baseTrip?.name || "Beijing study mission" }];
-    for (const tr of otherTrips) {
-      if (baseTrip && tr.id === baseTrip.uuid_id) continue; // skip dup of the base trip
-      opts.push({ id: tr.id, name: tr.name });
-    }
-    return opts;
-  }, [otherTrips, baseTrip]);
-
-  // A trip id saved to localStorage before this fix (the old "t-2"/"t-3" stub
-  // options) no longer matches anything real — clear it once the real list is
-  // in, rather than silently keeping an upload pointed at a trip that doesn't
-  // exist.
-  useEffect(() => {
-    if (tripId && tripOptions.length > 0 && !tripOptions.some((o) => o.id === tripId)) {
-      setTripId("");
-    }
-  }, [tripOptions, tripId]);
+  const [context, setContext] = useState({ existingNames: [], coaches: [] });
 
   /* ---- duplicate set (names already in the selected trip) --------------- */
   const existingSet = useMemo(
@@ -121,6 +88,21 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (job?.id) localStorage.setItem(LS_JOB, JSON.stringify({ id: job.id, fileName: job.fileName, status: job.status }));
   }, [job]);
+
+  /* ---- real trips for the picker (ids that actually exist in the DB) --- */
+  useEffect(() => {
+    let alive = true;
+    getTrips()
+      .then((list) => {
+        if (!alive) return;
+        setTrips(list);
+        // Drop a stale saved trip id (e.g. the old hardcoded t-2/t-3) that no
+        // longer matches a real trip, so we never submit against a dead id.
+        setTripId((cur) => (cur && !list.some((tr) => tr.id === cur) ? "" : cur));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   /* ---- onboarding context (existing names + coaches) ------------------- */
   useEffect(() => {
@@ -200,6 +182,9 @@ export default function OnboardingPage() {
   const setVip = (k, val) => setRows((prev) => prev.map((r) => (r._key === k ? { ...r, vip: val } : r)));
   const setCoach = (k, val) => setRows((prev) => prev.map((r) => (r._key === k ? { ...r, coachId: val } : r)));
   const removeRow = (k) => setRows((prev) => prev.filter((r) => r._key !== k));
+  const [editKeys, setEditKeys] = useState(() => new Set());
+  const toggleEdit = (k) =>
+    setEditKeys((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
 
   /* ---- derived --------------------------------------------------------- */
   const reviewNeeded = useMemo(() => rows.filter((r) => r.needsReview).length, [rows]);
@@ -225,8 +210,11 @@ export default function OnboardingPage() {
     if (toAdd.length === 0) { alert(t("Every extracted delegate is already in this trip.")); return; }
     setSaving(true);
     try {
-      const { added } = await confirmDelegates(tripId, toAdd);
-      alert(`${added} ${t("delegates added to the trip.")}${skipped ? ` (${skipped} ${t("duplicates skipped")})` : ""}`);
+      const { added, skippedInvalid = 0 } = await confirmDelegates(tripId, toAdd);
+      const notes = [];
+      if (skipped) notes.push(`${skipped} ${t("duplicates skipped")}`);
+      if (skippedInvalid) notes.push(`${skippedInvalid} ${t("invalid skipped")}`);
+      alert(`${added} ${t("delegates added to the trip.")}${notes.length ? ` (${notes.join(", ")})` : ""}`);
       setRows([]);
       setJob(null);
       localStorage.removeItem(LS_JOB);
@@ -246,11 +234,11 @@ export default function OnboardingPage() {
     <div className="page">
       <div className="page-eyebrow">{t("Onboarding")}</div>
       <h1 className="page-title">{t("Document parsing")}</h1>
-      <p className="page-sub">{t("Drop a delegate directory, attendee list, or passport scan — AI reads it and builds your delegate list.")}</p>
+      <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
 
       {/* Tabs */}
       <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
-        {[["parse", "Document parsing"], ["passes", "Boarding passes"], ["scan", "Scan to board"]].map(([k, label]) => (
+        {[["parse", "Document parsing"], ["passes", "Boarding passes"]].map(([k, label]) => (
           <button key={k} onClick={() => setView(k)} className="btn btn-ghost"
             style={{ borderRadius: 0, borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
             {t(label)}
@@ -259,10 +247,8 @@ export default function OnboardingPage() {
       </div>
 
       {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} /></div>}
-      {view === "scan" && <div style={{ marginTop: 20 }}><ScanToBoardView tripId={tripId} /></div>}
 
       {view === "parse" && (<>
-
       {/* Upload + job status */}
       <div className="card" style={{ padding: 24, marginTop: 20 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 24 }}>
@@ -301,8 +287,10 @@ export default function OnboardingPage() {
             <label className="field-label" style={{ marginTop: 16 }}>{t("Assign to trip")}</label>
             <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
               <option value="">{t("Select a trip…")}</option>
-              {tripOptions.map((trip) => (
-                <option key={trip.id} value={trip.id}>{trip.name}</option>
+              {trips.map((trip) => (
+                <option key={trip.id} value={trip.id}>
+                  {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
+                </option>
               ))}
             </select>
           </div>
@@ -385,113 +373,147 @@ export default function OnboardingPage() {
               <button className="btn btn-ghost" onClick={() => exportRowsCsv(rows, "delegates.csv")}>
                 <Download size={15} /> {t("Export")}
               </button>
-              <button className="btn btn-primary" onClick={confirmAndAdd} disabled={saving || job?.status === "running"}>
+              <button className="btn btn-primary" onClick={confirmAndAdd}
+                disabled={saving || job?.status === "running" || rows.length - dupCount === 0}>
                 <CheckCircle2 size={16} /> {saving ? t("Adding…") : `${t("Confirm & add")} ${rows.length - dupCount}`}
               </button>
             </div>
           </div>
+          {rows.length > 0 && dupCount === rows.length && (
+            <div style={{ padding: "10px 20px", fontSize: 12.5, color: "var(--st-missing)", borderBottom: "1px solid var(--line)", background: "var(--surface-2)" }}>
+              {t("All extracted delegates are already in this trip — nothing new to add.")}
+            </div>
+          )}
 
-          <div style={{ overflowX: "auto" }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>{t("Name")}</th>
-                  {activeColumns.map((c) => (
-                    <th key={c.key}>{t(c.label)}</th>
-                  ))}
-                  <th>{t("VIP")}</th>
-                  <th>{t("Coach")}</th>
-                  <th>{t("Confidence")}</th>
-                  <th style={{ width: 44 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRows.map((r) => {
-                  const editing = editAll || r.needsReview;
-                  const flagged = r.needsReview;
-                  const dup = isDup(r);
-                  const initials = (r.fullName || "?").split(" ").map((s) => s[0]).slice(0, 2).join("");
-                  return (
-                    <tr key={r._key} style={flagged ? { background: "var(--st-review-bg)" } : dup ? { opacity: 0.6 } : undefined}>
-                      <td>
-                        <div className="row" style={{ gap: 10 }}>
-                          <span className="avatar" style={flagged ? { background: "var(--st-review-bg)", color: "var(--st-review)" } : undefined}>
-                            {initials}
-                          </span>
-                          <div style={{ minWidth: 0 }}>
-                            {editing ? (
-                              <input className="input" style={{ padding: "6px 8px", maxWidth: 160 }}
-                                value={r.fullName} onChange={(e) => updateField(r._key, "fullName", e.target.value)} />
-                            ) : (
-                              <span style={{ fontWeight: 500 }}>{r.fullName}</span>
-                            )}
-                            {dup && <div style={{ fontSize: 11, color: "var(--st-missing)", fontWeight: 600 }}>{t("already in trip")}</div>}
-                          </div>
+          <div style={{ padding: "12px 16px 16px" }}>
+            {visibleRows.length === 0 && (
+              <div className="muted" style={{ fontSize: 13, padding: 8 }}>{t("No matching delegates.")}</div>
+            )}
+            {visibleRows.map((r) => {
+              const editing = editAll || editKeys.has(r._key);
+              const flagged = r.needsReview;
+              const dup = isDup(r);
+              const accent = dup ? "var(--st-missing)" : flagged ? "var(--st-review)" : "transparent";
+              const initials = (r.fullName || "?").split(" ").map((s) => s[0]).slice(0, 2).join("");
+              const details = [
+                r.industry && { icon: Briefcase, text: r.industry },
+                r.email && { icon: Mail, text: r.email },
+                r.phone && { icon: Phone, text: r.phone },
+                r.website && { icon: Globe, text: r.website },
+              ].filter(Boolean);
+              return (
+                <div key={r._key} className="mg-drow" style={{
+                  border: "1px solid var(--line)", borderLeft: `3px solid ${accent}`,
+                  borderRadius: 12, padding: "14px 16px", marginBottom: 10, background: "var(--surface)",
+                }}>
+                  <div className="row" style={{ gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+                    <span className="avatar" style={{ flexShrink: 0 }}>{initials}</span>
+
+                    {/* Identity + details */}
+                    <div style={{ flex: 1, minWidth: 220 }}>
+                      {editing ? (
+                        <input className="input" style={{ padding: "7px 10px", maxWidth: 320, fontWeight: 600, fontSize: 15 }}
+                          value={r.fullName} placeholder={t("Name")}
+                          onChange={(e) => updateField(r._key, "fullName", e.target.value)} />
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontWeight: 700, fontSize: 15.5 }}>{r.fullName}</span>
+                          {dup && <span className="mg-pill" style={{ color: "var(--st-missing)", background: "var(--surface-2)" }}>{t("Already in trip")}</span>}
+                          {flagged && !dup && <span className="mg-pill" style={{ color: "var(--st-review)", background: "var(--surface-2)" }}>{t("Needs review")}</span>}
                         </div>
-                      </td>
-                      {activeColumns.map((c) => (
-                        <td key={c.key} className={c.mono ? "mono" : undefined}>
-                          {editing ? (
-                            <input className="input" type={c.type || "text"}
-                              style={{ padding: "6px 8px", maxWidth: c.type === "date" ? 150 : 160 }}
-                              value={r[c.key] || ""} onChange={(e) => updateField(r._key, c.key, e.target.value)} />
-                          ) : c.type === "date" && r[c.key] ? (
-                            new Date(r[c.key]).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
-                          ) : (
-                            <span style={!r[c.key] ? { color: "var(--ink-3)" } : undefined}>{r[c.key] || "—"}</span>
-                          )}
-                        </td>
-                      ))}
-                      <td>
-                        <button
-                          onClick={() => setVip(r._key, !r.vip)}
-                          aria-label={r.vip ? "Unmark VIP" : "Mark VIP"}
-                          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", color: r.vip ? "#e0a800" : "var(--ink-3)" }}
-                        >
-                          <Star size={17} fill={r.vip ? "#e0a800" : "none"} />
-                        </button>
-                      </td>
-                      <td>
-                        <select className="select" style={{ padding: "6px 28px 6px 8px", minWidth: 110 }}
-                          value={r.coachId || ""} onChange={(e) => setCoach(r._key, e.target.value)}>
-                          <option value="">{t("—")}</option>
-                          {context.coaches.map((c) => (
-                            <option key={c.id} value={c.id}>{c.name}{c.city ? ` (${c.city})` : ""}</option>
+                      )}
+
+                      {!editing && (r.role || r.company) && (
+                        <div className="muted" style={{ fontSize: 13, marginTop: 3 }}>
+                          {[r.role, r.company].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+
+                      {!editing && details.length > 0 && (
+                        <div className="row" style={{ gap: 18, flexWrap: "wrap", marginTop: 10 }}>
+                          {details.map((d, i) => (
+                            <span key={i} className="muted" style={{ fontSize: 12.5, display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                              <d.icon size={14} style={{ flexShrink: 0, opacity: 0.7 }} />
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>{d.text}</span>
+                            </span>
                           ))}
-                        </select>
-                      </td>
-                      <td><ConfidenceBadge value={r.confidence} /></td>
-                      <td>
-                        <button onClick={() => removeRow(r._key)} aria-label={`Remove ${r.fullName}`}
-                          style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex" }}>
-                          <Trash2 size={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        </div>
+                      )}
+
+                      {editing && (
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10, marginTop: 10 }}>
+                          {activeColumns.map((c) => (
+                            <label key={c.key} style={{ fontSize: 11 }}>
+                              <span className="muted" style={{ display: "block", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.03em", fontSize: 10.5 }}>{t(c.label)}</span>
+                              <input className="input" type={c.type || "text"} style={{ padding: "7px 10px", width: "100%" }}
+                                value={r[c.key] || ""} onChange={(e) => updateField(r._key, c.key, e.target.value)} />
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Controls */}
+                    <div className="row" style={{ gap: 8, alignItems: "center", flexShrink: 0 }}>
+                      <button className="mg-iconbtn" onClick={() => setVip(r._key, !r.vip)} title={r.vip ? t("VIP") : t("Mark VIP")}
+                        style={{ color: r.vip ? "#e0a800" : "var(--ink-3)" }}>
+                        <Star size={18} fill={r.vip ? "#e0a800" : "none"} />
+                      </button>
+                      <select className="select" style={{ padding: "7px 8px", minWidth: 130 }}
+                        value={r.coachId || ""} onChange={(e) => setCoach(r._key, e.target.value)}>
+                        <option value="">{t("No coach")}</option>
+                        {context.coaches.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}{c.city ? ` (${c.city})` : ""}</option>
+                        ))}
+                      </select>
+                      <ConfidenceBadge value={r.confidence} />
+                      <button className="mg-iconbtn" onClick={() => toggleEdit(r._key)} title={editing ? t("Done") : t("Edit")}
+                        style={{ color: editing ? "var(--st-present)" : "var(--ink-3)" }}>
+                        {editing ? <Check size={17} /> : <Pencil size={16} />}
+                      </button>
+                      <button className="mg-iconbtn" onClick={() => removeRow(r._key)} title={t("Remove")} style={{ color: "var(--ink-3)" }}>
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
 
       </>)}
 
-      <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`
+        .spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}
+        .mg-drow{transition:box-shadow .15s ease, border-color .15s ease}
+        .mg-drow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07)}
+        .mg-iconbtn{background:none;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:7px;border-radius:9px;transition:background .12s ease}
+        .mg-iconbtn:hover{background:var(--surface-2)}
+        .mg-pill{font-size:10.5px;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap}
+      `}</style>
     </div>
   );
 }
 
+/* Compact inline stat — a quiet strip, not a row of dashboard tiles. Zero-value
+ * chips stay muted so the eye lands on what actually needs attention. */
 function SummaryChip({ icon: Icon, label, value, tone }) {
-  const color = tone === "review" ? "var(--st-review)" : tone === "missing" ? "var(--st-missing)" : "var(--ink)";
+  const active = Number(value) > 0;
+  const color = !active ? "var(--ink-3)"
+    : tone === "review" ? "var(--st-review)"
+    : tone === "missing" ? "var(--st-missing)"
+    : "var(--ink)";
   return (
-    <div className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, minWidth: 130 }}>
-      <Icon size={18} color={color} />
-      <div>
-        <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1, color }}>{value}</div>
-        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{label}</div>
-      </div>
+    <div style={{
+      display: "inline-flex", alignItems: "center", gap: 7,
+      padding: "6px 12px", borderRadius: 999,
+      background: "var(--surface-2)", border: "1px solid var(--line)",
+    }}>
+      <Icon size={14} color={color} />
+      <span style={{ fontSize: 14, fontWeight: 700, color }}>{value}</span>
+      <span className="muted" style={{ fontSize: 12 }}>{label}</span>
     </div>
   );
 }

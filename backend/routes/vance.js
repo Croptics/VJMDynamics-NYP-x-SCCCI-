@@ -686,6 +686,25 @@ router.post(
   })
 );
 
+/* Guard against stray/junk rows at confirm time. A real delegate needs a name
+ * with at least two letters; a very short single-token name (<=2 chars, e.g.
+ * "jq") that carries NO company/role/email/phone/passport is treated as a test
+ * entry, not a person. Deliberately conservative — genuine short names like
+ * "Wu" or "Ng" still pass as long as the row has any supporting detail, which a
+ * directory row almost always does. */
+function isPlausibleDelegate(r) {
+  const name = (r.fullName || "").toString().trim();
+  const letters = (name.match(/\p{L}/gu) || []).length;
+  if (letters < 2) return false;
+  const hasSupport = !!(r.company || r.role || r.email || r.phone || r.passportNumber || r.nationality);
+  const compact = name.replace(/\s+/g, "");
+  // A 2-char CJK name (e.g. 陈伟) is a complete name, so the "too short" check
+  // only applies to Latin-script tokens like "jq".
+  const hasCJK = /\p{Script=Han}/u.test(name);
+  if (!hasCJK && compact.length <= 2 && !name.includes(" ") && !hasSupport) return false;
+  return true;
+}
+
 router.post(
   "/api/trips/:id/onboarding/confirm",
   requirePermission("manageDelegates"),
@@ -701,11 +720,17 @@ router.post(
     // here — this is the actual fix for uploaded lists not reaching the
     // right trip's check-in module / dashboard.
     const tripUuid = await resolveTripUuid(req.params.id);
+    if (!tripUuid) {
+      // Fail loudly rather than create delegates with a null trip_id (orphaned
+      // to the base pool) — the old behaviour when a non-seed trip id was sent.
+      return res.status(404).json({ error: "UNKNOWN_TRIP", message: "That trip no longer exists. Pick a trip from the list and try again." });
+    }
 
     const added = [];
+    let skippedInvalid = 0;
     for (const r of rows) {
+      if (!isPlausibleDelegate(r)) { skippedInvalid++; continue; }
       const name = (r.fullName || "").toString().trim();
-      if (!name) continue;
       // A coach assignment means the delegate is expected on that coach but not
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
@@ -735,7 +760,7 @@ router.post(
       );
       added.push({ ...delegate, company: r.company || null, role: r.role || null });
     }
-    res.status(201).json({ added: added.length, delegates: added });
+    res.status(201).json({ added: added.length, skippedInvalid, delegates: added });
   })
 );
 
@@ -768,7 +793,10 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
   const coaches = (await q(`SELECT id, label, name, city FROM coaches ORDER BY sort_order NULLS LAST, id`)).rows;
-  const present = r.rows.filter((d) => d.status === "PRESENT").length;
+  // PRESENT is the legacy value this route itself still writes on scan-in
+  // (see /api/onboarding/checkin below); ARRIVED is the newer 5-status value
+  // set from Dashboard/TripCoachPage/mobile — both mean "boarded" here.
+  const present = r.rows.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
 }));
 

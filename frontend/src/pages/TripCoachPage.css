@@ -36,6 +36,7 @@
   --tf-red: #dc2626;       --tf-red-bg: #fef2f2;       --tf-red-line: #fecaca;
   --tf-purple: #9333ea;    --tf-purple-bg: #faf5ff;    --tf-purple-line: #e9d5ff;
   --tf-grey: #64748b;      --tf-grey-bg: #f1f5f9;      --tf-grey-line: #e2e8f0;
+  --tf-orange: #ea580c;    --tf-orange-bg: #fff7ed;    --tf-orange-line: #fed7aa;
 
   --tf-bg: #f4f6fb;
   --tf-surface: #ffffff;
@@ -78,6 +79,7 @@
   --tf-red: #f87171;    --tf-red-bg: rgba(248, 113, 113, 0.14);   --tf-red-line: rgba(248, 113, 113, 0.3);
   --tf-purple: #c084fc; --tf-purple-bg: rgba(192, 132, 252, 0.14); --tf-purple-line: rgba(192, 132, 252, 0.3);
   --tf-grey: #94a3b8;   --tf-grey-bg: rgba(148, 163, 184, 0.14);  --tf-grey-line: rgba(148, 163, 184, 0.3);
+  --tf-orange: #fb923c; --tf-orange-bg: rgba(251, 146, 60, 0.14); --tf-orange-line: rgba(251, 146, 60, 0.3);
 }
 
 .tf-root { background: var(--tf-bg); }

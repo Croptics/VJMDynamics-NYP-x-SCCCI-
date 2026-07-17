@@ -4,9 +4,22 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays } from "lucide-react";
-import { apiGet, apiDelete, getPermissions } from "../lib/api.js";
+import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw } from "lucide-react";
+import { apiGet, apiPost, apiDelete, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+
+// Human-readable labels for the field-level diff shown under a rollback-
+// eligible entry — matches the patch-shape keys updateDelegate() (backend)
+// accepts/returns, see data.js's PROFILE_FIELDS + the core CRUD fields.
+const FIELD_LABEL = {
+  name: "Name", coachId: "Coach", status: "Status", vip: "VIP",
+  lastSeen: "Last seen", lastLocation: "Last location",
+  company: "Company", role: "Role", industry: "Industry",
+  email: "Email", phone: "Phone", website: "Website",
+  passportNumber: "Passport number", nationality: "Nationality", passportExpiry: "Passport expiry",
+  accessibilityNotes: "Accessibility notes", notes: "Notes",
+};
+const fmtVal = (v) => (v === null || v === undefined || v === "" ? "—" : String(v));
 
 /**
  * History log — a dedicated, standalone audit page for the activity_log.
@@ -28,6 +41,7 @@ export default function HistoryLogPage() {
   const [history, setHistory] = useState([]);
   const [error, setError] = useState(null);
   const [loaded, setLoaded] = useState(false);
+  const [rollingBack, setRollingBack] = useState(null); // activity id currently being rolled back
   const loadingRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -57,6 +71,26 @@ export default function HistoryLogPage() {
       setHistory((h) => h.filter((a) => a.id !== id));
     } catch (e) {
       setError(e.message || "Delete failed.");
+    }
+  }
+
+  async function rollback(a) {
+    const changeList = Object.entries(a.changes || {})
+      .map(([field, { from, to }]) => `${t(FIELD_LABEL[field] || field)}: ${fmtVal(to)} → ${fmtVal(from)}`)
+      .join("\n");
+    const msg = lang === "zh"
+      ? `撤销此更改？\n\n${changeList}`
+      : `Roll back this change?\n\n${changeList}`;
+    if (!window.confirm(msg)) return;
+    setRollingBack(a.id);
+    setError(null);
+    try {
+      await apiPost(`/activity/${a.id}/rollback`, {});
+      await load(); // the rollback itself logs a new entry — refresh to show it
+    } catch (e) {
+      setError(e.message || "Rollback failed.");
+    } finally {
+      setRollingBack(null);
     }
   }
 
@@ -160,6 +194,7 @@ export default function HistoryLogPage() {
               )}
               {g.items.map((a) => {
                 const m = activityMeta(a.text, a.kind, t);
+                const canRollback = perms.manageDelegates && a.delegateId && a.changes && Object.keys(a.changes).length > 0;
                 return (
                   <div key={a.id} className="hist-row">
                     <span style={{ width: 28, height: 28, borderRadius: "50%", background: m.bg, color: m.color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, zIndex: 1, boxShadow: "0 0 0 3px var(--surface)" }}>
@@ -175,7 +210,28 @@ export default function HistoryLogPage() {
                         )}
                       </div>
                       <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
+                      {canRollback && (
+                        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                          {Object.entries(a.changes).map(([field, { from, to }]) => (
+                            <div key={field} className="muted" style={{ fontSize: 11.5 }}>
+                              <strong>{t(FIELD_LABEL[field] || field)}:</strong> {fmtVal(from)} → {fmtVal(to)}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
+                    {canRollback && (
+                      <button
+                        className="hist-del"
+                        style={{ opacity: 1, color: "var(--scc-red)" }}
+                        onClick={() => rollback(a)}
+                        disabled={rollingBack === a.id}
+                        aria-label={t("Roll back this change")}
+                        title={t("Roll back this change")}
+                      >
+                        <RotateCcw size={14} />
+                      </button>
+                    )}
                     {perms.manageDelegates && (
                       <button className="hist-del" onClick={() => removeEntry(a.id)} aria-label={t("Delete")} title={t("Delete")}>
                         <Trash2 size={14} />

@@ -40,6 +40,7 @@ import {
   getActivity,
   deleteActivity,
   deleteAllActivity,
+  rollbackActivity,
   getAccountByUsername,
   accountPermissions,
   resetPassword,
@@ -417,11 +418,16 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (re
 
   // Row-background tint per status, so a printed/scrolled sheet is scannable
   // at a glance without reading the Status column text — mirrors the app's
-  // StatusBadge colors (present=green, missing=red, unassigned=amber).
+  // StatusBadge colors (arrived=green, missing=red, unassigned=amber,
+  // assigned=blue, late=orange). PRESENT kept as a legacy alias since some
+  // check-in routes still write it directly (see normalize() in data.js).
   const STATUS_FILL = {
     PRESENT: "FFE7F5EC",
+    ARRIVED: "FFE7F5EC",
     MISSING: "FFFDECEC",
     UNASSIGNED: "FFFDF3E3",
+    ASSIGNED: "FFE7EEFB",
+    LATE: "FFFCEEDB",
   };
   const BORDER = { style: "thin", color: { argb: "FFE5E7EB" } };
   const THIN_BORDER = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER };
@@ -502,6 +508,17 @@ app.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(async
 app.delete("/api/activity", requirePermission("manageDelegates"), wrap(async (_req, res) => {
   const deleted = await deleteAllActivity();
   res.json({ deleted });
+}));
+
+// Field-level rollback for one History Log entry — see rollbackActivity()
+// in data.js for what "rollbackable" means (delegate-edit entries only,
+// not add/remove) and its documented limitations.
+app.post("/api/activity/:id/rollback", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const result = await rollbackActivity(req.params.id, actorOf(req));
+  if (result.error === "NOT_FOUND") return res.status(404).json({ error: "NOT_FOUND", message: "That history entry no longer exists." });
+  if (result.error === "NOT_ROLLBACKABLE") return res.status(400).json({ error: "NOT_ROLLBACKABLE", message: "This entry can't be rolled back." });
+  if (result.error === "DELEGATE_GONE") return res.status(404).json({ error: "DELEGATE_GONE", message: "That delegate no longer exists." });
+  res.json(result.delegate);
 }));
 
 /* =============================================================================

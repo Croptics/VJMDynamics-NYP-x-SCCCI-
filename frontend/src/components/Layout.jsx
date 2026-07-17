@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
+import ChatBubble from "./ChatBubble.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -86,6 +87,7 @@ export default function Layout({ onLogout }) {
       <main className="main">
         <Outlet />
       </main>
+      <ChatBubble />
     </div>
   );
 }

@@ -25,13 +25,23 @@
      to a light color in dark mode. Intentionally not overridden below. */
   --ink-solid: #1a1d21;
 
-  /* Five-state status system */
-  --st-present: #16a34a;   /* green   — boarded / present       */
+  /* Five-state status system. --st-present is the pre-5-status token kept
+     around because some check-in routes still write "PRESENT" directly
+     (legacy alias, see normalize() in backend/data.js) — --st-arrived is
+     the same color under the new name for delegates whose status now reads
+     ARRIVED. */
+  --st-present: #16a34a;   /* green   — boarded / present (legacy)*/
   --st-present-bg: #e7f6ec;
+  --st-arrived: #16a34a;   /* green   — boarded / arrived        */
+  --st-arrived-bg: #e7f6ec;
   --st-missing: #e1232a;   /* red     — missing / critical      */
   --st-missing-bg: #fdecec;
   --st-unassigned: #d97706;/* amber   — unassigned / needs coach*/
   --st-unassigned-bg: #fef3e2;
+  --st-assigned: #2563eb;  /* blue    — assigned, not yet checked in */
+  --st-assigned-bg: #e7eefb;
+  --st-late: #ea580c;      /* orange  — late, hasn't scanned by cutoff */
+  --st-late-bg: #fceedb;
   --st-review: #ca8a04;    /* yellow  — low-confidence / review */
   --st-review-bg: #fdf6e3;
   --st-normal: #7c3aed;    /* violet  — normal-priority exception */
@@ -65,9 +75,16 @@
      sticky/pinned element (this bit the sidebar: at 110% zoom, `height:
      100vh` rendered as 110% of the real viewport, pushing the Log out
      button off-screen with no way to reach it — a real user got locked out
-     of logging out). Anything using `100vh` for a viewport-CLAMPED (not
-     page-scrollable) element must divide by this factor instead. */
-  --app-zoom: 1.1;
+     of logging out — the fix below still applies at ANY zoom value, not
+     just >100%, since the formula is `100vh / --app-zoom` either way).
+     Anything using `100vh` for a viewport-CLAMPED (not page-scrollable)
+     element must divide by this factor instead.
+     Value: was 1.1 (110%) originally; lowered to 0.99 (99%) per user
+     preference — they were manually zooming Chrome to 90% on top of the
+     app's own 110% (net ~99% effective size) to get a size they liked, so
+     this bakes that same net size in as the default instead of requiring a
+     manual per-browser zoom override every time. */
+  --app-zoom: 0.99;
 }
 
 /* Dark theme — toggled by adding data-theme="dark" to <html> (see lib/theme.jsx).
@@ -90,8 +107,11 @@
   --scc-red-tint-2: #52292e;
 
   --st-present-bg: #17392a;
+  --st-arrived-bg: #17392a;
   --st-missing-bg: #432427;
   --st-unassigned-bg: #423313;
+  --st-assigned-bg: #1f2f4d;
+  --st-late-bg: #3d2a16;
   --st-review-bg: #3c3013;
   --st-normal-bg: #302650;
   --st-neutral-bg: #2b2f34;
@@ -357,8 +377,11 @@ a { color: inherit; }
   white-space: nowrap;
 }
 .badge-present    { color: var(--st-present);    background: var(--st-present-bg); }
+.badge-arrived    { color: var(--st-arrived);    background: var(--st-arrived-bg); }
 .badge-missing    { color: var(--st-missing);    background: var(--st-missing-bg); }
 .badge-unassigned { color: var(--st-unassigned); background: var(--st-unassigned-bg); }
+.badge-assigned   { color: var(--st-assigned);   background: var(--st-assigned-bg); }
+.badge-late       { color: var(--st-late);       background: var(--st-late-bg); }
 .badge-review     { color: var(--st-review);     background: var(--st-review-bg); }
 .badge-normal     { color: var(--st-normal);     background: var(--st-normal-bg); }
 .badge-neutral    { color: var(--st-neutral);    background: var(--st-neutral-bg); }

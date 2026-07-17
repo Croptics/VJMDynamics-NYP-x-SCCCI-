@@ -6,7 +6,6 @@ import { getToken, clearToken, getUser, getPermissions, apiPost } from "./lib/ap
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
 import OnboardingPage from "./pages/OnboardingPage.jsx";
-import ChatAssistantPage from "./pages/ChatAssistantPage.jsx";
 
 // Scaffolds — owned by teammates
 import DashboardPage from "./pages/DashboardPage.jsx";
@@ -21,7 +20,7 @@ import HistoryLogPage from "./pages/HistoryLogPage.jsx";
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
 import MobileHomePage from "./pages/mobile/MobileHomePage.jsx";
 import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
-import MobileAssistantPage from "./pages/mobile/MobileAssistantPage.jsx";
+import MobileTripsPage from "./pages/mobile/MobileTripsPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 
 // Which UI (desktop or mobile) to land in — set explicitly by which button
@@ -121,8 +120,9 @@ export default function App() {
         {/* Jayden — Exception Logging & QR Fallback (Screen 5) */}
         <Route path="/exceptions" element={<ExceptionInboxPage />} />
 
-        {/* Vance — AI Trip Assistant (Screen 6) */}
-        <Route path="/assistant" element={<ChatAssistantPage />} />
+        {/* Vance — AI Trip Assistant (Screen 6) — now a floating bubble
+            (ChatBubble.jsx, rendered from Layout.jsx on every route)
+            instead of a dedicated destination; no route needed. */}
 
         {/* Vimal — QR Check-in (mobile-web staff view) */}
         <Route path="/checkin" element={<QRCheckInPage />} />
@@ -155,7 +155,7 @@ export default function App() {
       <Route element={<MobileLayout onLogout={handleLogout} />}>
         <Route path="/mobile" element={<MobileHomePage />} />
         <Route path="/mobile/attendance" element={<MobileAttendancePage />} />
-        <Route path="/mobile/assistant" element={<MobileAssistantPage />} />
+        <Route path="/mobile/trips" element={<MobileTripsPage />} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
       </Route>
     </Routes>

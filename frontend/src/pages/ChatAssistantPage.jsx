@@ -129,7 +129,7 @@ const hhmm = (iso) => {
 
 const iconBtn = { background: "none", border: "none", cursor: "pointer", color: "var(--ink-3)", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, padding: 0 };
 
-export default function ChatAssistantPage() {
+export default function ChatAssistantPage({ embedded = false }) {
   const { t, lang } = useLang();
   const [sessions, setSessions] = useState([]);
   const [currentId, setCurrentId] = useState(null);
@@ -321,14 +321,30 @@ export default function ChatAssistantPage() {
 
   const visible = sessions.filter((s) => s.title.toLowerCase().includes(filter.toLowerCase()));
 
+  // embedded = rendered inside the floating ChatBubble widget instead of as
+  // its own routed page — skips the page chrome (redundant in a small
+  // panel) and the history-management sidebar (a floating bubble is a
+  // live-conversation surface, not a full chat-management UI; nothing about
+  // history/rename/pin/delete/export is removed, just not shown here).
   return (
-    <div className="page" style={{ maxWidth: 1100 }}>
-      <div className="page-eyebrow">{t("Assistant")}</div>
-      <h1 className="page-title">{t("Trip assistant")}</h1>
-      <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
+    <div
+      className={embedded ? undefined : "page"}
+      style={embedded
+        ? { height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }
+        : { maxWidth: 1100 }}
+    >
+      {!embedded && (<>
+        <div className="page-eyebrow">{t("Assistant")}</div>
+        <h1 className="page-title">{t("Trip assistant")}</h1>
+        <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
+      </>)}
 
-      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, marginTop: 20 }}>
+      <div style={embedded
+        ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
+        : { display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, marginTop: 20 }
+      }>
         {/* History sidebar */}
+        {!embedded && (
         <div className="card" style={{ padding: 12, height: 520, overflowY: "auto" }}>
           <button className="btn btn-dark btn-block" style={{ marginBottom: 12 }} onClick={newChat}>
             <Plus size={16} /> {t("New chat")}
@@ -392,9 +408,17 @@ export default function ChatAssistantPage() {
             </div>
           ))}
         </div>
+        )}
 
         {/* Conversation panel */}
-        <div className="card" style={{ display: "flex", flexDirection: "column", height: 520 }}>
+        <div className="card" style={embedded
+          ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, border: "none", boxShadow: "none" }
+          : { display: "flex", flexDirection: "column", height: 520 }
+        }>
+          {/* Embedded mode skips this header — ChatBubble.jsx's own header
+              (title + close button) already covers it; showing both was a
+              real duplicate-header bug the user flagged from a screenshot. */}
+          {!embedded && (
           <div className="row" style={{ gap: 10, padding: "14px 18px", borderBottom: "1px solid var(--line)" }}>
             <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}><Bot size={16} /></span>
             <div style={{ flex: 1 }}>
@@ -407,8 +431,9 @@ export default function ChatAssistantPage() {
               <Download size={14} /> {t("Export")}
             </button>
           </div>
+          )}
 
-          <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div ref={messagesRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
             {messages.length === 0 && (
               <div style={{ margin: "auto 0", textAlign: "center" }}>
                 <p className="muted" style={{ fontSize: 14, marginBottom: 14 }}>

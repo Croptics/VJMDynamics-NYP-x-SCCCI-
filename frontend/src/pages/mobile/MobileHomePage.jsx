@@ -66,7 +66,8 @@ export default function MobileHomePage() {
   const trip = data?.trip;
   const k = data?.kpis;
   const staffName = getUser()?.name || getUser()?.staffId || t("Staff");
-  const goToAttendance = (status) => navigate(`/mobile/attendance?status=${status}`);
+  const goToAttendance = (status, coachId) =>
+    navigate(`/mobile/attendance?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
 
   return (
     <div>
@@ -124,37 +125,49 @@ export default function MobileHomePage() {
       {k && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 14 }}>
           <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
-          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("PRESENT")} />
+          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
           <Stat label={t("Total")} value={k.total} tone="neutral" onClick={() => goToAttendance("ALL")} />
         </div>
       )}
 
-      {/* Coach status — the WHOLE card is one tap target straight into the
-          Missing-only Attendance list (not per-coach drill-down). */}
+      {/* Coach status — header links to the full missing list across every
+          coach; each per-coach row is its OWN link, straight to that coach's
+          missing delegates only (was previously one whole-card tap target
+          that always went to the generic all-coaches list regardless of
+          which row you tapped). */}
       {data?.coaches && (
-        <button
-          onClick={() => goToAttendance("MISSING")}
-          className="mobile-card"
-          style={{ width: "100%", textAlign: "left", cursor: "pointer", border: "1px solid var(--line)", background: "var(--surface)" }}
-        >
-          <div className="row between" style={{ marginBottom: 10 }}>
+        <div className="mobile-card" style={{ border: "1px solid var(--line)", background: "var(--surface)", marginTop: 18 }}>
+          <button
+            onClick={() => goToAttendance("MISSING")}
+            className="row between"
+            style={{ width: "100%", background: "none", border: "none", padding: 0, marginBottom: 12, cursor: "pointer", textAlign: "left", color: "inherit", font: "inherit" }}
+          >
             <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Coach status")}</div>
             <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {data.coaches.map((c) => (
-              <div key={c.id} className="row between" style={{ fontSize: 13 }}>
+              <button
+                key={c.id}
+                onClick={() => goToAttendance("MISSING", c.id)}
+                className="row between"
+                style={{
+                  width: "100%", background: "none", border: "none", padding: "8px 4px",
+                  borderRadius: "var(--r-sm)", cursor: "pointer", textAlign: "left",
+                  color: "inherit", font: "inherit", fontSize: 13,
+                }}
+              >
                 <span>{[c.name, c.city].filter(Boolean).join(" · ")}</span>
                 <span className={c.missing > 0 ? "badge badge-missing" : "badge badge-present"}>
                   {c.missing > 0 ? `${c.missing} ${t("missing")}` : t("All in")}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
           <div className="muted" style={{ fontSize: 12, marginTop: 10, textAlign: "center" }}>
-            {t("Tap to view all missing delegates")}
+            {t("Tap a coach to see who's missing")}
           </div>
-        </button>
+        </div>
       )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>

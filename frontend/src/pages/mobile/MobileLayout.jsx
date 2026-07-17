@@ -1,8 +1,9 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { Home, ClipboardList, MessageSquare, User, Languages, Moon, Sun } from "lucide-react";
+import { Home, ClipboardList, MapPin, User, Languages, Moon, Sun } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
+import MobileChatBubble from "./MobileChatBubble.jsx";
 import "../../styles/mobile.css";
 
 /**
@@ -13,6 +14,11 @@ import "../../styles/mobile.css";
  * The standalone "Missing" tab was folded into Home (see MobileHomePage) so
  * first-time users have one obvious starting point instead of hunting across
  * tabs; this freed slot now points at the Attendance sheet instead.
+ *
+ * The former "Assistant" tab is now a floating chat bubble (MobileChatBubble,
+ * rendered below on every /mobile/* route) instead of a dedicated
+ * destination — that tab slot now points at Trips (currently a blank
+ * placeholder, MobileTripsPage.jsx, for a teammate to build out).
  *
  * useSessionGuard() force-logs-out on an invalidated token — same hook the
  * desktop Layout uses. Previously only desktop had this, so logging in on
@@ -28,7 +34,7 @@ export default function MobileLayout({ onLogout }) {
   const tabs = [
     { to: "/mobile", label: "Home", icon: Home, end: true },
     { to: "/mobile/attendance", label: "Attendance", icon: ClipboardList },
-    { to: "/mobile/assistant", label: "Assistant", icon: MessageSquare },
+    { to: "/mobile/trips", label: "Trips", icon: MapPin },
     { to: "/mobile/profile", label: "Profile", icon: User },
   ];
 
@@ -65,6 +71,7 @@ export default function MobileLayout({ onLogout }) {
           </NavLink>
         ))}
       </nav>
+      <MobileChatBubble />
     </div>
   );
 }

@@ -71,6 +71,27 @@ export default function LoginPage({ onSignIn }) {
       if (token) {
         setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
+        // Explicitly hand the credential to the browser's password manager via
+        // the Credential Management API, instead of relying on Chrome's own
+        // heuristic (watch the form submit, infer success from the page
+        // changing). That heuristic is unreliable in an SPA like this one —
+        // there's no full-page navigation for the browser to key off, so the
+        // "Save password?" prompt can silently never fire even though the
+        // form/autoComplete attributes are correct. This API tells the
+        // browser directly "here's a credential, offer to save it" — no
+        // guessing. Chrome/Edge/Brave support it; Firefox/Safari don't, so
+        // this is feature-detected and never blocks login if unsupported or
+        // if the user declines the OS/browser's own save prompt.
+        if (keep && window.PasswordCredential) {
+          try {
+            const cred = new window.PasswordCredential({
+              id: staffId.trim(),
+              password,
+              name: staffId.trim(),
+            });
+            await navigator.credentials.store(cred);
+          } catch { /* not fatal — login already succeeded */ }
+        }
       }
       onSignIn?.(mode); // success -> enter the app
     } catch (e) {
