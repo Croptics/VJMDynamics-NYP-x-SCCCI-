@@ -70,6 +70,13 @@ const DICT = {
 
   // Dashboard — overview
   "Active trip": "当前行程",
+  "Good morning": "早上好",
+  "Good afternoon": "下午好",
+  "Good evening": "晚上好",
+  "Online · synced": "在线 · 已同步",
+  "Tap to view all missing delegates": "点击查看所有缺席代表",
+  "Update status": "更新状态",
+  "Call": "拨打电话",
   "Live present / missing / unassigned visibility.": "实时查看出席、缺席与未分配人数。",
   "Refresh": "刷新",
   "Export": "导出",
@@ -100,6 +107,7 @@ const DICT = {
   "updated": "已更新",
   "removed": "已移除",
   "Uploaded": "上传时间",
+  "Created by": "创建人",
   "Search delegates…": "搜索代表…",
   "All statuses": "所有状态",
   "Sort: Name": "排序：姓名",

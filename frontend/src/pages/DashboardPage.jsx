@@ -911,7 +911,7 @@ export default function DashboardPage() {
                       />
                     </th>
                   )}
-                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th><th>{t("Uploaded")}</th>
+                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th><th>{t("Uploaded")}</th><th>{t("Created by")}</th>
                   <th style={{ width: 90 }} />
                 </tr>
               </thead>
@@ -943,6 +943,7 @@ export default function DashboardPage() {
                     <td><StatusBadge state={d.status} /></td>
                     <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>
                     <td className="muted">{fmtUploadDate(d.createdAt)}</td>
+                    <td className="muted">{d.createdBy || "—"}</td>
                     <td>
                       <div className="row" style={{ gap: 6 }}>
                         <button
@@ -976,7 +977,7 @@ export default function DashboardPage() {
                 ))}
                 {visibleDelegates.length === 0 && (
                   <tr>
-                    <td colSpan={perms.manageDelegates ? 7 : 6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                    <td colSpan={perms.manageDelegates ? 8 : 7} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
                       {t("No delegates match your filters.")}
                     </td>
                   </tr>

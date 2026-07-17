@@ -718,7 +718,7 @@ router.post(
         status: coachId ? "MISSING" : "UNASSIGNED",
         vip: !!r.vip,
         coachId,
-      }, tripUuid);
+      }, tripUuid, req.account?.name || req.account?.username || null);
       await q(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,

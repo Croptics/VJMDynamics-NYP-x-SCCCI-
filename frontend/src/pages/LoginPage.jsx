@@ -121,8 +121,16 @@ export default function LoginPage({ onSignIn }) {
           <p style={S.brandFoot}>{t("A Singapore Chinese Chamber of Commerce & Industry initiative")}</p>
         </div>
 
-        {/* Form panel */}
-        <div className="login-panel" style={S.form}>
+        {/* Form panel — a real <form> with autoComplete hints so the browser's
+            own "save password?" prompt fires on submit (it never does for
+            bare onClick-handled inputs with no name/autoComplete, which is
+            what this used to be). preventDefault + submit() keeps our
+            existing token-based "keep me signed in" logic unchanged. */}
+        <form
+          className="login-panel"
+          style={S.form}
+          onSubmit={(e) => { e.preventDefault(); submit("desktop"); }}
+        >
           <h1 style={{ fontSize: 26 }}>{t("Sign in")}</h1>
           <p className="muted" style={{ marginTop: 4, marginBottom: 24, fontSize: 14 }}>
             {t("SCCCI secretariat & on-ground staff")}
@@ -131,23 +139,25 @@ export default function LoginPage({ onSignIn }) {
           <label className="field-label" htmlFor="staffId">{t("Staff ID")}</label>
           <input
             id="staffId"
+            name="username"
+            autoComplete="username"
             className="input"
             placeholder="e.g. SCCCI132"
             value={staffId}
             onChange={(e) => setStaffId(e.target.value)}
-            onKeyDown={onKeyDown}
           />
 
           <label className="field-label" htmlFor="pw" style={{ marginTop: 16 }}>{t("Password")}</label>
           <div style={{ position: "relative" }}>
             <input
               id="pw"
+              name="password"
+              autoComplete="current-password"
               className="input"
               type={showPw ? "text" : "password"}
               placeholder="............"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={onKeyDown}
               style={{ paddingRight: 42 }}
             />
             <button
@@ -183,17 +193,17 @@ export default function LoginPage({ onSignIn }) {
             </button>
           </div>
 
-          <button className="btn btn-primary btn-block" onClick={() => submit("desktop")} disabled={submitting}>
+          <button type="submit" className="btn btn-primary btn-block" disabled={submitting}>
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
-          <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={() => submit("mobile")} disabled={submitting}>
+          <button type="button" className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={() => submit("mobile")} disabled={submitting}>
             <Smartphone size={18} color="var(--scc-red)" /> {t("Login for Mobile")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
             {t("By signing in, you accept the SCCCI data handling policy.")}
           </p>
-        </div>
+        </form>
       </div>
 
       {forgotOpen && <ForgotPasswordModal onClose={() => setForgotOpen(false)} />}

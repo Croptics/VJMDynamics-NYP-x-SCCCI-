@@ -108,6 +108,15 @@ data.js
     check-ins don't pass one — those show "you"). Nullable column, added via
     ALTER ... ADD COLUMN IF NOT EXISTS, so existing rows aren't attributed
     retroactively (they keep showing "you").
+    delegates.createdBy — same actor-snapshot pattern as activity_log.actor,
+    but persisted ON the delegate row itself (not just the audit log) so it
+    can be its own Dashboard table column ("Created by"). createDelegate()
+    already took an `actor` param for the activity-log entry; this just also
+    writes it into the new column and returns it on the created row. Wired
+    from server.js's POST /api/trips/:id/delegates (single add) and
+    vance.js's POST /api/trips/:id/onboarding/confirm (bulk upload) — both
+    already had req.account available via their permission gate. NULL/"—"
+    for legacy rows or any other creation path that doesn't pass an actor.
     resolveTripUuid("t-1") now returns the REAL Beijing trip uuid instead of
     null. WHY (fixed two linked bugs): "t-1" used to mean null = "every
     delegate/coach across ALL trips". Fine while only Beijing had data, but
@@ -551,6 +560,41 @@ Pages (src/pages/) — one file per route:
                                                 rendered nearly invisible on
                                                 a still-white card — both now
                                                 use var(--surface).
+                                                The Staff ID/password inputs
+                                                used to sit in plain <div>s
+                                                with no <form> and no name/
+                                                autoComplete attributes —
+                                                submission only ever happened
+                                                via onClick handlers or a
+                                                manual Enter-key listener, so
+                                                the browser's own "save
+                                                password?" prompt never had
+                                                anything to hook into and
+                                                never fired (document.forms
+                                                was empty). Wrapped the inputs
+                                                in a real <form
+                                                onSubmit={e=>{e.preventDefault();
+                                                submit("desktop")}}>, added
+                                                name="username"/
+                                                autoComplete="username" and
+                                                name="password"/
+                                                autoComplete="current-password",
+                                                and changed "Sign in" to
+                                                type="submit" (the "Remember
+                                                password" checkbox and "Login
+                                                for Mobile" stay type="button"
+                                                — mobile mode still calls
+                                                submit("mobile") directly, it
+                                                just isn't the form's default
+                                                submit path). This is separate
+                                                from the app's OWN "keep me
+                                                signed in" checkbox below,
+                                                which controls whether the JWT
+                                                goes to localStorage vs
+                                                sessionStorage — that logic is
+                                                unchanged; this fix only makes
+                                                the browser's native
+                                                credential-save prompt appear.
 "Keep me signed in" was briefly renamed to
                                                 "Stay signed in" with the
                                                 plaintext-password-remembering
@@ -675,14 +719,26 @@ Pages (src/pages/) — one file per route:
                                                   rows with a "Show all"
                                                   toggle, has a search box, an
                                                   "Uploaded" column
-                                                  (delegates.createdAt), status
-                                                  filter + sort, and a map-pin
-                                                  button per row (only shown
-                                                  when that delegate has a
-                                                  lastLocation) opening a small
-                                                  DelegateLocationMap popup —
-                                                  tinted red for MISSING
-                                                  delegates. Coach status caps
+                                                  (delegates.createdAt), a
+                                                  "Created by" column
+                                                  (delegates.createdBy — the
+                                                  creating account's display
+                                                  NAME at creation time, a
+                                                  snapshot not a live FK, so it
+                                                  stays correct even if that
+                                                  account is later renamed/
+                                                  deleted; NULL/"—" for rows
+                                                  predating this column or
+                                                  created by a route that
+                                                  doesn't pass an actor),
+                                                  status filter + sort, and a
+                                                  map-pin button per row (only
+                                                  shown when that delegate has
+                                                  a lastLocation) opening a
+                                                  small DelegateLocationMap
+                                                  popup — tinted red for
+                                                  MISSING delegates. Coach
+                                                  status caps
                                                   to 4 with "Show all", now
                                                   pushed to the bottom of its
                                                   card (flex column +
@@ -1203,41 +1259,101 @@ Mobile pages (src/pages/mobile/):
                                                  kept failing every API call
                                                  instead of cleanly logging
                                                  out.
-  MobileHomePage.jsx        /mobile             Condensed KPI + coach-status
-                                                 summary. No delegate list of
-                                                 its own — each KPI tile
-                                                 (Missing/Present/Unassigned/
-                                                 Total) is a shortcut button
-                                                 into MobileAttendancePage,
-                                                 pre-filtered to that status
-                                                 (?status=MISSING etc).
+  MobileHomePage.jsx        /mobile             Rebuilt to mirror the layout
+                                                 of Vimal's Check-in screen's
+                                                 own "Trips" home tab
+                                                 (QRCheckInPage.jsx's HomeView)
+                                                 so both mobile surfaces feel
+                                                 like the same app:
+                                                 • Personalized greeting header
+                                                   — "Good morning/afternoon/
+                                                   evening" (by local hour) +
+                                                   the signed-in staff name +
+                                                   an "● Online · synced"
+                                                   badge.
+                                                 • Active trip panel — red
+                                                   card, trip name, "Day X of
+                                                   Y · HH:MM local", departsIn
+                                                   badge. Same visual language
+                                                   as the Check-in screen's own
+                                                   trip card.
+                                                 • Glanceable metrics —
+                                                   Missing / Present / Total
+                                                   (3 cards, not the previous
+                                                   4 incl. Unassigned —
+                                                   Unassigned stays reachable
+                                                   via the Attendance page's
+                                                   filter chips). Each tile is
+                                                   still a shortcut into
+                                                   MobileAttendancePage,
+                                                   pre-filtered to that status.
+                                                 • Coach status — now a SINGLE
+                                                   tap target (the whole card,
+                                                   not per-coach rows): tapping
+                                                   anywhere on it jumps
+                                                   straight to Attendance
+                                                   pre-filtered to MISSING
+                                                   (?status=MISSING), rather
+                                                   than drilling into one
+                                                   coach's own headcount (that
+                                                   per-coach drill-down is
+                                                   Check-in's own "Trips" tab
+                                                   behavior, not replicated
+                                                   here — this card's whole
+                                                   job is "take me to who's
+                                                   missing").
                                                  Auto-refreshes every 2s (same
                                                  pattern/loadingRef guard as
-                                                 the desktop Dashboard) so
-                                                 another staff member's change
-                                                 shows up without a manual tap
-                                                 on the Refresh icon.
+                                                 the desktop Dashboard).
   MobileAttendancePage.jsx  /mobile/attendance  Full delegate roster — search
                                                  + status filter chips (reads
                                                  an initial ?status= from the
-                                                 URL, so Home's KPI tiles can
+                                                 URL, so Home's KPI tiles AND
+                                                 its Coach status card both
                                                  deep-link straight into a
-                                                 filtered view). Status is
-                                                 editable inline via a
-                                                 Present/Missing/Unassigned
-                                                 <select> per row (optimistic,
+                                                 filtered view).
+                                                 Row layout redesigned to match
+                                                 the "card row between" pattern
+                                                 already used by Vimal's Manual
+                                                 check-in (ManualTrackingPanel.
+                                                 jsx) and "Me" tab (QRCheckIn
+                                                 Page.jsx's MeView) — avatar +
+                                                 name/subtitle on the left, a
+                                                 clear action button on the
+                                                 right, one delegate per
+                                                 `.mobile-card`. Status is no
+                                                 longer edited via a cramped
+                                                 inline <select> — an explicit
+                                                 "Update status" button (gated
+                                                 on manageDelegates; read-only
+                                                 StatusBadge-style pill
+                                                 otherwise) opens a bottom-
+                                                 sheet (StatusSheet, local to
+                                                 this file) listing
+                                                 Present/Missing/Unassigned as
+                                                 three big obvious buttons —
+                                                 same "one clear action per
+                                                 row" spirit as Manual check-
+                                                 in's own "Mark present"
+                                                 button. Optimistic update,
                                                  rolls back + shows an inline
-                                                 error on failure), gated on
-                                                 manageDelegates — read-only
-                                                 StatusBadge otherwise. Took
-                                                 over the tab slot the old
-                                                 standalone Missing tab used
-                                                 to occupy (now folded into
-                                                 Home, see above). Each row
-                                                 also shows a map-pin button
-                                                 when that delegate has a
-                                                 lastLocation set (tinted red
-                                                 for MISSING), opening the same
+                                                 error on failure.
+                                                 A MISSING delegate with a
+                                                 phone number on file also gets
+                                                 a one-tap `tel:` call button —
+                                                 delegates.phone already
+                                                 existed (added by Vance's
+                                                 onboarding parser for the
+                                                 document-upload flow), so this
+                                                 needed no new backend column,
+                                                 just reading `d.phone` (already
+                                                 included since listDelegates
+                                                 does SELECT *).
+                                                 Each row also still shows a
+                                                 map-pin button when that
+                                                 delegate has a lastLocation
+                                                 set (tinted red for MISSING),
+                                                 opening the same
                                                  DelegateLocationMap component
                                                  used on desktop.
                                                  Auto-refreshes every 2s; the
@@ -1266,16 +1382,48 @@ Styles (src/styles/):
       the right (padding-right >= ~28px) or the icon will overlap the text;
       see OnboardingPage.jsx's coach-picker and MobileAttendancePage.jsx's
       status <select> for the pattern.
-      `html { zoom: 110%; }` bakes in a fixed visual scale so the app reads at
-      a consistent, comfortable size at every viewer's own 100% browser zoom —
+      `html { zoom: calc(var(--app-zoom) * 100%); }` (--app-zoom: 1.1,
+      defined in :root) bakes in a fixed visual scale so the app reads at a
+      consistent, comfortable size at every viewer's own 100% browser zoom —
       same look across Chrome/Edge/Safari/Firefox 126+, since it's part of
       the page instead of a per-browser manual zoom setting. Uses `zoom` (not
       `transform: scale`) so it participates in normal layout — scrollbars,
-      viewport units, and click hit-testing all stay correct.
+      viewport units, and click hit-testing all stay correct in MOST cases
+      (see the --sidebar-w / .sidebar note below for the one real exception
+      this surfaced).
       Dark theme (:root[data-theme="dark"]) was softened — was near-black
       (--bg #121417, --surface #1a1d22); now a lighter charcoal (--bg
       #1a1d21, --surface #24272c, --surface-2 #2a2e33), same relative
       structure (bg < surface < surface-2), just lifted several steps.
+      .sidebar's `height: 100vh` — a REAL bug, not just cosmetic, was found
+      here: `zoom` scales the RENDERED box of everything, but `vh` units and
+      the browser's own overflow detection (scrollHeight/clientHeight) are
+      computed in PRE-zoom layout space. So on a viewport-CLAMPED sticky
+      element like the sidebar, `height: 100vh` rendered as 100vh × 1.1 of
+      ACTUAL visual space — the bottom ~10% (the Log out button) silently
+      overflowed the real screen, and because the browser's own layout math
+      didn't consider it "overflowing" (both measured pre-zoom, so they were
+      equal), `overflow-y: auto` didn't even trigger a scrollbar to reach it.
+      A real user got completely locked out of the Log out button. Two
+      wrong attempts before the real fix: (1) `overflow-y: hidden` traded
+      the "unwanted scrollbar" complaint for silently clipping the footer
+      with zero way to reach it — worse, not better; (2) just restoring
+      `overflow-y: auto` alone didn't help either, since (per the paragraph
+      above) the browser doesn't detect this as overflow in the first place.
+      The actual fix: `.sidebar`'s height is `calc(100vh / var(--app-zoom))`
+      — dividing cancels the zoom's scale-up so the RENDERED box is exactly
+      one real viewport tall, matching what `100vh` is supposed to mean.
+      `overflow-y: auto` is kept as a defensive safety net on top (content
+      that still somehow doesn't fit — an unusual OS font size, a longer nav
+      list later — stays reachable by scrolling instead of disappearing).
+      Sidebar padding/gaps were also trimmed a little (20px→16px container
+      padding, 4px→2px item gap, 10px→8px per-item vertical padding) so
+      scrolling is rarely actually needed on a normal screen. Any OTHER
+      element that uses `100vh`/`100vw` for a viewport-CLAMPED (not
+      page-scrollable) size must divide by `--app-zoom` the same way — plain
+      page content using `min-height: 100vh` (like `.app-shell`) is fine
+      as-is, since overshooting there just makes an already-scrollable page
+      a little taller, which is harmless.
 
   mobile.css
       Mobile-only classes (.mobile-shell, .mobile-card, .mobile-tabbar,

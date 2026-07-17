@@ -1,19 +1,33 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle } from "lucide-react";
-import { apiGet } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, ChevronRight } from "lucide-react";
+import { apiGet, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
 const TRIP_ID = "t-1";
+
+/** "Good morning" / "Good afternoon" / "Good evening", by local hour. */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
 
 /**
  * Mobile Home — pulls the same live summary as the desktop Dashboard
  * (GET /api/trips/:id/dashboard), condensed for a phone screen.
  *
- * Each KPI tile is a shortcut into the Attendance sheet pre-filtered to that
- * status (e.g. tapping "20 missing" opens the roster already filtered to
- * MISSING), so the tiles double as both an at-a-glance summary and
- * navigation — no separate "who, specifically" list needed here anymore.
+ * Layout mirrors the Check-in screen's own "Trips" home tab
+ * (QRCheckInPage.jsx's HomeView) so both mobile surfaces feel like the same
+ * app: a personalized greeting header, a live Active Trip panel, a
+ * glanceable KPI strip, and a Coach status card. Two differences from that
+ * reference, both deliberate:
+ *   - The KPI strip here is Missing/Present/Total (3 cards) per spec, not
+ *     Check-in's Missing/Present/Unassigned (Unassigned stays reachable via
+ *     the Attendance page's own filter chips).
+ *   - The whole "Coach status" card is ONE tap target that jumps straight to
+ *     the Attendance page pre-filtered to Missing — Check-in's version lets
+ *     you tap into any one coach's own headcount view instead. Each KPI tile
+ *     is still its own shortcut into Attendance, pre-filtered to that status.
  */
 export default function MobileHomePage() {
   const { t, lang } = useLang();
@@ -51,23 +65,16 @@ export default function MobileHomePage() {
 
   const trip = data?.trip;
   const k = data?.kpis;
+  const staffName = getUser()?.name || getUser()?.staffId || t("Staff");
   const goToAttendance = (status) => navigate(`/mobile/attendance?status=${status}`);
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 4 }}>
         <div>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("Home")}
-          </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{trip ? trip.name : "MusterGo"}</h1>
-          {trip && (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {lang === "zh"
-                ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
-                : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime}`}
-            </p>
-          )}
+          <div className="muted" style={{ fontSize: 13 }}>{t(greeting())}</div>
+          <h1 style={{ fontSize: 22, margin: "2px 0 8px" }}>{staffName}</h1>
+          <span className="badge badge-present">● {t("Online · synced")}</span>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
@@ -75,7 +82,7 @@ export default function MobileHomePage() {
       </div>
 
       {error && (
-        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
+        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)", marginTop: 14 }}>
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={16} /> {t("Couldn't reach the backend")}
           </div>
@@ -83,20 +90,57 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {loading && !data && <div className="muted">{t("Loading…")}</div>}
+      {loading && !data && <div className="muted" style={{ marginTop: 14 }}>{t("Loading…")}</div>}
 
+      {/* Active trip — live tracking panel, same visual language as the
+          Check-in screen's own trip card. */}
+      {trip && (
+        <div
+          style={{
+            background: "var(--scc-red)", color: "#fff",
+            borderRadius: "var(--r-lg)", padding: 16, marginTop: 18,
+            boxShadow: "var(--shadow-md)",
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.85 }}>
+            {t("Active trip")}
+          </div>
+          <div style={{ fontWeight: 700, fontSize: 17, marginTop: 4 }}>{trip.name}</div>
+          <div style={{ opacity: 0.9, fontSize: 13, marginTop: 2 }}>
+            {lang === "zh"
+              ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
+              : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime} local`}
+          </div>
+          {trip.departsIn && (
+            <span className="badge" style={{ background: "rgba(255,255,255,.22)", color: "#fff", marginTop: 10, display: "inline-block" }}>
+              {t("Departure in")} {trip.departsIn}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Glanceable metrics — Missing / Present / Total, each a shortcut into
+          the Attendance page pre-filtered to that status. */}
       {k && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 14 }}>
           <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
           <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("PRESENT")} />
-          <Stat label={t("Unassigned")} value={k.unassigned} tone="unassigned" onClick={() => goToAttendance("UNASSIGNED")} />
           <Stat label={t("Total")} value={k.total} tone="neutral" onClick={() => goToAttendance("ALL")} />
         </div>
       )}
 
+      {/* Coach status — the WHOLE card is one tap target straight into the
+          Missing-only Attendance list (not per-coach drill-down). */}
       {data?.coaches && (
-        <div className="mobile-card">
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>{t("Coach status")}</div>
+        <button
+          onClick={() => goToAttendance("MISSING")}
+          className="mobile-card"
+          style={{ width: "100%", textAlign: "left", cursor: "pointer", border: "1px solid var(--line)", background: "var(--surface)" }}
+        >
+          <div className="row between" style={{ marginBottom: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Coach status")}</div>
+            <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+          </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {data.coaches.map((c) => (
               <div key={c.id} className="row between" style={{ fontSize: 13 }}>
@@ -107,7 +151,10 @@ export default function MobileHomePage() {
               </div>
             ))}
           </div>
-        </div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 10, textAlign: "center" }}>
+            {t("Tap to view all missing delegates")}
+          </div>
+        </button>
       )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>

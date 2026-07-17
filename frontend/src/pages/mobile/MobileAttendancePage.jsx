@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X } from "lucide-react";
+import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2 } from "lucide-react";
 import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
-import StatusBadge from "../../components/StatusBadge.jsx";
 import DelegateAvatar from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 
 const TRIP_ID = "t-1";
 const FILTERS = ["ALL", "PRESENT", "MISSING", "UNASSIGNED"];
+const STATUS_OPTIONS = ["PRESENT", "MISSING", "UNASSIGNED"];
 
 /**
  * Mobile Attendance sheet — the full delegate roster (GET /api/trips/:id/
@@ -17,12 +17,19 @@ const FILTERS = ["ALL", "PRESENT", "MISSING", "UNASSIGNED"];
  * their status" view, where Home is "what's the overall picture right now".
  *
  * The initial status filter can come in via ?status=MISSING (the Home page's
- * KPI tiles link here that way) so tapping "20 missing" lands you straight
- * on the filtered list instead of the unfiltered roster.
+ * KPI tiles and Coach status card both link here that way) so tapping
+ * "20 missing" lands you straight on the filtered list instead of the
+ * unfiltered roster.
  *
- * Status is edited with a <select> (Present/Missing/Unassigned), not a
- * checkbox — it's a 3-state value, not a toggle — gated on manageDelegates
- * same as the desktop Dashboard's delegate table.
+ * Row layout mirrors the "card row between" pattern already used by
+ * QRCheckInPage.jsx's Manual check-in and "Me" tabs — avatar + name/subtitle
+ * on the left, a clear action button on the right — instead of the old
+ * cramped inline <select>. Status is changed via a bottom-sheet picker
+ * (StatusSheet below) triggered by an explicit "Update status" button, same
+ * spirit as Manual check-in's obvious "Mark present" button per row. A
+ * MISSING delegate with a phone on file also gets a one-tap `tel:` call
+ * button — delegates.phone already exists (added by Vance's onboarding
+ * parser), so this needed no new backend column.
  */
 export default function MobileAttendancePage() {
   const { t } = useLang();
@@ -40,6 +47,7 @@ export default function MobileAttendancePage() {
   const [rowError, setRowError] = useState(null); // { id, message }
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
+  const [statusSheetFor, setStatusSheetFor] = useState(null); // the delegate being re-statused, or null
 
   // Guards a poll tick against (a) overlapping with a still-in-flight
   // previous poll, and (b) landing while a row's status edit is mid-save —
@@ -83,6 +91,7 @@ export default function MobileAttendancePage() {
   };
 
   async function changeStatus(d, status) {
+    setStatusSheetFor(null);
     if (status === d.status) return;
     setRowError(null);
     setSavingId(d.id);
@@ -163,54 +172,72 @@ export default function MobileAttendancePage() {
         </div>
       )}
 
-      {visible.map((d) => (
-        <div key={d.id} className="mobile-card" style={{ padding: 14 }}>
-          <div className="row between">
-            <div className="row" style={{ gap: 8, minWidth: 0 }}>
+      {visible.map((d) => {
+        const missing = d.status === "MISSING";
+        return (
+          <div key={d.id} className="mobile-card" style={{ padding: 14 }}>
+            <div className="row" style={{ gap: 10, minWidth: 0 }}>
               <DelegateAvatar delegate={d} />
-              <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
-              {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
-            </div>
-            {canEdit ? (
-              <select
-                className="select"
-                style={{ width: "auto", padding: "4px 28px 4px 8px", fontSize: 12.5, fontWeight: 600 }}
-                value={d.status}
-                disabled={savingId === d.id}
-                onChange={(e) => changeStatus(d, e.target.value)}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="row" style={{ gap: 6 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                  {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
+                </div>
+                <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {coachName(d.coachId)}
+                  {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+                </div>
+              </div>
+              {missing && d.phone && (
+                <a
+                  href={`tel:${d.phone}`}
+                  aria-label={`${t("Call")} ${d.name}`}
+                  title={`${t("Call")} ${d.name}`}
+                  style={{
+                    background: "none", border: "none", padding: 6, flexShrink: 0,
+                    color: "var(--st-missing)", display: "flex", textDecoration: "none",
+                  }}
+                >
+                  <Phone size={18} />
+                </a>
+              )}
+              <button
+                onClick={() => d.status === "MISSING" && setMapDelegate(d)}
+                disabled={d.status !== "MISSING"}
+                aria-label={`${t("View location")} — ${d.name}`}
+                style={{
+                  background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0,
+                  color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
+                  opacity: d.status === "MISSING" ? 1 : 0.35,
+                  cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
+                }}
               >
-                <option value="PRESENT">{t("Present")}</option>
-                <option value="MISSING">{t("Missing")}</option>
-                <option value="UNASSIGNED">{t("Unassigned")}</option>
-              </select>
-            ) : (
-              <StatusBadge state={d.status} />
+                <MapPin size={18} />
+              </button>
+            </div>
+
+            <div className="row between" style={{ marginTop: 10, gap: 8 }}>
+              <span className={"badge " + (d.status === "PRESENT" ? "badge-present" : d.status === "MISSING" ? "badge-missing" : "badge-unassigned")}>
+                {savingId === d.id ? t("Saving…") : t(FILTER_LABEL[d.status] || d.status)}
+              </span>
+              {canEdit && (
+                <button
+                  className="btn btn-dark"
+                  style={{ padding: "7px 12px", fontSize: 12.5 }}
+                  disabled={savingId === d.id}
+                  onClick={() => setStatusSheetFor(d)}
+                >
+                  <PencilLine size={13} /> {t("Update status")}
+                </button>
+              )}
+            </div>
+
+            {rowError?.id === d.id && (
+              <div style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(rowError.message)}</div>
             )}
           </div>
-          <div className="row between" style={{ marginTop: 6 }}>
-            <div className="muted" style={{ fontSize: 12 }}>
-              {coachName(d.coachId)}
-              {d.status === "MISSING" && <> · {t("last seen")} {d.lastSeen || "—"}</>}
-            </div>
-            <button
-              onClick={() => d.status === "MISSING" && setMapDelegate(d)}
-              disabled={d.status !== "MISSING"}
-              aria-label={`${t("View location")} — ${d.name}`}
-              style={{
-                background: "none", border: "none", padding: 0, display: "flex", flexShrink: 0,
-                color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
-                opacity: d.status === "MISSING" ? 1 : 0.35,
-                cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
-              }}
-            >
-              <MapPin size={16} />
-            </button>
-          </div>
-          {rowError?.id === d.id && (
-            <div style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(rowError.message)}</div>
-          )}
-        </div>
-      ))}
+        );
+      })}
 
       {mapDelegate && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }} onClick={() => setMapDelegate(null)}>
@@ -235,7 +262,67 @@ export default function MobileAttendancePage() {
         </div>
       )}
 
+      {statusSheetFor && (
+        <StatusSheet
+          delegate={statusSheetFor}
+          onPick={(status) => changeStatus(statusSheetFor, status)}
+          onClose={() => setStatusSheetFor(null)}
+          t={t}
+        />
+      )}
+
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+/** Bottom-sheet status picker — the "clear status update" interface, opened
+ *  by the per-row "Update status" button. Three big obvious buttons instead
+ *  of a cramped inline <select>, same "one clear action per row" spirit as
+ *  Manual check-in's own "Mark present" button. */
+function StatusSheet({ delegate, onPick, onClose, t }) {
+  const FILTER_LABEL = { PRESENT: "Present", MISSING: "Missing", UNASSIGNED: "Unassigned" };
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{ width: "100%", borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="row between" style={{ marginBottom: 4 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Update status")}</div>
+            <div className="muted" style={{ fontSize: 12.5 }}>{delegate.name}</div>
+          </div>
+          <button onClick={onClose} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+            <X size={18} />
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
+          {STATUS_OPTIONS.map((status) => {
+            const active = delegate.status === status;
+            return (
+              <button
+                key={status}
+                onClick={() => onPick(status)}
+                className="row between"
+                style={{
+                  padding: "12px 14px", borderRadius: "var(--r-md)", fontSize: 14, fontWeight: 600,
+                  border: `1.5px solid ${active ? "var(--scc-red)" : "var(--line)"}`,
+                  background: active ? "var(--scc-red-tint)" : "var(--surface)",
+                  color: active ? "var(--scc-red-700)" : "var(--ink)",
+                }}
+              >
+                {t(FILTER_LABEL[status])}
+                {active && <CheckCircle2 size={16} />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

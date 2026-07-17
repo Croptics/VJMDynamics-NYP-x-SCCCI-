@@ -52,6 +52,22 @@
   --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.12);
 
   --sidebar-w: 232px;
+
+  /* The app-wide zoom factor (see `html { zoom: ... }` below) as a plain
+     number, so any element that needs to convert a viewport-unit measurement
+     into ACTUAL rendered/visual pixels can divide by it. Keep this in sync
+     with the percentage in the `html` rule by hand — CSS has no way to read
+     one from the other. WHY THIS EXISTS: `zoom` scales the RENDERED box of
+     everything on the page, but `vh`/`vw` units and layout-overflow
+     detection (scrollHeight/clientHeight) are computed in PRE-zoom space —
+     so `height: 100vh` on a zoomed page renders taller than the actual
+     physical viewport by exactly the zoom factor, silently overflowing a
+     sticky/pinned element (this bit the sidebar: at 110% zoom, `height:
+     100vh` rendered as 110% of the real viewport, pushing the Log out
+     button off-screen with no way to reach it — a real user got locked out
+     of logging out). Anything using `100vh` for a viewport-CLAMPED (not
+     page-scrollable) element must divide by this factor instead. */
+  --app-zoom: 1.1;
 }
 
 /* Dark theme — toggled by adding data-theme="dark" to <html> (see lib/theme.jsx).
@@ -96,7 +112,7 @@
    — scrollbars, viewport units, and hit-testing all stay correct, whereas a
    transform would visually scale without updating the scrollable area or
    click coordinates. Supported in Chrome/Edge/Safari and Firefox 126+. */
-html { zoom: 110%; }
+html { zoom: calc(var(--app-zoom) * 100%); }
 
 html, body, #root { height: 100%; }
 
@@ -189,22 +205,34 @@ a { color: inherit; }
   flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--line);
-  padding: 20px 14px;
+  padding: 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   /* Stay put while the page content scrolls */
   position: sticky;
   top: 0;
-  height: 100vh;
+  /* `height: 100vh` would render as 100vh × --app-zoom of ACTUAL visual
+     space, because `zoom` scales the rendered box while `vh` is computed in
+     pre-zoom layout space (see --app-zoom's definition above for the full
+     story) — on this sticky, viewport-clamped element that meant the bottom
+     ~10% silently overflowed the real screen with no way to reach it: a
+     real user got locked out of the Log out button. Dividing by --app-zoom
+     here cancels that scale-up so the rendered box is exactly one real
+     viewport tall, matching what `100vh` is supposed to mean. */
+  height: calc(100vh / var(--app-zoom));
+  /* Safety net, not the primary fix: if content ever still doesn't fit
+     (a custom OS font size, an added nav item, etc.), it stays reachable by
+     scrolling instead of silently disappearing. Never hide navigation/
+     account controls with no fallback way to reach them. */
   overflow-y: auto;
 }
-.sidebar-brand { padding: 6px 10px 20px; font-size: 22px; }
+.sidebar-brand { padding: 4px 10px 14px; font-size: 22px; }
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-radius: var(--r-sm);
   color: var(--ink-2);
   text-decoration: none;

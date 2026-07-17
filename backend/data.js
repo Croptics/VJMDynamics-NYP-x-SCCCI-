@@ -172,6 +172,13 @@ async function createSchema() {
   // missing-delegates list. Not geocoded/validated server-side; the Embed
   // API's `q=` param accepts free text and looks it up itself.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "lastLocation" VARCHAR(255)`);
+  // Who added this delegate — the account's display name at creation time
+  // (a snapshot, not a live FK to accounts, so it stays correct even if that
+  // account is later renamed or deleted). Powers the Dashboard's "Created By"
+  // column. NULL for rows created before this column existed, or by a route
+  // that doesn't pass an actor (e.g. teammate check-in modules importing a
+  // roster directly) — those show "—" in the UI rather than a guessed name.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdBy" VARCHAR(255)`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
@@ -467,11 +474,11 @@ export async function getDelegateById(id) {
 export async function createDelegate(input, tripUuid = null, actor = null) {
   const d = normalize(input, await nextId());
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid]
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id, "createdBy") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid, actor]
   );
   await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor);
-  return d;
+  return { ...d, createdBy: actor };
 }
 
 export async function updateDelegate(id, patch, actor = null) {
