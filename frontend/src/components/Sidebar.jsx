@@ -24,7 +24,7 @@ import { useTheme } from "../lib/theme.jsx";
  */
 export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) {
   const perms = getPermissions();
-  const isMain = !!perms.manageAccounts;
+  const isAdmin = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
   const items = [
@@ -36,7 +36,7 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     { to: "/checkin", label: "Check-in", icon: QrCode },
     { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
     { to: "/assistant", label: "Chat assistant", icon: MessageSquare },
-    ...(isMain ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
+    ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
   ];
 
   const user = getUser() || {};

@@ -15,30 +15,39 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   UserX, BadgeX, BatteryLow, Crown, AlertTriangle, CheckCircle2,
-  Clock, ShieldAlert, Inbox,
+  Clock, ShieldAlert, Inbox, MoreHorizontal,
 } from "lucide-react";
 import { getPermissions } from "../lib/api.js";
 import {
   listExceptions, createException, resolveException,
-  subscribeStream, fmtTime, ISSUE_LABEL,
+  subscribeStream, fmtTime, issueLabel,
+  PRIORITIES, BASE_PRIORITIES, TYPE_OTHER_MAX,
 } from "../lib/exceptionsApi.js";
 
-/* Issue tiles — the four from Figma Screen 10, in a 2×2 grid. */
+/* Issue tiles — the four from Figma Screen 10 plus "Others", in a 2×3 grid.
+ * "Others" reveals a short free-text label so staff can be specific without a
+ * new enum value for every one-off. */
 const ISSUE_TYPES = [
   { value: "MISSING_PERSON", label: "Missing person", Icon: UserX },
   { value: "LOST_BADGE",     label: "Lost badge",     Icon: BadgeX },
   { value: "DEAD_PHONE",     label: "Dead phone",     Icon: BatteryLow },
   { value: "VIP_REQUEST",    label: "VIP request",    Icon: Crown },
+  { value: "OTHER",          label: "Others",         Icon: MoreHorizontal },
 ];
+
+/** Priority pill metadata for a ticket in the list (colour-matched to the form). */
+const prioMeta = (p) => PRIORITIES.find((x) => x.value === p) || PRIORITIES[1];
 
 export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
   const canEdit = getPermissions().manageExceptions;
 
   // form
   const [type, setType] = useState("MISSING_PERSON");
+  const [typeOther, setTypeOther] = useState("");
   const [delegateId, setDelegateId] = useState("");
   const [note, setNote] = useState("");
   const [critical, setCritical] = useState(false);
+  const [priority, setPriority] = useState("NORMAL");   // used when not critical
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
   const [toast, setToast] = useState("");
@@ -86,15 +95,29 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
 
   async function submit() {
     if (!canEdit) return;
+    const otherLabel = typeOther.trim();
+    if (type === "OTHER" && !otherLabel) {
+      setFormError("Describe the issue type.");
+      return;
+    }
     setSaving(true);
     setFormError("");
     try {
-      await createException({ type, delegateId, coachId, note, markCritical: critical });
+      await createException({
+        type,
+        typeOther: type === "OTHER" ? otherLabel : null,
+        delegateId,
+        coachId,
+        note,
+        priority: critical ? "CRITICAL" : priority,
+      });
       flash(critical ? "Critical alert sent to all staff" : "Exception logged");
       setNote("");
       setCritical(false);
+      setPriority("NORMAL");
       setDelegateId("");
       setType("MISSING_PERSON");
+      setTypeOther("");
       await load();
       onLogged?.();
     } catch (e) {
@@ -125,13 +148,14 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
   const st = {
     eyebrow: { fontSize: 11, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 },
     grid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
-    tile: (active) => ({
+    tile: (active, wide) => ({
       display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start",
       padding: "14px 14px", borderRadius: "var(--r-md)", fontSize: 13.5, fontWeight: 600,
       border: `1.5px solid ${active ? "var(--scc-red)" : "var(--line)"}`,
       background: active ? "var(--scc-red-tint)" : "var(--surface)",
       color: active ? "var(--scc-red-700)" : "var(--ink)",
       textAlign: "left",
+      ...(wide ? { gridColumn: "span 2" } : null),
     }),
     select: {
       width: "100%", padding: "12px 12px", borderRadius: "var(--r-md)",
@@ -157,10 +181,38 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
       borderRadius: "50%", background: "var(--surface)", transition: "left .15s",
       boxShadow: "var(--shadow-sm)",
     }),
+    // Left rule colour-matches the ticket's priority (red / violet / slate).
     ticket: (pri) => ({
       border: "1px solid var(--line)",
-      borderLeft: `3px solid ${pri === "CRITICAL" ? "var(--st-missing)" : "var(--st-normal)"}`,
+      borderLeft: `3px solid ${prioMeta(pri).colour}`,
       borderRadius: "var(--r-md)", padding: "12px 14px", background: "var(--surface)",
+    }),
+    otherRow: { display: "flex", alignItems: "center", gap: 10, marginTop: 10 },
+    otherInput: {
+      flex: 1, padding: "12px", borderRadius: "var(--r-md)",
+      border: "1px solid var(--line)", fontSize: 14, fontFamily: "inherit",
+      background: "var(--surface)", color: "var(--ink)",
+    },
+    counter: (atLimit) => ({
+      fontSize: 12, fontWeight: 600, flexShrink: 0, minWidth: 42, textAlign: "right",
+      fontVariantNumeric: "tabular-nums",
+      color: atLimit ? "var(--scc-red)" : "var(--ink-3)",
+    }),
+    prioRow: (superseded) => ({
+      display: "flex", gap: 8, marginTop: 8, opacity: superseded ? 0.5 : 1,
+    }),
+    // Selected buttons use the same palette as the pills in the ticket list.
+    prioBtn: (p, on, disabled) => ({
+      flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7,
+      padding: "10px 12px", borderRadius: "var(--r-md)", fontSize: 13.5, fontWeight: 600,
+      border: `1.5px solid ${on ? p.colour : "var(--line)"}`,
+      background: on ? p.bg : "var(--surface)",
+      color: on ? p.colour : "var(--ink-2)",
+      cursor: disabled ? "not-allowed" : "pointer",
+      transition: "background .12s, border-color .12s, color .12s",
+    }),
+    prioDot: (colour) => ({
+      width: 8, height: 8, borderRadius: "50%", background: colour, flexShrink: 0,
     }),
   };
 
@@ -193,13 +245,31 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
         <div style={st.eyebrow}>Issue type</div>
         <div style={st.grid}>
           {ISSUE_TYPES.map(({ value, label, Icon }) => (
-            <button key={value} type="button" style={st.tile(type === value)}
+            <button key={value} type="button" style={st.tile(type === value, value === "OTHER")}
                     onClick={() => setType(value)} aria-pressed={type === value}>
               <Icon size={20} strokeWidth={2} />
               {label}
             </button>
           ))}
         </div>
+
+        {/* Free-text label — only for "Others". */}
+        {type === "OTHER" && (
+          <div style={st.otherRow}>
+            <input
+              style={st.otherInput}
+              autoFocus
+              maxLength={TYPE_OTHER_MAX}
+              placeholder="Describe it — e.g. Lost luggage"
+              value={typeOther}
+              onChange={(e) => setTypeOther(e.target.value)}
+              aria-label="Describe the issue type"
+            />
+            <span style={st.counter(typeOther.length >= TYPE_OTHER_MAX)}>
+              {typeOther.length}/{TYPE_OTHER_MAX}
+            </span>
+          </div>
+        )}
       </div>
 
       <div style={{ marginTop: 18 }}>
@@ -233,6 +303,32 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
         <div>
           <div style={{ fontWeight: 700, fontSize: 14, color: critical ? "var(--scc-red-700)" : "var(--ink)" }}>Mark as critical</div>
           <div className="muted" style={{ fontSize: 12.5 }}>Alerts all staff devices instantly</div>
+        </div>
+      </div>
+
+      {/* Normal / Low — superseded while Critical is on. */}
+      <div style={{ marginTop: 12 }}>
+        <div className="muted" style={{ fontSize: 12, fontWeight: 600 }}>
+          {critical ? "Priority · set to Critical by the switch above" : "Priority"}
+        </div>
+        <div style={st.prioRow(critical)}>
+          {BASE_PRIORITIES.map((p) => {
+            const on = !critical && priority === p.value;
+            const disabled = critical || !canEdit;
+            return (
+              <button
+                key={p.value}
+                type="button"
+                style={st.prioBtn(p, on, disabled)}
+                onClick={() => !disabled && setPriority(p.value)}
+                disabled={disabled}
+                aria-pressed={on}
+              >
+                <span style={st.prioDot(p.colour)} />
+                {p.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -276,10 +372,10 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
             <div className="row between" style={{ alignItems: "flex-start", gap: 10 }}>
               <div style={{ minWidth: 0 }}>
                 <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                  <span className={`badge ${t.priority === "CRITICAL" ? "badge-missing" : "badge-neutral"}`} style={{ fontSize: 11 }}>
-                    {t.priority === "CRITICAL" ? "Critical" : "Normal"}
+                  <span className={`badge ${prioMeta(t.priority).cls}`} style={{ fontSize: 11 }}>
+                    {prioMeta(t.priority).label}
                   </span>
-                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>{ISSUE_LABEL[t.type] || t.type}</span>
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>{issueLabel(t)}</span>
                 </div>
                 <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
                   {t.delegateName || "Unidentified"}{t.coach ? ` · ${t.coach}` : ""}

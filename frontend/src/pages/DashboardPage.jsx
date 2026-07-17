@@ -27,7 +27,7 @@ import {
   Users,
   Radio,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getToken } from "../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser, getToken } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
 import DelegateAvatar from "../components/DelegateAvatar.jsx";
@@ -60,8 +60,22 @@ const EMPTY_FORM = { name: "", coachId: "", status: "PRESENT", vip: false, lastS
 
 export default function DashboardPage() {
   const perms = getPermissions();
+  // Two-role RBAC: Admin sees every tab; Staff is limited to the Delegate
+  // tab (Analytics is admin-only) — Staff operations was already gated on
+  // manageAccounts, which perms.manageAccounts now only carries for admins.
+  const isAdmin = getUser()?.role === "admin";
   const { t, lang } = useLang();
   const navigate = useNavigate();
+
+  // The page is tall (KPIs, coach status, history, the full delegate table),
+  // and browsers restore the previous scroll position on SPA route re-entry
+  // by default — landing back on Dashboard scrolled to the bottom instead of
+  // showing a fresh top-of-page view. Reset once on mount only (not on every
+  // 2s poll re-render, which doesn't remount this component).
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
   const [tab, setTab] = useState("delegate"); // "delegate" | "analytics" | "headcount" | "staffops"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
@@ -81,6 +95,11 @@ export default function DashboardPage() {
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
   const [showAllDelegates, setShowAllDelegates] = useState(false);
   const [showAllCoaches, setShowAllCoaches] = useState(false);
+
+  // Batch selection for "All delegates" — replaces the old blanket "Delete
+  // all" button with per-row checkboxes + a "Delete selected" action.
+  const [selectedDelegateIds, setSelectedDelegateIds] = useState(new Set());
+  const [deletingSelectedDelegates, setDeletingSelectedDelegates] = useState(false);
   const [history, setHistory] = useState([]);
 
   // "Staff operations" tab — admin-only (manageAccounts), lives on this same
@@ -326,6 +345,35 @@ export default function DashboardPage() {
     }
   }
 
+  function toggleDelegateSelected(id) {
+    setSelectedDelegateIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function deleteSelectedDelegates() {
+    const count = selectedDelegateIds.size;
+    if (count === 0) return;
+    const msg = lang === "zh"
+      ? `确定删除选中的 ${count} 位代表？此操作无法撤销。`
+      : `Delete ${count} selected delegate${count === 1 ? "" : "s"}? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+
+    setDeletingSelectedDelegates(true);
+    setError(null);
+    const ids = [...selectedDelegateIds];
+    const results = await Promise.allSettled(ids.map((id) => apiDelete(`/delegates/${id}`)));
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      setError(failed[0].reason?.message || "Delete failed.");
+    }
+    setSelectedDelegateIds(new Set());
+    setDeletingSelectedDelegates(false);
+    await load();
+  }
+
   async function deleteAll() {
     const msg = lang === "zh"
       ? `确定删除全部 ${delegates.length} 位代表？此操作无法撤销。`
@@ -333,6 +381,7 @@ export default function DashboardPage() {
     if (!window.confirm(msg)) return;
     try {
       await apiDelete(`/trips/${selectedTripId}/delegates`);
+      setSelectedDelegateIds(new Set());
       await load();
     } catch (e) {
       setError(e.message || "Delete all failed.");
@@ -408,6 +457,11 @@ export default function DashboardPage() {
   const COACH_TOP_N = 4;
   const openCoachBoard = () => { if (currentTripUuid) navigate(`/trips?tripId=${currentTripUuid}`); };
 
+  // The delegate rows actually rendered in the table right now (respects the
+  // "Show all" toggle) — the "select all" checkbox scopes to exactly this
+  // set, matching the same convention as the Trips/Onboarding pages.
+  const rowsShown = showAllDelegates ? visibleDelegates : visibleDelegates.slice(0, TOP_N);
+
   return (
     <div className="page">
       {/* ---- Header ------------------------------------------------------- */}
@@ -453,7 +507,7 @@ export default function DashboardPage() {
             className="select"
             style={{ maxWidth: 260 }}
             value={selectedTripId}
-            onChange={(e) => { setSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); }}
+            onChange={(e) => { setSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
             title={t("Switch trip")}
           >
             {tripOptions.map((tr) => (
@@ -476,17 +530,19 @@ export default function DashboardPage() {
         >
           {t("Delegate")}
         </button>
-        <button
-          className="btn"
-          onClick={() => setTab("analytics")}
-          style={{
-            background: tab === "analytics" ? "var(--scc-red-tint)" : "transparent",
-            color: tab === "analytics" ? "var(--scc-red)" : "var(--ink-2)",
-            border: `1px solid ${tab === "analytics" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
-          }}
-        >
-          <BarChart3 size={16} /> {t("Analytics")}
-        </button>
+        {isAdmin && (
+          <button
+            className="btn"
+            onClick={() => setTab("analytics")}
+            style={{
+              background: tab === "analytics" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "analytics" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "analytics" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            }}
+          >
+            <BarChart3 size={16} /> {t("Analytics")}
+          </button>
+        )}
         {perms.manageAccounts && (
           <button
             className="btn"
@@ -521,7 +577,7 @@ export default function DashboardPage() {
         <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
       )}
 
-      {tab === "analytics" && (
+      {tab === "analytics" && isAdmin && (
         <div style={{ marginTop: 20 }}>
           <AnalyticsPanel data={data} missing={missing} delegates={delegates} />
         </div>
@@ -786,6 +842,16 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="row" style={{ gap: 10 }}>
+              {perms.manageDelegates && selectedDelegateIds.size > 0 && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+                  onClick={deleteSelectedDelegates}
+                  disabled={deletingSelectedDelegates}
+                >
+                  <Trash2 size={16} /> {deletingSelectedDelegates ? t("Deleting…") : `${t("Delete selected")} (${selectedDelegateIds.size})`}
+                </button>
+              )}
               {perms.manageDelegates && delegates.length > 0 && (
                 <button className="btn btn-ghost" style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }} onClick={deleteAll}>
                   <Trash2 size={16} /> {t("Delete all")}
@@ -831,13 +897,37 @@ export default function DashboardPage() {
             <table className="table">
               <thead>
                 <tr>
+                  {perms.manageDelegates && (
+                    <th style={{ width: 36 }}>
+                      <input
+                        type="checkbox"
+                        checked={rowsShown.length > 0 && rowsShown.every((d) => selectedDelegateIds.has(d.id))}
+                        onChange={() => setSelectedDelegateIds((prev) => {
+                          const allChecked = rowsShown.length > 0 && rowsShown.every((d) => prev.has(d.id));
+                          return allChecked ? new Set() : new Set(rowsShown.map((d) => d.id));
+                        })}
+                        disabled={rowsShown.length === 0}
+                        aria-label={t("Select all")}
+                      />
+                    </th>
+                  )}
                   <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th><th>{t("Uploaded")}</th>
                   <th style={{ width: 90 }} />
                 </tr>
               </thead>
               <tbody>
-                {(showAllDelegates ? visibleDelegates : visibleDelegates.slice(0, TOP_N)).map((d) => (
+                {rowsShown.map((d) => (
                   <tr key={d.id}>
+                    {perms.manageDelegates && (
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedDelegateIds.has(d.id)}
+                          onChange={() => toggleDelegateSelected(d.id)}
+                          aria-label={`${t("Select")} ${d.name}`}
+                        />
+                      </td>
+                    )}
                     <td>
                       <div className="row" style={{ gap: 10 }}>
                         <DelegateAvatar delegate={d} />
@@ -886,7 +976,7 @@ export default function DashboardPage() {
                 ))}
                 {visibleDelegates.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                    <td colSpan={perms.manageDelegates ? 7 : 6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
                       {t("No delegates match your filters.")}
                     </td>
                   </tr>

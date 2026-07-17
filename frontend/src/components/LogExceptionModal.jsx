@@ -2,8 +2,12 @@
  *  OWNED BY:  Jayden — Exception Logging & QR Fallback
  * ============================================================================= */
 import { useEffect, useState } from "react";
-import { X, UserX, BadgeX, BatteryLow, Accessibility, ScanLine } from "lucide-react";
-import { getDelegates, createException } from "../lib/exceptionsApi.js";
+import {
+  X, UserX, BadgeX, BatteryLow, Accessibility, ScanLine, MoreHorizontal,
+} from "lucide-react";
+import {
+  getDelegates, createException, BASE_PRIORITIES, TYPE_OTHER_MAX,
+} from "../lib/exceptionsApi.js";
 import { useLang } from "../lib/i18n.jsx";
 
 const ISSUE_TYPES = [
@@ -12,20 +16,31 @@ const ISSUE_TYPES = [
   { value: "FACE_MATCH_FAILED", label: "Face match failed", Icon: ScanLine },
   { value: "DEAD_PHONE",        label: "Dead phone",        Icon: BatteryLow },
   { value: "VIP_REQUEST",       label: "VIP request",       Icon: Accessibility },
+  { value: "OTHER",             label: "Others",            Icon: MoreHorizontal },
 ];
 
 /**
- * "Log exception" — the Create half of the ticket CRUD.
- * Turning on "Mark as critical" raises priority to CRITICAL, which the server
- * pushes over SSE to every connected staff device.
+ * "Log exception" — the Create half of the ticket CRUD (admin / Screen 5).
+ *
+ * Priority model (shared with the mobile Issues panel):
+ *   - "Mark as critical" is the escalation switch. On => CRITICAL, and the
+ *     server pushes the ticket to every connected staff device over SSE.
+ *   - With it off, the ticket is either NORMAL or LOW, chosen on the two
+ *     colour-coded buttons underneath.
+ *
+ * Issue types include "Others", which reveals a short free-text label
+ * (max TYPE_OTHER_MAX chars) so staff can be specific without a new enum
+ * value for every one-off.
  */
 export default function LogExceptionModal({ onClose, onCreated }) {
   const { t } = useLang();
   const [delegates, setDelegates] = useState([]);
   const [type, setType] = useState("MISSING_PERSON");
+  const [typeOther, setTypeOther] = useState("");
   const [delegateId, setDelegateId] = useState("");
   const [note, setNote] = useState("");
   const [critical, setCritical] = useState(false);
+  const [priority, setPriority] = useState("NORMAL");   // used when not critical
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -36,11 +51,27 @@ export default function LogExceptionModal({ onClose, onCreated }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const isOther = type === "OTHER";
+  const otherLabel = typeOther.trim();
+  const effectivePriority = critical ? "CRITICAL" : priority;
+  // "Others" is only meaningful with a label, so block submit until it has one.
+  const blocked = saving || (isOther && !otherLabel);
+
   async function submit() {
+    if (isOther && !otherLabel) {
+      setError(t("Describe the issue type."));
+      return;
+    }
     setSaving(true);
     setError("");
     try {
-      const created = await createException({ type, delegateId, note, markCritical: critical });
+      const created = await createException({
+        type,
+        typeOther: isOther ? otherLabel : null,
+        delegateId,
+        note,
+        priority: effectivePriority,
+      });
       onCreated(created, critical);
     } catch (e) {
       setError(e.message || t("Could not log the exception. Please try again."));
@@ -72,6 +103,27 @@ export default function LogExceptionModal({ onClose, onCreated }) {
               </button>
             ))}
           </div>
+
+          {/* Free-text label — only for "Others". */}
+          {isOther && (
+            <div className="exc-other-wrap">
+              <label className="field-label" htmlFor="exc-type-other">{t("Describe the issue type")}</label>
+              <div className="exc-other-row">
+                <input
+                  id="exc-type-other"
+                  className="input"
+                  autoFocus
+                  maxLength={TYPE_OTHER_MAX}
+                  placeholder={t("e.g. Lost luggage")}
+                  value={typeOther}
+                  onChange={(e) => setTypeOther(e.target.value)}
+                />
+                <span className={"exc-other-count" + (typeOther.length >= TYPE_OTHER_MAX ? " at-limit" : "")}>
+                  {typeOther.length}/{TYPE_OTHER_MAX}
+                </span>
+              </div>
+            </div>
+          )}
 
           <label className="field-label" htmlFor="exc-delegate">{t("Delegate")}</label>
           <select
@@ -115,12 +167,35 @@ export default function LogExceptionModal({ onClose, onCreated }) {
             </div>
           </div>
 
+          {/* Normal / Low — superseded while Critical is on. */}
+          <div style={{ marginBottom: 16 }}>
+            <span className="exc-prio-label">
+              {critical ? t("Priority · set to Critical by the switch above") : t("Priority")}
+            </span>
+            <div className={"exc-prio-row" + (critical ? " superseded" : "")}>
+              {BASE_PRIORITIES.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  data-p={p.value}
+                  className={"exc-prio-btn" + (!critical && priority === p.value ? " selected" : "")}
+                  onClick={() => setPriority(p.value)}
+                  disabled={critical}
+                  aria-pressed={!critical && priority === p.value}
+                >
+                  <span className="dot" style={{ background: p.colour }} />
+                  {t(p.label)}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {error && <p className="exc-error">{error}</p>}
 
           <button
             className={"btn btn-block " + (critical ? "btn-primary" : "btn-dark")}
             onClick={submit}
-            disabled={saving}
+            disabled={blocked}
           >
             {saving ? t("Submitting…") : critical ? t("Submit & alert team") : t("Submit ticket")}
           </button>

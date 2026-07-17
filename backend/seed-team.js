@@ -15,9 +15,11 @@
  *  exists, so nobody's password gets reset):
  *      cd backend && npm run seed:team
  *
- *  Everyone gets full ("main") access for development. Tighten any account
- *  afterwards in the Account control page if you want to demo the permission
- *  gates. Default password for every new account is "password123!".
+ *  Everyone gets the "admin" role for development (full access, bypasses
+ *  every permission check — see accountPermissions() in data.js). Change any
+ *  account to "staff" afterwards in the Account control page if you want to
+ *  demo the permission gates. Default password for every new account is
+ *  "password123!".
  * ============================================================================= */
 
 import "dotenv/config";
@@ -81,7 +83,7 @@ async function main() {
     const id = `u-${nextN++}`;
     await pool.query(
       `INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt")
-       VALUES ($1,$2,$3,$4,'main',$5,$6)`,
+       VALUES ($1,$2,$3,$4,'admin',$5,$6)`,
       [id, member.username, member.name, await hashPassword(PASSWORD), permsJson, new Date().toISOString()]
     );
     console.log(`  ✓ created ${member.username} / ${PASSWORD}`);

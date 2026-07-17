@@ -6,8 +6,8 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useState, useCallback } from "react";
-import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle } from "lucide-react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../permissions.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -25,35 +25,30 @@ const EMPTY_FORM = {
   username: "",
   name: "",
   password: "",
-  perms: { ...DEFAULT_PERMISSIONS },
+  role: "staff",
+  perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
 };
 
-// Role is a UI convenience only — the backend still derives the account's
-// actual role from whichever permission checkboxes are ticked (see
-// roleFromPerms/defaultPermsForRole in backend/data.js). Picking a role here
-// just pre-fills the checkboxes with that role's usual starting point; the
-// checkboxes themselves remain what's actually submitted, so admins can
-// still fine-tune access per account exactly as before.
+// Exactly two roles — role is now an independent field, submitted as-is
+// alongside the permission checkboxes (see backend/data.js's createAccount/
+// updateAccount). Picking "Admin" here pre-fills every checkbox ticked as a
+// preview, but it's cosmetic: an Admin account bypasses every permission
+// check regardless of what's stored (accountPermissions() in data.js always
+// returns all-true for role="admin"), so the checkboxes are hidden entirely
+// once Admin is selected — see the form below. Staff's checkboxes are the
+// real, enforced access grant, defaulting to just "Manage delegates" (the
+// Delegate tab) — the usual staff-facing surface.
 const ROLE_PRESETS = {
   staff: { manageDelegates: true, manageTrips: false, manageExceptions: false, exportData: false, manageAccounts: false },
-  admin: { manageDelegates: true, manageTrips: false, manageExceptions: false, exportData: true, manageAccounts: false },
+  admin: { manageDelegates: true, manageTrips: true, manageExceptions: true, exportData: true, manageAccounts: true },
 };
-
-// Best-effort read of an account's current role from its permissions, purely
-// to preselect the dropdown when editing. "main" (manageAccounts) accounts
-// aren't offered Staff/Admin here — see the disabled-selector note below.
-function roleFromPerms(p) {
-  if (p.manageAccounts) return "main";
-  if (p.exportData) return "admin";
-  return "staff";
-}
 
 const ERR_TEXT = {
   USERNAME_TAKEN: "That username is already taken.",
   USERNAME_REQUIRED: "Username is required.",
   PASSWORD_REQUIRED: "Password is required.",
   WEAK_PASSWORD: "Password must be at least 8 characters, with a letter and a number.",
-  LAST_MAIN: "You can't remove the last account that manages accounts.",
+  LAST_MAIN: "You can't remove or demote the last Admin account.",
   NOT_FOUND: "That account no longer exists.",
 };
 
@@ -80,6 +75,17 @@ export default function AccountControlPage() {
   const [formErr, setFormErr] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Search / filter / sort for the accounts table.
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState("ALL"); // ALL | admin | staff
+  const [sortMode, setSortMode] = useState("username"); // username | name | role
+
+  // Batch selection — Set of account ids. Your OWN account is never
+  // selectable (see visibleAccounts below and the row checkbox), so a batch
+  // delete can't lock you out of your own session mid-loop.
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
+
   const me = getUser() || {};
 
   const load = useCallback(async () => {
@@ -99,9 +105,98 @@ export default function AccountControlPage() {
     load();
   }, [load]);
 
+  // Search + role filter + sort, applied in that order. Search matches
+  // username or display name (case-insensitive substring).
+  const visibleAccounts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    let list = accounts.filter((a) => {
+      const role = a.role === "admin" ? "admin" : "staff";
+      if (roleFilter !== "ALL" && role !== roleFilter) return false;
+      if (q) {
+        const hay = `${a.username || ""} ${a.name || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    const byUsername = (a, b) => (a.username || "").localeCompare(b.username || "");
+    list = [...list].sort((a, b) => {
+      if (sortMode === "name") return (a.name || "").localeCompare(b.name || "") || byUsername(a, b);
+      if (sortMode === "role") return (a.role || "").localeCompare(b.role || "") || byUsername(a, b);
+      return byUsername(a, b); // username
+    });
+    return list;
+  }, [accounts, search, roleFilter, sortMode]);
+
+  // Every visible account EXCEPT your own — your own account is never
+  // selectable for batch delete (see the row checkbox below).
+  const selectableVisible = useMemo(() => visibleAccounts.filter((a) => a.username !== me.username), [visibleAccounts, me.username]);
+  const allSelectableChecked = selectableVisible.length > 0 && selectableVisible.every((a) => selectedIds.has(a.id));
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => {
+      if (allSelectableChecked) return new Set();
+      return new Set(selectableVisible.map((a) => a.id));
+    });
+  }
+
+  async function deleteSelected() {
+    const count = selectedIds.size;
+    if (count === 0) return;
+    const msg = lang === "zh"
+      ? `确定删除选中的 ${count} 个账户？此操作无法撤销。`
+      : `Delete ${count} selected account${count === 1 ? "" : "s"}? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+
+    setDeletingSelected(true);
+    setError("");
+    const ids = [...selectedIds];
+    const results = await Promise.allSettled(ids.map((id) => apiDelete(`/accounts/${id}`)));
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      // Most likely cause: the "last admin" guard blocked one of them —
+      // show the first failure's message rather than a generic one.
+      setError(mapError(failed[0].reason, "LAST_MAIN"));
+    }
+    setSelectedIds(new Set());
+    setDeletingSelected(false);
+    await load();
+  }
+
+  // Deletes every account EXCEPT your own (never itself deletable — same
+  // rule as the row checkboxes). The backend's "last admin" guard still
+  // blocks removing the only remaining admin, so at minimum your own account
+  // survives this.
+  async function deleteAllAccounts() {
+    const targets = accounts.filter((a) => a.username !== me.username);
+    if (targets.length === 0) return;
+    const msg = lang === "zh"
+      ? `确定删除除您以外的全部 ${targets.length} 个账户？此操作无法撤销。`
+      : `Delete ALL ${targets.length} other account${targets.length === 1 ? "" : "s"} (everyone except you)? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+
+    setDeletingSelected(true);
+    setError("");
+    const results = await Promise.allSettled(targets.map((a) => apiDelete(`/accounts/${a.id}`)));
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      setError(mapError(failed[0].reason, "LAST_MAIN"));
+    }
+    setSelectedIds(new Set());
+    setDeletingSelected(false);
+    await load();
+  }
+
   function openCreate() {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms }, role: roleFromPerms(EMPTY_FORM.perms) });
+    setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms } });
     setFormErr("");
     setModalOpen(true);
   }
@@ -114,14 +209,14 @@ export default function AccountControlPage() {
       name: a.name || "",
       password: "",
       perms,
-      role: roleFromPerms(perms),
+      role: a.role === "admin" ? "admin" : "staff",
     });
     setFormErr("");
     setModalOpen(true);
   }
 
   function togglePerm(key) {
-    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] }, role: roleFromPerms({ ...f.perms, [key]: !f.perms[key] }) }));
+    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] } }));
   }
 
   function selectRole(role) {
@@ -155,6 +250,7 @@ export default function AccountControlPage() {
     const payload = {
       username: form.username.trim(),
       name: form.name.trim(),
+      role: form.role,
       permissions: form.perms,
     };
     if (form.password) payload.password = form.password; // blank on edit = keep current
@@ -213,9 +309,31 @@ export default function AccountControlPage() {
           <h1 className="page-title">{t("Account control")}</h1>
           <p className="page-sub">{t("Create accounts and choose exactly what each one can do.")}</p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>
-          <UserPlus size={16} /> {t("New account")}
-        </button>
+        <div className="row" style={{ gap: 10 }}>
+          {selectedIds.size > 0 && (
+            <button
+              className="btn btn-ghost"
+              style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+              onClick={deleteSelected}
+              disabled={deletingSelected}
+            >
+              <Trash2 size={16} /> {deletingSelected ? t("Deleting…") : `${t("Delete selected")} (${selectedIds.size})`}
+            </button>
+          )}
+          {accounts.length > 1 && (
+            <button
+              className="btn btn-ghost"
+              style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+              onClick={deleteAllAccounts}
+              disabled={deletingSelected}
+            >
+              <Trash2 size={16} /> {t("Delete all")}
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={openCreate}>
+            <UserPlus size={16} /> {t("New account")}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -233,6 +351,31 @@ export default function AccountControlPage() {
           <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>{accounts.length} {t("total")}</span>
         </div>
 
+        {accounts.length > 0 && (
+          <div className="row" style={{ gap: 10, padding: "12px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+            <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
+              <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+              <input
+                className="input"
+                style={{ paddingLeft: 32 }}
+                placeholder={t("Search accounts…")}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <select className="select" style={{ maxWidth: 160 }} value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
+              <option value="ALL">{t("All roles")}</option>
+              <option value="admin">{t("Admin")}</option>
+              <option value="staff">{t("Staff")}</option>
+            </select>
+            <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+              <option value="username">{t("Sort: Username")}</option>
+              <option value="name">{t("Sort: Name")}</option>
+              <option value="role">{t("Sort: Role")}</option>
+            </select>
+          </div>
+        )}
+
         {loading ? (
           <div className="muted" style={{ padding: 24, fontSize: 14 }}>{t("Loading…")}</div>
         ) : accounts.length === 0 ? (
@@ -240,14 +383,43 @@ export default function AccountControlPage() {
         ) : (
           <table className="table">
             <thead>
-              <tr><th>{t("Username")}</th><th>{t("Name")}</th><th>{t("Access")}</th><th style={{ width: 90 }} /></tr>
+              <tr>
+                <th style={{ width: 36 }}>
+                  <input
+                    type="checkbox"
+                    checked={allSelectableChecked}
+                    onChange={toggleSelectAll}
+                    disabled={selectableVisible.length === 0}
+                    aria-label={t("Select all")}
+                  />
+                </th>
+                <th>{t("Username")}</th><th>{t("Name")}</th><th>{t("Role")}</th><th>{t("Access")}</th><th style={{ width: 90 }} />
+              </tr>
             </thead>
             <tbody>
-              {accounts.map((a) => {
+              {visibleAccounts.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                    {t("No accounts match your filters.")}
+                  </td>
+                </tr>
+              )}
+              {visibleAccounts.map((a) => {
                 const isMe = a.username === me.username;
+                const isAdmin = a.role === "admin";
                 const granted = PERMISSIONS.filter((p) => a.permissions?.[p.key]);
                 return (
                   <tr key={a.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(a.id)}
+                        onChange={() => toggleSelected(a.id)}
+                        disabled={isMe}
+                        title={isMe ? t("You can't select your own account for batch delete.") : undefined}
+                        aria-label={`${t("Select")} ${a.username}`}
+                      />
+                    </td>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
                         <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
@@ -258,6 +430,11 @@ export default function AccountControlPage() {
                       </div>
                     </td>
                     <td>{a.name || "—"}</td>
+                    <td>
+                      <span className={"badge " + (isAdmin ? "badge-missing" : "badge-neutral")} style={{ padding: "2px 8px" }}>
+                        {isAdmin ? t("Admin") : t("Staff")}
+                      </span>
+                    </td>
                     <td>
                       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                         {granted.length === 0 ? (
@@ -326,45 +503,46 @@ export default function AccountControlPage() {
             )}
 
             <label className="field-label" style={{ marginTop: 18 }}>{t("Role")}</label>
-            {form.role === "main" ? (
-              <div className="row" style={{ gap: 8 }}>
-                <span className="badge badge-missing">{t("Main")}</span>
-                <span className="muted" style={{ fontSize: 12 }}>{t("This is the primary account — its access is managed via the checkboxes below.")}</span>
-              </div>
-            ) : (
-              <div className="row" style={{ gap: 8 }}>
-                {["staff", "admin"].map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    className={"btn " + (form.role === r ? "btn-primary" : "btn-ghost")}
-                    style={{ flex: 1 }}
-                    onClick={() => selectRole(r)}
-                  >
-                    {t(r === "staff" ? "Staff" : "Admin")}
-                  </button>
-                ))}
-              </div>
-            )}
-            <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>{t("Sets a starting point for the checkboxes below — you can still fine-tune each one.")}</p>
-
-            <label className="field-label" style={{ marginTop: 18 }}>{t("Access rights")}</label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {PERMISSIONS.map((p) => (
-                <label key={p.key} style={S.permRow}>
-                  <input
-                    type="checkbox"
-                    checked={!!form.perms[p.key]}
-                    onChange={() => togglePerm(p.key)}
-                    style={{ marginTop: 3 }}
-                  />
-                  <span>
-                    <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
-                    <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
-                  </span>
-                </label>
+            <div className="row" style={{ gap: 8 }}>
+              {["staff", "admin"].map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  className={"btn " + (form.role === r ? "btn-primary" : "btn-ghost")}
+                  style={{ flex: 1 }}
+                  onClick={() => selectRole(r)}
+                >
+                  {t(r === "staff" ? "Staff" : "Admin")}
+                </button>
               ))}
             </div>
+            <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              {form.role === "admin"
+                ? t("Admins bypass every check below — full access to every tab and feature.")
+                : t("Staff are limited to exactly what's ticked below.")}
+            </p>
+
+            {form.role === "staff" && (
+              <>
+                <label className="field-label" style={{ marginTop: 18 }}>{t("Access rights")}</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {PERMISSIONS.map((p) => (
+                    <label key={p.key} style={S.permRow}>
+                      <input
+                        type="checkbox"
+                        checked={!!form.perms[p.key]}
+                        onChange={() => togglePerm(p.key)}
+                        style={{ marginTop: 3 }}
+                      />
+                      <span>
+                        <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
+                        <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
 
             {formErr && (
               <div style={S.formErr}><AlertTriangle size={15} /> {t(formErr)}</div>

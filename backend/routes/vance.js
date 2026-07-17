@@ -36,6 +36,7 @@ import {
   getTrip,
   getDashboard,
   getMissing,
+  resolveTripUuid,
   COACHES,
 } from "../data.js";
 import { requireAuth, requirePermission } from "../auth.js";
@@ -597,9 +598,15 @@ router.get("/api/documents/parse-async/:id", requireAuth(), wrap(async (req, res
  * detection) + the trip's coaches (for per-row assignment). */
 router.get("/api/onboarding/context", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
-  const tripId = req.query.tripId;
-  const tripRow = tripId ? await q(`SELECT uuid_id FROM trips WHERE id = $1`, [tripId]) : null;
-  const tripUuid = tripRow?.rows?.[0]?.uuid_id || null;
+  // WHY resolveTripUuid(): the frontend's trip picker sends the SAME id shape
+  // as everywhere else in the app — "t-1" for the base Beijing trip, or a real
+  // trip's uuid_id for any other trip (see DashboardPage.jsx's trip switcher).
+  // This used to do `SELECT uuid_id FROM trips WHERE id = $1`, which only ever
+  // matches trips.id (a legacy short code that's ONLY ever "t-1" for the seed
+  // trip — every other trip's `id` column holds an unrelated random uuid, see
+  // desmond.js's trip-seed INSERT), so passing a real trip's uuid here never
+  // matched anything and silently fell back to trip_id IS NULL (unscoped).
+  const tripUuid = await resolveTripUuid(req.query.tripId);
   const dq = tripUuid
     ? await q(`SELECT name FROM delegates WHERE trip_id = $1`, [tripUuid])
     : await q(`SELECT name FROM delegates`);
@@ -689,8 +696,11 @@ router.post(
     if (rows.length === 0) {
       return res.status(400).json({ error: "NO_ROWS", message: "There are no delegates to add." });
     }
-    const tripRow = await q(`SELECT uuid_id FROM trips WHERE id = $1`, [req.params.id]);
-    const tripUuid = tripRow.rows[0]?.uuid_id || null;
+    // See the comment on GET /api/onboarding/context above for why
+    // resolveTripUuid() (not a raw `trips WHERE id = $1` lookup) is required
+    // here — this is the actual fix for uploaded lists not reaching the
+    // right trip's check-in module / dashboard.
+    const tripUuid = await resolveTripUuid(req.params.id);
 
     const added = [];
     for (const r of rows) {
@@ -700,12 +710,15 @@ router.post(
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
       const coachId = r.coachId || null;
+      // tripUuid passed directly at creation (not just patched in below) so the
+      // delegate is correctly scoped from the very first INSERT — no window
+      // where it exists with trip_id NULL and is invisible everywhere.
       const delegate = await createDelegate({
         name,
         status: coachId ? "MISSING" : "UNASSIGNED",
         vip: !!r.vip,
         coachId,
-      });
+      }, tripUuid);
       await q(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,
@@ -747,9 +760,8 @@ async function backfillQrCodes(tripUuid) {
 // and the scanner's roster/headcount.
 router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
-  const tripId = req.query.tripId;
-  const tripRow = tripId ? await q(`SELECT uuid_id FROM trips WHERE id = $1`, [tripId]) : null;
-  const tripUuid = tripRow?.rows?.[0]?.uuid_id || null;
+  // See the comment on GET /api/onboarding/context above.
+  const tripUuid = await resolveTripUuid(req.query.tripId);
   await backfillQrCodes(tripUuid);
   const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
   const r = tripUuid

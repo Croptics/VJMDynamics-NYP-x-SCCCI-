@@ -175,6 +175,19 @@ routes/exceptions.js
     table and flips the delegate PRESENT) — gated on requireAuth() only,
     same level as Vimal's face scan, not the elevated manageExceptions used
     by manual overrides. Idempotent on client_event_id.
+    exception_type has a 6th value, "OTHER", carrying a free-text label in
+    the new exception_tickets.type_other column (VARCHAR(TYPE_OTHER_MAX=20),
+    added via ALTER TABLE ... IF NOT EXISTS so an already-deployed DB picks
+    it up on next boot). exception_priority already had "LOW" in its enum
+    from the start, but nothing in the UI ever exposed it until this same
+    change — Critical/Normal/Low is now a real 3-tier system end to end.
+    POST /api/trips/:id/exceptions validates type against the enum itself
+    (400 instead of an opaque Postgres 500 on a bad value), requires
+    typeOther (trimmed, capped) when type is "OTHER", and validates priority
+    the same way. Cherry-picked from Jayden's upstream branch
+    (`origin/SecureScan-Logs-(Jayden)`) — see the "INTEGRATING TEAMMATE
+    BRANCHES" note near the bottom of this file for why this was a
+    selective port, not a file merge.
 
 routes/vimal.js
     Vimal's FaceCheck-Pro — Privacy-First Biometric & Multi-Modal Fusion
@@ -236,6 +249,21 @@ routes/vance.js
     manageDelegates; the chatbot and the boarding-pass/scan endpoints are any
     signed-in user. Parsing prefers Claude (needs ANTHROPIC_API_KEY; required
     for scans); the chatbot is Ollama-first then Claude, like insights.js.
+    GET /api/onboarding/context, POST /api/trips/:id/onboarding/confirm, and
+    GET /api/onboarding/badges now resolve their tripId via data.js's shared
+    resolveTripUuid() instead of an ad-hoc `SELECT uuid_id FROM trips WHERE
+    id = $1`. WHY: trips.id is a legacy short code that's ONLY ever "t-1" for
+    the seed trip — every other trip's `id` column holds an unrelated random
+    uuid (see desmond.js's `gen_random_uuid()::text` in its trip-seed
+    INSERT) — so the old lookup silently matched nothing for any trip except
+    the base one, and every write/read fell back to unscoped (trip_id NULL)
+    behavior. This was the real cause behind "pre-event uploads don't reach
+    the arrival check-in module" for any non-Beijing trip. onboarding/confirm
+    also now passes the resolved tripUuid directly into createDelegate()'s
+    2nd param (not just a follow-up UPDATE), so a delegate is correctly
+    scoped from its very first INSERT. POST /api/onboarding/checkin's own
+    trip-derivation (LEFT JOIN through the delegate's own trip_id, see the
+    comment there) was already correct and untouched.
 
 backend/seed-demo.js
     One-off script (npm run seed:demo) that seeds a realistic delegate
@@ -424,6 +452,14 @@ Shared components (src/components/):
       Jayden — the "Log exception" create form (issue type, delegate
       picker, note, "Mark as critical" toggle). Only reachable via the
       gated "Log exception" button on ExceptionInboxPage.jsx.
+      Issue type includes "Others" (free-text label input appears inline,
+      capped at TYPE_OTHER_MAX/20 chars, required before submit). Below the
+      Critical toggle, a Normal/Low priority button pair (colour-matched to
+      the inbox pills) sets the ticket's priority when Critical is off —
+      superseded/disabled while Critical is on. Cherry-picked from Jayden's
+      upstream branch with every t()/useLang() call preserved by hand (his
+      branch had dropped i18n entirely on this file — see the note near the
+      bottom of this file).
 
 Library helpers (src/lib/):
 
@@ -465,6 +501,13 @@ Library helpers (src/lib/):
       checkInByQR() (POST /api/checkins/qr) was added for the /checkin
       screen's QR pill, but QRScannerPanel.jsx no longer calls it — see the
       QRScannerPanel.jsx entry below for why (unused, left in place).
+      TYPE_OTHER_MAX/PRIORITIES/BASE_PRIORITIES/issueLabel() added — mirrors
+      backend/routes/exceptions.js's "Others" type + 3-tier Critical/Normal/
+      Low priority. issueLabel(ticket) returns the ticket's custom typeOther
+      label when set, else the ISSUE_LABEL[type] fallback (kept exported,
+      still used as issueLabel()'s own fallback). createException() gained
+      typeOther/priority params; markCritical is still honoured for backward
+      compatibility (always forces CRITICAL when passed).
 
   useSessionGuard.js
       Shared hook (Layout.jsx + MobileLayout.jsx): polls GET /api/auth/
@@ -647,6 +690,52 @@ Pages (src/pages/) — one file per route:
                                                   sitting right under a short
                                                   list, so its position matches
                                                   History tracker's.
+                                                • Per-row checkboxes + a
+                                                  "Delete selected (N)" button
+                                                  (only rendered once 1+ rows
+                                                  are checked) sit alongside
+                                                  the original blanket "Delete
+                                                  all" button (was briefly
+                                                  replaced by "Delete selected"
+                                                  alone, then explicitly asked
+                                                  back — both now coexist).
+                                                  "Delete selected" deletes
+                                                  just the checked ids via the
+                                                  existing single DELETE /api/
+                                                  delegates/:id route
+                                                  (Promise.allSettled loop, no
+                                                  new backend route); "Delete
+                                                  all" still calls DELETE
+                                                  /api/trips/:id/delegates
+                                                  (wipes every delegate in the
+                                                  current trip, unchanged from
+                                                  before). The header checkbox
+                                                  scopes "select all" to
+                                                  exactly the rows currently
+                                                  rendered (rowsShown —
+                                                  respects the "Show all"
+                                                  toggle, so it won't silently
+                                                  select filtered-out or
+                                                  not-yet-shown rows).
+                                                  Selection clears when the
+                                                  trip switcher changes.
+                                                • Dashboard now resets window
+                                                  scroll to the top once on
+                                                  mount (an SPA route re-entry
+                                                  otherwise restores the
+                                                  browser's previous scroll
+                                                  position — landing back on
+                                                  this long page scrolled to
+                                                  the bottom instead of a fresh
+                                                  top-of-page view). Chat
+                                                  assistant's OWN scroll-to-
+                                                  latest-message behavior is a
+                                                  separate mechanism — see
+                                                  ChatAssistantPage.jsx below;
+                                                  it was later found to have
+                                                  the OPPOSITE bug (forcing a
+                                                  page-level scroll on that
+                                                  page) and fixed too.
                                                 • "History tracker" (was "Live
                                                   activity") — persisted to the
                                                   activity_log table (GET/DELETE
@@ -759,7 +848,34 @@ Pages (src/pages/) — one file per route:
   TripsListPage.jsx        (/trips grid)       Desmond — the trip grid + the
                                                 shared useTfTheme dark-mode hook.
   OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — three
-                                                tabs. "Document parsing"
+                                                tabs.
+                                                • "Assign to trip" used to be a
+                                                  HARDCODED stub array (t-1/
+                                                  t-2/t-3 — only t-1 was ever a
+                                                  real trip; t-2/t-3 didn't
+                                                  exist in the trips table at
+                                                  all), totally disconnected
+                                                  from the real 16-trip
+                                                  database. Assigning an upload
+                                                  to anything but t-1 silently
+                                                  created delegates with
+                                                  trip_id NULL — invisible on
+                                                  the Trips board and the
+                                                  arrival check-in module. Now
+                                                  fetches the REAL trip list
+                                                  (GET /all-trips + the base
+                                                  trip's own name via GET
+                                                  /trips/t-1), same pattern as
+                                                  DashboardPage.jsx's trip
+                                                  switcher — every trip that
+                                                  actually exists is a real,
+                                                  working option. A stale
+                                                  localStorage trip selection
+                                                  from before this fix (an old
+                                                  t-2/t-3 value) is detected
+                                                  and cleared once the real
+                                                  list loads.
+                                                "Document parsing"
                                                 (default): upload a directory
                                                 / attendee list / scanned
                                                 passport, AI extracts delegate
@@ -803,6 +919,21 @@ Pages (src/pages/) — one file per route:
                                                 viewing the inbox doesn't.
                                                 Styled by
                                                 ExceptionInboxPage.css.
+                                                Priority badge is StatusBadge
+                                                (already supported LOW/
+                                                "Low" — badge-neutral — before
+                                                this feature was wired up end
+                                                to end, so it needed no
+                                                change); issue-type label
+                                                switched from a raw
+                                                ISSUE_LABEL[type] lookup to
+                                                issueLabel(ticket) so an
+                                                "Others" ticket's custom
+                                                typeOther text displays
+                                                (still passed through t() —
+                                                a no-op for untranslated free
+                                                text, since t() falls back to
+                                                the original string).
   ChatAssistantPage.jsx    /assistant          Vance's Trip Assistant — a real
                                                 chatbot answering over the live
                                                 trip snapshot (everyone's data),
@@ -812,6 +943,27 @@ Pages (src/pages/) — one file per route:
                                                 clickable delegate names. Any
                                                 signed-in user. Calls
                                                 backend/routes/vance.js.
+                                                Auto-scroll-to-latest-message
+                                                sets messagesRef.current.
+                                                scrollTop = scrollHeight
+                                                directly on the message-list
+                                                div — NOT endRef.
+                                                scrollIntoView() (removed),
+                                                which walks up through every
+                                                ancestor scroll container it
+                                                finds, including the outer
+                                                page. On a tall message list —
+                                                and worse once the app-wide
+                                                110% zoom made the page taller
+                                                than the viewport — that meant
+                                                simply opening this page could
+                                                yank the WHOLE page down to
+                                                bring the chat bottom into
+                                                view, instead of only
+                                                scrolling inside the chat
+                                                panel. Setting scrollTop is
+                                                scoped to that one div and
+                                                never touches window scroll.
   QRCheckInPage.jsx        /checkin            FULL — Vimal's phone-frame
                                                 staff check-in app, rendered
                                                 inside the desktop Layout.
@@ -888,6 +1040,28 @@ Pages (src/pages/) — one file per route:
                                                 longer scan successfully;
                                                 print a real badge from
                                                 "Boarding passes" instead.
+                                                NOTE: Jayden's own upstream
+                                                branch later re-reversed this
+                                                — it reintroduces the JSON
+                                                DELEGATE_BADGE format as a
+                                                second accepted shape
+                                                alongside Vance's plain code,
+                                                reactivating checkInByQR()/
+                                                POST /api/checkins/qr.
+                                                Deliberately NOT merged: that
+                                                JSON format is still printed
+                                                nowhere in the live app (only
+                                                a demo qr-payloads.txt with a
+                                                hardcoded fake delegate "d-1")
+                                                — merging it would reintroduce
+                                                the exact two-format ambiguity
+                                                this fix eliminated, for no
+                                                real functional gain. Flagged
+                                                to the user and skipped by
+                                                explicit choice; see the
+                                                "INTEGRATING TEAMMATE
+                                                BRANCHES" note near the bottom
+                                                of this file.
   ManualTrackingPanel.jsx  (Scan → Manual)     Jayden — mark a delegate
                                                 present by hand when a scan
                                                 isn't possible. Reads the
@@ -903,38 +1077,83 @@ Pages (src/pages/) — one file per route:
   IssuesPanel.jsx          (Me → Issues tab)   Jayden — mobile exception
                                                 logging: issue-type tiles
                                                 (Missing person / Lost badge
-                                                / Dead phone / VIP request),
-                                                delegate picker, note, "Mark
-                                                as critical", plus the open-
-                                                ticket list for this trip.
+                                                / Dead phone / VIP request /
+                                                Others), delegate picker,
+                                                note, "Mark as critical" +
+                                                a Normal/Low priority button
+                                                pair underneath (superseded
+                                                while Critical is on), plus
+                                                the open-ticket list for this
+                                                trip. "Others" reveals a
+                                                free-text label input capped
+                                                at TYPE_OTHER_MAX (20 chars).
                                                 Same data layer as the
                                                 desktop ExceptionInboxPage.jsx
                                                 (exceptionsApi.js), including
                                                 the live SSE "● Live"
                                                 indicator. Logging/resolving
-                                                needs manageExceptions.
+                                                needs manageExceptions. No
+                                                i18n on this file (mobile
+                                                Check-in shell is English-
+                                                only) — unchanged by this.
   AccountControlPage.jsx   /accounts           Create/edit/delete staff
                                                 accounts + permissions
                                                 (needs manageAccounts).
-                                                • Role selector (Staff/Admin)
-                                                  in the create/edit form —
-                                                  UI convenience only, no
-                                                  backend change: picking a
-                                                  role just pre-fills the
-                                                  permission checkboxes with
-                                                  that role's usual starting
-                                                  point (ROLE_PRESETS mirrors
-                                                  backend's defaultPermsForRole
-                                                  in data.js); the checkboxes
-                                                  remain what's actually
-                                                  submitted, so access is
-                                                  still tunable per account.
-                                                  Accounts already at "main"
-                                                  tier (manageAccounts) show a
-                                                  protective badge instead of
-                                                  the selector, so this can't
-                                                  accidentally demote the
-                                                  primary account.
+                                                • Role selector (Staff/Admin,
+                                                  no more "Main" tier) in the
+                                                  create/edit form — role is a
+                                                  real, independently-submitted
+                                                  field (see the RBAC note
+                                                  under AUTH & SECURITY above),
+                                                  not derived from the
+                                                  checkboxes. Picking Admin
+                                                  hides the checkboxes (moot —
+                                                  admin bypasses every check);
+                                                  picking Staff shows the real,
+                                                  enforced checkboxes.
+                                                • Table now has a dedicated
+                                                  Role column (badge: red for
+                                                  Admin, neutral for Staff),
+                                                  plus Search (username/name
+                                                  substring), a role Filter
+                                                  (All/Admin/Staff), and a Sort
+                                                  select (Username/Name/Role) —
+                                                  same UI conventions as the
+                                                  Dashboard's "All delegates"
+                                                  search/filter/sort bar.
+                                                • Multi-select checkboxes +
+                                                  "Delete selected (N)" button
+                                                  (only rendered once 1+ rows
+                                                  are checked) — batch-deletes
+                                                  by looping the existing
+                                                  single DELETE /api/accounts/
+                                                  :id endpoint via
+                                                  Promise.allSettled (no new
+                                                  backend route). Your OWN
+                                                  account's checkbox is always
+                                                  disabled and excluded from
+                                                  "select all," so a batch
+                                                  delete can't invalidate your
+                                                  own session mid-loop. If one
+                                                  deletion in the batch fails
+                                                  (e.g. the "last admin" guard
+                                                  blocks it), the first
+                                                  failure's message is shown
+                                                  and the rest still complete.
+                                                • A "Delete all" button sits
+                                                  next to "Delete selected"
+                                                  (shown whenever there's at
+                                                  least one OTHER account) —
+                                                  deleteAllAccounts() targets
+                                                  every account except your
+                                                  own (same self-exclusion
+                                                  rule as the checkboxes,
+                                                  same Promise.allSettled loop
+                                                  over the single-delete
+                                                  route) rather than literally
+                                                  everyone, so you can't
+                                                  accidentally lock yourself
+                                                  out of Account control.
   SettingsPage.jsx         /settings           Signed-in account info
                                                 (avatar/name/role),
                                                 permissions list, and the
@@ -1047,6 +1266,16 @@ Styles (src/styles/):
       the right (padding-right >= ~28px) or the icon will overlap the text;
       see OnboardingPage.jsx's coach-picker and MobileAttendancePage.jsx's
       status <select> for the pattern.
+      `html { zoom: 110%; }` bakes in a fixed visual scale so the app reads at
+      a consistent, comfortable size at every viewer's own 100% browser zoom —
+      same look across Chrome/Edge/Safari/Firefox 126+, since it's part of
+      the page instead of a per-browser manual zoom setting. Uses `zoom` (not
+      `transform: scale`) so it participates in normal layout — scrollbars,
+      viewport units, and click hit-testing all stay correct.
+      Dark theme (:root[data-theme="dark"]) was softened — was near-black
+      (--bg #121417, --surface #1a1d22); now a lighter charcoal (--bg
+      #1a1d21, --surface #24272c, --surface-2 #2a2e33), same relative
+      structure (bg < surface < surface-2), just lifted several steps.
 
   mobile.css
       Mobile-only classes (.mobile-shell, .mobile-card, .mobile-tabbar,
@@ -1075,6 +1304,48 @@ AUTH & SECURITY
   just hidden in the UI).
 - Because tokens changed format, everyone gets signed out once after
   this update and needs to log back in — expected, one-time.
+
+- RBAC — EXACTLY TWO ROLES (Admin / Staff). The old "main" tier (derived
+  whenever manageAccounts was ticked) is retired; role is now an independent,
+  explicitly-set field (the Account control role picker), not derived from
+  permission checkboxes.
+    · Admin BYPASSES every permission check. accountPermissions(row) in
+      data.js returns every key as `true` for role="admin" regardless of
+      what's actually stored — so requirePermission() (auth.js) and every
+      getPermissions().xyz check on the frontend automatically unlock for
+      admins, with zero per-call special-casing. Admin sees every Dashboard
+      tab (Delegate/Analytics/Staff operations), every Sidebar item, and
+      Account control.
+    · Staff are governed by the stored checkboxes (permissions.js's 5 keys),
+      defaulting to just "Manage delegates" — i.e. the Dashboard's Delegate
+      tab, the typical staff-facing surface. DashboardPage.jsx additionally
+      hard-gates the Analytics tab on role==="admin" (not a checkbox) — a
+      Staff account never sees it, however the permissions are configured.
+    · "Last admin" protection: updateAccount()/deleteAccount() in data.js
+      block demoting or deleting the only account with role="admin" (would
+      lock everyone out of Account control) — countAdmins() replaces the old
+      countManagers()/manageAccounts-flag check. Error code stays "LAST_MAIN"
+      for frontend compatibility; the displayed message now says "Admin".
+    · Migration: seed()'s startup routine runs
+      `UPDATE accounts SET role = 'admin' WHERE role = 'main'` every boot
+      (idempotent — a no-op once none are left), so the team's shared Neon
+      DB picks this up automatically on next deploy/restart, no manual DB
+      edit needed. backend/seed-team.js and backend/reset-login.js were also
+      updated to seed role='admin' instead of 'main'.
+    · AccountControlPage.jsx's role picker always shows a Staff/Admin toggle
+      (no more "this is the protected Main account, checkboxes only"
+      special case) — picking Admin hides the permission checkboxes
+      entirely (they're moot; admin bypasses regardless) and shows a note
+      instead; picking Staff shows the real, enforced checkboxes.
+- "Remember password" (login page) is now SECURE / TOKEN-BASED — it no
+  longer stores the password anywhere. Ticking it only controls whether the
+  signed JWT persists in localStorage (survives closing the browser) vs
+  sessionStorage (cleared when the tab/browser closes), via the existing
+  setToken(token, keep) call. LoginPage.jsx purges any plaintext password an
+  earlier build already wrote under the old "mg_remember"/"mg_remember_v2"
+  keys on load, for every returning visitor. This reverses the earlier
+  restored plaintext-password-remembering behavior (see AI Log) at explicit
+  user request, for a different, security-focused reason this time.
 
 
 TESTING THE MOBILE UI ON A PHONE
@@ -1169,3 +1440,54 @@ new accounts (and any created before this feature) don't have the
 "Manage exceptions" permission — grant it in Account Control to let an
 account raise/resolve/delete tickets or do a manual override; everyone
 signed in can already view the inbox and live alerts.
+
+
+INTEGRATING TEAMMATE BRANCHES (e.g. from C:\fsad\Project\integration\...)
+---------------------------------------------------------------------------
+Teammates' work sometimes arrives as a full clone/checkout of their branch in
+a sibling `integration/` folder rather than a PR against this repo. Two
+lessons learned merging Jayden's `SecureScan-Logs-(Jayden)` branch a second
+time (2026-07-17, after an earlier successful merge on 2026-07-15):
+
+1. CONFIRM IT'S REALLY NEWER before touching anything. `git fetch origin`
+   inside the integration clone + compare against its tracked remote branch —
+   don't assume a folder labeled "integration" is automatically ahead of what
+   was already merged. This time it genuinely was (a real new commit,
+   "QR scanner: accept Vance's boarding-pass codes" — coincidentally the same
+   headline as a fix already made independently in this project days earlier,
+   which is what makes checking essential rather than assuming).
+
+2. DIFF EVERY FILE, but expect MOST diffs to be false positives. A teammate's
+   branch is usually an old snapshot relative to this project's own fast-
+   moving trunk — diffing shared/foundational files (data.js, server.js,
+   App.jsx, Sidebar.jsx, tokens.css, i18n.jsx, lib/api.js, any page not owned
+   by that teammate) will show "differs" almost everywhere, but that's THIS
+   PROJECT having moved on, not the teammate having added something. Blindly
+   overwriting any of those would silently REVERT real, already-shipped work
+   (this pass alone would have reverted the RBAC/dark-theme/zoom/rate-
+   limiting/mobile-refactor changes from the same day). Only cherry-pick the
+   files the branch's OWNER actually touched for their OWN feature, and even
+   then verify feature-by-feature, not file-by-file:
+     - A file can carry BOTH a genuine new feature AND stale drift in the
+       same diff (Jayden's exceptions.js/IssuesPanel.jsx/LogExceptionModal.jsx
+       had a real, valuable "Others" issue-type + Low-priority feature mixed
+       in with hardcoded `#fff` backgrounds that would have broken dark mode,
+       and — in the two exception-inbox files specifically — every
+       `useLang()`/`t()` call stripped entirely, which would have silently
+       killed Chinese translation on that page). The fix was to hand-port
+       just the new logic into the CURRENT versions of those files (Edit, not
+       Read+Write-over), not take the diff wholesale.
+     - A file can look like a genuine new feature but be a REGRESSION of a
+       deliberate earlier fix (QRScannerPanel.jsx reintroduced the JSON
+       DELEGATE_BADGE format + Jayden's own POST /api/checkins/qr endpoint
+       that an earlier merge had specifically retired — see the
+       QRScannerPanel.jsx entry above). Trace whether the "new" thing is
+       actually reachable in the live app (grep the WHOLE branch for what
+       generates/prints it, not just what accepts it) before assuming it's
+       worth merging.
+   When something like this shows up, STOP and ask before finalizing — don't
+   silently pick a side. This time: presented both findings (the real feature
+   + the two conflicts) to the user with concrete evidence, and asked how to
+   proceed; the offered options were "cherry-pick the safe feature only"
+   (chosen), "also take the reverted QR format," or "show me the raw diffs
+   first."

@@ -141,7 +141,7 @@ export default function ChatAssistantPage() {
   const [roster, setRoster] = useState([]);
   const [card, setCard] = useState(null);      // delegate shown in the info card
   const [renaming, setRenaming] = useState(null); // { id, value }
-  const endRef = useRef(null);
+  const messagesRef = useRef(null); // the scrollable message-list div itself
 
   const copyMsg = (i, text) => {
     navigator.clipboard?.writeText(text);
@@ -149,7 +149,18 @@ export default function ChatAssistantPage() {
     setTimeout(() => setCopiedIdx((c) => (c === i ? null : c)), 1500);
   };
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
+  // Scroll only the message list itself to its latest content — NOT
+  // endRef.current.scrollIntoView(), which walks up through every ancestor scroll
+  // container it finds, including the outer page. On a tall message list
+  // (or with the app-wide 110% zoom making the page taller than the
+  // viewport), that meant opening/visiting this page could yank the WHOLE
+  // page down to bring the chat bottom into view, instead of just scrolling
+  // inside the chat panel. Setting scrollTop directly is scoped to this one
+  // div and never touches window scroll.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, sending]);
 
   /* ---- delegate roster → clickable-name context ------------------------ */
   useEffect(() => { apiGet("/assistant/roster").then((r) => setRoster(r.delegates || [])).catch(() => {}); }, []);
@@ -397,7 +408,7 @@ export default function ChatAssistantPage() {
             </button>
           </div>
 
-          <div style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
             {messages.length === 0 && (
               <div style={{ margin: "auto 0", textAlign: "center" }}>
                 <p className="muted" style={{ fontSize: 14, marginBottom: 14 }}>
@@ -454,7 +465,6 @@ export default function ChatAssistantPage() {
                 ))}
               </div>
             )}
-            <div ref={endRef} />
           </div>
 
           <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>

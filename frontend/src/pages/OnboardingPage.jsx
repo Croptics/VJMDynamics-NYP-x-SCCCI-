@@ -21,6 +21,7 @@ import {
   confirmDelegates,
   exportRowsCsv,
 } from "../lib/claudeParse.js";
+import { apiGet } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
 import ScanToBoardView from "./ScanToBoardView.jsx";
@@ -32,13 +33,17 @@ import ScanToBoardView from "./ScanToBoardView.jsx";
  * left and re-attached — the parse keeps going in the background. Extracted
  * rows stream in with a progress bar, then the admin can review, flag VIPs,
  * assign coaches, search/export and Confirm into the shared delegate list.
+ *
+ * "Assign to trip" used to be a hardcoded stub list (t-1/t-2/t-3, only one of
+ * which — t-1 — was ever a real trip) totally disconnected from the actual
+ * trips table. Assigning an upload to "Shanghai"/"Shenzhen" from that stub
+ * silently created delegates with no real trip attached — invisible on the
+ * Trips board and the arrival check-in module, since neither one ever
+ * queries for an unscoped/orphaned delegate. Fixed by fetching the REAL trip
+ * list the same way DashboardPage.jsx's trip switcher does (GET /all-trips +
+ * the base trip's own name), so every trip actually in the database is a
+ * real, working option here.
  */
-
-const TRIPS = [
-  { id: "t-1", name: "Beijing study mission · 12–16 Aug 2026" },
-  { id: "t-2", name: "Shanghai trade mission · 28 Aug 2026" },
-  { id: "t-3", name: "Shenzhen tech tour · 17 Sep 2026" },
-];
 
 // Optional columns rendered only when at least one row has data for them.
 const OPTIONAL_COLUMNS = [
@@ -73,6 +78,33 @@ export default function OnboardingPage() {
   const [search, setSearch] = useState("");
   const [context, setContext] = useState({ existingNames: [], coaches: [] });
   const [view, setView] = useState("parse"); // parse | passes | scan
+  const [baseTrip, setBaseTrip] = useState(null); // the real base ("t-1") trip's own name/uuid
+  const [otherTrips, setOtherTrips] = useState([]); // every OTHER real trip, from /api/all-trips
+
+  /* ---- real trip list (replaces the old hardcoded t-1/t-2/t-3 stub) ----- */
+  useEffect(() => {
+    apiGet("/trips/t-1").then(setBaseTrip).catch(() => {});
+    apiGet("/all-trips").then((r) => setOtherTrips(r.trips || [])).catch(() => {});
+  }, []);
+
+  const tripOptions = useMemo(() => {
+    const opts = [{ id: "t-1", name: baseTrip?.name || "Beijing study mission" }];
+    for (const tr of otherTrips) {
+      if (baseTrip && tr.id === baseTrip.uuid_id) continue; // skip dup of the base trip
+      opts.push({ id: tr.id, name: tr.name });
+    }
+    return opts;
+  }, [otherTrips, baseTrip]);
+
+  // A trip id saved to localStorage before this fix (the old "t-2"/"t-3" stub
+  // options) no longer matches anything real — clear it once the real list is
+  // in, rather than silently keeping an upload pointed at a trip that doesn't
+  // exist.
+  useEffect(() => {
+    if (tripId && tripOptions.length > 0 && !tripOptions.some((o) => o.id === tripId)) {
+      setTripId("");
+    }
+  }, [tripOptions, tripId]);
 
   /* ---- duplicate set (names already in the selected trip) --------------- */
   const existingSet = useMemo(
@@ -269,7 +301,7 @@ export default function OnboardingPage() {
             <label className="field-label" style={{ marginTop: 16 }}>{t("Assign to trip")}</label>
             <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
               <option value="">{t("Select a trip…")}</option>
-              {TRIPS.map((trip) => (
+              {tripOptions.map((trip) => (
                 <option key={trip.id} value={trip.id}>{trip.name}</option>
               ))}
             </select>

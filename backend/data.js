@@ -32,7 +32,7 @@
 
 import pg from "pg";
 import bcrypt from "bcryptjs";
-import { cleanPermissions } from "../permissions.js";
+import { cleanPermissions, PERM_KEYS } from "../permissions.js";
 
 const { Pool } = pg;
 
@@ -255,13 +255,20 @@ async function createSchema() {
 }
 
 async function seed() {
-  // First "main" account (once).
+  // First "admin" account (once) — was seeded as role "main" before the RBAC
+  // simplification to exactly Admin/Staff; see the migration right below this
+  // for existing shared-DB rows still holding the retired "main" value.
   if (!(await get("SELECT id FROM accounts LIMIT 1"))) {
-    const perms = defaultPermsForRole("main");
+    const perms = defaultPermsForRole("admin");
     await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
-      "u-1", "staff_194", "Staff 194", await hashPassword("password123!"), "main", JSON.stringify(perms), new Date().toISOString(),
+      "u-1", "staff_194", "Staff 194", await hashPassword("password123!"), "admin", JSON.stringify(perms), new Date().toISOString(),
     ]);
   }
+  // Migration: the team's shared Neon DB has real accounts already seeded
+  // with the retired "main" role from before RBAC was simplified to exactly
+  // Admin/Staff. Runs on every startup (idempotent — a no-op once none are
+  // left) so every deploy picks it up without a manual DB fix.
+  await run(`UPDATE accounts SET role = 'admin' WHERE role = 'main'`);
   // Trip (once).
   if (!(await get("SELECT id FROM trips LIMIT 1"))) {
     await run(
@@ -623,48 +630,60 @@ export async function getDelegates(tripUuid = null) {
 }
 
 /* ---- Accounts + permissions -------------------------------------------- *
- * Each account carries a set of permissions (tickboxes on the Account control
- * page). A short "role" label (main/admin/staff) is derived from the
- * permissions for display. Passwords are stored as bcrypt hashes (see
- * hashPassword/verifyPassword above).
- * ------------------------------------------------------------------------- */
+ * Exactly two roles: "admin" and "staff" — role is an independent, explicitly
+ * set field (the Account control role picker), NOT derived from whichever
+ * permission checkboxes happen to be ticked (that used to also imply a third
+ * "main" tier whenever manageAccounts was on). Passwords are stored as bcrypt
+ * hashes (see hashPassword/verifyPassword above).
+ *
+ * Admin BYPASSES every permission check — accountPermissions() below returns
+ * every key as true for an admin account regardless of what's actually
+ * stored, so requirePermission() (auth.js) and every getPermissions().xyz
+ * check on the frontend automatically unlock for admins with no per-call
+ * special-casing needed. Staff are governed by the stored checkboxes, which
+ * default to just "manage delegates" (i.e. the Delegate tab) — the usual
+ * staff-facing surface — until an admin grants more on Account control. */
 function defaultPermsForRole(role) {
-  if (role === "main") return { manageDelegates: true, exportData: true, manageAccounts: true };
-  if (role === "admin") return { manageDelegates: true, exportData: true, manageAccounts: false };
-  return { manageDelegates: true, exportData: false, manageAccounts: false }; // staff
+  if (role === "admin") return cleanPermissions(Object.fromEntries(PERM_KEYS.map((k) => [k, true])));
+  return cleanPermissions({ manageDelegates: true }); // staff
 }
 
 function cleanPerms(input) {
   return cleanPermissions(input);
 }
 
-function roleFromPerms(p) {
-  if (p.manageAccounts) return "main";
-  if (p.manageDelegates || p.exportData) return "admin";
-  return "staff";
+/** Coerce any input into exactly "admin" or "staff" (defaults to "staff" for
+ *  anything else, including the retired "main" role on legacy rows). */
+export function cleanRole(role) {
+  return role === "admin" ? "admin" : "staff";
 }
 
-/** Parsed permissions for an account row (falls back to role defaults). */
+/** Parsed permissions for an account row. Admins bypass entirely (always
+ *  every permission true); staff get their stored checkboxes, falling back
+ *  to the staff defaults if the stored JSON is missing/corrupt. */
 export function accountPermissions(row) {
   if (!row) return cleanPerms({});
+  if (row.role === "admin") return defaultPermsForRole("admin");
   try {
     if (row.permissions) return cleanPerms(JSON.parse(row.permissions));
   } catch { /* fall through */ }
-  return defaultPermsForRole(row.role);
+  return defaultPermsForRole("staff");
 }
 
 export function accountCan(row, perm) {
   return !!accountPermissions(row)[perm];
 }
 
-async function countManagers() {
-  return (await all("SELECT * FROM accounts")).filter((a) => accountPermissions(a).manageAccounts).length;
+/** Count of admin accounts — used to block removing/demoting the LAST admin
+ *  (would otherwise lock everyone out of Account control). */
+async function countAdmins() {
+  return (await all("SELECT role FROM accounts")).filter((a) => a.role === "admin").length;
 }
 
 function accountPublic(row) {
   if (!row) return null;
   const { password, permissions, token_version, ...rest } = row; // never expose password / raw JSON / session counter
-  return { ...rest, permissions: accountPermissions(row) };
+  return { ...rest, role: cleanRole(row.role), permissions: accountPermissions(row) };
 }
 
 /**
@@ -722,8 +741,13 @@ export async function createAccount(input) {
   const username = String(input.username || "").trim();
   const password = String(input.password || "");
   const name = String(input.name || "").trim() || username;
-  const perms = cleanPerms(input.permissions);
-  const role = roleFromPerms(perms);
+  // Role is now an independent, explicit field (the Account control role
+  // picker) — NOT derived from whichever permission checkboxes are ticked.
+  // An Admin's checkboxes are moot (accountPermissions() bypasses them all),
+  // so store the admin-default set for a clean "Access" display; a Staff
+  // account keeps whatever was actually submitted.
+  const role = cleanRole(input.role);
+  const perms = role === "admin" ? defaultPermsForRole("admin") : cleanPerms(input.permissions);
 
   if (!username) return { error: "USERNAME_REQUIRED" };
   if (!password) return { error: "PASSWORD_REQUIRED" };
@@ -744,8 +768,10 @@ export async function updateAccount(id, patch) {
 
   const username = patch.username !== undefined ? String(patch.username).trim() : existing.username;
   const name = patch.name !== undefined ? String(patch.name).trim() || username : existing.name;
-  const perms = patch.permissions ? cleanPerms(patch.permissions) : accountPermissions(existing);
-  const role = roleFromPerms(perms);
+  const role = patch.role !== undefined ? cleanRole(patch.role) : cleanRole(existing.role);
+  const perms = role === "admin"
+    ? defaultPermsForRole("admin")
+    : (patch.permissions ? cleanPerms(patch.permissions) : accountPermissions(existing));
 
   let password = existing.password;
   if (patch.password) {
@@ -758,7 +784,8 @@ export async function updateAccount(id, patch) {
   const clash = await getAccountByUsername(username);
   if (clash && clash.id !== id) return { error: "USERNAME_TAKEN" };
 
-  if (accountPermissions(existing).manageAccounts && !perms.manageAccounts && (await countManagers()) <= 1) {
+  // Block demoting the last admin — would lock everyone out of Account control.
+  if (cleanRole(existing.role) === "admin" && role !== "admin" && (await countAdmins()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 
@@ -796,7 +823,7 @@ export async function deleteAccount(id) {
   const existing = await get("SELECT * FROM accounts WHERE id = $1", [id]);
   if (!existing) return { error: "NOT_FOUND" };
 
-  if (accountPermissions(existing).manageAccounts && (await countManagers()) <= 1) {
+  if (cleanRole(existing.role) === "admin" && (await countAdmins()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 

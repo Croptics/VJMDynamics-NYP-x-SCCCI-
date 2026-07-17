@@ -12,36 +12,32 @@ import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
 
-const REMEMBER_KEY = "mg_remember_v2";
-
-// One-time cleanup: an earlier build always kept "Keep me signed in" ticked
-// and could save your password even when you didn't intend it. Remove any value
-// left under the old key so a fresh start never prefills a password unexpectedly.
-// (Values saved by the current build use the new key and are unaffected.)
-try { localStorage.removeItem("mg_remember"); } catch { /* ignore */ }
-
-// Read remembered login (used to prefill the form). Stored only when the user
-// ticked "Remember password". NOTE: this includes the password in plaintext in
-// localStorage — readable by anything with JS access to this origin (an XSS
-// bug, a malicious browser extension, physical device access). Restored at
-// the user's explicit request after being flagged; fine for a school demo on
-// a small trusted team, but NOT production-safe. Same disclosed-limitation
-// pattern used elsewhere in this codebase (e.g. the forgot-password flow).
-function readRemembered() {
-  try {
-    return JSON.parse(localStorage.getItem(REMEMBER_KEY)) || null;
-  } catch {
-    return null;
-  }
-}
+// One-time cleanup: earlier builds stored the plaintext password in
+// localStorage (under these two keys, across two iterations of the "Remember
+// password" feature) to prefill the login form. "Remember password" is now
+// secure/token-based instead — see the checkbox's onChange below — so any
+// value left under either old key is purged on load rather than kept around
+// or silently reused. This runs for every returning visitor exactly once
+// (removeItem is a no-op once the key's gone), cleaning up whatever a prior
+// build already wrote to their browser.
+try {
+  localStorage.removeItem("mg_remember");
+  localStorage.removeItem("mg_remember_v2");
+} catch { /* ignore */ }
 
 /**
  * Screen 1 — Login / Authentication (shared across team; Vance leads).
  * Split layout: SCCCI-Red brand panel + sign-in form.
  *
  * Login validates against the backend (POST /api/auth/login) using accounts
- * managed on the Account control page. If "Remember password" was ticked, the
- * previous username + password are pre-filled so you can re-login in one click.
+ * managed on the Account control page. "Remember password" is secure and
+ * token-based: it does NOT store your password anywhere — ticking it just
+ * puts the signed JWT session token in localStorage (survives closing the
+ * browser) instead of sessionStorage (cleared when the tab/browser closes),
+ * via setToken(token, keep) below. No plaintext credential of any kind is
+ * ever written to disk. (An earlier build did store the raw password to
+ * prefill the form — see the cleanup at the top of this file, which purges
+ * that from any browser that still has it.)
  *
  * Which UI you land in (desktop or mobile) is now an explicit choice — "Sign
  * in" vs "Login for Mobile" — instead of guessed from screen width, so
@@ -50,11 +46,10 @@ function readRemembered() {
 export default function LoginPage({ onSignIn }) {
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
-  const remembered = readRemembered();
-  const [staffId, setStaffId] = useState(remembered?.staffId || "");
-  const [password, setPassword] = useState(remembered?.password || "");
+  const [staffId, setStaffId] = useState("");
+  const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [keep, setKeep] = useState(!!remembered); // ticked only if a login was remembered
+  const [keep, setKeep] = useState(false); // "Remember password" — see the token-based note above
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
@@ -74,14 +69,8 @@ export default function LoginPage({ onSignIn }) {
         password,
       });
       if (token) {
-        setToken(token, keep); // keep = "Remember password" checkbox
+        setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
-        // Remember (or forget) the login for one-click re-login next time.
-        if (keep) {
-          localStorage.setItem(REMEMBER_KEY, JSON.stringify({ staffId: staffId.trim(), password }));
-        } else {
-          localStorage.removeItem(REMEMBER_KEY);
-        }
       }
       onSignIn?.(mode); // success -> enter the app
     } catch (e) {

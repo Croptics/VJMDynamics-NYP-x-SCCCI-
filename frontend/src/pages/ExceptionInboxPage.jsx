@@ -17,7 +17,7 @@ import { getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import {
   listExceptions, resolveException, deleteException, manualOverride,
-  subscribeStream, fmtTime, ISSUE_LABEL,
+  subscribeStream, fmtTime, issueLabel,
 } from "../lib/exceptionsApi.js";
 import "./ExceptionInboxPage.css";
 
@@ -141,7 +141,7 @@ export default function ExceptionInboxPage() {
                 {counts.critical} {t(counts.critical === 1 ? "critical exception" : "critical exceptions")} · {t("pushed to all staff devices")}
               </div>
               <div className="exc-banner__sub">
-                {t(ISSUE_LABEL[critical.type])} · {critical.coach || t("Unassigned")} ·{" "}
+                {t(issueLabel(critical))} · {critical.coach || t("Unassigned")} ·{" "}
                 {critical.delegateName || t("Unidentified")} · {t("raised")} {fmtTime(critical.createdAt)}
               </div>
             </div>
@@ -190,7 +190,7 @@ export default function ExceptionInboxPage() {
                 <td><StatusBadge state={tk.priority} /></td>
                 <td>
                   <div className="exc-issue-title">
-                    {t(ISSUE_LABEL[tk.type]) || tk.type}
+                    {t(issueLabel(tk))}
                     {tk.delegateVip && <span className="exc-vip">{t("VIP")}</span>}
                   </div>
                   <div className="exc-issue-sub">{tk.note}</div>
@@ -229,7 +229,7 @@ export default function ExceptionInboxPage() {
               <StatusBadge state={tk.status} />
             </div>
             <div className="exc-issue-title">
-              {t(ISSUE_LABEL[tk.type]) || tk.type}
+              {t(issueLabel(tk))}
               {tk.delegateVip && <span className="exc-vip">VIP</span>}
             </div>
             <div className="exc-issue-sub">{tk.note}</div>

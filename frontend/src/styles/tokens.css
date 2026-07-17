@@ -56,33 +56,47 @@
 
 /* Dark theme — toggled by adding data-theme="dark" to <html> (see lib/theme.jsx).
    Overrides only the neutrals/surfaces/status-tints; brand red and the status
-   accent colors themselves stay legible on dark backgrounds unchanged. */
+   accent colors themselves stay legible on dark backgrounds unchanged.
+   Softened to a lighter charcoal (was near-black, #121417 bg / #1a1d22
+   cards) — same relative structure (bg < surface < surface-2), just lifted
+   several steps so it reads as a gentler dark mode instead of pure black. */
 :root[data-theme="dark"] {
   --ink: #eef0f2;
-  --ink-2: #c2c8d0;
-  --ink-3: #8b929c;
-  --line: #2b2f36;
-  --line-2: #23262c;
-  --bg: #121417;
-  --surface: #1a1d22;
-  --surface-2: #20242a;
+  --ink-2: #c7cdd4;
+  --ink-3: #949aa3;
+  --line: #383c42;
+  --line-2: #2d3136;
+  --bg: #1a1d21;
+  --surface: #24272c;
+  --surface-2: #2a2e33;
 
-  --scc-red-tint: #3a1f21;
-  --scc-red-tint-2: #4a2528;
+  --scc-red-tint: #43262a;
+  --scc-red-tint-2: #52292e;
 
-  --st-present-bg: #123322;
-  --st-missing-bg: #3a1f20;
-  --st-unassigned-bg: #3a2c10;
-  --st-review-bg: #33290f;
-  --st-normal-bg: #292040;
-  --st-neutral-bg: #23262c;
+  --st-present-bg: #17392a;
+  --st-missing-bg: #432427;
+  --st-unassigned-bg: #423313;
+  --st-review-bg: #3c3013;
+  --st-normal-bg: #302650;
+  --st-neutral-bg: #2b2f34;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
+
+/* Bake in a fixed 110% visual scale so the app reads at the same comfortable
+   size the team has been using (Chrome zoomed to 110%) at every viewer's
+   OWN default 100% browser zoom — consistent across Chrome/Edge/Firefox/
+   Safari, since it's part of the page instead of a per-browser manual zoom
+   setting nobody would remember to set the same way twice. `zoom` (not
+   `transform: scale`) is used because it participates in normal layout flow
+   — scrollbars, viewport units, and hit-testing all stay correct, whereas a
+   transform would visually scale without updating the scrollable area or
+   click coordinates. Supported in Chrome/Edge/Safari and Firefox 126+. */
+html { zoom: 110%; }
 
 html, body, #root { height: 100%; }
 

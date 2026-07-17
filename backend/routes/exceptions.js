@@ -71,6 +71,18 @@ function readConfig() {
 
 const q = (text, params) => pool.query(text, params);
 
+/* ---- Shared vocabulary ---------------------------------------------------- *
+ * Kept as constants so the enum definition, the request validation and the
+ * column width can never drift apart. The frontend mirrors these in
+ * lib/exceptionsApi.js.
+ * -------------------------------------------------------------------------- */
+export const TYPE_OTHER_MAX = 20;                       // max chars for a custom label
+const VALID_TYPES = [
+  "MISSING_PERSON", "LOST_BADGE", "FACE_MATCH_FAILED",
+  "DEAD_PHONE", "VIP_REQUEST", "OTHER",
+];
+const VALID_PRIORITIES = ["CRITICAL", "NORMAL", "LOW"];
+
 /** Create this feature's tables. Safe to run on every boot. */
 export async function initExceptions() {
   pool = new Pool(readConfig());
@@ -78,8 +90,8 @@ export async function initExceptions() {
   // Enum types from HLD §2. CREATE TYPE has no IF NOT EXISTS, so guard it.
   const enums = [
     ["checkin_method", "'QR','MANUAL'"],
-    ["exception_type", "'MISSING_PERSON','LOST_BADGE','FACE_MATCH_FAILED','DEAD_PHONE','VIP_REQUEST','OTHER'"],
-    ["exception_priority", "'CRITICAL','NORMAL','LOW'"],
+    ["exception_type", VALID_TYPES.map((t) => `'${t}'`).join(",")],
+    ["exception_priority", VALID_PRIORITIES.map((p) => `'${p}'`).join(",")],
     ["exception_status", "'OPEN','RESOLVED'"],
   ];
   for (const [name, vals] of enums) {
@@ -130,6 +142,11 @@ export async function initExceptions() {
   await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_trip ON exception_tickets(trip_id, status)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_pri  ON exception_tickets(trip_id, priority) WHERE status = 'OPEN'`);
 
+  // Free-text label for type='OTHER' ("Others" tile in the log form). Additive,
+  // so an already-deployed database picks it up on the next boot without a
+  // migration. Capped in the column as well as the UI — never trust the client.
+  await q(`ALTER TABLE exception_tickets ADD COLUMN IF NOT EXISTS type_other VARCHAR(${TYPE_OTHER_MAX})`);
+
   console.log("  Exception module ready -> exception_tickets, check_in_logs");
 }
 
@@ -163,7 +180,7 @@ router.get("/api/exceptions/stream", requireAuth(), (req, res) => {
 
 /* ---- Shaping ------------------------------------------------------------- */
 const SELECT_TICKETS = `
-  SELECT x.id, x.type, x.priority, x.status, x.note, x.created_at, x.resolved_at,
+  SELECT x.id, x.type, x.type_other, x.priority, x.status, x.note, x.created_at, x.resolved_at,
          x.delegate_id,
          d.name  AS delegate_name, d.vip AS delegate_vip,
          c.name  AS coach_name,
@@ -179,6 +196,7 @@ const SELECT_TICKETS = `
 const shape = (r) => ({
   id: r.id,
   type: r.type,
+  typeOther: r.type_other || null,   // custom label when type === 'OTHER'
   priority: r.priority,
   status: r.status,
   note: r.note,
@@ -249,8 +267,30 @@ router.get("/api/exceptions/:id", requireAuth(), wrap(async (req, res) => {
 
 /** POST /api/trips/:id/exceptions — raise a ticket; CRITICAL pushes to devices. Needs manageExceptions. */
 router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), wrap(async (req, res) => {
-  const { delegateId, coachId, type, priority, note, clientEventId } = req.body || {};
+  const { delegateId, coachId, type, typeOther, priority, note, clientEventId } = req.body || {};
   if (!type) return res.status(400).json({ error: "TYPE_REQUIRED", message: "An issue type is required." });
+
+  // Validate against the enum ourselves: an unknown value would otherwise reach
+  // Postgres and surface as an opaque 500 instead of a useful 400.
+  if (!VALID_TYPES.includes(type)) {
+    return res.status(400).json({ error: "INVALID_TYPE", message: `Unknown issue type "${type}".` });
+  }
+
+  // "Others" carries a free-text label. Required when chosen, trimmed, and
+  // hard-capped here as well as in the UI — the client is never trusted.
+  let otherLabel = null;
+  if (type === "OTHER") {
+    otherLabel = typeof typeOther === "string" ? typeOther.trim() : "";
+    if (!otherLabel) {
+      return res.status(400).json({ error: "TYPE_OTHER_REQUIRED", message: "Describe the issue type." });
+    }
+    if (otherLabel.length > TYPE_OTHER_MAX) {
+      return res.status(400).json({
+        error: "TYPE_OTHER_TOO_LONG",
+        message: `Keep the issue type to ${TYPE_OTHER_MAX} characters or fewer.`,
+      });
+    }
+  }
 
   // Idempotency (offline outbox may retry the same event).
   const eventId = clientEventId || randomUUID();
@@ -268,12 +308,12 @@ router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), 
   }
 
   const id = randomUUID();
-  const pri = ["CRITICAL", "NORMAL", "LOW"].includes(priority) ? priority : "NORMAL";
+  const pri = VALID_PRIORITIES.includes(priority) ? priority : "NORMAL";
   await q(
     `INSERT INTO exception_tickets
-       (id, trip_id, delegate_id, coach_id, type, priority, status, note, raised_by, client_event_id, is_offline_origin)
-     VALUES ($1,$2,$3,$4,$5,$6,'OPEN',$7,$8,$9,$10)`,
-    [id, req.params.id, delegateId || null, coach, type, pri, note || null,
+       (id, trip_id, delegate_id, coach_id, type, type_other, priority, status, note, raised_by, client_event_id, is_offline_origin)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN',$8,$9,$10,$11)`,
+    [id, req.params.id, delegateId || null, coach, type, otherLabel, pri, note || null,
      req.account.id, eventId, !!req.body?.isOfflineOrigin]
   );
 
@@ -303,7 +343,12 @@ router.patch("/api/exceptions/:id", requirePermission("manageExceptions"), wrap(
   } else {
     const sets = [];
     const params = [];
-    if (priority !== undefined) { params.push(priority); sets.push(`priority = $${params.length}`); }
+    if (priority !== undefined) {
+      if (!VALID_PRIORITIES.includes(priority)) {
+        return res.status(400).json({ error: "INVALID_PRIORITY", message: `Unknown priority "${priority}".` });
+      }
+      params.push(priority); sets.push(`priority = $${params.length}`);
+    }
     if (note !== undefined)     { params.push(note);     sets.push(`note = $${params.length}`); }
     if (!sets.length) return res.status(400).json({ error: "NO_FIELDS", message: "Nothing to update." });
     params.push(req.params.id);
