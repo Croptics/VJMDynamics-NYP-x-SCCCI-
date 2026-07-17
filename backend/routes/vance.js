@@ -759,6 +759,59 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
 }));
 
+// Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
+// the scan. This is what the on-site scanner calls.
+router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const code = (req.body?.code || "").toString().trim();
+  const requestedTripId = (req.body?.tripId || "t-1").toString();
+  const coachOverride = req.body?.coachId || null;
+  if (!code) return res.status(400).json({ error: "NO_CODE", message: "No badge code provided." });
+
+  // Resolve the delegate by their OWN unique qr_code, and join through to their
+  // real trip (trips.id string, via the delegate's trip_id uuid). We log the
+  // check-in against THAT trip rather than the client-supplied tripId, so a
+  // mistyped/mismatched tripId in the request body can't file a check-in
+  // against the wrong trip. Base-pool delegates (trip_id NULL) have no resolved
+  // trip, so they fall back to the requested tripId (defaulting "t-1").
+  const d = await q(
+    `SELECT dg.id, dg.name, dg."coachId" AS coach_id, dg.status, t.id AS trip_str
+       FROM delegates dg
+       LEFT JOIN trips t ON t.uuid_id = dg.trip_id
+      WHERE dg.qr_code = $1`,
+    [code]
+  );
+  if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
+  const del = d.rows[0];
+  const tripId = del.trip_str || requestedTripId;
+  const alreadyBoarded = del.status === "PRESENT";
+  const coachId = coachOverride || del.coach_id || null;
+  const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+  try {
+    await q(
+      `INSERT INTO check_in_logs (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts)
+       VALUES ($1,$2,$3,$4,'QR',$5,$6,false,$7)`,
+      [randomUUID(), del.id, tripId, coachId, req.account.id, randomUUID(), new Date().toISOString()]
+    );
+  } catch (err) {
+    console.error("  QR check-in log failed (continuing to update delegate):", err.message || err);
+  }
+  await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
+    [coachOverride, `QR check-in · ${nowStr}`, del.id]);
+
+  const counts = await q(
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
+       FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
+  res.json({
+    ok: true,
+    alreadyBoarded,
+    delegate: { id: del.id, name: del.name, coachId },
+    total: counts.rows[0]?.total ?? null,
+    present: counts.rows[0]?.present ?? null,
+  });
+}));
+
 /* =============================================================================
  *  FEATURE 2 — TRIP ASSISTANT  (Use Case 2)
  * ========================================================================== */

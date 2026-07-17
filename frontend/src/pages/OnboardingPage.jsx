@@ -481,15 +481,23 @@ export default function OnboardingPage() {
   );
 }
 
+/* Compact inline stat — a quiet strip, not a row of dashboard tiles. Zero-value
+ * chips stay muted so the eye lands on what actually needs attention. */
 function SummaryChip({ icon: Icon, label, value, tone }) {
-  const color = tone === "review" ? "var(--st-review)" : tone === "missing" ? "var(--st-missing)" : "var(--ink)";
+  const active = Number(value) > 0;
+  const color = !active ? "var(--ink-3)"
+    : tone === "review" ? "var(--st-review)"
+    : tone === "missing" ? "var(--st-missing)"
+    : "var(--ink)";
   return (
-    <div className="card" style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, minWidth: 130 }}>
-      <Icon size={18} color={color} />
-      <div>
-        <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1, color }}>{value}</div>
-        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{label}</div>
-      </div>
+    <div style={{
+      display: "inline-flex", alignItems: "center", gap: 7,
+      padding: "6px 12px", borderRadius: 999,
+      background: "var(--surface-2)", border: "1px solid var(--line)",
+    }}>
+      <Icon size={14} color={color} />
+      <span style={{ fontSize: 14, fontWeight: 700, color }}>{value}</span>
+      <span className="muted" style={{ fontSize: 12 }}>{label}</span>
     </div>
   );
 }

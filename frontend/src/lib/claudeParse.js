@@ -126,9 +126,17 @@ export function getOnboardingContext(tripId) {
   return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
 }
 
-/* ---- Boarding passes (QR) ------------------------------------------------ */
+/* ---- Boarding passes (QR) + check-in ------------------------------------ *
+ * qrCheckin() is the badge contract consumed by the on-site scanner
+ * (Jayden's QRScannerPanel, mounted in the shared QR check-in screen) — it
+ * resolves a scanned `qr_code` and boards the delegate. Do not remove.
+ */
 export function getBadges(tripId) {
   return apiGet(`/onboarding/badges?tripId=${encodeURIComponent(tripId || "")}`); // { delegates, coaches, total, present }
+}
+
+export function qrCheckin({ code, tripId, coachId }) {
+  return apiPost("/onboarding/checkin", { code, tripId, coachId }); // { ok, alreadyBoarded, delegate, total, present }
 }
 
 /* ---- CSV export (opens in Excel) ---------------------------------------- */

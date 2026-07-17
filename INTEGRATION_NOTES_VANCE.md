@@ -1,28 +1,27 @@
-# Integration Notes — DocuSync AI + Trip Assistant + QR Boarding (Vance)
+# Integration Notes — DocuSync AI + Trip Assistant + QR Boarding Passes (Vance)
 
 **Screens:** 4 (Document Parsing / Onboarding) and 6 (Trip Assistant).
 **Use cases:**
 - **UC1** Automated Attendee Onboarding via AI Document Parsing.
 - **UC2** Real-Time Attendance & Exception Tracking via AI Chatbot.
-- **Cross-feature:** onboarded delegates get a unique **QR boarding pass** — the
-  hand-off to Vimal's on-site scanner, which boards them into Desmond's coach board.
+- **Cross-feature:** every onboarded delegate gets a unique **QR boarding pass**,
+  which is the badge the on-site scanner reads to check them in.
 
-Self-contained module — it does **not** modify JQ's base files (`server.js`
-beyond the two-line TEAMMATE-ZONE mount, `data.js`, `auth.js`, `permissions.js`)
-and edits **no** teammate feature files. Everything lives in:
+Self-contained module — it does **not** modify JQ's base files (`server.js` beyond
+the two-line TEAMMATE-ZONE mount, `auth.js`, `permissions.js`) and edits no
+teammate feature files. Everything lives in:
 
 ```
-backend/routes/vance.js                    ← all APIs (parsing, assistant, QR passes)
-frontend/src/lib/claudeParse.js            ← parse / confirm / badges bridge
+backend/routes/vance.js                    ← all APIs (parsing, boarding passes, assistant)
+frontend/src/lib/claudeParse.js            ← parse / confirm / badges / check-in bridge
 frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (2 tabs: parse / boarding passes)
-frontend/src/pages/BoardingPassesView.jsx  ← printable QR badge per delegate
+frontend/src/pages/BoardingPassesView.jsx  ← pass desk: search/filter, per-coach list, view/print a pass
 frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6 (streaming AI + saved history)
 frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
 ```
 
-Mounted with two lines in `server.js`'s TEAMMATE ZONE, exactly like `desmond.js`
-and `exceptions.js`. Dependencies added: `unpdf` (backend PDF text extraction)
-and `qrcode` (frontend QR-pass generation).
+Dependencies added by this module: `unpdf` (backend PDF text extraction) and
+`qrcode` (frontend QR-pass generation).
 
 ## API endpoints
 
@@ -35,10 +34,11 @@ and `qrcode` (frontend QR-pass generation).
 | GET | `/api/onboarding/context` | signed-in | Existing delegate names (dedup) + coaches |
 | POST | `/api/trips/:id/onboarding/confirm` | `manageDelegates` | Commit rows to shared `delegates`; mints a `qr_code` each |
 
-### QR boarding passes
+### QR boarding passes & check-in  ⭐ shared contract
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/onboarding/badges` | signed-in | Delegates + generated `qr_code` for the printable boarding passes |
+| GET | `/api/onboarding/badges` | signed-in | Delegates + generated `qr_code` for the printable passes |
+| POST | `/api/onboarding/checkin` | signed-in | Resolve a scanned `qr_code` → PRESENT (+coach) → `check_in_logs` |
 
 ### Trip assistant (chatbot)
 | Method | Path | Auth | Purpose |
@@ -53,24 +53,35 @@ and `qrcode` (frontend QR-pass generation).
 | DELETE | `/api/chat/sessions/:id` | signed-in | Delete a chat |
 | GET | `/api/assistant/roster` | signed-in | Delegate details → clickable delegate cards |
 
-## Connective tissue (how it integrates with the team)
+## Connective tissue (how this integrates with the team)
 
-- **Onboarding writes to the SHARED `delegates` table** via JQ's `createDelegate()`
-  — so a parsed delegate appears on JQ's dashboard, is linked to the trip
-  (`trip_id`), and is available to everyone. No separate table, no sync step.
-- **QR boarding passes → Vimal's scanner:** each onboarded delegate gets a unique
-  `qr_code`, rendered as a printable QR pass. That pass is the **hand-off point** —
-  Vimal's on-site scanner reads the code (`POST /api/checkins`) and flips the
-  delegate to `status='PRESENT'`, which **Desmond's coach board counts by coach**
-  and JQ's dashboard head-count reflects. The shared `qr_code` is the contract
-  between onboarding and the scanner; the scanning/check-in itself is **not owned
-  here**.
+- **Onboarding writes to the SHARED `delegates` table** via JQ's `createDelegate()`,
+  scoped to the trip at creation — so a parsed delegate appears on JQ's dashboard,
+  Desmond's Trips board, and the check-in module with no sync step.
+- **The QR boarding pass is the badge contract.** `BoardingPassesView` encodes the
+  delegate's plain `qr_code` (e.g. `MG-86B620A4`) from the shared `delegates` table.
+  **Jayden's `QRScannerPanel.jsx`** (mounted in the `qr` slot of Vimal's shared
+  `QRCheckInPage`) scans that code and registers it through **`POST /api/onboarding/checkin`**
+  (via `qrCheckin()`), which flips the delegate to `status='PRESENT'` (+coach) and
+  writes a `check_in_logs` QR row. **Desmond's coach board counts `PRESENT` by coach**
+  and JQ's head-count agrees. Jayden dropped his original JSON badge format to
+  standardise on this plain code — so **`qr_code`, `/api/onboarding/checkin` and
+  `qrCheckin()` are load-bearing for the scanner: do not remove them.**
+  (There is no separate "scan" tab on the Onboarding screen — the real scanner is
+  the shared check-in page; Onboarding only *issues* the passes.)
 - **The chatbot reads a live snapshot assembled from everyone's data:** delegate
   roster + coach counts (JQ/Desmond), open exception tickets (Jayden), check-in
-  method breakdown (`check_in_logs`, shared with Vimal/Jayden), and today's
-  itinerary (Desmond). Every cross-feature read is `try/catch`-isolated, so a
-  missing teammate table never breaks the chat. Only this developer-authored
-  snapshot is sent to the model — it cannot query arbitrary rows.
+  method breakdown (`check_in_logs`), and today's itinerary (Desmond). Every
+  cross-feature read is `try/catch`-isolated, so a missing teammate table never
+  breaks the chat. Only this developer-authored snapshot reaches the model — it
+  cannot query arbitrary rows.
+- **Trip scoping uses `resolveTripUuid()`** (in `data.js`) everywhere a trip id
+  arrives from the client. The frontend sends the same id shape as the rest of the
+  app (`"t-1"` for the base trip, a real `uuid_id` for any other), and only
+  `resolveTripUuid()` handles both — a raw `trips WHERE id = $1` lookup silently
+  matches nothing for non-base trips and orphans the delegates. The Onboarding trip
+  picker likewise fetches the **real** trip list (`GET /all-trips` + the base trip),
+  not a hardcoded stub.
 
 ## Additive schema (never drops/changes base tables)
 
@@ -85,36 +96,34 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
 
 - **Document parsing — text-first, vision-fallback (hybrid):**
   1. PDFs are read as **text server-side** with `unpdf`. If real text is present
-     (delegate directories, attendee lists, spreadsheet exports), it's structured
-     by an LLM as text — cheap, fast, page-by-page, works on free Ollama.
+     (delegate directories, attendee lists, spreadsheet exports), it's structured by
+     an LLM as text — cheap, fast, page-by-page, and runs on free local Ollama.
   2. Scanned PDFs / images (no extractable text) fall back to **Claude vision**.
-  Provider preference for structuring: **Claude if `ANTHROPIC_API_KEY` is set
-  (best accuracy), else Ollama `OLLAMA_PARSE_MODEL`** (default `llama3.2`, the 3B
-  model). Bilingual (中文/English) names are collapsed to the romanised name and
-  placeholder/garbage names are dropped.
+  Structuring prefers **Claude if `ANTHROPIC_API_KEY` is set** (best accuracy), else
+  Ollama `OLLAMA_PARSE_MODEL` (default `llama3.2`, 3B). Bilingual (中文/English)
+  names collapse to the romanised name; placeholder/garbage names are dropped.
 - **Chatbot — Ollama-first, Claude fallback** (mirrors JQ's `insights.js`). Uses
-  `OLLAMA_MODEL` (set to `llama3.2:1b` for demo speed), replies **stream token by
-  token** over SSE. Attendance numbers are given to the model pre-computed (a
-  "ready-made summary" line in the snapshot) so a small model still reports exact
-  figures — *AI handles language, code handles arithmetic*.
+  `OLLAMA_MODEL` (`llama3.2:1b` for demo speed); replies **stream token-by-token**
+  over SSE. Attendance figures are pre-computed into the snapshot ("ready-made
+  summary" line) so even a small model reports exact numbers — *AI handles language,
+  code handles arithmetic.*
 
 ## Edge cases handled
 
-- **Blurry / low-confidence extraction:** rows below the confidence threshold are
-  flagged for review and editable inline; the model returns `null` rather than
-  inventing an unreadable field.
-- **Directory with no passport numbers:** missing passport fields don't force a
-  review — a plain attendee directory imports cleanly.
+- **Low-confidence extraction:** rows below the threshold are flagged "Needs review"
+  and are editable inline; the model returns `null` rather than inventing a field.
+- **Directory with no passport numbers:** missing passport fields don't force review.
 - **Big documents:** async job with progress; the admin can leave the page and
   re-attach — parsing continues server-side.
-- **Duplicates:** onboarding flags names already in the trip and skips them on
-  confirm.
+- **Duplicates:** rows already in the trip are flagged and skipped on confirm; the
+  Confirm button disables when there's nothing new to add.
 - **Unknown / already-scanned QR:** check-in returns a clear message (404 unknown,
-  "already boarded" otherwise) instead of a bare status code.
+  "already boarded" otherwise), and resolves the trip from the delegate's own record
+  so a mistyped `tripId` can't file a check-in against the wrong trip.
 - **AI busy vs not configured:** the assistant distinguishes "busy, try again"
-  (Ollama running but slow) from "not configured" (nothing installed).
-- **Ambiguous chatbot query:** the prompt tells the model to ask ONE clarifying
-  question instead of guessing; out-of-scope questions are politely declined.
+  (Ollama up but slow) from "not configured" (nothing installed).
+- **Ambiguous chatbot query:** the prompt asks ONE clarifying question rather than
+  guessing; out-of-scope questions are politely declined.
 
 ## Env (`backend/.env`, see `.env.example`)
 
@@ -122,7 +131,7 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
 DATABASE_URL=postgresql://...neon.tech/...?sslmode=require   # shared team Neon
 OLLAMA_MODEL=llama3.2:1b        # chatbot model (fast). Omit for llama3.2 (3B, more accurate)
 # OLLAMA_PARSE_MODEL=llama3.2   # parsing model (defaults to llama3.2 / 3B)
-# ANTHROPIC_API_KEY=sk-ant-...  # optional: enables Claude vision (scanned docs) + higher-quality
+# ANTHROPIC_API_KEY=sk-ant-...  # optional: enables Claude vision (scanned docs) + higher accuracy
 ```
 
 The chatbot and text-based parsing work fully offline on Ollama; a Claude key is
