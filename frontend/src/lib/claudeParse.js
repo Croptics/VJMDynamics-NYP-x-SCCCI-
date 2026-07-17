@@ -126,6 +126,15 @@ export function getOnboardingContext(tripId) {
   return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
 }
 
+/* Real trips for the onboarding "Assign to trip" picker. Reads the shared
+ * all-trips list so the option values are the ACTUAL trip ids in the database.
+ * The old hardcoded t-1/t-2/t-3 list only matched the seed trip — the other two
+ * matched no row and silently orphaned every delegate onboarded to them. */
+export async function getTrips() {
+  const data = await apiGet("/all-trips"); // { trips: [{ id, name, dateRange, ... }] }
+  return Array.isArray(data?.trips) ? data.trips : [];
+}
+
 /* ---- Boarding passes (QR) + check-in ------------------------------------ *
  * qrCheckin() is the badge contract consumed by the on-site scanner
  * (Jayden's QRScannerPanel, mounted in the shared QR check-in screen) — it

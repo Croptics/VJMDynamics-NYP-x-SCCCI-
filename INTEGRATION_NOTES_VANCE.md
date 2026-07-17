@@ -75,13 +75,17 @@ Dependencies added by this module: `unpdf` (backend PDF text extraction) and
   cross-feature read is `try/catch`-isolated, so a missing teammate table never
   breaks the chat. Only this developer-authored snapshot reaches the model — it
   cannot query arbitrary rows.
-- **Trip scoping uses `resolveTripUuid()`** (in `data.js`) everywhere a trip id
-  arrives from the client. The frontend sends the same id shape as the rest of the
-  app (`"t-1"` for the base trip, a real `uuid_id` for any other), and only
-  `resolveTripUuid()` handles both — a raw `trips WHERE id = $1` lookup silently
-  matches nothing for non-base trips and orphans the delegates. The Onboarding trip
-  picker likewise fetches the **real** trip list (`GET /all-trips` + the base trip),
-  not a hardcoded stub.
+- **Trip scoping uses `resolveTripUuid()`** (a local helper in `vance.js` — kept
+  self-contained rather than editing JQ's `data.js`) everywhere a trip id arrives
+  from the client: `onboarding/confirm`, `onboarding/context`, `onboarding/badges`.
+  It resolves the trip by **either** the `trips.id` string (`"t-1"`, the base trip)
+  **or** its `uuid_id` — which is what `GET /all-trips` returns as `id` and what the
+  Onboarding trip picker now sends. A raw `trips WHERE id = $1` lookup silently
+  matched nothing for non-base trips and orphaned the delegates (created with a null
+  `trip_id`), so `confirm` now also **returns `404 UNKNOWN_TRIP`** instead of writing
+  orphans when a trip can't be resolved. The Onboarding trip picker fetches the
+  **real** trip list (`GET /all-trips`), not the old hardcoded `t-1/t-2/t-3` stub
+  (whose `t-2`/`t-3` matched no row in the shared DB).
 
 ## Additive schema (never drops/changes base tables)
 

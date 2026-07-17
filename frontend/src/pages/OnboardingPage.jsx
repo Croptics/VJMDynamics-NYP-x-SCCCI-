@@ -22,6 +22,7 @@ import {
   startParseJob,
   getParseJob,
   getOnboardingContext,
+  getTrips,
   confirmDelegates,
   exportRowsCsv,
 } from "../lib/claudeParse.js";
@@ -36,12 +37,6 @@ import BoardingPassesView from "./BoardingPassesView.jsx";
  * rows stream in with a progress bar, then the admin can review, flag VIPs,
  * assign coaches, search/export and Confirm into the shared delegate list.
  */
-
-const TRIPS = [
-  { id: "t-1", name: "Beijing study mission · 12–16 Aug 2026" },
-  { id: "t-2", name: "Shanghai trade mission · 28 Aug 2026" },
-  { id: "t-3", name: "Shenzhen tech tour · 17 Sep 2026" },
-];
 
 // Optional columns rendered only when at least one row has data for them.
 const OPTIONAL_COLUMNS = [
@@ -69,6 +64,7 @@ export default function OnboardingPage() {
   const pollRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [tripId, setTripId] = useState(() => localStorage.getItem(LS_TRIP) || "");
+  const [trips, setTrips] = useState([]);
   const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
   const [rows, setRows] = useState([]);
   const [editAll, setEditAll] = useState(false);
@@ -92,6 +88,21 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (job?.id) localStorage.setItem(LS_JOB, JSON.stringify({ id: job.id, fileName: job.fileName, status: job.status }));
   }, [job]);
+
+  /* ---- real trips for the picker (ids that actually exist in the DB) --- */
+  useEffect(() => {
+    let alive = true;
+    getTrips()
+      .then((list) => {
+        if (!alive) return;
+        setTrips(list);
+        // Drop a stale saved trip id (e.g. the old hardcoded t-2/t-3) that no
+        // longer matches a real trip, so we never submit against a dead id.
+        setTripId((cur) => (cur && !list.some((tr) => tr.id === cur) ? "" : cur));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   /* ---- onboarding context (existing names + coaches) ------------------- */
   useEffect(() => {
@@ -273,8 +284,10 @@ export default function OnboardingPage() {
             <label className="field-label" style={{ marginTop: 16 }}>{t("Assign to trip")}</label>
             <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
               <option value="">{t("Select a trip…")}</option>
-              {TRIPS.map((trip) => (
-                <option key={trip.id} value={trip.id}>{trip.name}</option>
+              {trips.map((trip) => (
+                <option key={trip.id} value={trip.id}>
+                  {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
+                </option>
               ))}
             </select>
           </div>

@@ -70,6 +70,21 @@ function readConfig() {
 
 const q = (text, params) => pool.query(text, params);
 
+/* Resolve a client-supplied trip identifier to its uuid_id. Accepts EITHER the
+ * trips.id string (e.g. "t-1", the seed trip) OR the uuid_id itself (what
+ * /api/all-trips returns as `id`, which is what the onboarding trip picker now
+ * sends). Returns null when nothing matches. Matching only the string id used
+ * to silently orphan delegates onboarded to any non-seed trip. Call after
+ * ensureReady() so the pool exists. */
+async function resolveTripUuid(tripId) {
+  if (!tripId) return null;
+  const r = await q(
+    `SELECT uuid_id FROM trips WHERE id = $1 OR uuid_id::text = $1 LIMIT 1`,
+    [String(tripId)]
+  );
+  return r.rows[0]?.uuid_id || null;
+}
+
 /* ---- Lazy schema init (additive only — never drops base tables) ---------- */
 let readyPromise = null;
 function ensureReady() {
@@ -598,8 +613,7 @@ router.get("/api/documents/parse-async/:id", requireAuth(), wrap(async (req, res
 router.get("/api/onboarding/context", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const tripId = req.query.tripId;
-  const tripRow = tripId ? await q(`SELECT uuid_id FROM trips WHERE id = $1`, [tripId]) : null;
-  const tripUuid = tripRow?.rows?.[0]?.uuid_id || null;
+  const tripUuid = await resolveTripUuid(tripId);
   const dq = tripUuid
     ? await q(`SELECT name FROM delegates WHERE trip_id = $1`, [tripUuid])
     : await q(`SELECT name FROM delegates`);
@@ -689,8 +703,12 @@ router.post(
     if (rows.length === 0) {
       return res.status(400).json({ error: "NO_ROWS", message: "There are no delegates to add." });
     }
-    const tripRow = await q(`SELECT uuid_id FROM trips WHERE id = $1`, [req.params.id]);
-    const tripUuid = tripRow.rows[0]?.uuid_id || null;
+    const tripUuid = await resolveTripUuid(req.params.id);
+    if (!tripUuid) {
+      // Fail loudly rather than create delegates with a null trip_id (orphaned
+      // to the base pool) — the old behaviour when a non-seed trip id was sent.
+      return res.status(404).json({ error: "UNKNOWN_TRIP", message: "That trip no longer exists. Pick a trip from the list and try again." });
+    }
 
     const added = [];
     for (const r of rows) {
@@ -747,8 +765,7 @@ async function backfillQrCodes(tripUuid) {
 router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const tripId = req.query.tripId;
-  const tripRow = tripId ? await q(`SELECT uuid_id FROM trips WHERE id = $1`, [tripId]) : null;
-  const tripUuid = tripRow?.rows?.[0]?.uuid_id || null;
+  const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
   const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
   const r = tripUuid
