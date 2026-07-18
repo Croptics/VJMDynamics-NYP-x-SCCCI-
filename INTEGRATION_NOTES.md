@@ -138,7 +138,7 @@ shadowing — or being shadowed by — those.
 
 - **Activity feed is in-memory** — it resets if the backend restarts (mirrors the Dashboard's own activity pattern; not a persisted audit log).
 - Drag-and-drop uses plain Pointer Events (no `@dnd-kit`); the moving "bus" is a CSS-animated 2D icon (no 3D library).
-- Coach capacity is informational, not enforced. Reassigning a delegate out of "Unassigned" sets them to `MISSING` (they still have to prove they boarded).
+- Coach capacity is informational, not enforced. Reassigning a delegate out of "Unassigned" onto a coach sets them to `ASSIGNED` (updated from the original `MISSING` — see "Updates since initial merge" below).
 - **Partial Chinese:** the new UI strings fall back to English until added to `DICT` in `i18n.jsx`. The board works fully in English.
 
 ---
@@ -173,7 +173,7 @@ override. Critical tickets push in real time to every open browser.
 ### Database (auto-created by initExceptions on boot)
 
 - `exception_tickets` — the support tickets.
-- `check_in_logs` — shared with Vimal's (future) QR module; this feature writes only the `MANUAL` rows (manual override). Created with `CREATE TABLE IF NOT EXISTS` so it won't clash when Vimal's module lands.
+- `check_in_logs` — shared with Vimal's face/voice scan module and Vance's QR boarding-pass check-in (both merged since this doc was originally written); this feature writes the `MANUAL` rows (manual override). Created with `CREATE TABLE IF NOT EXISTS` so none of the writers clash.
 
 Ids are `VARCHAR(64)` to match the live base schema (the HLD's UUID types
 wouldn't match the real `t-1`/`c1`/`d-1` foreign keys); id *values* are still
@@ -191,14 +191,18 @@ Edit (needs `manageExceptions`):
 `PATCH /api/exceptions/:id` (resolve / re-prioritise),
 `DELETE /api/exceptions/:id`, `POST /api/checkins/manual` (mark present without a scan).
 
-`POST /api/checkins` (the QR path) is intentionally left for Vimal — this
-module namespaces its override to `/checkins/manual` so both can coexist.
+`POST /api/checkins/qr` exists in this file too (Jayden's own QR path) but has
+no frontend caller — the live QR scan flow actually goes through Vance's
+`POST /api/onboarding/checkin` (see Feature 3 below). Both this module's
+`/checkins/manual` and Vance's `/onboarding/checkin` now write the current
+`ARRIVED` status (was `PRESENT` at original merge — see "Updates since
+initial merge" below).
 
 ### Good to know
 
 - **Idempotent writes:** raising a ticket or an override with a repeated `clientEventId` returns the original (`duplicate: true`) instead of creating a duplicate — safe for an offline retry queue.
 - **Real-time** uses Server-Sent Events (SSE), not WebSockets — no new dependency, works through restrictive proxies.
-- A manual override writes a `MANUAL` `check_in_logs` row and flips the delegate to `PRESENT`, which the main Dashboard head-count then reflects.
+- A manual override writes a `MANUAL` `check_in_logs` row and flips the delegate to `ARRIVED` (was `PRESENT` — see "Updates since initial merge"), which the main Dashboard head-count then reflects.
 
 ---
 
@@ -210,10 +214,16 @@ Two AI features in one module:
   export, or scanned passport; an AI reads it and returns structured delegate
   rows (name, company, role, industry, passport, etc.) with a confidence score.
   You review/edit, then confirm — and they're added to the shared delegate list.
-- **`/assistant`** — a chatbot that answers plain-language questions about the
+- **The Trip assistant chatbot** — answers plain-language questions about the
   live trip ("who's missing from Coach 2?", "which companies are biggest?") over
   a snapshot assembled from *everyone's* data. Replies stream in; chats are
-  saved, renameable, pinnable, and exportable.
+  saved, renameable, pinnable, and exportable. Originally a dedicated
+  `/assistant` page; now a floating chat bubble on every route instead — see
+  "Updates since initial merge" below.
+- **QR boarding passes + on-site check-in** — every onboarded delegate gets a
+  unique `qr_code`; scanning it flips them to `ARRIVED`. This is the LIVE QR
+  scan path (`POST /api/onboarding/checkin`), not Jayden's orphaned
+  `/api/checkins/qr`.
 
 ### Files
 
@@ -261,6 +271,49 @@ Assistant (any signed-in user):
 - The chatbot reads a snapshot spanning delegates, coaches, open exceptions, check-ins, and today's itinerary — each cross-feature read is `try/catch`-wrapped, so it still works if a teammate's table isn't present yet. Only this developer-authored snapshot is sent to the model; it can't query arbitrary rows.
 - **Edge cases handled:** low-confidence rows are flagged for manual review (the model returns `null` rather than inventing a passport number); a plain directory with no passport numbers still imports; an ambiguous chatbot question triggers one clarifying question instead of a guess.
 - **Partial Chinese:** the assistant replies in the UI's selected language, but Vance's new page labels fall back to English until added to `DICT` in `i18n.jsx`.
+
+---
+
+## Updates since initial merge
+
+This file describes the state right after the three-feature merge. Several
+things have since changed; noted here rather than rewriting the sections
+above wholesale:
+
+- **5-status delegate model.** The original 3-status system
+  (`UNASSIGNED`/`PRESENT`/`MISSING`) expanded to 5:
+  `UNASSIGNED → ASSIGNED → ARRIVED → LATE → MISSING`. `PRESENT` is kept as a
+  legacy alias mapped to `ARRIVED` in `data.js`'s `normalize()`, so old rows
+  and any not-yet-migrated writer keep working. See `PROJECT_STRUCTURE.txt`
+  for the full rollout history across Dashboard, TripCoachPage, and mobile.
+- **Trip-page reassignment now sets `ASSIGNED`, not `MISSING`.** Dragging a
+  delegate onto a coach used to mark them `MISSING` ("still has to prove they
+  boarded") — now sets `ASSIGNED`, since `MISSING` is reserved for a genuine
+  check-in miss or explicit staff override.
+- **Configurable per-trip "Late" cutoff.** `trips."lateCutoffTime"`
+  (`"HH:MM"`, default `"10:00"`) replaces a single hardcoded 10am check. A
+  background scheduler (`applyLateCutoff()` in `data.js`, runs every 60s) auto-
+  flips `ASSIGNED` delegates to `LATE` once their own trip's cutoff passes.
+  Editable via a "Trip settings" button on TripCoachPage.jsx
+  (`PATCH /api/trips/:tripId/late-cutoff`, gated on `manageTrips`).
+- **QR/face-scan → `ARRIVED` migration (2026-07-18).** All live check-in
+  writers (`vance.js`'s `/api/onboarding/checkin`, `exceptions.js`'s
+  `/api/checkins/manual` and the orphaned `/api/checkins/qr`) now write
+  `ARRIVED` instead of the legacy `PRESENT` literal, and re-scan/duplicate
+  guards are properly enforced (a re-scan no longer silently re-writes).
+  Vimal's `/api/attendance/scan` needed no change — it already went through
+  `updateDelegate()`, which already aliased `PRESENT`→`ARRIVED`.
+- **Missing status is manual-only, by design.** It is NOT auto-set by any
+  scan/check-in flow — it's for a delegate who steps away mid-trip (toilet,
+  wandering off) and isn't back by an appointed time, so a staff member marks
+  it by hand (with a required last-seen location on mobile).
+- **Chat assistant is now a floating bubble**, not a dedicated `/assistant`
+  page — `ChatBubble.jsx` (desktop) / `MobileChatBubble.jsx` (mobile) wrap
+  the existing chat engines unchanged and render on every route. Both FABs
+  stay hidden until the page is scrolled down ~120px, so they don't sit over
+  other clickable UI near the top of a page.
+- **Field-level rollback** was added to the persisted `activity_log` table —
+  most delegate edits can be undone from the History Log page.
 
 ---
 

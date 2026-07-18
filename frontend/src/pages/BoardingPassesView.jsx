@@ -243,7 +243,7 @@ export default function BoardingPassesView({ tripId }) {
       <style>{`
         .mg-chip{font-size:12.5px;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;transition:background .12s ease}
         .mg-passrow{width:100%;display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:6px;
-          background:var(--surface);border:1px solid var(--line);border-radius:10px;cursor:pointer;
+          background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:10px;cursor:pointer;
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
         .mg-print-sheet{display:none}

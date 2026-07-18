@@ -40,10 +40,12 @@ const STATUS_BADGE_CLASS = {
  * on the left, a clear action button on the right — instead of the old
  * cramped inline <select>. Status is changed via a bottom-sheet picker
  * (StatusSheet below) triggered by an explicit "Update status" button, same
- * spirit as Manual check-in's obvious "Mark present" button per row. A
- * MISSING delegate with a phone on file also gets a one-tap `tel:` call
- * button — delegates.phone already exists (added by Vance's onboarding
- * parser), so this needed no new backend column.
+ * spirit as Manual check-in's obvious "Mark present" button per row. Every
+ * MISSING or LATE delegate also gets a one-tap call button (delegates.phone
+ * already exists, added by Vance's onboarding parser) — if no number is on
+ * file yet it prompts for one first (saved back onto the delegate) rather
+ * than just hiding the button, since most delegates don't have a phone
+ * populated.
  */
 export default function MobileAttendancePage() {
   const { t } = useLang();
@@ -107,15 +109,47 @@ export default function MobileAttendancePage() {
     return c ? [c.name, c.city].filter(Boolean).join(" · ") : t("Unassigned");
   };
 
-  async function changeStatus(d, status) {
+  // Missing AND Late delegates get a call action — Late means they haven't
+  // checked in by the trip's cutoff yet (might just be running behind),
+  // Missing means staff genuinely can't account for them. Works even with
+  // no phone on file yet, since most demo/real delegates don't have one
+  // populated — prompts for a number (saved back onto the delegate) the
+  // first time, then calls.
+  async function callDelegate(d) {
+    let phone = d.phone;
+    if (!phone) {
+      const entered = window.prompt(t("No phone number on file for") + ` ${d.name}. ` + t("Enter one to call:"));
+      phone = (entered || "").trim();
+      if (!phone) return;
+      setSavingId(d.id);
+      try {
+        await apiPatch(`/delegates/${d.id}`, { phone });
+        setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, phone } : x)));
+      } catch (e) {
+        setRowError({ id: d.id, message: e.message || t("Could not save phone number.") });
+        setSavingId(null);
+        return;
+      }
+      setSavingId(null);
+    }
+    window.location.href = `tel:${phone}`;
+  }
+
+  // `location` is only ever passed (and required — see StatusSheet) when
+  // status is MISSING; otherwise lastSeen/lastLocation are cleared so a
+  // later Missing spell doesn't silently inherit a stale location from a
+  // previous one. Mirrors DashboardPage.jsx's saveForm() on desktop.
+  async function changeStatus(d, status, location) {
     setStatusSheetFor(null);
-    if (status === d.status) return;
+    const nextLocation = status === "MISSING" ? (location || "").trim() : "";
+    if (status === d.status && nextLocation === (d.lastLocation || "")) return;
     setRowError(null);
     setSavingId(d.id);
     const prev = delegates;
-    setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, status } : x)));
+    const patch = { status, lastLocation: nextLocation, lastSeen: status === "MISSING" ? d.lastSeen || "" : "" };
+    setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, ...patch } : x)));
     try {
-      await apiPatch(`/delegates/${d.id}`, { status });
+      await apiPatch(`/delegates/${d.id}`, patch);
     } catch (e) {
       setDelegates(prev); // roll back the optimistic update
       setRowError({ id: d.id, message: e.message || t("Save failed.") });
@@ -228,6 +262,10 @@ export default function MobileAttendancePage() {
 
       {visible.map((d) => {
         const missing = d.status === "MISSING";
+        // Late delegates are the other case staff actually want to ring —
+        // they haven't checked in by the trip's cutoff and might just be
+        // running behind, not necessarily missing.
+        const callable = missing || effectiveStatus(d) === "LATE";
         return (
           <div key={d.id} className="mobile-card" style={{ padding: 16 }}>
             <div className="row" style={{ gap: 12, minWidth: 0 }}>
@@ -242,18 +280,19 @@ export default function MobileAttendancePage() {
                   {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
                 </div>
               </div>
-              {missing && d.phone && (
-                <a
-                  href={`tel:${d.phone}`}
+              {callable && (
+                <button
+                  onClick={() => callDelegate(d)}
                   aria-label={`${t("Call")} ${d.name}`}
                   title={`${t("Call")} ${d.name}`}
+                  disabled={savingId === d.id}
                   style={{
                     background: "none", border: "none", padding: 6, flexShrink: 0,
-                    color: "var(--st-missing)", display: "flex", textDecoration: "none",
+                    color: missing ? "var(--st-missing)" : "var(--st-late)", display: "flex",
                   }}
                 >
                   <Phone size={18} />
-                </a>
+                </button>
               )}
               <button
                 onClick={() => d.status === "MISSING" && setMapDelegate(d)}
@@ -319,7 +358,7 @@ export default function MobileAttendancePage() {
       {statusSheetFor && (
         <StatusSheet
           delegate={statusSheetFor}
-          onPick={(status) => changeStatus(statusSheetFor, status)}
+          onPick={(status, location) => changeStatus(statusSheetFor, status, location)}
           onClose={() => setStatusSheetFor(null)}
           t={t}
         />
@@ -337,6 +376,75 @@ export default function MobileAttendancePage() {
 function StatusSheet({ delegate, onPick, onClose, t }) {
   const FILTER_LABEL = { UNASSIGNED: "Unassigned", ASSIGNED: "Assigned", ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
   const current = effectiveStatus(delegate);
+  // Picking MISSING doesn't save immediately — it switches this sheet to a
+  // second step asking for a last known location first (mirrors
+  // DashboardPage.jsx's Edit modal, which has always required this on
+  // desktop; mobile previously let you mark someone Missing with nothing to
+  // actually go find them by). Any other status still saves on tap, same as
+  // before.
+  const [askingLocation, setAskingLocation] = useState(false);
+  const [location, setLocation] = useState(delegate.lastLocation || "");
+
+  function pick(status) {
+    if (status === "MISSING") { setAskingLocation(true); return; }
+    onPick(status);
+  }
+
+  if (askingLocation) {
+    const trimmed = location.trim();
+    return (
+      <div
+        style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
+        onClick={onClose}
+      >
+        <div
+          className="card"
+          style={{ width: "100%", borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="row between" style={{ marginBottom: 4 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Last known location")}</div>
+              <div className="muted" style={{ fontSize: 12.5 }}>{delegate.name}</div>
+            </div>
+            <button onClick={onClose} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+            {t("Required before marking a delegate Missing, so they can actually be found.")}
+          </p>
+          <input
+            autoFocus
+            className="input"
+            style={{ marginTop: 10 }}
+            placeholder={t("e.g. Novotel Beijing Sanyuan, Lobby")}
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+          />
+          {trimmed && (
+            <div style={{ marginTop: 10 }}>
+              <DelegateLocationMap location={trimmed} height={140} />
+            </div>
+          )}
+          <div className="row" style={{ gap: 10, marginTop: 16 }}>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setAskingLocation(false)}>
+              {t("Back")}
+            </button>
+            <button
+              className="btn btn-primary"
+              style={{ flex: 1 }}
+              disabled={!trimmed}
+              onClick={() => onPick("MISSING", trimmed)}
+            >
+              {t("Confirm")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
@@ -362,7 +470,7 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
             return (
               <button
                 key={status}
-                onClick={() => onPick(status)}
+                onClick={() => pick(status)}
                 className="row between"
                 style={{
                   padding: "12px 14px", borderRadius: "var(--r-md)", fontSize: 14, fontWeight: 600,

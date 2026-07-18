@@ -120,11 +120,11 @@ data.js
     5-status system, step 1 (Dashboard-only basic CRUD) — normalize() (in this
     file) expanded its allowlist from 3 values (PRESENT/MISSING/UNASSIGNED) to
     5 (UNASSIGNED/ASSIGNED/ARRIVED/LATE/MISSING). "PRESENT" is kept as a
-    legacy alias mapped to ARRIVED inside normalize() itself — any row or
-    write that still says PRESENT (several teammates' QR/face-scan/manual
-    check-in routes do — vance.js, vimal.js, exceptions.js — none of them
-    touched in this pass) keeps working instead of silently resetting to
-    UNASSIGNED. Only DashboardPage.jsx's status <select>s (filter dropdown +
+    legacy alias mapped to ARRIVED inside normalize() itself — any row that
+    still says PRESENT (from before the 2026-07-18 QR/face-scan → ARRIVED
+    migration below, or any future writer that reintroduces the legacy
+    literal) keeps working instead of silently resetting to UNASSIGNED. Only
+    DashboardPage.jsx's status <select>s (filter dropdown +
     the add/edit modal) were updated to offer all 5 values; every other
     consumer (TripCoachPage, mobile attendance, QR/check-in screens) still
     only knows the original 3 and is unaffected either way — this is
@@ -239,9 +239,20 @@ routes/exceptions.js
     merge time to use auth.js's requireAuth/requirePermission like every
     other route. Also has POST /api/checkins/qr (Jayden's QR half of the
     /checkin screen — writes a method='QR' row to the shared check_in_logs
-    table and flips the delegate PRESENT) — gated on requireAuth() only,
+    table and flips the delegate ARRIVED) — gated on requireAuth() only,
     same level as Vimal's face scan, not the elevated manageExceptions used
-    by manual overrides. Idempotent on client_event_id.
+    by manual overrides. Idempotent on client_event_id. NOTE: this route has
+    no frontend caller anywhere (ScanToBoardView.jsx, the only page that
+    would've used it, is itself unrouted/dead) — kept fixed for consistency
+    with the other check-in routes, but confirmed orphaned as of 2026-07-18.
+    QR/face-scan → ARRIVED migration (2026-07-18): both this route and
+    POST /api/checkins/manual (the LIVE endpoint ManualTrackingPanel.jsx
+    calls) used to write the legacy 'PRESENT' literal via raw SQL, bypassing
+    data.js's updateDelegate()/normalize() aliasing entirely — now write
+    'ARRIVED' directly. /api/checkins/manual's duplicate-check response and
+    /api/checkins/qr's duplicate-check + success responses were updated to
+    match. See vance.js and data.js entries below for the other two routes
+    in this same migration.
     exception_type has a 6th value, "OTHER", carrying a free-text label in
     the new exception_tickets.type_other column (VARCHAR(TYPE_OTHER_MAX=20),
     added via ALTER TABLE ... IF NOT EXISTS so an already-deployed DB picks
@@ -294,7 +305,7 @@ routes/vance.js
     check-in: GET /api/onboarding/badges returns every delegate + their QR
     token for a trip (auto-backfills a qr_code for any delegate that predates
     this feature, via backfillQrCodes()); POST /api/onboarding/checkin
-    resolves a scanned/tapped code, flips the delegate PRESENT (+ coach), and
+    resolves a scanned/tapped code, flips the delegate ARRIVED (+ coach), and
     logs a QR row to the SHARED check_in_logs table — the same table Jayden's
     manual override and Vimal's face scan write to, and the one Desmond's
     coach board reads, so a boarding-pass scan shows up everywhere instantly.
@@ -305,6 +316,13 @@ routes/vance.js
     trip set.
     Both gated on requireAuth() only (any signed-in staff), matching Vimal's
     face-scan auth level rather than the elevated manageExceptions tier.
+    QR/face-scan → ARRIVED migration (2026-07-18): this is the LIVE endpoint
+    QRScannerPanel.jsx actually calls (via qrCheckin()). Previously wrote the
+    legacy 'PRESENT' literal via raw SQL and computed an `alreadyBoarded`
+    re-scan guard that was never actually enforced (the write happened
+    regardless) — now writes 'ARRIVED', the guard is enforced (a re-scan
+    returns `alreadyBoarded:true` without re-writing/re-logging), and the
+    trip's headcount SQL recognizes both the legacy and current value.
     (3) Trip assistant chatbot: answers questions over a live snapshot of
     everyone's data (delegates/coaches/exceptions/check-ins/itinerary),
     streaming replies token-by-token, with saved chat history. The prompt is
@@ -496,6 +514,17 @@ Shared components (src/components/):
       row (avatar/title/Ready-status/Export) when embedded — ChatBubble.jsx
       already renders its own header with the same title, so both stacking
       was a real visible duplicate, not by design.
+      Scroll-reveal (2026-07-18): "hide the chatbot until when i scroll down
+      like typical uiux chatbot... it hard for me to click certain stuff" —
+      the FAB was always visible and sat over other clickable UI near the
+      top of pages. Confirmed `.app-shell` has no `overflow` set (the page
+      scrolls at the `window`/document level, not a nested container), added
+      a `scrolled` state from a `window` scroll listener
+      (`SCROLL_REVEAL_PX = 120`), `visible = scrolled || open` (so an
+      already-open panel stays interactive even if you scroll back to the
+      top), and wired the FAB's opacity/pointerEvents/transform to `visible`
+      with a CSS transition. Same pattern applied to MobileChatBubble.jsx
+      (below) with its own `mg-mobile-chat-fab` class.
 
   StatusBadge.jsx
       Small reusable pill component for status labels (Present/Missing/
@@ -1368,7 +1397,16 @@ Pages (src/pages/) — one file per route:
                                                 manualOverride() → POST /api/
                                                 checkins/manual, gated on
                                                 manageExceptions (read-only
-                                                notice otherwise).
+                                                notice otherwise). Its local
+                                                statusOf()/isPresent() check
+                                                originally only matched the
+                                                literal "PRESENT" — once the
+                                                2026-07-18 migration made the
+                                                backend write "ARRIVED", this
+                                                would've shown already-
+                                                checked-in delegates with the
+                                                "Mark present" button again;
+                                                fixed to accept both values.
   IssuesPanel.jsx          (Me → Issues tab)   Jayden — mobile exception
                                                 logging: issue-type tiles
                                                 (Missing person / Lost badge
@@ -1694,7 +1732,15 @@ Mobile pages (src/pages/mobile/):
                                                  embedded />`. Rendered once
                                                  from MobileLayout.jsx so it
                                                  persists across every mobile
-                                                 route.
+                                                 route. Scroll-reveal
+                                                 (2026-07-18): same
+                                                 `scrolled`/`SCROLL_REVEAL_PX`
+                                                 pattern as desktop
+                                                 ChatBubble.jsx — hidden until
+                                                 `window.scrollY > 120`, stays
+                                                 visible once opened. See
+                                                 ChatBubble.jsx's entry above
+                                                 for the full rationale.
   MobileTripsPage.jsx       /mobile/trips       New. Genuinely blank
                                                  placeholder (eyebrow + h1 +
                                                  "Coming soon.") — took over

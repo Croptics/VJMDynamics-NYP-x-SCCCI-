@@ -39,7 +39,10 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
   };
 
   const roster = (coach && coach.delegates) ? coach.delegates : [];
-  const statusOf = (d) => (justMarked.has(d.delegateId) ? "PRESENT" : d.status);
+  // ARRIVED is the current 5-status value (PRESENT was the legacy name); accept
+  // both so already-arrived delegates loaded from the API still show correctly.
+  const statusOf = (d) => (justMarked.has(d.delegateId) ? "ARRIVED" : d.status);
+  const isPresent = (s) => s === "ARRIVED" || s === "PRESENT";
 
   const filtered = useMemo(() => {
     const qq = query.trim().toLowerCase();
@@ -49,7 +52,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roster, query, justMarked]);
 
-  const presentCount = roster.filter((d) => statusOf(d) === "PRESENT").length;
+  const presentCount = roster.filter((d) => isPresent(statusOf(d))).length;
 
   async function markPresent(d) {
     if (!canEdit) return;
@@ -134,7 +137,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
       <div style={S.list}>
         {filtered.map((d) => {
           const status = statusOf(d);
-          const present = status === "PRESENT";
+          const present = isPresent(status);
           return (
             <div key={d.delegateId} style={S.row}>
               <span style={S.avatar(d.vip)}>{d.initials || initialsOf(d.name)}</span>

@@ -389,7 +389,7 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
 
   const eventId = clientEventId || randomUUID();
   const dup = await q("SELECT id FROM check_in_logs WHERE client_event_id = $1", [eventId]);
-  if (dup.rows.length) return res.json({ id: dup.rows[0].id, delegateId, status: "PRESENT", duplicate: true });
+  if (dup.rows.length) return res.json({ id: dup.rows[0].id, delegateId, status: "ARRIVED", duplicate: true });
 
   const id = randomUUID();
   await q(
@@ -400,12 +400,13 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
      !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
   );
 
-  // Reflect the override on the delegate so the dashboard head-count agrees.
-  await q(`UPDATE delegates SET status='PRESENT', "lastSeen"=$1 WHERE id=$2`,
+  // ARRIVED — the 5-status value (was the legacy PRESENT literal). Reflect
+  // the override on the delegate so the dashboard head-count agrees.
+  await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`Manual override · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL" });
-  res.status(201).json({ id, delegateId, status: "PRESENT", duplicate: false, method: "MANUAL" });
+  res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
 }));
 
 /* ---------------------------------------------------------------------------
@@ -431,7 +432,7 @@ router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
   const eventId = clientEventId || randomUUID();
   const dup = await q("SELECT id FROM check_in_logs WHERE client_event_id = $1", [eventId]);
   if (dup.rows.length) {
-    return res.json({ id: dup.rows[0].id, delegateId, name: d.rows[0].name, status: "PRESENT", method: "QR", duplicate: true });
+    return res.json({ id: dup.rows[0].id, delegateId, name: d.rows[0].name, status: "ARRIVED", method: "QR", duplicate: true });
   }
 
   // Log against the badge's own coach (fall back to the scoped coach hint).
@@ -445,11 +446,12 @@ router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
      !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
   );
 
-  await q(`UPDATE delegates SET status='PRESENT', "lastSeen"=$1 WHERE id=$2`,
+  // ARRIVED — the 5-status value (was the legacy PRESENT literal).
+  await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`QR check-in · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "QR" });
-  res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "PRESENT", duplicate: false, method: "QR" });
+  res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "ARRIVED", duplicate: false, method: "QR" });
 }));
 
 export default router;

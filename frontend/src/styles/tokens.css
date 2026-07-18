@@ -4,6 +4,7 @@
    ========================================================================== */
 
 :root {
+  color-scheme: light;
   /* Brand */
   --scc-red: #e1232a;
   --scc-red-600: #c41d24;
@@ -94,6 +95,11 @@
    cards) — same relative structure (bg < surface < surface-2), just lifted
    several steps so it reads as a gentler dark mode instead of pure black. */
 :root[data-theme="dark"] {
+  /* Without this, native form widgets (<select> dropdown lists, <input
+     type="time/date">, checkboxes, scrollbars) render with their LIGHT
+     system chrome regardless of our own dark CSS variables — black text on
+     a white popup — because the browser doesn't know the page is dark. */
+  color-scheme: dark;
   --ink: #eef0f2;
   --ink-2: #c7cdd4;
   --ink-3: #949aa3;

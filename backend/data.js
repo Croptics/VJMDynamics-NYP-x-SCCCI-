@@ -208,6 +208,13 @@ async function createSchema() {
   // table/column below references this uuid_id instead, so they're real UUIDs.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS uuid_id UUID UNIQUE DEFAULT gen_random_uuid()`);
   await run(`UPDATE trips SET uuid_id = gen_random_uuid() WHERE uuid_id IS NULL`);
+  // Per-trip Late-status cutoff ("HH:MM", 24-hour, server-local) — was a
+  // single hardcoded 10:00 global constant in applyLateCutoff() below;
+  // admins can now set this per trip (desmond.js's PATCH /api/trips/:id/
+  // late-cutoff). DEFAULT '10:00' both for brand-new trips AND backfills
+  // every existing trip row to the same value this used to be hardcoded to,
+  // so nothing's behavior silently changes for a trip nobody has touched.
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "lateCutoffTime" VARCHAR(8) DEFAULT '10:00'`);
 
   // users: a lightweight staff directory for coach assignment ONLY (a "guide"
   // per coach). Separate from `accounts` — these rows never sign in anywhere.
@@ -619,6 +626,46 @@ export async function rollbackActivity(activityLogId, actor = null) {
   for (const [field, { from }] of Object.entries(entry.changes)) patch[field] = from;
   const delegate = await updateDelegate(entry.delegate_id, patch, actor);
   return { ok: true, delegate };
+}
+
+// "10:00" fallback — used only for a delegate whose trip somehow has no
+// lateCutoffTime (shouldn't happen once the DEFAULT-backfilled column
+// exists, but a delegate with no trip_id at all could still reach this).
+const DEFAULT_LATE_CUTOFF = "10:00";
+
+function cutoffToMinutes(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
+  if (!m) return 10 * 60;
+  return Math.min(23, Number(m[1])) * 60 + Math.min(59, Number(m[2]));
+}
+
+/** Auto-transition: any delegate still ASSIGNED (expected on a coach, not
+ *  yet checked in) once it's at/past ITS OWN TRIP'S cutoff time gets flipped
+ *  to LATE — each trip can set its own via trips."lateCutoffTime" (admins
+ *  edit it from TripCoachPage.jsx's "Trip settings" modal; defaults to
+ *  "10:00" for every trip, was a single hardcoded global constant before).
+ *  Only ASSIGNED delegates are touched — ARRIVED/MISSING/LATE/UNASSIGNED are
+ *  untouched, so this can run repeatedly (every minute, see server.js) with
+ *  no risk of re-flipping or reverting a status a human already set. Goes
+ *  through the normal updateDelegate() path with actor="System", so each
+ *  transition is a real, visible, rollback-eligible History Log entry —
+ *  not a silent background write. */
+export async function applyLateCutoff(now = new Date()) {
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const rows = await all(`
+    SELECT d.id, t."lateCutoffTime"
+    FROM delegates d
+    LEFT JOIN trips t ON t.uuid_id = d.trip_id
+    WHERE d.status = 'ASSIGNED'
+  `);
+  let updated = 0;
+  for (const row of rows) {
+    const cutoffMinutes = cutoffToMinutes(row.lateCutoffTime || DEFAULT_LATE_CUTOFF);
+    if (nowMinutes < cutoffMinutes) continue;
+    const result = await updateDelegate(row.id, { status: "LATE" }, "System");
+    if (result) updated++;
+  }
+  return { checked: rows.length, updated };
 }
 
 export async function deleteDelegate(id, actor = null) {

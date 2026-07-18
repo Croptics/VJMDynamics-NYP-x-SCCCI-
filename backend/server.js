@@ -41,6 +41,7 @@ import {
   deleteActivity,
   deleteAllActivity,
   rollbackActivity,
+  applyLateCutoff,
   getAccountByUsername,
   accountPermissions,
   resetPassword,
@@ -521,6 +522,18 @@ app.post("/api/activity/:id/rollback", requirePermission("manageDelegates"), wra
   res.json(result.delegate);
 }));
 
+// Manual trigger for the Late-status cutoff check (see applyLateCutoff() in
+// data.js + the background interval in this file that normally runs it
+// automatically every minute). Exists for two reasons: (1) so a manual
+// re-check is possible if the interval was ever down, and (2) so this can
+// actually be tested/demoed without waiting for real wall-clock 10:00 AM —
+// `force: true` bypasses the hour check entirely (still only ever touches
+// ASSIGNED delegates either way).
+app.post("/api/system/late-cutoff", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const result = await applyLateCutoff(req.body?.force ? new Date(2000, 0, 1, 23, 59) : undefined);
+  res.json(result);
+}));
+
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
  *
@@ -562,6 +575,21 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "SERVER_ERROR", message: "Something went wrong on the server." });
 });
 
+// Late-status auto-transition: any delegate still ASSIGNED (expected, not
+// yet checked in) once it's past the 10:00 AM cutoff (local server time)
+// gets flipped to LATE — see applyLateCutoff() in data.js. Runs as a real
+// background interval (not piggybacked on request polling, which would
+// mean every open tab's 2s auto-refresh re-running this) so it fires
+// exactly once per minute regardless of traffic. Started only after the
+// DB is confirmed ready, same as the HTTP server itself below.
+const LATE_CUTOFF_CHECK_MS = 60000;
+function startLateCutoffScheduler() {
+  applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+  setInterval(() => {
+    applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+  }, LATE_CUTOFF_CHECK_MS);
+}
+
 /* ---- Start (only after the database is ready) --------------------------- */
 initDb()
   .then(initExceptions) // creates exception_tickets/check_in_logs after the base schema exists
@@ -570,6 +598,7 @@ initDb()
       console.log(`\n  MusterGo backend running -> http://localhost:${PORT}`);
       console.log(`  Login: staff_194 / password123!\n`);
     });
+    startLateCutoffScheduler();
   })
   .catch((err) => {
     console.error("\n  Could not connect to PostgreSQL. Is your database reachable?");

@@ -825,7 +825,9 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
   const tripId = del.trip_str || requestedTripId;
-  const alreadyBoarded = del.status === "PRESENT";
+  // PRESENT kept in this check too — a delegate scanned before this route
+  // was migrated to write ARRIVED still has PRESENT in the database.
+  const alreadyBoarded = del.status === "PRESENT" || del.status === "ARRIVED";
   const coachId = coachOverride || del.coach_id || null;
   const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -838,11 +840,17 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   } catch (err) {
     console.error("  QR check-in log failed (continuing to update delegate):", err.message || err);
   }
-  await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
+  // ARRIVED — the 5-status value (was the legacy PRESENT literal; the whole
+  // point of this feature is that scanning a delegate's own badge at the
+  // start of the event moves them Assigned -> Arrived, so this needs to
+  // write the real current value, not the alias). Works from any prior
+  // status, not just ASSIGNED — someone scanning back in after being marked
+  // Late should also read as Arrived, not stay stuck.
+  await q(`UPDATE delegates SET status='ARRIVED', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
     [coachOverride, `QR check-in · ${nowStr}`, del.id]);
 
   const counts = await q(
-    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present
        FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
   res.json({
     ok: true,

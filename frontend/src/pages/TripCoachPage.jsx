@@ -64,7 +64,7 @@ import {
   PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
   ArrowRight, Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare,
   Search, Activity, MapPin, Building2, Landmark, UtensilsCrossed,
-  Factory, Plane, Accessibility, Clock, Navigation, Gauge,
+  Factory, Plane, Accessibility, Clock, Navigation, Gauge, Settings,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -551,7 +551,7 @@ function JourneyTimeline({ items, dayNumber, onAddClick, coachCount, delegateCou
  *  the only thing it surfaces proactively is a red "N missing" pill, and only
  *  when N > 0, so the header stays calm when there's nothing to flag.
  * ========================================================================== */
-function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, onEditItinerary, onAddDelegate, canEdit = true }) {
+function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coachCount, delegateCount, onEditItinerary, onAddDelegate, onTripSettings, canEdit = true }) {
   const { t } = useLang();
   const [clock, setClock] = useState(() => new Date());
   useEffect(() => { const iv = setInterval(() => setClock(new Date()), 1000); return () => clearInterval(iv); }, []);
@@ -604,6 +604,7 @@ function Hero({ trip, currentStop, nextStop, progressFraction, missingCount, coa
       {canEdit && (
       <div className="tf-hero-actions">
         <button className="tf-btn tf-btn-glass" onClick={onEditItinerary}><PencilLine size={14} /> {t("Edit itinerary")}</button>
+        <button className="tf-btn tf-btn-glass" onClick={onTripSettings}><Settings size={14} /> {t("Trip settings")}</button>
         <button className="tf-btn tf-btn-solid" onClick={onAddDelegate}><UserPlus size={14} /> {t("Add delegate")}</button>
       </div>
       )}
@@ -643,6 +644,55 @@ function ActivityFeed({ activity }) {
         })
       )}
     </div>
+  );
+}
+
+/* ---- TripSettingsModal ------------------------------------------------- *
+ * Currently just the Late-status auto-transition cutoff time — any delegate
+ * still Assigned at/past this time on this trip gets flipped to Late (see
+ * applyLateCutoff() in backend/data.js). Was a single hardcoded 10:00
+ * constant shared by every trip; now per-trip, editable here, defaulting to
+ * "10:00" for any trip nobody has customized. */
+function TripSettingsModal({ tripId, initialCutoff, onClose, onSaved }) {
+  const { t } = useLang();
+  const [cutoff, setCutoff] = useState(initialCutoff || "10:00");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function handleSave() {
+    setSaving(true); setError(null);
+    try {
+      const updated = await apiPatch(`/trips/${tripId}/late-cutoff`, { lateCutoffTime: cutoff });
+      onSaved(updated.lateCutoffTime);
+      onClose();
+    } catch (e) {
+      setError(e.message || t("Save failed."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={t("Trip settings")} onClose={onClose} maxWidth={420}
+      footer={<>
+        <button className="tf-btn tf-btn-ghost" onClick={onClose} disabled={saving}>{t("Cancel")}</button>
+        <button className="tf-btn tf-btn-solid" onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />} {t("Save changes")}
+        </button>
+      </>}
+    >
+      <label className="tf-field-label">{t("Late-status cutoff time")}</label>
+      <input
+        type="time"
+        className="tf-input"
+        value={cutoff}
+        onChange={(e) => setCutoff(e.target.value)}
+      />
+      <p className="tf-muted" style={{ fontSize: 12, marginTop: 8 }}>
+        {t("A delegate still Assigned (not yet checked in) at or after this time is automatically marked Late.")}
+      </p>
+      {error && <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--tf-red)" }}>{error}</div>}
+    </Modal>
   );
 }
 
@@ -981,6 +1031,7 @@ function CoachBoardView({ tripId }) {
   const [loadError, setLoadError] = useState(null);
 
   const [showItinerary, setShowItinerary] = useState(false);
+  const [showTripSettings, setShowTripSettings] = useState(false);
   const [showAddDelegate, setShowAddDelegate] = useState(false);
   const [showAddCoach, setShowAddCoach] = useState(false);
   const [editStaffCoach, setEditStaffCoach] = useState(null);
@@ -1186,7 +1237,9 @@ function CoachBoardView({ tripId }) {
   }, [todayItems, nowMinutes]);
 
   const tripProgress = trip ? Math.min(1, ((trip.dayOf - 1) + dayFraction) / Math.max(1, trip.totalDays)) : 0;
-  const presentCount = delegates.filter((d) => d.status === "PRESENT").length;
+  // Legacy rows may still hold "PRESENT" — count both so the headcount
+  // doesn't undercount once check-in routes write "ARRIVED" instead.
+  const presentCount = delegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
   const missingCount = delegates.filter((d) => d.status === "MISSING").length;
   const capacityTotal = coaches.reduce((s, c) => s + (c.capacity || 0), 0);
   const capacityUsed = coaches.reduce((s, c) => s + (c.total || 0), 0);
@@ -1217,6 +1270,14 @@ function CoachBoardView({ tripId }) {
         {confirmState && <ConfirmDialog title={confirmState.title} message={confirmState.message} tone={confirmState.tone} onCancel={() => closeConfirm(false)} onConfirm={() => closeConfirm(true)} />}
         {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}
+        {showTripSettings && (
+          <TripSettingsModal
+            tripId={tripId}
+            initialCutoff={trip?.lateCutoffTime}
+            onClose={() => setShowTripSettings(false)}
+            onSaved={(lateCutoffTime) => { setTrip((tr) => (tr ? { ...tr, lateCutoffTime } : tr)); pushToast(t("Save changes") + " ✓"); }}
+          />
+        )}
         {showAddDelegate && <AddDelegateModal tripId={tripId} onClose={() => setShowAddDelegate(false)} onAdded={handleDelegateAdded} />}
         {showAddCoach && <AddCoachModal tripId={tripId} existingCount={coaches.length} onClose={() => setShowAddCoach(false)} onAdded={(c) => { fetchAll(); pushToast(`${c.label} ${t("added")}.`); }} />}
         {panelDelegate && (
@@ -1235,6 +1296,7 @@ function CoachBoardView({ tripId }) {
           missingCount={missingCount} coachCount={coaches.length} delegateCount={delegates.length}
           canEdit={canEdit}
           onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
+          onTripSettings={() => setShowTripSettings(true)}
         />
 
         <div className="tf-card">

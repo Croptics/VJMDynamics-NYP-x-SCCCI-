@@ -226,7 +226,29 @@ router.get("/api/trips/:tripId/summary", readAccess, wrap(async (req, res) => {
     totalDays: trip.totalDays,
     coachCount: Number(coachRow?.c || 0),
     delegateCount: Number(delegateRow?.c || 0),
+    // Per-trip Late-status auto-transition cutoff ("HH:MM", 24h, server-
+    // local) — see applyLateCutoff() in data.js. Defaults to "10:00" at the
+    // DB column level, so this is never actually null/undefined in practice.
+    lateCutoffTime: trip.lateCutoffTime,
   });
+}));
+
+// Trip settings: currently just the Late-status cutoff time, edited from
+// TripCoachPage.jsx's "Trip settings" modal. Kept as its own narrow route
+// (not folded into a general trip-metadata PATCH, which doesn't exist yet)
+// since that's the only trip-level setting anything currently needs to edit.
+router.patch("/api/trips/:tripId/late-cutoff", writeAccess, wrap(async (req, res) => {
+  const { lateCutoffTime } = req.body || {};
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(lateCutoffTime || "")) {
+    return res.status(400).json({ error: "INVALID_TIME", message: "Enter a time in HH:MM (24-hour) format." });
+  }
+  const updated = await get(
+    `UPDATE trips SET "lateCutoffTime" = $1 WHERE uuid_id = $2 RETURNING uuid_id AS id, "lateCutoffTime"`,
+    [lateCutoffTime, req.params.tripId]
+  );
+  if (!updated) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+  logActivity(req.params.tripId, `Late-status cutoff set to ${lateCutoffTime}.`, "system");
+  res.json(updated);
 }));
 
 // Demo trip catalogue. Idempotent: only inserts whichever names don't already

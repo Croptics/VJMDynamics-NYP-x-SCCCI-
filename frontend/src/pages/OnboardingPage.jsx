@@ -240,7 +240,7 @@ export default function OnboardingPage() {
       <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
         {[["parse", "Document parsing"], ["passes", "Boarding passes"]].map(([k, label]) => (
           <button key={k} onClick={() => setView(k)} className="btn btn-ghost"
-            style={{ borderRadius: 0, borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
+            style={{ borderRadius: "10px 10px 0 0", borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
             {t(label)}
           </button>
         ))}
