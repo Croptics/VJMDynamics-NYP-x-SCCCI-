@@ -896,10 +896,6 @@ export function accountPermissions(row) {
   return defaultPermsForRole("staff");
 }
 
-export function accountCan(row, perm) {
-  return !!accountPermissions(row)[perm];
-}
-
 /** Count of admin accounts — used to block removing/demoting the LAST admin
  *  (would otherwise lock everyone out of Account control). */
 async function countAdmins() {

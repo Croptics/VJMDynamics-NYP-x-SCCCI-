@@ -262,8 +262,9 @@ routes/exceptions.js
     same level as Vimal's face scan, not the elevated manageExceptions used
     by manual overrides. Idempotent on client_event_id. NOTE: this route has
     no frontend caller anywhere (ScanToBoardView.jsx, the only page that
-    would've used it, is itself unrouted/dead) — kept fixed for consistency
-    with the other check-in routes, but confirmed orphaned as of 2026-07-18.
+    would've used it, was itself unrouted/dead and has since been DELETED
+    2026-07-19) — kept fixed for consistency with the other check-in routes,
+    but confirmed orphaned as of 2026-07-18.
     QR/face-scan → ARRIVED migration (2026-07-18): both this route and
     POST /api/checkins/manual (the LIVE endpoint ManualTrackingPanel.jsx
     calls) used to write the legacy 'PRESENT' literal via raw SQL, bypassing
@@ -1451,7 +1452,8 @@ Pages (src/pages/) — one file per route:
   OnboardingPage.jsx       /onboarding         Vance's DocuSync AI — two tabs
                                                 (a third, "Scan to board" /
                                                 ScanToBoardView.jsx, was
-                                                dropped — see below).
+                                                dropped, and that dead file
+                                                deleted 2026-07-19 — see below).
                                                 • "Assign to trip" used to be a
                                                   HARDCODED stub array (t-1/
                                                   t-2/t-3 — only t-1 was ever a
@@ -1581,19 +1583,23 @@ Pages (src/pages/) — one file per route:
                                                 its own `present` count
                                                 (`status === "PRESENT"` only)
                                                 — fixed there too.
-                                                "Scan to board" (the third tab,
-                                                ScanToBoardView.jsx) was
-                                                dropped in this pass — it's
-                                                redundant with the shared
-                                                Check-in page (QRCheckInPage.jsx
-                                                + Jayden's QRScannerPanel),
-                                                which is the actual on-site
-                                                scanner; Onboarding's job is
-                                                only to ISSUE passes.
-                                                ScanToBoardView.jsx itself
-                                                still exists on disk (unused,
-                                                not deleted) in case anything
-                                                else references it later.
+                                                "Scan to board" (formerly the
+                                                third tab, ScanToBoardView.jsx)
+                                                was dropped — it's redundant
+                                                with the shared Check-in page
+                                                (QRCheckInPage.jsx + Jayden's
+                                                QRScannerPanel), which is the
+                                                actual on-site scanner;
+                                                Onboarding's job is only to
+                                                ISSUE passes. ScanToBoardView.jsx
+                                                sat unused on disk for a while
+                                                after, then was DELETED
+                                                2026-07-19 as dead code (it was
+                                                the only importer of the
+                                                html5-qrcode npm package, which
+                                                was uninstalled at the same
+                                                time — the live scanner uses
+                                                jsQR, not html5-qrcode).
                                                 The route + sidebar item stay
                                                 gated behind manageDelegates
                                                 (parsing bulk-creates
@@ -1717,8 +1723,9 @@ Pages (src/pages/) — one file per route:
                                                 post to Vance's existing
                                                 POST /api/onboarding/checkin
                                                 via claudeParse.js's
-                                                qrCheckin() — same endpoint
-                                                ScanToBoardView.jsx uses, so
+                                                qrCheckin() — the same endpoint
+                                                the (since-deleted)
+                                                ScanToBoardView.jsx used, so
                                                 there's one badge format, one
                                                 resolution path. See
                                                 QR_BADGE_MISMATCH.md for the

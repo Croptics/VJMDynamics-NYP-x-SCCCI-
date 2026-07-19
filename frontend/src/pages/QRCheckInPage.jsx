@@ -25,7 +25,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   MapPin, ScanFace, AlertTriangle, User, Phone, Mic, Moon, Sun,
-  RefreshCw, ShieldCheck, X, Zap, Turtle, Camera, Sparkles, QrCode,
+  RefreshCw, ShieldCheck, X, Zap, Turtle, Camera, Sparkles,
   ChevronRight, CheckCircle2, Users,
 } from "lucide-react";
 import { apiGet, apiPost, getUser } from "../lib/api.js";

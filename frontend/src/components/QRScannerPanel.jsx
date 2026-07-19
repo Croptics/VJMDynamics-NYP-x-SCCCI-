@@ -20,11 +20,11 @@
  *  source is Vance's "Boarding passes" tab (OnboardingPage.jsx), which
  *  encodes the delegate's plain `qr_code` string (e.g. "MG-86B620A4") from
  *  the shared `delegates` table. Rather than keep two incompatible QR
- *  systems, this scanner now reads that same plain code and resolves it the
- *  same way ScanToBoardView.jsx does — see QR_BADGE_MISMATCH.md for the
- *  history of why this changed. The old JSON badge / qr-test-codes/ images
- *  no longer scan successfully; re-print/re-share badges from "Boarding
- *  passes" instead.
+ *  systems, this scanner now reads that same plain code and resolves it via
+ *  qrCheckin() → POST /api/onboarding/checkin — see QR_BADGE_MISMATCH.md for
+ *  the history of why this changed. The old JSON badge / qr-test-codes/
+ *  images no longer scan successfully; re-print/re-share badges from
+ *  "Boarding passes" instead.
  * ============================================================================= */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -154,10 +154,34 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     async function start() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } }, audio: false,
+          // Ask for a sharp 720p+ stream. Without an explicit resolution the
+          // browser hands back a low default (often 640x480), which — scaled
+          // up to fill this tall viewport via objectFit:cover — looks soft/
+          // blurry and gives jsQR far fewer pixels to lock a QR onto (the
+          // "keeps blurring while scanning" report). `ideal` still gracefully
+          // falls back on webcams that can't do 720p.
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         streamRef.current = stream;
+
+        // Best-effort: nudge the camera into CONTINUOUS autofocus so a badge
+        // held close is kept sharp instead of the sensor hunting in and out.
+        // Silently ignored on devices/browsers that don't expose focusMode
+        // (most laptop webcams are fixed-focus and need no help anyway).
+        try {
+          const track = stream.getVideoTracks()[0];
+          const caps = track?.getCapabilities?.();
+          if (caps && Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+            await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          }
+        } catch { /* focus control unsupported — the higher resolution still helps */ }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});

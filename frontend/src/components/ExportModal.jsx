@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X, Download, Sparkles, Loader2, Check } from "lucide-react";
+import { X, Download, Sparkles, Loader2 } from "lucide-react";
 import { apiGet, apiPost, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 

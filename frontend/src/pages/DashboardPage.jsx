@@ -14,7 +14,6 @@ import {
   AlertTriangle,
   UserCheck,
   HelpCircle,
-  Bell,
   Clock,
   Activity,
   Crown,

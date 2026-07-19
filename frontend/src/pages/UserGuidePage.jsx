@@ -2,7 +2,7 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
-import { PlayCircle, HelpCircle, UserX, UserCheck2, LogIn, Clock, AlertTriangle, ArrowRight, QrCode, PencilLine } from "lucide-react";
+import { PlayCircle, HelpCircle, UserCheck2, LogIn, Clock, AlertTriangle, ArrowRight, QrCode, PencilLine } from "lucide-react";
 import { useLang } from "../lib/i18n.jsx";
 
 /**
