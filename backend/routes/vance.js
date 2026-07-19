@@ -128,6 +128,7 @@ async function init() {
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
   console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages");
+  warmUpModel(); // preload the chat model so the first question isn't a cold start
 }
 
 /* =============================================================================
@@ -760,6 +761,7 @@ router.post(
       );
       added.push({ ...delegate, company: r.company || null, role: r.role || null });
     }
+    if (added.length) invalidateSnapshot(); // the assistant's cached view is now stale
     res.status(201).json({ added: added.length, skippedInvalid, delegates: added });
   })
 );
@@ -836,6 +838,7 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   }
   await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
     [coachOverride, `QR check-in · ${nowStr}`, del.id]);
+  invalidateSnapshot(); // a delegate just boarded — refresh the assistant's view
 
   const counts = await q(
     `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
@@ -918,6 +921,21 @@ async function buildSnapshot() {
     roster, byIndustry, byCompany, vips,
   };
 }
+
+/* Short-TTL cache over buildSnapshot(). Every chat turn rebuilds the snapshot
+ * from ~6 DB queries; within a few seconds the data barely changes, so caching
+ * it makes rapid follow-up questions (and the fast-path below) much cheaper.
+ * Writes that change the picture (confirm, check-in) call invalidateSnapshot(). */
+let _snapshotCache = { at: 0, data: null };
+const SNAPSHOT_TTL_MS = 5000;
+async function getSnapshot() {
+  const now = Date.now();
+  if (_snapshotCache.data && now - _snapshotCache.at < SNAPSHOT_TTL_MS) return _snapshotCache.data;
+  const data = await buildSnapshot();
+  _snapshotCache = { at: now, data };
+  return data;
+}
+function invalidateSnapshot() { _snapshotCache = { at: 0, data: null }; }
 
 function buildSystemPrompt(snapshot, lang) {
   const languageLine = lang === "zh"
@@ -1058,13 +1076,206 @@ async function ollamaUp() {
   } catch { return false; }
 }
 
+/* Load the chat model into memory ahead of the first real question. Ollama only
+ * loads a model on first use (a ~20-30s cold start on CPU); firing one tiny
+ * request at startup means the first user isn't the one who pays it. Runs once,
+ * fire-and-forget, and fully guarded — if Ollama isn't up it just no-ops. */
+let _warmedUp = false;
+function warmUpModel() {
+  if (_warmedUp) return;
+  _warmedUp = true;
+  const base = process.env.OLLAMA_HOST || "http://localhost:11434";
+  fetch(`${base}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: CHAT_MODEL(), prompt: "ok", stream: false, keep_alive: "30m", options: { num_predict: 1 } }),
+    signal: AbortSignal.timeout(90000),
+  })
+    .then(() => console.log(`  Assistant model warmed up (${CHAT_MODEL()})`))
+    .catch(() => { /* Ollama not running or slow — the first real question will load it */ });
+}
+
+/* =============================================================================
+ *  ASSISTANT FAST-PATH — deterministic answers straight from the snapshot.
+ *
+ *  The chat model runs on CPU (tens of seconds per reply), so the biggest speed
+ *  win is to NOT call it for the common, factual questions we can answer exactly
+ *  from live data. answerLocally() returns a formatted reply for those — instant
+ *  and never hallucinated — or null to let the LLM handle anything open-ended.
+ *  English only for now; Chinese questions fall through to the model.
+ * ========================================================================== */
+const bold = (n) => `**${n}**`;
+
+/* Only match a delegate name distinctive enough to avoid false positives:
+ * multi-word, or a single token of 5+ letters. Returns the longest match. */
+function findDelegateInText(q, roster) {
+  let best = null;
+  for (const d of roster) {
+    const name = (d.name || "").toLowerCase();
+    if (!name) continue;
+    const distinctive = name.includes(" ") || name.replace(/[^a-z]/g, "").length >= 5;
+    if (distinctive && q.includes(name) && (!best || name.length > best.name.length)) best = d;
+  }
+  return best;
+}
+
+function coachNameById(id, coaches) {
+  const c = coaches.find((x) => x.id === id || x.label === id);
+  return c ? `${c.name}${c.city ? ` (${c.city})` : ""}` : null;
+}
+
+function answerLocally(question, snapshot) {
+  if (!snapshot) return null;
+  const q = (question || "").toLowerCase().trim();
+  if (!q || q.length > 200) return null; // very long → probably freeform; let the model handle it
+  const {
+    kpis = {}, coaches = [], missing = [], roster = [], byCompany = [],
+    byIndustry = [], vips = [], exceptions = [], itinerary = [], trip = {},
+  } = snapshot;
+  const has = (...ws) => ws.some((w) => q.includes(w));
+  const asksCount = /\b(how many|number of|count|total)\b/.test(q);
+  const asksWho = /\b(who|whom|which delegates?|names?|list|show me)\b/.test(q);
+
+  // 1) Greetings / thanks
+  if (/^(hi|hello|hey|yo|hiya|greetings|good (morning|afternoon|evening))\b/.test(q)
+    || /^(thanks|thank you|thx|ty|cheers|great|nice|ok|okay)\b[\s!.]*$/.test(q)) {
+    return `Hi! I can help with the ${trip.name || "trip"} — attendance, who's missing, coach status, open exceptions, today's itinerary, or delegate and company look-ups. What would you like?`;
+  }
+
+  // Open-ended / generative requests ("draft an email…", "explain why…") want
+  // the model, not a data lookup — even if they mention a keyword like "missing".
+  if (/\b(draft|write|compose|email|notify|remind|suggest|recommend|advise|explain|translate|why|how should|what should i (do|say)|help me (write|draft|plan))\b/.test(q)) {
+    return null;
+  }
+
+  // 2) Person look-up / status of a specific named delegate. Checked before the
+  //    aggregate + breakdown intents so "what company is X from" isn't misread.
+  const named = findDelegateInText(q, roster);
+  if (named && /\b(who|what|which|where|whose|is|are|does|has|from|on|about|status|company|industry|role|coach|bus|here|present|missing|checked|arrived|boarded)\b/.test(q)) {
+    const statusText = named.status === "PRESENT" ? "checked in"
+      : named.status === "MISSING" ? "missing" : "not on a coach yet";
+    const facts = [];
+    if (named.role) facts.push(named.role);
+    if (named.company) facts.push(`from ${bold(named.company)}`);
+    if (named.industry) facts.push(`${named.industry} sector`);
+    const coach = coachNameById(named.coach_id, coaches);
+    let s = `${named.name}${named.vip ? " (VIP)" : ""}${facts.length ? " — " + facts.join(", ") : ""}. Currently ${bold(statusText)}`;
+    if (coach) s += `, on ${coach}`;
+    return s + ".";
+  }
+
+  // 3) Coach superlative (most/fewest missing or boarded) — checked before the
+  //    plain missing/present intents since "which coach has the most missing"
+  //    also contains "missing".
+  if (has("coach", "bus", "vehicle") && has("most", "least", "fewest", "highest", "lowest", "fullest", "emptiest", "biggest", "smallest")) {
+    const metric = has("missing", "unaccounted", "not checked", "not boarded") ? "missing" : "boarded";
+    const least = has("least", "fewest", "lowest", "emptiest", "smallest");
+    const vals = coaches
+      .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c[metric] ?? 0) }))
+      .filter((x) => Number.isFinite(x.v));
+    if (vals.length) {
+      vals.sort((a, b) => b.v - a.v);
+      const pick = least ? vals[vals.length - 1] : vals[0];
+      return `${pick.label} has the ${least ? "fewest" : "most"} ${metric} — ${bold(pick.v)}.`;
+    }
+  }
+
+  // 4) Attendance summary / overview
+  if (has("attendance", "summary", "summarise", "summarize", "overview", "how are we doing", "how's it going", "hows it going", "where are we", "overall")) {
+    return `${kpis.total} delegates total — ${kpis.present} present, ${kpis.missing} missing, ${kpis.unassigned} unassigned (not yet on a coach).`;
+  }
+
+  // 4) Present / checked-in count
+  if (!named && (/\b(present|checked[- ]?in|turnout|arrived)\b/.test(q) || has("here yet", "how many are here"))) {
+    return `${bold(kpis.present)} of ${bold(kpis.total)} delegates are checked in — ${kpis.missing} still missing, ${kpis.unassigned} not yet on a coach.`;
+  }
+
+  // 5) Missing (count or list)
+  if (!named && has("missing", "not checked in", "not here", "haven't arrived", "havent arrived", "unaccounted", "who's left", "still to board", "not boarded")) {
+    if (asksCount && !asksWho) return `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
+    if (!missing.length) return "Nobody is currently marked missing — everyone expected is accounted for.";
+    const ordered = [...missing].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
+    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${m.coach ? ` · ${m.coach}` : ""}`);
+    const more = missing.length > 15 ? `\n…and ${missing.length - 15} more.` : "";
+    return `${bold(missing.length)} missing:\n${lines.join("\n")}${more}`;
+  }
+
+  // 6) Unassigned (not on any coach yet)
+  if (!named && has("unassigned", "not on a coach", "no coach", "not placed", "without a coach", "not yet assigned", "not on any coach")) {
+    const un = roster.filter((d) => !d.coach_id && d.status !== "PRESENT");
+    if ((asksCount && !asksWho) || !un.length) return `${bold(kpis.unassigned)} delegates aren't on any coach yet.`;
+    const lines = un.slice(0, 15).map((d) => `- ${d.name}${d.company ? ` · ${d.company}` : ""}`);
+    const more = un.length > 15 ? `\n…and ${un.length - 15} more.` : "";
+    return `${bold(kpis.unassigned)} not yet on a coach:\n${lines.join("\n")}${more}`;
+  }
+
+  // 8) Company breakdown
+  if (has("compan", "organisation", "organization", "employer", "firms")) {
+    if (!byCompany.length) return "No company information has been captured for the delegates yet.";
+    const top = byCompany.slice(0, 8).map(([name, n]) => `- ${name} — ${bold(n)}`);
+    return `Delegates by company:\n${top.join("\n")}`;
+  }
+
+  // 9) Industry breakdown
+  if (has("industr", "sector")) {
+    if (!byIndustry.length) return "No industry information has been captured for the delegates yet.";
+    const top = byIndustry.slice(0, 8).map(([name, n]) => `- ${name} — ${bold(n)}`);
+    return `Delegates by industry:\n${top.join("\n")}`;
+  }
+
+  // 10) VIPs
+  if (has("vip", "important", "priority guest", "priority delegate")) {
+    if (!vips.length) return "No delegates are flagged as VIPs.";
+    const missingVips = vips.filter((v) => v.status === "MISSING");
+    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${v.status === "PRESENT" ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
+    const head = `${bold(vips.length)} VIP${vips.length > 1 ? "s" : ""}${missingVips.length ? `, ${bold(missingVips.length)} still missing` : ""}:`;
+    return `${head}\n${lines.join("\n")}`;
+  }
+
+  // 11) Open exception tickets
+  if (has("exception", "issue", "problem", "ticket", "incident", "anything wrong", "any issues")) {
+    if (!exceptions.length) return "No open exception tickets right now.";
+    const lines = exceptions.slice(0, 10).map((e) => `- [${e.priority}] ${e.type}${e.delegate ? ` · ${e.delegate}` : ""}`);
+    return `${bold(exceptions.length)} open exception${exceptions.length > 1 ? "s" : ""}:\n${lines.join("\n")}`;
+  }
+
+  // 12) Today's itinerary
+  if (has("itinerary", "schedule", "agenda", "what's on", "whats on", "plan for today", "today's plan", "programme", "program")) {
+    if (!itinerary.length) return "There are no itinerary items scheduled for today.";
+    const lines = itinerary.map((i) => `- ${i.start_time} ${i.title}${i.location ? ` @ ${i.location}` : ""}`);
+    return `Today's itinerary:\n${lines.join("\n")}`;
+  }
+
+  // 13) Risk / "who should I worry about" — a computed priority list
+  if (has("worry", "worried", "concern", "risk", "chase", "priorit", "attention", "watch", "focus on", "urgent", "trouble")) {
+    const missingVips = missing.filter((m) => m.vip);
+    const critical = exceptions.filter((e) => (e.priority || "").toUpperCase() === "CRITICAL");
+    const topMissingCoach = [...coaches]
+      .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c.missing ?? 0) }))
+      .sort((a, b) => b.v - a.v)[0];
+    const lines = [];
+    if (missingVips.length) lines.push(`- ${bold(missingVips.length)} VIP${missingVips.length > 1 ? "s" : ""} still missing: ${missingVips.map((m) => m.name).join(", ")}`);
+    if (critical.length) lines.push(`- ${bold(critical.length)} critical exception${critical.length > 1 ? "s" : ""}: ${critical.map((e) => e.type + (e.delegate ? ` (${e.delegate})` : "")).join("; ")}`);
+    if (topMissingCoach && topMissingCoach.v > 0) lines.push(`- ${topMissingCoach.label} has the most missing (${bold(topMissingCoach.v)})`);
+    if (!lines.length) return `Nothing urgent right now — no missing VIPs and no critical exceptions.${kpis.missing ? ` ${kpis.missing} delegates are still to check in.` : " Everyone's accounted for."}`;
+    return `Here's what to watch right now:\n${lines.join("\n")}`;
+  }
+
+  return null; // no confident match → let the model answer
+}
+
 async function answer(messages, lang) {
-  const snapshot = await buildSnapshot();
-  const system = buildSystemPrompt(snapshot, lang === "zh" ? "zh" : "en");
+  const snapshot = await getSnapshot();
   const history = normaliseHistory(messages);
   if (history.length === 0 || history[history.length - 1].role !== "user") {
     return { content: "What would you like to know about the trip?", source: "none" };
   }
+  // Deterministic fast-path (English) — instant, exact answers with no model call.
+  if (lang !== "zh") {
+    const local = answerLocally(history[history.length - 1].content, snapshot);
+    if (local != null) return { content: local, source: "local" };
+  }
+  const system = buildSystemPrompt(snapshot, lang === "zh" ? "zh" : "en");
   // Generous timeout: a cold model load (~27s) plus generation can exceed a
   // minute, and Ollama serialises requests (a running parse blocks chat).
   const viaOllama = await ollamaChat(history, system, { timeoutMs: 120000 });
@@ -1186,8 +1397,8 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   const prior = await q(`SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId]);
   const priorRows = prior.rows;
   const history = normaliseHistory([...priorRows, { role: "user", content: userText }]);
-  const snapshot = await buildSnapshot();
-  const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
+  const snapshot = await getSnapshot();
+  const lang = req.body?.lang === "zh" ? "zh" : "en";
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -1196,18 +1407,25 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   res.flushHeaders?.();
   const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
-  let full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
-
-  // Fallback if Ollama couldn't stream (not running / busy) — use the same
-  // non-streaming path (Claude, or a clear error message).
-  if (full == null) {
-    try {
-      const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
-      full = r.content;
-      sse({ token: full });
-    } catch (err) {
-      sse({ error: err.message });
-      return res.end();
+  // Fast-path: answer common factual questions instantly from the snapshot
+  // (English only; Chinese and open-ended questions fall through to the model).
+  let full = lang === "en" ? answerLocally(userText, snapshot) : null;
+  if (full != null) {
+    sse({ token: full });
+  } else {
+    const system = buildSystemPrompt(snapshot, lang);
+    full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
+    // Fallback if Ollama couldn't stream (not running / busy) — use the same
+    // non-streaming path (Claude, or a clear error message).
+    if (full == null) {
+      try {
+        const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
+        full = r.content;
+        sse({ token: full });
+      } catch (err) {
+        sse({ error: err.message });
+        return res.end();
+      }
     }
   }
 
@@ -1238,7 +1456,7 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
   }
 
   const history = normaliseHistory(msgs);
-  const snapshot = await buildSnapshot();
+  const snapshot = await getSnapshot();
   const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -1279,3 +1497,19 @@ router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => 
 }));
 
 export default router;
+
+/* ---- Exposed for unit testing (tests/vance/) ----------------------------- *
+ * These are the pure, side-effect-free helpers behind document parsing and the
+ * confirm-time junk guard. They're exported here so the test suite can exercise
+ * them directly without spinning up the HTTP layer or a database. The live app
+ * only ever consumes the router (default export above). */
+export {
+  extractRecords,
+  cleanName,
+  dedupeByName,
+  preferRomanised,
+  finalizeRecords,
+  toRow,
+  isPlausibleDelegate,
+  answerLocally,
+};

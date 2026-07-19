@@ -111,6 +111,19 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   over SSE. Attendance figures are pre-computed into the snapshot ("ready-made
   summary" line) so even a small model reports exact numbers — *AI handles language,
   code handles arithmetic.*
+- **Deterministic fast-path (`answerLocally`)** — common factual questions
+  (attendance, present/missing/unassigned, coach superlatives, company/industry
+  breakdowns, VIPs, exceptions, itinerary, "who should I worry about", and named
+  delegate look-ups) are answered **instantly from the snapshot with no model
+  call** — exact and never hallucinated. Open-ended/generative questions and any
+  Chinese question return `null` and fall through to the LLM. Applied on
+  `/chat/messages` and the `/stream` endpoint (which emits the whole answer as one
+  SSE token); `source:"local"` marks a fast-path reply. Not applied to
+  `/regenerate` (that always re-attempts via the model).
+- **Snapshot cache + model warm-up (speed):** `getSnapshot()` caches the ~6-query
+  snapshot for 5s (invalidated on confirm and QR check-in, so the bot never shows
+  stale counts after a write); a fire-and-forget warm-up call on first module use
+  preloads the chat model so the first question doesn't pay the ~20-30s cold load.
 
 ## Edge cases handled
 
