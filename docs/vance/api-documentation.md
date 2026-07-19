@@ -42,7 +42,7 @@ job's creator may read it, else `404`).
 {
   "status": "running",          // running | done | error
   "done": 2, "total": 4,        // pages processed / total
-  "method": "text/ollama",      // text/ollama | text/anthropic | vision/anthropic
+  "method": "text/ollama",      // text/ollama | text/anthropic | vision/anthropic | ocr/tesseract
   "rows": [
     { "id": "file-0", "fullName": "Chew Kam Swee", "company": "K.S. Chew & Co",
       "role": "Director", "email": null, "confidence": 0.93, "needsReview": false }
@@ -142,7 +142,9 @@ Auth: `signed-in`.
 ```json
 { "messages": [ { "role": "user", "content": "how many are missing?" } ], "lang": "en" }
 ```
-**200 OK** — `source` is `local` (fast-path), `ollama`, `anthropic`, or `none`.
+**200 OK** — `source` is `local` (fast-path), `ollama`, `anthropic`, `none`, or
+`unavailable` (no AI text engine reachable — the fast-path still answers common
+factual questions; open-ended ones return a graceful guidance message).
 ```json
 { "reply": { "content": "**20** delegates are missing (expected but not yet checked in)." }, "source": "local" }
 ```

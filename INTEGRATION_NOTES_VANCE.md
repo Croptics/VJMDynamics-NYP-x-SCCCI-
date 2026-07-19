@@ -102,7 +102,11 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   1. PDFs are read as **text server-side** with `unpdf`. If real text is present
      (delegate directories, attendee lists, spreadsheet exports), it's structured by
      an LLM as text — cheap, fast, page-by-page, and runs on free local Ollama.
-  2. Scanned PDFs / images (no extractable text) fall back to **Claude vision**.
+  2. Scanned images (no extractable text) fall back to **vision**: Claude vision if
+     `ANTHROPIC_API_KEY` is set, else **local Tesseract OCR** (`method: "ocr/tesseract"`)
+     so passport/ID photos and photographed lists work fully offline — the OCR text
+     flows through the same structuring step. (Scanned image-only PDFs aren't
+     rasterised; upload them as an image.)
   Structuring prefers **Claude if `ANTHROPIC_API_KEY` is set** (best accuracy), else
   Ollama `OLLAMA_PARSE_MODEL` (default `llama3.2`, 3B). Bilingual (中文/English)
   names collapse to the romanised name; placeholder/garbage names are dropped.
@@ -119,7 +123,11 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   Chinese question return `null` and fall through to the LLM. Applied on
   `/chat/messages` and the `/stream` endpoint (which emits the whole answer as one
   SSE token); `source:"local"` marks a fast-path reply. Not applied to
-  `/regenerate` (that always re-attempts via the model).
+  `/regenerate` (that always re-attempts via the model). **Because the fast-path
+  needs no model, the assistant still answers common factual questions even where
+  no AI engine is reachable** (e.g. the deployed cloud host without Ollama) —
+  open-ended questions then return a graceful "text engine unavailable here"
+  message (`source:"unavailable"`) instead of an error.
 - **Risk scoring (`computeRisk`)** ranks what to worry about from the live
   snapshot — missing VIPs and CRITICAL exceptions first, then the coach furthest
   from boarded, then ordinary open tickets. It powers the fast-path "who should I

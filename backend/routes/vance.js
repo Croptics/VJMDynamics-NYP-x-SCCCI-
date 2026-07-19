@@ -14,15 +14,17 @@
  *       a typed list…), that text is structured by an LLM — cheap, fast, works
  *       across many pages, and even runs on a free local Ollama.
  *    2. If a PDF has little/no extractable text (a SCANNED passport, a photo),
- *       or the upload is an image, it falls back to Claude VISION, which can
- *       actually "see" the document.
+ *       or the upload is an image, it falls back to VISION. Claude vision is used
+ *       when a key is set; otherwise images are read by LOCAL OCR (Tesseract), so
+ *       scanned attendee lists and passport/ID photos still work fully offline —
+ *       the OCR text then flows through the same LLM structuring step.
  *    This is why one uploader handles directories, spreadsheets AND passport
  *    scans — the strongest talking point for the Section C AI reflection.
  *
  *  Provider split:
  *    - Parsing prefers Claude when a key is set (best extraction accuracy),
  *      and falls back to local Ollama for text-based docs when it isn't.
- *      Vision (scanned docs / images) needs Claude — Ollama can't see.
+ *      Vision uses Claude when available, else local Tesseract OCR for images.
  *    - The chatbot is Ollama-first, Claude-fallback (mirrors JQ's insights.js),
  *      because it is high-volume and text-only.
  * ============================================================================= */
@@ -339,6 +341,25 @@ const chunk = (arr, n) => {
   return out;
 };
 
+/* Local OCR fallback (no cloud). When an uploaded IMAGE has no text layer and no
+ * Claude vision key is set, read it with Tesseract so scanned attendee lists and
+ * passport/ID photos still work fully offline. The recognised text then flows
+ * through the same text-structuring pipeline. Returns "" on failure. (A scanned,
+ * image-only PDF would need rasterising to images first — not handled here; users
+ * can upload it as an image.) */
+async function ocrImage(buf) {
+  try {
+    const { createWorker } = await import("tesseract.js");
+    const worker = await createWorker("eng");
+    const { data: { text } } = await worker.recognize(buf);
+    await worker.terminate();
+    return (text || "").trim();
+  } catch (err) {
+    console.warn("  OCR (tesseract) unavailable:", err.message || err);
+    return "";
+  }
+}
+
 function dedupeByName(records) {
   const seen = new Map();
   for (const r of records) {
@@ -545,12 +566,31 @@ async function runParseJob(job, buf, mediaType, isPdf) {
       }
     }
 
-    // Vision path (scanned PDF / image) — Claude only.
+    // Vision path (scanned PDF / image). Prefer Claude vision when a key is set;
+    // otherwise fall back to LOCAL OCR (Tesseract) for images so scans work
+    // offline. OCR still needs a text engine (Ollama) to structure the result.
+    const isImage = mediaType.startsWith("image/");
     if (!hasClaude) {
+      if (isImage && hasOllama) {
+        job.total = 1;
+        job.method = "ocr/tesseract";
+        const text = await ocrImage(buf);
+        if (text.replace(/\s/g, "").length >= 20) {
+          const recs = await structurePage(text);
+          all.push(...(recs || []));
+          job.done = 1;
+          job.rows = finalizeRecords(all).map((r, i) => toRow(r, i, job.name));
+          job.status = "done";
+          return;
+        }
+        job.status = "error";
+        job.error = "Couldn't read any text from that image. Try a sharper photo, or a text-based PDF.";
+        return;
+      }
       job.status = "error";
-      job.error = mediaType.startsWith("image/")
-        ? "Reading images/scans needs Claude vision. Set ANTHROPIC_API_KEY in backend/.env."
-        : "This looks like a scanned document, which needs Claude vision. Set ANTHROPIC_API_KEY, or upload a text-based PDF.";
+      job.error = isImage
+        ? "Reading this image needs the local AI engine for OCR. Start Ollama, or set ANTHROPIC_API_KEY in backend/.env."
+        : "This looks like a scanned PDF. Local OCR currently supports images — upload it as a photo/screenshot, set a Claude key, or use a text-based PDF.";
       return;
     }
     job.total = 1;
@@ -1336,9 +1376,14 @@ async function answer(messages, lang) {
     e.status = 503;
     throw e;
   }
-  const e = new Error("The AI assistant isn't running. Start Ollama (it should be running in the background), or ask an admin to set ANTHROPIC_API_KEY in backend/.env.");
-  e.status = 503;
-  throw e;
+  // No AI text engine available (e.g. the deployed cloud host, where Ollama can't
+  // run). The fast-path above already answers the common factual questions with
+  // no model at all, so rather than error out, degrade gracefully for open-ended
+  // ones and point the user at what still works instantly.
+  return {
+    content: "I can answer questions about attendance, who's missing, coach status, exceptions, the itinerary, VIPs, and specific delegates or companies — all instantly. Open-ended questions need the AI text engine, which isn't available in this environment. Try asking, for example, \"who's missing?\", \"which coach has the most missing?\", or \"who should I worry about?\"",
+    source: "unavailable",
+  };
 }
 
 /* ---- Stateless chat (mobile) -------------------------------------------- */

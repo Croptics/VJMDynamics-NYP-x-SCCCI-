@@ -63,7 +63,16 @@ wrong, so I treated its output as a draft to verify, not an answer.
    accuracy matters*, and to use the model only for what it's good at (phrasing
    and open-ended reasoning).
 
-4. **Small correctness fixes AI would have left alone.** e.g. the chat auto-scroll
+4. **Replacing an unavailable cloud dependency with a local one.** Reading scanned
+   documents (passport photos, photographed attendee lists) originally required
+   Claude's vision API, which I don't have — so that whole path was dead. Rather
+   than leave it broken, I added local **Tesseract OCR** as the fallback: an
+   uploaded image is OCR'd to text on the server, then goes through the exact same
+   structuring pipeline the text-PDF path uses. Now "one uploader handles
+   directories AND scans" is actually true, fully offline. AI suggested the cloud
+   vision route by default; the better answer for my constraints was a local tool.
+
+5. **Small correctness fixes AI would have left alone.** e.g. the chat auto-scroll
    originally used `scrollIntoView()`, which yanked the whole page; I changed it to
    scroll only the message list via `scrollTop`. And "Print all" on the boarding
    passes originally printed the whole trip even when the list was filtered — I

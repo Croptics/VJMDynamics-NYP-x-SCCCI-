@@ -31,8 +31,9 @@ Document Parsing tab.
 - **A1 — Leaves the page mid-parse:** the job runs server-side; on return the page
   re-attaches to the same job by id and progress continues.
 - **A2 — Scanned/image document with no text layer:** falls back to the vision
-  path (needs a Claude key). With no key configured, the job ends with a clear
-  message to upload a text PDF — a known, accepted limitation.
+  path — Claude vision if a key is set, otherwise **local Tesseract OCR** for
+  images, so passport/ID photos and photographed lists are read fully offline.
+  (Scanned image-only PDFs aren't rasterised; the user uploads them as an image.)
 - **A3 — Bilingual entries (`陈伟 / Reyes Tin`):** merged into one record with the
   romanised name; stray Chinese-only duplicate rows are dropped.
 - **A4 — Unsupported file / empty upload:** rejected with `415`/`400` before any
