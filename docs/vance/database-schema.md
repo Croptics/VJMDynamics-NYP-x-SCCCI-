@@ -83,7 +83,7 @@ existed (Desmond) and is reused via `COALESCE`.
 | --- | --- | --- |
 | `passport_no` | `VARCHAR(64)` | From passport/ID documents (vision path). |
 | `nationality` | `VARCHAR(128)` | From passport/ID documents. |
-| `passport_expiry` | `VARCHAR(32)` | ISO date if legible, else null. |
+| `passport_expiry` | `VARCHAR(32)` | ISO date if legible, else null. Validated by `checkPassportExpiry` — flagged if expired or expiring within 6 months. |
 | `role` | `VARCHAR(191)` | Job title / designation. |
 | `industry` | `VARCHAR(191)` | Industry / sector. |
 | `email` | `VARCHAR(191)` | |

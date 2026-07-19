@@ -60,6 +60,10 @@ reviewing the parsed rows.
   genuine short names (`Wu`, `陈伟`) pass.
 - **A3 — Needs review:** rows below the confidence threshold are highlighted; the
   organiser confirms an explicit "add anyway".
+- **A5 — Passport validity:** a row whose passport is expired or expires within 6
+  months (the overseas-travel rule) is flagged with a "Passport expired/expiring"
+  pill before confirm; the Trip Assistant can also list these ("any passport
+  issues?") and they show in the "what to watch" widget.
 - **A4 — Dead/unknown trip:** if the trip can't be resolved, confirm returns
   `404 UNKNOWN_TRIP` instead of silently orphaning delegates.
 

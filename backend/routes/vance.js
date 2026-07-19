@@ -895,13 +895,28 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
 /* =============================================================================
  *  FEATURE 2 — TRIP ASSISTANT  (Use Case 2)
  * ========================================================================== */
+/* Passport validity for overseas travel: "expired", or "expiring" within 6
+ * months (the common 6-month passport-validity rule), else "ok". A missing or
+ * unparseable expiry is "unknown" (never flagged). Pure + exported for tests. */
+function checkPassportExpiry(expiry, now = new Date()) {
+  if (!expiry) return { status: "unknown", daysLeft: null };
+  const d = new Date(expiry);
+  if (Number.isNaN(d.getTime())) return { status: "unknown", daysLeft: null };
+  const daysLeft = Math.round((d.getTime() - now.getTime()) / 86400000);
+  const sixMonths = new Date(now.getTime());
+  sixMonths.setMonth(sixMonths.getMonth() + 6);
+  if (d.getTime() < now.getTime()) return { status: "expired", daysLeft };
+  if (d.getTime() < sixMonths.getTime()) return { status: "expiring", daysLeft };
+  return { status: "ok", daysLeft };
+}
+
 async function buildSnapshot() {
   const [trip, dashboard, missing] = await Promise.all([getTrip(), getDashboard(), getMissing()]);
 
   /* Rich delegate roster (drives company/industry/VIP analytics + lookups). */
   let roster = [];
   try {
-    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email
+    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry
                          FROM delegates ORDER BY name`);
     roster = r.rows;
   } catch { /* delegate doc columns not present yet */ }
@@ -917,6 +932,13 @@ async function buildSnapshot() {
   const byIndustry = tally(roster, "industry");
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
+
+  /* Passport validity — delegates whose passport is expired or expires within
+   * 6 months. Soonest-to-expire / most-overdue first. */
+  const passportIssues = roster
+    .map((d) => ({ name: d.name, vip: !!d.vip, expiry: d.passport_expiry, ...checkPassportExpiry(d.passport_expiry) }))
+    .filter((x) => x.status === "expired" || x.status === "expiring")
+    .sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0));
 
   let exceptions = [];
   try {
@@ -958,7 +980,7 @@ async function buildSnapshot() {
     trip, kpis: dashboard.kpis,
     coaches: dashboard.coaches.length ? dashboard.coaches : COACHES,
     missing, exceptions, checkins, itinerary,
-    roster, byIndustry, byCompany, vips,
+    roster, byIndustry, byCompany, vips, passportIssues,
   };
 }
 
@@ -993,6 +1015,10 @@ function buildSystemPrompt(snapshot, lang) {
   const exceptionLines = snapshot.exceptions.length
     ? snapshot.exceptions.map((e) => `- [${e.priority}] ${e.type}${e.delegate ? ` · ${e.delegate}` : ""}${e.note ? ` — ${e.note}` : ""}`).join("\n")
     : "(no open exception tickets)";
+
+  const passportLines = snapshot.passportIssues?.length
+    ? snapshot.passportIssues.map((p) => `- ${p.name}${p.vip ? " (VIP)" : ""}: passport ${p.status === "expired" ? "EXPIRED" : "expiring"} (${p.expiry})`).join("\n")
+    : "(no passport issues — all captured expiries valid 6+ months)";
 
   const methodLine = Object.keys(snapshot.checkins.byMethod).length
     ? Object.entries(snapshot.checkins.byMethod).map(([m, n]) => `${m}: ${n}`).join(", ")
@@ -1085,6 +1111,9 @@ ${missingLines}
 
 Open exception tickets:
 ${exceptionLines}
+
+Passport issues (expired, or expiring within 6 months of today):
+${passportLines}
 
 Check-ins so far: ${snapshot.checkins.total} total (${methodLine}).
 
@@ -1179,7 +1208,7 @@ function coachNameById(id, coaches) {
  * answer and the model prompt's PRIORITIES block, so both lead with the same
  * computed judgement. Plain text (no markdown) so it reads cleanly in either. */
 function computeRisk(snapshot) {
-  const { missing = [], exceptions = [], coaches = [] } = snapshot || {};
+  const { missing = [], exceptions = [], coaches = [], passportIssues = [] } = snapshot || {};
   const items = [];
 
   const missingVips = missing.filter((m) => m.vip);
@@ -1192,6 +1221,17 @@ function computeRisk(snapshot) {
   if (critical.length) {
     items.push({ score: 900 + critical.length, level: "critical",
       text: `${critical.length} critical exception${critical.length > 1 ? "s" : ""}: ${critical.map((e) => e.type + (e.delegate ? ` (${e.delegate})` : "")).join("; ")}` });
+  }
+
+  const expiredPp = passportIssues.filter((p) => p.status === "expired");
+  if (expiredPp.length) {
+    items.push({ score: 850 + expiredPp.length, level: "critical",
+      text: `${expiredPp.length} expired passport${expiredPp.length > 1 ? "s" : ""}: ${expiredPp.map((p) => p.name).join(", ")}` });
+  }
+  const expiringPp = passportIssues.filter((p) => p.status === "expiring");
+  if (expiringPp.length) {
+    items.push({ score: 300 + expiringPp.length, level: "medium",
+      text: `${expiringPp.length} passport${expiringPp.length > 1 ? "s" : ""} expiring within 6 months` });
   }
 
   // Operational gap: the coach furthest from boarded (most still missing).
@@ -1220,6 +1260,7 @@ function answerLocally(question, snapshot) {
   const {
     kpis = {}, coaches = [], missing = [], roster = [], byCompany = [],
     byIndustry = [], vips = [], exceptions = [], itinerary = [], trip = {},
+    passportIssues = [],
   } = snapshot;
   const has = (...ws) => ws.some((w) => q.includes(w));
   const asksCount = /\b(how many|number of|count|total)\b/.test(q);
@@ -1321,8 +1362,8 @@ function answerLocally(question, snapshot) {
     return `${head}\n${lines.join("\n")}`;
   }
 
-  // 11) Open exception tickets
-  if (has("exception", "issue", "problem", "ticket", "incident", "anything wrong", "any issues")) {
+  // 11) Open exception tickets (but not "passport issues" — that's its own intent)
+  if (!has("passport") && has("exception", "issue", "problem", "ticket", "incident", "anything wrong", "any issues")) {
     if (!exceptions.length) return "No open exception tickets right now.";
     const lines = exceptions.slice(0, 10).map((e) => `- [${e.priority}] ${e.type}${e.delegate ? ` · ${e.delegate}` : ""}`);
     return `${bold(exceptions.length)} open exception${exceptions.length > 1 ? "s" : ""}:\n${lines.join("\n")}`;
@@ -1335,7 +1376,15 @@ function answerLocally(question, snapshot) {
     return `Today's itinerary:\n${lines.join("\n")}`;
   }
 
-  // 13) Risk / "who should I worry about" — a ranked, computed priority list
+  // 13) Passport validity
+  if (has("passport", "expiry", "expiring", "expire", "travel doc", "travel document")) {
+    if (!passportIssues.length) return "No passport issues — every captured passport expiry is valid for at least 6 months.";
+    const lines = passportIssues.slice(0, 15).map((p) => `- ${p.name}${p.vip ? " (VIP)" : ""} — ${p.status === "expired" ? "EXPIRED" : "expires"} ${p.expiry}`);
+    const more = passportIssues.length > 15 ? `\n…and ${passportIssues.length - 15} more.` : "";
+    return `${bold(passportIssues.length)} passport${passportIssues.length > 1 ? "s" : ""} to check:\n${lines.join("\n")}${more}`;
+  }
+
+  // 14) Risk / "who should I worry about" — a ranked, computed priority list
   if (has("worry", "worried", "concern", "risk", "chase", "priorit", "attention", "watch", "focus on", "urgent", "trouble")) {
     const risks = computeRisk(snapshot);
     if (!risks.length) return `Nothing urgent right now — no missing VIPs and no critical exceptions.${kpis.missing ? ` ${kpis.missing} delegates are still to check in.` : " Everyone's accounted for."}`;
@@ -1613,4 +1662,5 @@ export {
   isPlausibleDelegate,
   answerLocally,
   computeRisk,
+  checkPassportExpiry,
 };

@@ -59,6 +59,21 @@ const POLL_MS = 2500;
 
 const keyOf = (name) => (name || "").trim().toLowerCase();
 
+/* Review-time passport check — mirrors the backend rule: flag a parsed row whose
+ * passport is expired or expires within 6 months (the overseas-travel rule), so
+ * the organiser can catch it before confirming. Returns null when there's no
+ * usable expiry (never a false alarm). */
+const passportFlag = (expiry) => {
+  if (!expiry) return null;
+  const d = new Date(expiry);
+  if (Number.isNaN(d.getTime())) return null;
+  const now = new Date();
+  const six = new Date(now); six.setMonth(six.getMonth() + 6);
+  if (d < now) return "expired";
+  if (d < six) return "expiring";
+  return null;
+};
+
 export default function OnboardingPage() {
   const { t } = useLang();
   const inputRef = useRef(null);
@@ -426,6 +441,11 @@ export default function OnboardingPage() {
                           <span style={{ fontWeight: 700, fontSize: 15.5 }}>{r.fullName}</span>
                           {dup && <span className="mg-pill" style={{ color: "var(--st-missing)", background: "var(--surface-2)" }}>{t("Already in trip")}</span>}
                           {flagged && !dup && <span className="mg-pill" style={{ color: "var(--st-review)", background: "var(--surface-2)" }}>{t("Needs review")}</span>}
+                          {passportFlag(r.passportExpiry) && (
+                            <span className="mg-pill" style={{ color: passportFlag(r.passportExpiry) === "expired" ? "var(--st-missing)" : "var(--st-review)", background: "var(--surface-2)" }}>
+                              {passportFlag(r.passportExpiry) === "expired" ? t("Passport expired") : t("Passport expiring")}
+                            </span>
+                          )}
                         </div>
                       )}
 

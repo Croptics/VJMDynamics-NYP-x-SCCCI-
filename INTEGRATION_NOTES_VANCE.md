@@ -130,6 +130,12 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   no AI engine is reachable** (e.g. the deployed cloud host without Ollama) —
   open-ended questions then return a graceful "text engine unavailable here"
   message (`source:"unavailable"`) instead of an error.
+- **Passport-expiry validation (`checkPassportExpiry`)** flags delegates whose
+  passport is **expired** or **expiring within 6 months** (the standard overseas
+  rule); missing/unparseable dates are never flagged. Surfaced three ways: a
+  review-time pill on the onboarding cards (catch it before confirm), a fast-path
+  assistant intent ("any passport issues?"), and a `computeRisk` item (expired =
+  critical, expiring = medium) so it appears in the "what to watch" widget too.
 - **Risk scoring (`computeRisk`)** ranks what to worry about from the live
   snapshot — missing VIPs and CRITICAL exceptions first, then the coach furthest
   from boarded, then ordinary open tickets. It powers the fast-path "who should I
