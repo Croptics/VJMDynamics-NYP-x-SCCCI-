@@ -1,12 +1,13 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   AreaChart, Area,
 } from "recharts";
-import { apiPost, getUser } from "../lib/api.js";
+import { getUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { subscribe as subscribeInsights, getSnapshot as getInsightsSnapshot, generateInsights as runGenerateInsights } from "../lib/insightsStore.js";
 
 /**
  * Analytics panel — the "Analytics" tab inside the Dashboard page.
@@ -74,31 +75,17 @@ export default function AnalyticsPanel({ data, missing, delegates = [] }) {
   const [sortOpen, setSortOpen] = useState(false);
   const [coachFilter, setCoachFilter] = useState("ALL");
   const [coachSort, setCoachSort] = useState("name"); // name | boarded | remaining | missing
-  const [insights, setInsights] = useState(null);
-  const [insightsAsOf, setInsightsAsOf] = useState(null);
-  const [insightsSource, setInsightsSource] = useState(null);
-  const [insightsLoading, setInsightsLoading] = useState(false);
-  const [insightsError, setInsightsError] = useState(null);
 
-  async function generateInsights() {
-    setInsightsLoading(true);
-    setInsightsError(null);
-    try {
-      const { insights: text, asOf, source } = await apiPost(`/trips/${TRIP_ID}/insights`, { lang });
-      setInsights(text);
-      setInsightsAsOf(asOf);
-      setInsightsSource(source);
-    } catch (e) {
-      // Use our own copy of the message (not the backend's e.message) so the
-      // dictionary can translate it.
-      setInsightsError(
-        e.code === "AI_NOT_CONFIGURED"
-          ? "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env."
-          : "AI insights are temporarily unavailable."
-      );
-    } finally {
-      setInsightsLoading(false);
-    }
+  // Backed by insightsStore.js, a module-level store OUTSIDE this component
+  // — not useState — specifically so "Generate Insights" survives switching
+  // Dashboard tabs (which unmounts this panel) or navigating away entirely
+  // (user report: it used to silently reset because the request's result
+  // had nowhere left to land once this component was gone).
+  const { loading: insightsLoading, insights, asOf: insightsAsOf, source: insightsSource, error: insightsError } =
+    useSyncExternalStore(subscribeInsights, () => getInsightsSnapshot(TRIP_ID));
+
+  function generateInsights() {
+    runGenerateInsights(TRIP_ID, lang);
   }
 
   function toggle(key) {

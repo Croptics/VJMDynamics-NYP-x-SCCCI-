@@ -697,6 +697,29 @@ export async function clearDelegatePhoto(id) {
   return existing.photoPublicId || null;
 }
 
+/** Every delegate that currently has a photo — used by the Settings → Image
+ *  storage media manager to show which stored Cloudinary asset belongs to
+ *  which delegate (and which are orphaned: still in storage but no delegate
+ *  references them, e.g. left over from a photo that was since replaced). */
+export async function listDelegatesWithPhoto() {
+  return all('SELECT id, name, "photoPublicId" FROM delegates WHERE "photoPublicId" IS NOT NULL');
+}
+
+/** Unlink a delegate's photo columns by Cloudinary publicId rather than
+ *  delegate id — used after deleting an asset from the media manager (which
+ *  operates on Cloudinary publicIds, not a specific delegate), so a delegate
+ *  whose photo just got destroyed that way doesn't keep pointing at a
+ *  now-dead image URL. */
+export async function clearPhotoByPublicId(publicIds) {
+  if (!publicIds || !publicIds.length) return 0;
+  // run() doesn't surface rowCount (see the Query helpers comment above), so
+  // count affected rows with a SELECT first rather than changing that shared
+  // helper's contract just for this one caller.
+  const affected = await all('SELECT id FROM delegates WHERE "photoPublicId" = ANY($1)', [publicIds]);
+  await run('UPDATE delegates SET "photoUrl" = NULL, "photoPublicId" = NULL WHERE "photoPublicId" = ANY($1)', [publicIds]);
+  return affected.length;
+}
+
 /* ---- Bulk delete (dashboard "Delete all") -------------------------------
  * tripUuid scopes the wipe to just that trip's delegates; null (the base t-1
  * unfiltered view) keeps the original behaviour of clearing every delegate. */
@@ -753,11 +776,19 @@ export async function resolveTripUuid(tripId) {
   return t?.uuid_id || null;
 }
 
+// "Boarded" = arrived on the coach. ARRIVED is the current 5-status value;
+// PRESENT is the pre-migration literal some rows/routes still carry (aliased
+// to ARRIVED in normalize()). Count BOTH everywhere a headcount is derived,
+// or the Present KPI + coach progress bars silently undercount every delegate
+// checked in after the ARRIVED migration.
+const isBoarded = (x) => x.status === "PRESENT" || x.status === "ARRIVED";
+
 export async function getDashboard(tripUuid = null) {
   const d = await listDelegates(tripUuid);
   const activity = await getActivity(8); // small preview — full history lives on its own endpoint
-  const present = d.filter((x) => x.status === "PRESENT").length;
+  const present = d.filter(isBoarded).length;
   const missing = d.filter((x) => x.status === "MISSING").length;
+  const late = d.filter((x) => x.status === "LATE").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
 
   const coachRows = tripUuid
@@ -771,8 +802,11 @@ export async function getDashboard(tripUuid = null) {
       name: c.name,
       city: c.city,
       capacity: c.capacity,
-      boarded: assigned.filter((x) => x.status === "PRESENT").length,
+      boarded: assigned.filter(isBoarded).length,
+      // Surfaced per-coach so the Coach status card can show a severity-ranked
+      // headline badge (Missing outranks Late — see CoachBar on the frontend).
       missing: assigned.filter((x) => x.status === "MISSING").length,
+      late: assigned.filter((x) => x.status === "LATE").length,
       total: assigned.length,
     };
   });
@@ -783,6 +817,7 @@ export async function getDashboard(tripUuid = null) {
       total: d.length,
       present,
       missing,
+      late,
       unassigned,
       openExceptions: 0,
       criticalExceptions: 0,

@@ -1,5 +1,5 @@
-import { useOutletContext } from "react-router-dom";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { useOutletContext, useNavigate } from "react-router-dom";
+import { LogOut, ShieldCheck, HelpCircle, ChevronRight } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -9,6 +9,7 @@ import { useLang } from "../../lib/i18n.jsx";
  */
 export default function MobileProfilePage() {
   const { t } = useLang();
+  const navigate = useNavigate();
   const { onLogout } = useOutletContext() || {};
   const user = getUser() || {};
   const perms = getPermissions();
@@ -57,6 +58,18 @@ export default function MobileProfilePage() {
           </div>
         )}
       </div>
+
+      <button
+        className="mobile-card row between"
+        style={{ width: "100%", cursor: "pointer", border: "1px solid var(--line)" }}
+        onClick={() => navigate("/guide")}
+      >
+        <span className="row" style={{ gap: 10 }}>
+          <HelpCircle size={18} color="var(--ink-3)" />
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t("User guide")}</span>
+        </span>
+        <ChevronRight size={16} color="var(--ink-3)" />
+      </button>
 
       <button className="btn btn-ghost btn-block" onClick={handleLogout} style={{ marginTop: 8 }}>
         <LogOut size={16} /> {t("Log out")}

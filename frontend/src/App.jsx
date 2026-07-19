@@ -15,6 +15,7 @@ import ExceptionInboxPage from "./pages/ExceptionInboxPage.jsx";
 import AccountControlPage from "./pages/AccountControlPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import HistoryLogPage from "./pages/HistoryLogPage.jsx";
+import UserGuidePage from "./pages/UserGuidePage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
@@ -147,6 +148,11 @@ export default function App() {
 
         {/* Settings — signed-in account info + theme/language preferences */}
         <Route path="/settings" element={<SettingsPage />} />
+
+        {/* User guide — onboarding walkthrough + delegate status explainer,
+            open to any signed-in user (no permission gate — it's for people
+            brand new to the app, regardless of what they're allowed to edit) */}
+        <Route path="/guide" element={<UserGuidePage />} />
 
         <Route path="*" element={<Navigate to={pickHomeRoute()} replace />} />
       </Route>

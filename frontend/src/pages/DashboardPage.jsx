@@ -15,6 +15,7 @@ import {
   UserCheck,
   HelpCircle,
   Bell,
+  Clock,
   Activity,
   Crown,
   Plus,
@@ -27,11 +28,12 @@ import {
   Users,
   Radio,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser, getToken } from "../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../lib/api.js";
 import StatusBadge from "../components/StatusBadge.jsx";
 import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
-import DelegateAvatar from "../components/DelegateAvatar.jsx";
+import DelegateAvatar, { statusTone } from "../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../components/DelegateLocationMap.jsx";
+import ExportModal from "../components/ExportModal.jsx";
 import { useLang } from "../lib/i18n.jsx";
 
 /**
@@ -54,7 +56,6 @@ import { useLang } from "../lib/i18n.jsx";
  */
 
 const TRIP_ID = "t-1";
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const EMPTY_FORM = {
   name: "", coachId: "", status: "ARRIVED", vip: false, lastSeen: "", lastLocation: "",
@@ -116,6 +117,8 @@ export default function DashboardPage() {
   // card, not a persistent tab (was one; the user liked the content but not
   // that UX, so it moved to an on-demand modal instead).
   const [headcountOpen, setHeadcountOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const delegateTableRef = useRef(null);
 
 
   // modal state
@@ -202,40 +205,19 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [tab, perms.manageAccounts, loadStaffOps]);
 
-  async function exportXlsx() {
-    // Fetch with the auth header (the export route requires the "exportData"
-    // permission) and trigger the download from the response blob. A plain
-    // window.open() can't send the Authorization header, so it would 401.
-    setError(null);
-    try {
-      const res = await fetch(`${API_BASE}/trips/${selectedTripId}/export?format=xlsx`, {
-        headers: { Authorization: `Bearer ${getToken()}` },
-      });
-      if (!res.ok) {
-        throw new Error(
-          res.status === 403
-            ? "You don't have permission to export."
-            : res.status === 401
-            ? "Please sign in again."
-            : `Export failed (${res.status}).`
-        );
-      }
-      const blob = await res.blob();
-      const cd = res.headers.get("Content-Disposition") || "";
-      const match = cd.match(/filename="?([^"]+)"?/);
-      const filename = match ? match[1] : "attendance.xlsx";
+  // Excel export now runs through the ExportModal (opened by the Export
+  // button), which lets the user pick status/coach/VIP/columns + an AI filter
+  // before downloading — see components/ExportModal.jsx.
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e.message || "Export failed.");
-    }
+  // KPI tile drill-down → jump to the delegate table filtered to that status
+  // and scroll it into view. Shared by all 4 primary tiles (Missing/Present/
+  // Unassigned/Late) so every one of them behaves the same way.
+  function showDelegatesFiltered(status) {
+    setTab("delegate");
+    setStatusFilter(status);
+    requestAnimationFrame(() =>
+      delegateTableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+    );
   }
 
   /* ---- CRUD handlers ---------------------------------------------------- */
@@ -520,7 +502,7 @@ export default function DashboardPage() {
           >
             <RefreshCw size={16} className={loading ? "spin" : ""} /> {t("Refresh")}
           </button>
-          <button className="btn btn-primary" onClick={exportXlsx} disabled={!data} style={{ display: perms.exportData ? undefined : "none" }}>
+          <button className="btn btn-primary" onClick={() => setExportOpen(true)} disabled={!data} style={{ display: perms.exportData ? undefined : "none" }}>
             <Download size={16} /> {t("Export")}
           </button>
         </div>
@@ -610,6 +592,8 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {exportOpen && <ExportModal tripId={selectedTripId} onClose={() => setExportOpen(false)} />}
+
       {headcountOpen && (
         <div style={S.overlay} onClick={() => setHeadcountOpen(false)}>
           <div className="card" style={{ ...S.modal, width: "min(1000px, 100%)" }} onClick={(e) => e.stopPropagation()}>
@@ -624,7 +608,10 @@ export default function DashboardPage() {
             </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 16 }}>
             {coaches.map((c) => {
-              const coachMissing = missing.filter((m) => m.coachId === c.id);
+              // "Missing" folds in LATE too (per the simplified status logic),
+              // so this list shows everyone not yet accounted for — pulled from
+              // the full delegate list since the `missing` array is MISSING-only.
+              const coachMissing = delegates.filter((d) => d.coachId === c.id && (d.status === "MISSING" || d.status === "LATE"));
               const boardedPct = c.capacity ? Math.round((c.boarded / c.capacity) * 100) : 0;
               return (
                 <div key={c.id} className="card" style={{ padding: 20 }}>
@@ -634,7 +621,7 @@ export default function DashboardPage() {
                       <div className="muted" style={{ fontSize: 12 }}>{c.boarded}/{c.capacity} {t("boarded")}</div>
                     </div>
                     {coachMissing.length === 0 ? (
-                      <span className="badge badge-present">{t("All in")}</span>
+                      <span className="badge badge-present">{t("Arrived")}</span>
                     ) : (
                       <span className="badge badge-missing">{coachMissing.length} {t("missing")}</span>
                     )}
@@ -656,7 +643,9 @@ export default function DashboardPage() {
                                 <span style={{ fontWeight: 500, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
                                 {m.vip && <Crown size={13} color="var(--st-review)" style={{ flexShrink: 0 }} />}
                               </div>
-                              <div className="muted" style={{ fontSize: 12 }}>{m.lastSeen || t("No status")}</div>
+                              {/* Everyone here is missing or late, so the subtitle is their
+                                  last known location rather than a generic status label. */}
+                              <div className="muted" style={{ fontSize: 12 }}>{m.lastLocation || t("Last known location")}</div>
                             </div>
                           </div>
                           {m.lastLocation && (
@@ -720,6 +709,11 @@ export default function DashboardPage() {
                     <span className="muted" style={{ fontSize: 13, fontWeight: 600 }}>{t("Total staff accounts")}</span>
                   </div>
                   <div style={{ fontSize: 30, fontWeight: 700 }}>{staffOps.totalStaff}</div>
+                  {(staffOps.adminCount != null && staffOps.staffCount != null) && (
+                    <div className="muted" style={{ fontSize: 13 }}>
+                      {staffOps.adminCount} {t("Admin")} · {staffOps.staffCount} {t("Staff")}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -760,15 +754,22 @@ export default function DashboardPage() {
       <>
       {/* ---- KPI tiles ---------------------------------------------------- */}
       {k && (
-        <div style={S.kpiGrid}>
+        <div className="kpi-grid">
+          {/* Order: Missing, Late, Present, Unassigned — the two "needs
+              attention" statuses lead, grouped together, ahead of the two
+              calmer counts. */}
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
-            suffix={`${t("of")} ${k.total}`} foot={trip ? `${t("Departure in")} ${trip.departsIn}` : null} big />
+            suffix={`${t("of")} ${k.total}`} foot={trip ? `${t("Departure in")} ${trip.departsIn}` : null} big
+            onClick={() => showDelegatesFiltered("MISSING")} />
+          <Kpi tone="late" icon={Clock} label={t("Late")} value={`${k.late ?? 0}`}
+            foot={t("Past cut-off, not checked in")}
+            onClick={() => showDelegatesFiltered("LATE")} />
           <Kpi tone="present" icon={UserCheck} label={t("Present")} value={`${k.present}`}
-            foot={`+${k.presentDelta} ${t("in last 5 mins")}`} />
+            foot={`+${k.presentDelta} ${t("in last 5 mins")}`}
+            onClick={() => showDelegatesFiltered("ARRIVED")} />
           <Kpi tone="unassigned" icon={HelpCircle} label={t("Unassigned")} value={`${k.unassigned}`}
-            foot={t("No coach yet")} />
-          <Kpi tone="normal" icon={Bell} label={t("Open exceptions")} value={`${k.openExceptions}`}
-            foot={`${k.criticalExceptions} ${t("critical")} · ${k.normalExceptions} ${t("normal")}`} />
+            foot={t("No coach yet")}
+            onClick={() => showDelegatesFiltered("UNASSIGNED")} />
         </div>
       )}
 
@@ -786,7 +787,7 @@ export default function DashboardPage() {
                   onClick={() => setHeadcountOpen(true)}
                   title={t("Who's still missing, per coach — the same view staff see on the Check-in screen.")}
                 >
-                  <Users size={13} /> {t("Reverse headcount")}
+                  <Users size={13} /> {t("More details")}
                 </button>
               </div>
             </div>
@@ -860,7 +861,7 @@ export default function DashboardPage() {
 
       {/* ---- All delegates (CRUD surface) -------------------------------- */}
       {data && (
-        <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
+        <div ref={delegateTableRef} className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
             <div>
               <h2 style={{ fontSize: 16 }}>{t("All delegates")}</h2>
@@ -1037,16 +1038,20 @@ export default function DashboardPage() {
 
             {editingId && (
               <div className="row" style={{ gap: 14, marginBottom: 18 }}>
+                {/* Status-toned across all 5 states via the shared statusTone()
+                    helper (DelegateAvatar.jsx) — was MISSING-vs-everyone-else
+                    binary, so an Unassigned/Assigned/Late delegate's header
+                    all showed the same green as Arrived. */}
                 {editingPhotoUrl ? (
-                  <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: `0 0 0 2px ${form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)"}` }} />
+                  <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: `0 0 0 2px ${statusTone(form.status).fg}` }} />
                 ) : (
                   <span
                     className="avatar"
                     style={{
                       width: 56, height: 56, fontSize: 20,
-                      background: form.status === "MISSING" ? "var(--st-missing-bg)" : "var(--st-present-bg)",
-                      color: form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)",
-                      boxShadow: `inset 0 0 0 1.5px ${form.status === "MISSING" ? "var(--st-missing)" : "var(--st-present)"}`,
+                      background: statusTone(form.status).bg,
+                      color: statusTone(form.status).fg,
+                      boxShadow: `inset 0 0 0 1.5px ${statusTone(form.status).fg}`,
                     }}
                   >
                     {form.name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?"}
@@ -1234,15 +1239,44 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}
+        /* 4 equal columns at a fixed width, not auto-fit — auto-fit's minmax
+           boundaries produce an uneven trailing gap/card width depending on
+           exactly how many columns fit, which is what read as "unaligned".
+           Explicit breakpoints instead of a fluid track keep every card the
+           same size as its row-mates at every width. */
+        .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:22px;align-items:stretch}
+        .kpi-grid > *{min-height:132px}
+        @media (max-width:960px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
+        @media (max-width:480px){.kpi-grid{grid-template-columns:1fr}}
+        .kpi-clickable{transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease}
+        /* Hover/focus color now matches each card's OWN status tone (--kpi-tone,
+           set inline per card) instead of a hardcoded var(--st-normal) — that
+           hardcode was a leftover from when this hover style was written for
+           the old single purple "Open exceptions" tile, so every OTHER card
+           (including Late) inherited that same purple on hover regardless of
+           its actual color. */
+        .kpi-clickable:hover{box-shadow:var(--shadow-md);border-color:var(--kpi-tone);transform:translateY(-1px)}
+        .kpi-clickable:focus-visible{outline:2px solid var(--kpi-tone);outline-offset:2px}`}</style>
     </div>
   );
 }
 
 /* ---- KPI tile ----------------------------------------------------------- */
-function Kpi({ tone, icon: Icon, label, value, suffix, foot, big }) {
+function Kpi({ tone, icon: Icon, label, value, suffix, foot, big, onClick }) {
+  const clickable = !!onClick;
   return (
-    <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 10 }}>
+    <div
+      className={"card" + (clickable ? " kpi-clickable" : "")}
+      onClick={onClick}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onClick()) : undefined}
+      style={{
+        padding: 20, display: "flex", flexDirection: "column", gap: 10, cursor: clickable ? "pointer" : undefined,
+        "--kpi-tone": `var(--st-${tone})`,
+      }}
+    >
       <div className="row between">
         <span className="page-eyebrow" style={{ color: `var(--st-${tone})` }}>{label}</span>
         <Icon size={18} color={`var(--st-${tone})`} />
@@ -1299,8 +1333,13 @@ function staffOpsTimeAgo(iso, t) {
 function CoachBar({ coach, onOpen }) {
   const { t } = useLang();
   const pct = coach.capacity ? Math.round((coach.boarded / coach.capacity) * 100) : 0;
-  const allIn = coach.total > 0 && coach.missing === 0;
-  const barColor = coach.missing > 0 ? "var(--st-missing)" : "var(--st-present)";
+  // Simplified two-state headline (per request): a coach is "Missing" if it
+  // holds ANYONE not yet accounted for — LATE is folded in with MISSING, no
+  // separate Late badge — and "Arrived" only when everyone assigned has
+  // actually boarded. `attention` is that combined not-here count.
+  const attention = (coach.missing || 0) + (coach.late || 0);
+  const allArrived = coach.total > 0 && attention === 0 && coach.boarded === coach.total;
+  const barColor = attention > 0 ? "var(--st-missing)" : "var(--st-present)";
   const clickable = !!onOpen;
   return (
     <div
@@ -1318,10 +1357,12 @@ function CoachBar({ coach, onOpen }) {
           <span style={{ fontWeight: 500, fontSize: 14 }}>{coachDisplayName(coach)}</span>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          {coach.missing > 0 ? (
-            <span className="badge badge-missing">{coach.missing} {t("missing")}</span>
-          ) : allIn ? (
-            <span className="badge badge-present">{t("All in")}</span>
+          {attention > 0 ? (
+            <span className="badge badge-missing">{attention} {t("missing")}</span>
+          ) : allArrived ? (
+            <span className="badge badge-present">{t("Arrived")}</span>
+          ) : coach.total > 0 ? (
+            <span className="badge badge-neutral">{coach.total - coach.boarded} {t("to board")}</span>
           ) : (
             <span className="badge badge-neutral">{t("Empty")}</span>
           )}
@@ -1358,7 +1399,6 @@ function activityColor(kind) {
 /* ---- Local styles ------------------------------------------------------- */
 const S = {
   dot: { width: 10, height: 10, borderRadius: 999, background: "var(--st-present)", display: "inline-block", flexShrink: 0 },
-  kpiGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 16, marginTop: 22 },
   twoCol: { display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 20 },
   track: { height: 8, borderRadius: 999, background: "var(--line)", overflow: "hidden" },
   fill: { height: "100%", borderRadius: 999, transition: "width 0.4s ease" },

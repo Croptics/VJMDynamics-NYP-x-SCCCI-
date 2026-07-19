@@ -6,6 +6,7 @@ import { ShieldCheck, Sun, Moon, Languages } from "lucide-react";
 import { getUser, getPermissions } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
+import MediaManager from "../components/MediaManager.jsx";
 
 /**
  * Screen — Settings. Signed-in account info + app-wide preferences (theme,
@@ -98,6 +99,9 @@ export default function SettingsPage() {
           </button>
         </div>
       </div>
+
+      {/* ---- Image storage (manageAccounts-gated) ------------------------ */}
+      {perms.manageAccounts && <MediaManager />}
     </div>
   );
 }

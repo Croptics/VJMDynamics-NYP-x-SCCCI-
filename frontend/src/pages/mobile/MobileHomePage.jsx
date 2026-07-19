@@ -19,11 +19,15 @@ function greeting() {
  * Layout mirrors the Check-in screen's own "Trips" home tab
  * (QRCheckInPage.jsx's HomeView) so both mobile surfaces feel like the same
  * app: a personalized greeting header, a live Active Trip panel, a
- * glanceable KPI strip, and a Coach status card. Two differences from that
- * reference, both deliberate:
- *   - The KPI strip here is Missing/Present/Total (3 cards) per spec, not
- *     Check-in's Missing/Present/Unassigned (Unassigned stays reachable via
- *     the Attendance page's own filter chips).
+ * glanceable KPI strip, and a Coach status card. Differences from that
+ * reference, all deliberate:
+ *   - The KPI strip here is Missing/Present/Late (3 cards), not Check-in's
+ *     Missing/Present/Unassigned — Unassigned stays reachable via the
+ *     Attendance page's own filter chips, and Late gets the dedicated tile
+ *     instead since it's the higher-risk operational number during a live
+ *     trip. Total isn't a card here at all — it's a small text line under
+ *     the page title instead (2026-07-19), keeping the main tile row
+ *     dedicated to actionable/at-risk statuses rather than a plain count.
  *   - The whole "Coach status" card is ONE tap target that jumps straight to
  *     the Attendance page pre-filtered to Missing — Check-in's version lets
  *     you tap into any one coach's own headcount view instead. Each KPI tile
@@ -74,7 +78,11 @@ export default function MobileHomePage() {
       <div className="row between" style={{ alignItems: "flex-start", marginBottom: 4 }}>
         <div>
           <div className="muted" style={{ fontSize: 13 }}>{t(greeting())}</div>
-          <h1 style={{ fontSize: 22, margin: "2px 0 8px" }}>{staffName}</h1>
+          <h1 style={{ fontSize: 22, margin: "2px 0 4px" }}>{staffName}</h1>
+          {/* Total moved here (small subheader under the page title) — it's
+              no longer one of the main KPI cards, which now surface Late
+              instead so the actionable statuses keep the prime real estate. */}
+          {k && <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>{t("Total delegates")}: {k.total}</div>}
           <span className="badge badge-present">● {t("Online · synced")}</span>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
@@ -120,13 +128,18 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {/* Glanceable metrics — Missing / Present / Total, each a shortcut into
-          the Attendance page pre-filtered to that status. */}
+      {/* Glanceable metrics — Missing / Late / Present, each a shortcut into
+          the Attendance page pre-filtered to that status. Total moved out of
+          this row (see the subheader under the page title above) so these 3
+          stay dedicated to actionable, at-risk statuses. Order: the two
+          "needs attention" statuses (Missing, Late) lead together, ahead of
+          the calmer Present count — mirrors desktop DashboardPage.jsx's KPI
+          tile order. */}
       {k && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 14 }}>
           <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
+          <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
           <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
-          <Stat label={t("Total")} value={k.total} tone="neutral" onClick={() => goToAttendance("ALL")} />
         </div>
       )}
 
@@ -149,7 +162,10 @@ export default function MobileHomePage() {
             {data.coaches.map((c) => (
               <button
                 key={c.id}
-                onClick={() => goToAttendance("MISSING", c.id)}
+                // Badge now counts MISSING+LATE combined, and Attendance has
+                // no single-status filter for that pair — land on the coach's
+                // full roster (ALL) instead of a status that could be empty.
+                onClick={() => goToAttendance("ALL", c.id)}
                 className="row between"
                 style={{
                   width: "100%", background: "none", border: "none", padding: "8px 4px",
@@ -158,8 +174,10 @@ export default function MobileHomePage() {
                 }}
               >
                 <span>{[c.name, c.city].filter(Boolean).join(" · ")}</span>
-                <span className={c.missing > 0 ? "badge badge-missing" : "badge badge-present"}>
-                  {c.missing > 0 ? `${c.missing} ${t("missing")}` : t("All in")}
+                {/* Simplified two-state badge (mirrors desktop CoachBar):
+                    Late folds into Missing, no separate Late badge here. */}
+                <span className={(c.missing || 0) + (c.late || 0) > 0 ? "badge badge-missing" : "badge badge-present"}>
+                  {(c.missing || 0) + (c.late || 0) > 0 ? `${(c.missing || 0) + (c.late || 0)} ${t("missing")}` : t("Arrived")}
                 </span>
               </button>
             ))}

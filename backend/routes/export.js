@@ -1,0 +1,533 @@
+/**
+ * Customizable Excel export — POST /api/trips/:id/export
+ *
+ * Upgrades the old one-click flat-sheet dump into a configurable, polished
+ * MULTI-SHEET workbook, modelled on the "Headcount Planning" reference: a
+ * Summary dashboard sheet (key metrics + per-coach breakdown + optional AI
+ * notes) plus a Delegates detail sheet with only the columns/rows the user
+ * asked for.
+ *
+ * Three surfaces:
+ *   POST /api/trips/:id/export            → build + stream the .xlsx (filtered)
+ *   GET  /api/trips/:id/export            → same, unfiltered (back-compat)
+ *   POST /api/trips/:id/export/ai-filter  → natural-language → structured filter
+ *
+ * The AI layer is deliberately BOUNDED and TRANSPARENT: it only ever turns a
+ * plain-language request ("VIPs still missing from coaches 5-8") into the same
+ * structured filter object the checkboxes produce, which the UI then shows and
+ * lets the user edit — the model never sees or writes delegate data directly,
+ * and an unreachable model degrades gracefully (the checkboxes still work, and
+ * an unavailable AI summary is simply omitted rather than failing the export).
+ *
+ * Mirrors insights.js's provider strategy: local Ollama first (free, nothing
+ * leaves the machine), Anthropic API fallback, and a clear "not configured"
+ * signal if neither is available — none of which can crash startup.
+ */
+
+import { Router } from "express";
+import ExcelJS from "exceljs";
+import { getTrip, getDashboard, getDelegates, resolveTripUuid } from "../data.js";
+import { requireAuth, requirePermission } from "../auth.js";
+
+const router = Router();
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/* ---- shared vocabulary --------------------------------------------------- */
+// ARRIVED is the current value; PRESENT is the legacy literal (aliased). Every
+// status comparison here normalizes PRESENT→ARRIVED so filters/counts are
+// consistent regardless of which check-in route wrote the row.
+const normStatus = (s) => (s === "PRESENT" ? "ARRIVED" : s);
+const STATUS_ORDER = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+const UNASSIGNED_KEY = "__unassigned";
+
+/* ---- export-content translation (English / Simplified Chinese) -----------
+ * The export is generated entirely server-side, so it can't reuse the
+ * frontend's i18n.jsx (different runtime/bundle) — this is a small, self-
+ * contained dictionary just for the strings that actually appear IN the
+ * generated workbook (sheet names, headers, status labels), independent of
+ * whatever language the requesting UI happens to be in. `lang` is an
+ * explicit per-export choice (see ExportModal.jsx's language selector), not
+ * implicitly tied to the staff member's own UI language — a coordinator
+ * might work in English but need to hand a Chinese-language report to
+ * someone else, or vice versa. */
+const T = {
+  en: {
+    sheetSummary: "Summary", sheetDelegates: "Delegates",
+    title: (name) => `${name} — Attendance Export`,
+    generated: (when, filters) => `Generated ${when} · Filters — ${filters}`,
+    keyMetrics: "KEY METRICS", total: "Total", arrived: "Arrived", missing: "Missing", late: "Late", assigned: "Assigned",
+    unassignedNoCoach: "Unassigned (no coach)",
+    coachBreakdown: "COACH BREAKDOWN", boarded: "Boarded", pctBoarded: "% Boarded",
+    unassignedGroup: "Unassigned",
+    aiSummary: "AI SUMMARY",
+    noMatch: "No delegates match the selected filters.",
+    filterStatus: "Status", filterCoach: "Coach", filterVip: "VIP only", filterNone: "None (all delegates)",
+    status: { UNASSIGNED: "Unassigned", ASSIGNED: "Assigned", ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" },
+    columns: {
+      name: "Name", coach: "Coach", status: "Status", vip: "VIP", company: "Company", role: "Role",
+      industry: "Industry", email: "Email", phone: "Phone", nationality: "Nationality",
+      passportNumber: "Passport", lastSeen: "Last seen", lastLocation: "Last location", createdAt: "Uploaded",
+    },
+  },
+  zh: {
+    sheetSummary: "摘要", sheetDelegates: "代表名单",
+    title: (name) => `${name} — 出席情况导出`,
+    generated: (when, filters) => `生成于 ${when} · 筛选条件 — ${filters}`,
+    keyMetrics: "关键指标", total: "总数", arrived: "已抵达", missing: "缺席", late: "迟到", assigned: "已分配",
+    unassignedNoCoach: "未分配（无车辆）",
+    coachBreakdown: "各车辆情况", boarded: "已登车", pctBoarded: "登车率",
+    unassignedGroup: "未分配",
+    aiSummary: "AI 摘要",
+    noMatch: "没有符合所选筛选条件的代表。",
+    filterStatus: "状态", filterCoach: "车辆", filterVip: "仅限贵宾", filterNone: "无（全部代表）",
+    status: { UNASSIGNED: "未分配", ASSIGNED: "已分配", ARRIVED: "已抵达", LATE: "迟到", MISSING: "缺席" },
+    columns: {
+      name: "姓名", coach: "车辆", status: "状态", vip: "贵宾", company: "公司", role: "职位",
+      industry: "行业", email: "电子邮箱", phone: "电话", nationality: "国籍",
+      passportNumber: "护照号码", lastSeen: "最后出现", lastLocation: "最后位置", createdAt: "上传时间",
+    },
+  },
+};
+const tt = (lang) => T[lang === "zh" ? "zh" : "en"];
+
+// Every column the detail sheet can render; `get` pulls the display value off
+// a delegate (ctx carries {coachName, tt} — tt is the active language's
+// translation object, so the Status column and VIP marker render in whatever
+// language was requested). Selectable individually so a coordinator can
+// export just the contact columns for a phone-round, or everything for a
+// full record. The English `label` here is only the /export/options
+// metadata default (and the fallback key lookup) — the actual header text
+// rendered into the sheet comes from tt(lang).columns[key] in buildWorkbook.
+const ALL_COLUMNS = [
+  { key: "name", label: "Name", width: 22, get: (d) => d.name },
+  { key: "coach", label: "Coach", width: 20, get: (d, ctx) => ctx.coachName(d.coachId) },
+  { key: "status", label: "Status", width: 13, get: (d, ctx) => ctx.tt.status[normStatus(d.status)] || d.status },
+  { key: "vip", label: "VIP", width: 7, get: (d, ctx) => (d.vip ? ctx.tt.columns.vip : "") },
+  { key: "company", label: "Company", width: 24, get: (d) => d.company || "" },
+  { key: "role", label: "Role", width: 18, get: (d) => d.role || "" },
+  { key: "industry", label: "Industry", width: 18, get: (d) => d.industry || "" },
+  { key: "email", label: "Email", width: 24, get: (d) => d.email || "" },
+  { key: "phone", label: "Phone", width: 16, get: (d) => d.phone || "" },
+  { key: "nationality", label: "Nationality", width: 14, get: (d) => d.nationality || "" },
+  { key: "passportNumber", label: "Passport", width: 16, get: (d) => d.passportNumber || "" },
+  { key: "lastSeen", label: "Last seen", width: 22, get: (d) => d.lastSeen || "" },
+  { key: "lastLocation", label: "Last location", width: 24, get: (d) => d.lastLocation || "" },
+  { key: "createdAt", label: "Uploaded", width: 18, get: (d) => fmtDate(d.createdAt) },
+];
+const DEFAULT_COLUMNS = ["name", "coach", "status", "vip", "company", "lastSeen", "createdAt"];
+
+const STATUS_FILL = {
+  ARRIVED: "FFE7F5EC", MISSING: "FFFDECEC", UNASSIGNED: "FFFDF3E3", ASSIGNED: "FFE7EEFB", LATE: "FFFCEEDB",
+};
+const BORDER = { style: "thin", color: { argb: "FFE5E7EB" } };
+const THIN_BORDER = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER };
+const BRAND = "FFE1232A";
+
+function fmtDate(v) {
+  if (!v) return "";
+  const d = new Date(v);
+  return isNaN(d) ? "" : d.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/* ---- filtering ----------------------------------------------------------- */
+// A missing/empty array in a dimension means "no constraint on that dimension"
+// (i.e. all) — so an empty filter object exports everything, matching the old
+// unfiltered behaviour.
+function makeCoachName(coaches, lang) {
+  const fallback = tt(lang).unassignedGroup;
+  return (id) => {
+    if (!id) return fallback;
+    const c = coaches.find((x) => x.id === id);
+    return c ? [c.name, c.city].filter(Boolean).join(" · ") : fallback;
+  };
+}
+
+function passesFilter(d, filters) {
+  const st = normStatus(d.status);
+  if (Array.isArray(filters.statuses) && filters.statuses.length && !filters.statuses.includes(st)) return false;
+  if (Array.isArray(filters.coachIds) && filters.coachIds.length) {
+    const cid = d.coachId || UNASSIGNED_KEY;
+    if (!filters.coachIds.includes(cid)) return false;
+  }
+  if (filters.vipOnly && !d.vip) return false;
+  return true;
+}
+
+function describeFilters(filters, coaches, lang) {
+  const L = tt(lang);
+  const parts = [];
+  if (filters.statuses?.length) parts.push(`${L.filterStatus}: ${filters.statuses.map((s) => L.status[s] || s).join(", ")}`);
+  if (filters.coachIds?.length) {
+    const coachName = makeCoachName(coaches, lang);
+    parts.push(`${L.filterCoach}: ${filters.coachIds.map((id) => (id === UNASSIGNED_KEY ? L.unassignedGroup : coachName(id))).join(", ")}`);
+  }
+  if (filters.vipOnly) parts.push(L.filterVip);
+  return parts.length ? parts.join("  ·  ") : L.filterNone;
+}
+
+/* ---- workbook builder ---------------------------------------------------- */
+function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, lang }) {
+  const L = tt(lang);
+  const coachName = makeCoachName(coaches, lang);
+  const ctx = { coachName, tt: L };
+  const cols = (columns && columns.length ? columns : DEFAULT_COLUMNS)
+    .map((k) => ALL_COLUMNS.find((c) => c.key === k))
+    .filter(Boolean);
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "MusterGo";
+  wb.created = new Date();
+
+  /* ===== Sheet 1 — Summary dashboard ===== */
+  const sum = wb.addWorksheet(L.sheetSummary, { views: [{ showGridLines: false }] });
+  sum.columns = [{ width: 26 }, { width: 14 }, { width: 12 }, { width: 12 }, { width: 12 }, { width: 12 }];
+
+  const titleRow = sum.addRow([L.title(trip?.name || "Trip")]);
+  sum.mergeCells(titleRow.number, 1, titleRow.number, 6);
+  titleRow.getCell(1).font = { size: 15, bold: true };
+  const metaRow = sum.addRow([
+    `${trip?.dateRange || ""}${trip ? ` · Day ${trip.dayOf} of ${trip.totalDays}` : ""}${trip?.lead ? ` · Lead: ${trip.lead}` : ""}`,
+  ]);
+  sum.mergeCells(metaRow.number, 1, metaRow.number, 6);
+  metaRow.getCell(1).font = { size: 10, color: { argb: "FF6B7280" } };
+  const genRow = sum.addRow([L.generated(new Date().toLocaleString("en-GB"), describeFilters(filters, coaches, lang))]);
+  sum.mergeCells(genRow.number, 1, genRow.number, 6);
+  genRow.getCell(1).font = { size: 9, italic: true, color: { argb: "FF6B7280" } };
+  sum.addRow([]);
+
+  // KEY METRICS band — counts over the FILTERED set, so the summary always
+  // agrees with the Delegates sheet beside it.
+  const counts = { total: delegates.length, ARRIVED: 0, MISSING: 0, LATE: 0, ASSIGNED: 0, UNASSIGNED: 0 };
+  for (const d of delegates) counts[normStatus(d.status)] = (counts[normStatus(d.status)] || 0) + 1;
+
+  const metricHead = sum.addRow([L.keyMetrics, L.total, L.arrived, L.missing, L.late, L.assigned]);
+  metricHead.eachCell((cell, col) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
+    cell.border = THIN_BORDER;
+    cell.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "center" };
+  });
+  const metricVals = sum.addRow(["", counts.total, counts.ARRIVED, counts.MISSING, counts.LATE, counts.ASSIGNED]);
+  metricVals.eachCell((cell, col) => {
+    cell.border = THIN_BORDER;
+    if (col > 1) { cell.alignment = { horizontal: "center" }; cell.font = { bold: true, size: 13 }; }
+  });
+  // Unassigned on its own line so the band stays 5 metric columns wide.
+  const unRow = sum.addRow([L.unassignedNoCoach, counts.UNASSIGNED]);
+  unRow.getCell(1).font = { color: { argb: "FF6B7280" } };
+  unRow.getCell(2).alignment = { horizontal: "center" };
+  sum.addRow([]);
+
+  // Per-coach breakdown over the filtered set.
+  const bh = sum.addRow([L.coachBreakdown, L.total, L.boarded, L.missing, L.late, L.pctBoarded]);
+  bh.eachCell((cell, col) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
+    cell.border = THIN_BORDER;
+    cell.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "center" };
+  });
+  const groups = new Map();
+  for (const d of delegates) {
+    const key = d.coachId || UNASSIGNED_KEY;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(d);
+  }
+  const coachOrder = [...coaches.map((c) => c.id), UNASSIGNED_KEY];
+  for (const cid of coachOrder) {
+    const list = groups.get(cid);
+    if (!list || !list.length) continue;
+    const total = list.length;
+    const boarded = list.filter((d) => normStatus(d.status) === "ARRIVED").length;
+    const missing = list.filter((d) => d.status === "MISSING").length;
+    const late = list.filter((d) => d.status === "LATE").length;
+    const pct = total ? Math.round((boarded / total) * 100) : 0;
+    const label = cid === UNASSIGNED_KEY ? L.unassignedGroup : coachName(cid);
+    const row = sum.addRow([label, total, boarded, missing, late, `${pct}%`]);
+    row.eachCell((cell, col) => {
+      cell.border = THIN_BORDER;
+      if (col > 1) cell.alignment = { horizontal: "center" };
+    });
+  }
+
+  // Optional AI notes — best-effort; omitted entirely if unavailable. May
+  // contain \n line breaks (the numbered-bullet format, matching AI
+  // Insights) — wrapText renders each \n as its own visible line in Excel.
+  if (aiSummary) {
+    sum.addRow([]);
+    const aiHead = sum.addRow([L.aiSummary]);
+    sum.mergeCells(aiHead.number, 1, aiHead.number, 6);
+    aiHead.getCell(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    aiHead.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF7C3AED" } };
+    const noteRow = sum.addRow([aiSummary]);
+    sum.mergeCells(noteRow.number, 1, noteRow.number, 6);
+    noteRow.getCell(1).alignment = { wrapText: true, vertical: "top" };
+    const lineCount = aiSummary.split("\n").length;
+    const charHeight = Math.ceil(aiSummary.length / 90) * 15;
+    noteRow.height = Math.min(220, Math.max(26 + charHeight, lineCount * 18 + 10));
+  }
+
+  /* ===== Sheet 2 — Delegates detail ===== */
+  const ws = wb.addWorksheet(L.sheetDelegates);
+  const header = ws.addRow(cols.map((c) => L.columns[c.key] || c.label));
+  header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  header.eachCell((cell) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
+    cell.alignment = { vertical: "middle" };
+    cell.border = THIN_BORDER;
+  });
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+
+  // Sorted by status severity (Missing first) then name, so the sheet opens on
+  // what needs attention.
+  const sorted = [...delegates].sort((a, b) => {
+    const sa = STATUS_ORDER.indexOf(normStatus(a.status));
+    const sb = STATUS_ORDER.indexOf(normStatus(b.status));
+    if (sb !== sa) return sb - sa; // higher index (MISSING) first
+    return (a.name || "").localeCompare(b.name || "");
+  });
+  for (const d of sorted) {
+    const row = ws.addRow(cols.map((c) => c.get(d, ctx)));
+    const fill = STATUS_FILL[normStatus(d.status)];
+    row.eachCell((cell) => {
+      cell.border = THIN_BORDER;
+      if (fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+    });
+    const vipIdx = cols.findIndex((c) => c.key === "vip");
+    if (vipIdx >= 0 && d.vip) row.getCell(vipIdx + 1).font = { bold: true, color: { argb: "FFB45309" } };
+  }
+  ws.columns.forEach((col, i) => { col.width = cols[i]?.width || 16; });
+  if (!sorted.length) ws.addRow([L.noMatch]);
+
+  return wb;
+}
+
+/* ---- AI: natural language → structured filter, and export summary notes -- */
+// `json` forces Ollama's structured-output mode — needed for the ai-filter
+// endpoint (which must return a parseable {statuses,coachIds,vipOnly}
+// object), but must NOT be set for the freeform prose summary: with no JSON
+// schema to fill and nothing else to say, a model forced into JSON mode with
+// a prose prompt just emits an empty "{}" — which is exactly what showed up
+// in the Summary sheet instead of an actual written recap.
+async function tryOllama(prompt, { json = false } = {}) {
+  const base = process.env.OLLAMA_HOST || "http://localhost:11434";
+  const model = process.env.OLLAMA_MODEL || "llama3.2";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model, messages: [{ role: "user", content: prompt }], stream: false,
+        ...(json ? { format: "json" } : {}),
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callAnthropic(prompt, maxTokens = 400) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const anthropic = new Anthropic({ apiKey });
+  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5-20250929";
+  const response = await anthropic.messages.create({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] });
+  return (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+}
+
+// Pull the first {...} JSON object out of a model reply (handles chatty models
+// that wrap JSON in prose despite instructions).
+function extractJson(text) {
+  if (!text) return null;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+}
+
+function buildFilterPrompt(request, coaches) {
+  const coachLines = coaches.map((c) => `- id "${c.id}" = ${[c.name, c.city].filter(Boolean).join(" · ")}`).join("\n");
+  return `You translate a staff member's plain-language request into a JSON filter for an attendance export. Output ONLY a JSON object, no prose.
+
+Available statuses (use these exact UPPERCASE values): UNASSIGNED, ASSIGNED, ARRIVED, LATE, MISSING.
+- "arrived"/"present"/"boarded"/"checked in" → ARRIVED
+- "not arrived"/"not boarded"/"still to board" → include ASSIGNED, LATE and MISSING
+- "unaccounted"/"missing" → MISSING ; "late" → LATE ; "assigned"/"not yet checked in" → ASSIGNED
+
+Available coaches:
+${coachLines}
+Use the exact id string. When the request names a coach by number (e.g. "coach 5", "coaches 5 to 8"), match it to the coach whose name contains that number and use that coach's id — expand ranges to every coach in them. For "unassigned"/"no coach" use "${UNASSIGNED_KEY}".
+
+Return this shape (use an empty array to mean "no constraint on that dimension"). ONLY put values in "statuses" or "coachIds" that the request explicitly asks for — if it doesn't mention any coach, "coachIds" MUST be []; if it doesn't mention a status, "statuses" MUST be []:
+{"statuses": ["MISSING"], "coachIds": ["c1"], "vipOnly": false}
+
+Staff request: "${String(request).slice(0, 400)}"
+
+JSON:`;
+}
+
+function sanitizeFilter(raw, coaches) {
+  const validCoach = new Set([...coaches.map((c) => c.id), UNASSIGNED_KEY]);
+  const out = { statuses: [], coachIds: [], vipOnly: false };
+  if (raw && typeof raw === "object") {
+    if (Array.isArray(raw.statuses)) {
+      out.statuses = raw.statuses.map((s) => normStatus(String(s).toUpperCase())).filter((s) => STATUS_ORDER.includes(s));
+      out.statuses = [...new Set(out.statuses)];
+    }
+    if (Array.isArray(raw.coachIds)) out.coachIds = raw.coachIds.filter((id) => validCoach.has(id));
+    out.vipOnly = !!raw.vipOnly;
+  }
+  return out;
+}
+
+/* ---- routes -------------------------------------------------------------- */
+async function loadTripData(idParam) {
+  const tripUuid = await resolveTripUuid(idParam);
+  const [trip, delegates, dash] = await Promise.all([getTrip(tripUuid), getDelegates(tripUuid), getDashboard(tripUuid)]);
+  return { tripUuid, trip, delegates, coaches: dash.coaches || [] };
+}
+
+// Section labels for the AI summary's fixed 3-point structure — same
+// Overall/Missing/Advice shape (and same exact zh translations) as
+// insights.js's "Generate Insights" panel on the Dashboard, per the request
+// to make the export's AI note follow that same format.
+const SECTION_LABELS = {
+  en: { overall: "Overall", missing: "Missing", advice: "Advice" },
+  zh: { overall: "总体情况", missing: "缺席情况", advice: "建议" },
+};
+
+function buildSummaryPrompt(trip, filtered, coaches, filters, lang) {
+  const labels = SECTION_LABELS[lang === "zh" ? "zh" : "en"];
+  const coachName = makeCoachName(coaches, lang);
+  const counts = { ARRIVED: 0, MISSING: 0, LATE: 0, ASSIGNED: 0, UNASSIGNED: 0 };
+  for (const d of filtered) counts[normStatus(d.status)]++;
+  const missingNames = filtered.filter((d) => d.status === "MISSING").slice(0, 12)
+    .map((d) => `${d.name}${d.vip ? " (VIP)" : ""} · ${coachName(d.coachId)}`).join("; ") || "none";
+  const languageInstruction = lang === "zh"
+    ? "Write your entire response in Simplified Chinese (简体中文), including the three labels below exactly as given."
+    : "Write your entire response in English.";
+
+  return `You are writing an internal summary note for an SCCCI delegation attendance export, to be read by staff.
+
+Trip: ${trip?.name || "Trip"}${trip ? `, Day ${trip.dayOf} of ${trip.totalDays}` : ""}.
+This export (filters: ${describeFilters(filters, coaches, lang)}) contains ${filtered.length} delegates: ${counts.ARRIVED} arrived, ${counts.MISSING} missing, ${counts.LATE} late, ${counts.ASSIGNED} assigned, ${counts.UNASSIGNED} unassigned.
+Missing delegates: ${missingNames}.
+
+Write EXACTLY 3 numbered points, one per line, in this fixed structure:
+1. ${labels.overall}: overall attendance health for this export — the specific numbers, and whether it looks on track.
+2. ${labels.missing}: which delegates and/or coaches are missing, naming the ones with the most missing, and flagging any VIP delegates among them.
+3. ${labels.advice}: concrete next actions staff should take right now based on this export.
+
+Each point must start with its real number (1, 2, or 3), a period, a space, the exact label text given above, then a colon — for example the first point must literally begin "1. ${labels.overall}: " (substitute the real digit and label for points 2 and 3 the same way; never write the letter N or the word "Label" — those are not real output). Follow the label with one or two direct sentences containing specific numbers/names — no vague language. No markdown, no headers, no intro/closing sentence — just the 3 numbered points. ${languageInstruction}`;
+}
+
+// Optional AI summary of the filtered export — reuses the insights provider
+// strategy, but never fails the export: any error/absence just omits the notes.
+async function maybeAiSummary(trip, filtered, coaches, filters, lang) {
+  try {
+    const prompt = buildSummaryPrompt(trip, filtered, coaches, filters, lang);
+    const viaOllama = await tryOllama(prompt);
+    if (viaOllama) return viaOllama.replace(/^```[a-z]*|```$/g, "").trim();
+    return await callAnthropic(prompt, 300);
+  } catch {
+    return null;
+  }
+}
+
+async function handleExport(req, res, filters, options) {
+  const { trip, delegates, coaches } = await loadTripData(req.params.id);
+  const filtered = delegates.filter((d) => passesFilter(d, filters));
+  const lang = options.lang === "zh" ? "zh" : "en";
+
+  let aiSummary = null;
+  if (options.includeAiSummary && filtered.length) {
+    aiSummary = await maybeAiSummary(trip, filtered, coaches, filters, lang);
+  }
+
+  const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, lang });
+
+  // Filename stays plain-ASCII/English regardless of content language — a
+  // Chinese filename can still round-trip through Content-Disposition fine
+  // in modern browsers, but keeping it ASCII avoids any edge case with older
+  // clients/OSes and matches how the workbook is referenced in support chat.
+  const slug = (trip?.name || "trip").replace(/\s+/g, "_").toLowerCase();
+  const fileName = `attendance_${slug}${trip ? `_day${trip.dayOf}` : ""}.xlsx`;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+
+// Primary: filtered, configurable, multi-sheet.
+router.post("/api/trips/:id/export", requirePermission("exportData"), wrap(async (req, res) => {
+  const body = req.body || {};
+  const filters = {
+    statuses: Array.isArray(body.statuses) ? body.statuses.map((s) => normStatus(String(s).toUpperCase())).filter((s) => STATUS_ORDER.includes(s)) : [],
+    coachIds: Array.isArray(body.coachIds) ? body.coachIds : [],
+    vipOnly: !!body.vipOnly,
+  };
+  const options = {
+    columns: Array.isArray(body.columns) ? body.columns.filter((k) => ALL_COLUMNS.some((c) => c.key === k)) : null,
+    includeAiSummary: !!body.includeAiSummary,
+    // Independent, explicit per-export choice (ExportModal's language
+    // selector) — NOT implicitly tied to the requesting staff member's own
+    // UI language, since they might need to hand a report in the other
+    // language to someone else.
+    lang: body.lang === "zh" ? "zh" : "en",
+  };
+  await handleExport(req, res, filters, options);
+}));
+
+// Back-compat: unfiltered one-click (nothing constrains any dimension).
+router.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (req, res) => {
+  await handleExport(req, res, { statuses: [], coachIds: [], vipOnly: false }, { columns: null, includeAiSummary: false });
+}));
+
+// Metadata for the export config modal — the columns it can offer and the
+// coaches it can filter by (names resolved server-side).
+router.get("/api/trips/:id/export/options", requireAuth(), wrap(async (req, res) => {
+  const { coaches } = await loadTripData(req.params.id);
+  res.json({
+    columns: ALL_COLUMNS.map((c) => ({ key: c.key, label: c.label })),
+    defaultColumns: DEFAULT_COLUMNS,
+    statuses: STATUS_ORDER.map((s) => ({ key: s, label: T.en.status[s] })),
+    coaches: coaches.map((c) => ({ id: c.id, label: [c.name, c.city].filter(Boolean).join(" · ") })),
+  });
+}));
+
+// Natural-language → structured filter. Returns the same shape the checkboxes
+// produce so the UI can show + let the user edit it before exporting.
+router.post("/api/trips/:id/export/ai-filter", requirePermission("exportData"), wrap(async (req, res) => {
+  const request = (req.body?.prompt || "").toString().trim();
+  if (!request) return res.status(400).json({ error: "NO_PROMPT", message: "Describe what to export." });
+  const { coaches } = await loadTripData(req.params.id);
+  const prompt = buildFilterPrompt(request, coaches);
+
+  const viaOllama = await tryOllama(prompt, { json: true });
+  let parsed = extractJson(viaOllama);
+  if (!parsed) {
+    try {
+      const viaAnthropic = await callAnthropic(prompt, 300);
+      parsed = extractJson(viaAnthropic);
+    } catch (err) {
+      console.error("Export AI-filter call failed:", err.message || err);
+    }
+  }
+  if (!parsed) {
+    return res.status(503).json({
+      error: "AI_NOT_CONFIGURED",
+      message: "Natural-language filtering needs a local Ollama (free) or ANTHROPIC_API_KEY. The checkbox filters still work.",
+    });
+  }
+  res.json({ filter: sanitizeFilter(parsed, coaches) });
+}));
+
+export default router;

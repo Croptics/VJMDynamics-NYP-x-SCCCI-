@@ -22,7 +22,6 @@ import "dotenv/config"; // loads backend/.env into process.env — MUST be first
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import ExcelJS from "exceljs";
 import {
   initDb,
   getTrip,
@@ -247,7 +246,11 @@ app.post("/api/auth/logout", requireAuth(), wrap(async (req, res) => {
  */
 app.get("/api/staff/active-sessions", requirePermission("manageAccounts"), wrap(async (_req, res) => {
   const [all, active] = await Promise.all([listAccounts(), listActiveAccounts()]);
-  res.json({ totalStaff: all.length, activeCount: active.length, active });
+  // Role breakdown for the Staff operations "Total staff accounts" tile —
+  // role is "admin" or "staff" only (see cleanRole()/accountPublic() above).
+  const adminCount = all.filter((a) => a.role === "admin").length;
+  const staffCount = all.length - adminCount;
+  res.json({ totalStaff: all.length, adminCount, staffCount, activeCount: active.length, active });
 }));
 
 /* ---- Accounts (requires manageAccounts) --------------------------------- */
@@ -403,92 +406,10 @@ app.delete("/api/delegates/:id/photo", requirePermission("manageDelegates"), wra
 }));
 
 /* ---- Excel export --------------------------------------------------------
- * Matches the frontend's "exportData" permission gate on the Export button —
- * previously this route had no server-side check at all, so the gate was
- * cosmetic only.
+ * Moved to ./routes/export.js — a configurable, multi-sheet workbook with
+ * status/coach/VIP/column filters and an optional natural-language (AI) filter
+ * layer. Mounted with the other routers near the bottom of this file.
  * ------------------------------------------------------------------------- */
-app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (req, res) => {
-  const tripUuid = await resolveTripUuid(req.params.id);
-  const trip = await getTrip(tripUuid);
-  const delegates = await getDelegates(tripUuid);
-  const { coaches } = await getDashboard(tripUuid);
-
-  const wb = new ExcelJS.Workbook();
-  wb.creator = "MusterGo";
-  wb.created = new Date();
-
-  // Row-background tint per status, so a printed/scrolled sheet is scannable
-  // at a glance without reading the Status column text — mirrors the app's
-  // StatusBadge colors (arrived=green, missing=red, unassigned=amber,
-  // assigned=blue, late=orange). PRESENT kept as a legacy alias since some
-  // check-in routes still write it directly (see normalize() in data.js).
-  const STATUS_FILL = {
-    PRESENT: "FFE7F5EC",
-    ARRIVED: "FFE7F5EC",
-    MISSING: "FFFDECEC",
-    UNASSIGNED: "FFFDF3E3",
-    ASSIGNED: "FFE7EEFB",
-    LATE: "FFFCEEDB",
-  };
-  const BORDER = { style: "thin", color: { argb: "FFE5E7EB" } };
-  const THIN_BORDER = { top: BORDER, left: BORDER, bottom: BORDER, right: BORDER };
-
-  const ws = wb.addWorksheet("Attendance");
-  ws.mergeCells("A1:G1");
-  ws.getCell("A1").value = `${trip.name} — Attendance Report`;
-  ws.getCell("A1").font = { size: 14, bold: true };
-  ws.mergeCells("A2:G2");
-  ws.getCell("A2").value = `${trip.dateRange} · Day ${trip.dayOf} of ${trip.totalDays} · Lead: ${trip.lead}`;
-  ws.getCell("A2").font = { size: 10, color: { argb: "FF6B7280" } };
-
-  ws.addRow([]);
-  ws.addRow(["#", "Name", "VIP", "Coach", "Status", "Last seen", "Uploaded"]);
-  const head = ws.getRow(4);
-  head.font = { bold: true, color: { argb: "FFFFFFFF" } };
-  head.eachCell((cell) => {
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE1232A" } };
-    cell.alignment = { vertical: "middle" };
-    cell.border = THIN_BORDER;
-  });
-  ws.views = [{ state: "frozen", ySplit: 4 }]; // header stays visible while scrolling
-
-  // Look up live from the coaches table (a hardcoded c1-c4 map here used to
-  // export any newer coach's delegates as "Unassigned").
-  const coachName = (id) => {
-    const c = coaches.find((x) => x.id === id);
-    return c ? [c.name, c.city].filter(Boolean).join(" · ") : "Unassigned";
-  };
-  const fmtUploaded = (v) => {
-    if (!v) return "—";
-    const d = new Date(v);
-    return isNaN(d) ? "—" : d.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-  };
-
-  delegates.forEach((d, i) => {
-    const row = ws.addRow([
-      i + 1, d.name, d.vip ? "VIP" : "", coachName(d.coachId), d.status,
-      d.lastSeen || "—", fmtUploaded(d.createdAt),
-    ]);
-    const fill = STATUS_FILL[d.status];
-    row.eachCell((cell) => {
-      cell.border = THIN_BORDER;
-      if (fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
-    });
-    row.getCell(3).font = { bold: true, color: { argb: "FFB45309" } }; // VIP, if set
-    row.alignment = { vertical: "middle" };
-  });
-
-  ws.columns = [
-    { width: 5 }, { width: 22 }, { width: 8 }, { width: 20 },
-    { width: 14 }, { width: 24 }, { width: 18 },
-  ];
-
-  const fileName = `attendance_${trip.name.replace(/\s+/g, "_").toLowerCase()}_day${trip.dayOf}.xlsx`;
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-  await wb.xlsx.write(res);
-  res.end();
-}));
 
 /* ---- History tracker (persisted activity log) -----------------------------
  * Dashboard's "History tracker" card. Read for anyone signed in; deletes
@@ -555,6 +476,12 @@ app.post("/api/system/late-cutoff", requirePermission("manageDelegates"), wrap(a
 
 import insightsRouter from "./routes/insights.js";
 app.use(insightsRouter);
+
+import exportRouter from "./routes/export.js";
+app.use(exportRouter);
+
+import mediaRouter from "./routes/media.js";
+app.use(mediaRouter);
 
 import desmondRouter from "./routes/desmond.js";
 app.use(desmondRouter);

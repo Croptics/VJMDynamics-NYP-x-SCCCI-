@@ -140,7 +140,13 @@ data.js
     the enum, independent of data.js's normalize() and StatusBadge's
     STATE_MAP — see the "5 duplicate enum maps" note in the AI Log) gained
     ASSIGNED ("blue")/LATE ("orange") entries, PRESENT aliased to the
-    "Arrived" label/green color same as everywhere else. TripCoachPage.css
+    "Arrived" label/green color same as everywhere else. UNASSIGNED was
+    "yellow" originally; changed to "grey" (2026-07-19, uses the existing
+    --tf-grey token) so the delegate-details panel's status chip matches the
+    muted-grey-for-Unassigned convention adopted app-wide the same day (see
+    DelegateAvatar.jsx's statusTone()) — distinct from the yellow still used
+    for the unrelated "unassigned drop-zone" empty-coach-lane fleet card.
+    TripCoachPage.css
     gained matching --tf-orange/--tf-orange-bg/--tf-orange-line tokens
     (light+dark) — this page has its OWN --tf-* color variables, entirely
     separate from tokens.css's --st-* ones, so both had to be extended
@@ -210,6 +216,19 @@ cloudinary.js
     API_SECRET in backend/.env (sign up at cloudinary.com — free tier is
     plenty); isConfigured() lets server.js return a clear "not configured"
     503 instead of failing oddly when those aren't set.
+    Media manager additions (2026-07-19): listImages()/destroyImages()/
+    purgeAllImages() use the Cloudinary Admin API (cloudinary.api.*, distinct
+    from the Upload API — cloudinary.uploader.* — the per-delegate flow
+    above uses). All three are hardcoded to DELEGATE_PHOTO_FOLDER
+    ("mustergo/delegates") — the ONLY folder any uploadImage() call in the
+    codebase ever writes to — so "purge all" can never reach outside what
+    this app itself put there, even on a shared Cloudinary account. Backs
+    routes/media.js's admin-only bulk image management UI (Settings → Image
+    storage). destroyImages() chunks at 100 publicIds per call (Cloudinary's
+    own cap on delete_resources); purgeAllImages() lists then bulk-deletes
+    the exact ids just listed (rather than delete_resources_by_prefix) so
+    the caller gets back precisely what was removed, to reconcile against
+    the delegates table.
 
 routes/desmond.js
     Desmond's "TransitFlow" API — the Trips & Coaches board (list trips,
@@ -397,6 +416,76 @@ routes/insights.js
     ("the first point must literally begin '1. Overall: '") and an explicit
     "never write the letter N" instruction.
 
+routes/export.js
+    Customizable multi-sheet Excel export (added 2026-07-19 — replaced the
+    old single-flat-sheet GET /api/trips/:id/export that used to live inline
+    in server.js). Builds an ExcelJS workbook with TWO sheets modelled on the
+    reference "Headcount Planning" template: a "Summary" dashboard sheet
+    (trip header + generated/filters line, a KEY METRICS band = Total/Arrived/
+    Missing/Late/Assigned + an Unassigned line, a per-coach breakdown table
+    with % boarded, and an OPTIONAL AI summary note block) and a "Delegates"
+    detail sheet (only the selected columns, only the filtered rows, status-
+    tinted, sorted Missing-first, frozen header). Endpoints:
+    · POST /api/trips/:id/export   — filtered/configurable (exportData perm).
+      Body: { statuses[], coachIds[] (incl. "__unassigned"), vipOnly, columns[],
+      includeAiSummary, lang }. Empty array in a dimension = no constraint
+      there. `lang` ("en"|"zh") is an EXPLICIT, INDEPENDENT per-export choice
+      — set via ExportModal.jsx's own "Workbook language" selector, not
+      implicitly tied to the requesting staff member's own UI language (they
+      might work in English but need to hand a Chinese report to someone
+      else). Every sheet name/header/status label/generated message in the
+      workbook is translated via a small self-contained `T = {en, zh}`
+      dictionary local to this file (can't reuse frontend/src/lib/i18n.jsx —
+      different runtime); the filename itself stays plain-ASCII regardless.
+    · GET  /api/trips/:id/export   — unfiltered, back-compat (exportData perm).
+    · GET  /api/trips/:id/export/options — columns/statuses/coaches metadata
+      the ExportModal populates its controls from (requireAuth).
+    · POST /api/trips/:id/export/ai-filter — natural-language → the SAME
+      { statuses, coachIds, vipOnly } shape the checkboxes produce (exportData).
+      BOUNDED + TRANSPARENT by design: mirrors insights.js's provider strategy
+      (local Ollama first, Anthropic fallback, graceful 503 "not configured"),
+      the model output is sanitized against the real coach ids + status vocab,
+      and the UI shows the result as editable checkboxes — the model never sees
+      or writes delegate data, only translates the request into a filter. All
+      status comparisons normalize PRESENT→ARRIVED so counts/filters are
+      consistent regardless of which check-in route wrote the row.
+    Ollama JSON-mode bug (fixed 2026-07-19): the shared tryOllama() helper
+    hardcoded `format: "json"` on every call — correct for ai-filter (which
+    must return parseable JSON) but wrong for maybeAiSummary()'s freeform
+    prose "AI summary sheet note", which reused the same helper. Forced into
+    JSON mode with no schema to fill, Ollama just returned an empty `{}`,
+    which is what showed up in the Summary sheet instead of an actual
+    written recap. tryOllama() now takes an opt-in `{json:true}` flag,
+    defaulting to prose mode — only the ai-filter call site sets it.
+    AI summary format (2026-07-19): rewritten to the SAME fixed numbered
+    structure as the Dashboard's "Generate Insights" panel (insights.js) —
+    1. Overall / 2. Missing / 3. Advice — via buildSummaryPrompt() +
+    SECTION_LABELS (including the same zh labels and the same "must
+    literally begin '1. Overall: '" instruction insights.js needed to stop a
+    weak local model echoing a literal placeholder). Was a loose 2-3
+    sentence paragraph before. The Summary sheet's AI-note row height
+    calculation now also accounts for line count (the text is `\n`-joined
+    across the 3 points), not just character count.
+
+routes/media.js
+    Image storage management (added 2026-07-19) — Settings → "Image storage"
+    admin UI. manageAccounts-gated (same tier as Account control — this is
+    an account-wide infra action, not routine delegate editing).
+    · GET  /api/media/images — lists every asset in cloudinary.js's
+      DELEGATE_PHOTO_FOLDER, cross-referenced against listDelegatesWithPhoto()
+      (data.js) so each thumbnail is tagged with which delegate owns it, or
+      null/"Unlinked" if orphaned (left over from a since-replaced photo).
+    · POST /api/media/images/delete — bulk-delete a chosen publicId[]
+      selection; also calls clearPhotoByPublicId() (data.js) to unlink any
+      delegate whose photo just got destroyed, so the app never keeps
+      pointing at a dead image URL.
+    · POST /api/media/images/purge — deletes EVERY image in the folder.
+      Requires `{confirm: "DELETE ALL"}` in the body as a server-side guard
+      beyond the frontend's own typed-confirmation modal — the one truly
+      destructive, no-undo action anywhere in this app.
+    All three return 503 NOT_CONFIGURED if Cloudinary env vars aren't set,
+    same pattern as the per-delegate photo routes in server.js.
+
 package.json / package-lock.json
     Dependencies (express, pg, exceljs, cors, dotenv, @anthropic-ai/sdk,
     bcryptjs, jsonwebtoken, unpdf) and the scripts: "npm run dev",
@@ -514,17 +603,46 @@ Shared components (src/components/):
       row (avatar/title/Ready-status/Export) when embedded — ChatBubble.jsx
       already renders its own header with the same title, so both stacking
       was a real visible duplicate, not by design.
-      Scroll-reveal (2026-07-18): "hide the chatbot until when i scroll down
-      like typical uiux chatbot... it hard for me to click certain stuff" —
-      the FAB was always visible and sat over other clickable UI near the
-      top of pages. Confirmed `.app-shell` has no `overflow` set (the page
-      scrolls at the `window`/document level, not a nested container), added
-      a `scrolled` state from a `window` scroll listener
-      (`SCROLL_REVEAL_PX = 120`), `visible = scrolled || open` (so an
-      already-open panel stays interactive even if you scroll back to the
-      top), and wired the FAB's opacity/pointerEvents/transform to `visible`
-      with a CSS transition. Same pattern applied to MobileChatBubble.jsx
-      (below) with its own `mg-mobile-chat-fab` class.
+      Scroll-reveal v1 (2026-07-18, superseded same day — see v2 below):
+      "hide the chatbot until when i scroll down like typical uiux
+      chatbot... it hard for me to click certain stuff" — the FAB was
+      always visible and sat over other clickable UI near the top of pages.
+      First pass: a `scrolled` state from a `window` scroll listener
+      (`SCROLL_REVEAL_PX = 120`) that, once past the threshold, stayed
+      visible indefinitely regardless of further scroll activity.
+      Scroll-reveal v2 (2026-07-18, same day): flagged as still a defect —
+      "stays permanently visible as soon as the user scrolls down, which
+      blocks essential UI elements like the Delete buttons... should remain
+      completely hidden by default, regardless of the page position." v1's
+      `scrolled` boolean replaced with `recentlyActive`, driven by a scroll
+      listener that (re)starts a 5000ms `setTimeout` on every scroll event
+      and clears the flag when the timer fires uninterrupted — genuinely
+      activity-based (auto-hides 5s after scrolling STOPS), not a one-way
+      position threshold, and hidden by default before any scroll ever
+      happens (no longer primed on mount). `visible = recentlyActive || open
+      || !!dragPos` keeps the "stays visible once opened" exception the user
+      asked for explicitly, plus stays visible mid-drag.
+      Drag-to-corner (2026-07-18, same request): "Add drag-and-drop
+      capability... users must be able to freely click-and-drag (or
+      touch-and-drag on mobile) the chatbot button to any corner of the
+      screen." Implemented with native Pointer Events
+      (onPointerDown/onPointerMove/onPointerUp) rather than HTML5
+      drag-and-drop or separate mouse/touch handlers, since Pointer Events
+      unify mouse/touch/pen through one code path. A `DRAG_THRESHOLD_PX = 6`
+      total-displacement check distinguishes a genuine drag from a plain
+      click/tap (below = toggle open same as before; above = reposition —
+      note a raw synthetic `.click()` bypasses this pointer-based
+      interaction entirely, a real false-negative hit during testing; use a
+      pointerdown+pointerup pair instead). On release the FAB snaps to
+      whichever of the four screen quadrants the pointer ended in (not a
+      free-form position — matches "any corner," not "anywhere"), persisted
+      to localStorage (`mg_chatbubble_corner` on desktop,
+      `mg_mobile_chat_corner` on mobile) so it survives a reload. The
+      floating panel (desktop)/bottom sheet (mobile) repositions to open
+      sensibly relative to whichever corner the FAB currently occupies.
+      Same pattern applied to MobileChatBubble.jsx (below) with its own
+      `mg-mobile-chat-fab` class and mobile-appropriate margins (bottom
+      corners clear the fixed `.mobile-tabbar` + safe-area-inset).
 
   StatusBadge.jsx
       Small reusable pill component for status labels (Present/Missing/
@@ -535,16 +653,28 @@ Shared components (src/components/):
       /api/delegates/:id/photo, see server.js + cloudinary.js), otherwise
       falls back to the existing initials-in-a-circle look — same size/shape
       either way, drops in anywhere a plain .avatar span was used.
-      Status-tinted: a MISSING delegate's avatar (placeholder OR photo) is
-      coloured/ringed RED (var(--st-missing)); everyone else keeps the
-      standard GREEN, so it reverts automatically once marked PRESENT. Reads
-      delegate.status — so any caller passing a delegate that carries status
-      gets it for free (the "All delegates" table, the reverse-headcount
-      modal — getMissing() now includes status for this — and Mobile
-      attendance). The ring uses boxShadow, not border, so it never changes
-      the box size / breaks table alignment. The Dashboard edit-delegate
-      modal's large preview avatar tints the same way off form.status, so it
-      flips red↔green live as you change the status field. Used on
+      Status-tinted across all 5 states (2026-07-19 — was a MISSING-vs-
+      everyone-else binary: red for MISSING, green for literally everything
+      else, which meant an UNASSIGNED delegate's placeholder avatar
+      incorrectly showed green, as if already accounted for). Exports a
+      shared `statusTone(status)` helper — {fg, bg} CSS var pairs —
+      UNASSIGNED gets `--st-neutral`/`--st-neutral-bg` (muted grey). At the
+      time this was written, `--st-unassigned` (used for badges/KPI tiles
+      elsewhere) was still amber, deliberately kept separate from this grey
+      — that distinction is now moot: `--st-unassigned`'s own token VALUES
+      were changed to the same grey shortly after (2026-07-19, direct
+      request — see tokens.css), so both spellings render identically now,
+      though the two CSS variables remain separate for architecture
+      cleanliness. The other four (ASSIGNED/ARRIVED/LATE/MISSING) use the
+      SAME tokens already used everywhere else in the app (StatusBadge,
+      coach cards) — no new colors invented. Reads delegate.status — so any
+      caller passing a
+      delegate that carries status gets it for free (the "All delegates"
+      table, the reverse-headcount modal, and Mobile attendance). The ring
+      uses boxShadow, not border, so it never changes the box size / breaks
+      table alignment. The Dashboard edit-delegate modal's large preview
+      avatar imports and uses the same `statusTone()` off form.status (was
+      its own separate MISSING-vs-PRESENT-only ternary, same bug). Used on
       the Dashboard's "All delegates" table and MobileAttendancePage.jsx.
       Photo upload/remove itself lives in the Dashboard's edit-delegate
       modal (create flow doesn't get one — a delegate needs to exist first).
@@ -580,6 +710,22 @@ Shared components (src/components/):
       of leaving it blank. splitInsightPoints() now splits each returned
       line into a bold "Label:" (Overall/Missing/Advice) + body, matching
       insights.js's fixed 3-point prompt structure.
+      Persistence fix (2026-07-19): the insights state (loading/result/
+      source/error) used to be plain useState here — since this component
+      only renders while the Analytics tab is active, switching Dashboard
+      tabs (or navigating away entirely) unmounted it and threw the state
+      away, so a request that finished AFTER you left looked like it had
+      silently reset when you came back. Moved to lib/insightsStore.js, a
+      module-level store (Map keyed by tripId + a subscriber list) OUTSIDE
+      React's component lifecycle — the fetch and its result now live
+      independent of whether anything is mounted to observe them. This
+      component reads it via useSyncExternalStore instead of local state;
+      generateInsights() here just calls the store's version. Verified live
+      via genuine client-side navigation (not a hard reload, which would
+      trivially "fix" this by resetting the whole JS runtime): Generate →
+      immediately switch tabs → immediately navigate to a different route →
+      wait there while the real Ollama request finishes in the background →
+      navigate back → full result renders correctly.
       • 4th customizable widget: "Delegates onboarded over time" — a
         Recharts AreaChart (gradient-filled) showing cumulative delegate
         count by day, built purely on the frontend from the `delegates`
@@ -601,6 +747,30 @@ Shared components (src/components/):
         "Coach load" card heading appends the coach's name when a filter is
         active (e.g. "Coach load — Coach 5").
 
+  ExportModal.jsx
+      Export configuration modal (added 2026-07-19), opened from the
+      Dashboard's Export button. Loads GET /trips/:id/export/options to
+      populate: status chips, coach chips (+ Unassigned), a 14-option column
+      picker, a VIP-only toggle, an "AI summary sheet note" toggle, and a
+      natural-language box whose "Apply" button POSTs /export/ai-filter and
+      pre-ticks the resulting structured filters (fully editable — the AI is
+      an assist, never authoritative). Download POSTs the whole config to
+      /trips/:id/export and streams the .xlsx via a blob (raw fetch with the
+      auth header, since window.open can't send it — same reason the old
+      inline exporter used fetch+blob). See backend/routes/export.js for the
+      workbook + AI-filter server side. Replaced DashboardPage's old
+      one-click exportXlsx().
+      "Workbook language" selector (2026-07-19): English/中文 buttons at the
+      top of the modal, defaulting to (but independently overridable from)
+      the app's own current UI language — sent as `lang` in the export POST
+      body, which routes/export.js now actually uses to translate the whole
+      generated workbook (previously sent but silently ignored server-side).
+      Also surfaced — while live-testing this — that NONE of this modal's
+      own UI strings had ever had Chinese translations added to i18n.jsx's
+      DICT (falling back to raw English even with the app in 中文 mode);
+      added the missing ~20 keys, including one ("Last location") found only
+      by testing the actual rendered modal in Chinese after the first batch.
+
   LogExceptionModal.jsx
       Jayden — the "Log exception" create form (issue type, delegate
       picker, note, "Mark as critical" toggle). Only reachable via the
@@ -621,6 +791,15 @@ Library helpers (src/lib/):
       auto-attaching your JWT. Also handles token/user storage (login
       persistence).
 
+  insightsStore.js
+      New (2026-07-19). AI Insights state (loading/result/asOf/source/error)
+      as a module-level store, keyed by tripId — NOT React state, deliberately,
+      so it survives AnalyticsPanel.jsx being unmounted (switching Dashboard
+      tabs) or the whole app navigating away entirely. subscribe()/getSnapshot()
+      pair for useSyncExternalStore; generateInsights(tripId, lang) starts the
+      POST /api/trips/:id/insights request and updates the store regardless of
+      whether any component is currently mounted to observe it.
+
   i18n.jsx
       The translation system — the English/Chinese dictionary,
       useLang() hook (returns { lang, toggleLang, t }), and language
@@ -638,6 +817,18 @@ Library helpers (src/lib/):
       re-themes every page. TripsListPage's useTfTheme() is now just a thin
       wrapper around this (no more separate tf_theme localStorage key), so
       the Trips/Coach board pages follow the same toggle too.
+      Native form widgets fix (2026-07-18): tokens.css never set the CSS
+      `color-scheme` property, so native controls (<select> dropdown popups,
+      <input type="time">, checkboxes, scrollbars) kept rendering their LIGHT
+      system chrome regardless of our own dark CSS variables — read to users
+      as random black text on a white popup ("update the dark theme change
+      for onboarding page. It show black text instead of white"). Added
+      `color-scheme: light` to :root and `color-scheme: dark` to
+      :root[data-theme="dark"] in tokens.css. A second, narrower contributor
+      on the same page: BoardingPassesView.jsx's .mg-passrow is a raw
+      <button> with no explicit `color` — unstyled <button> text defaults to
+      a browser system color independent of inherited CSS — fixed with an
+      explicit `color: var(--ink)` on that class.
 
   claudeParse.js
       Vance's parse/confirm bridge for the Onboarding page — uploads a file
@@ -830,22 +1021,182 @@ Pages (src/pages/) — one file per route:
                                                   pattern (S.overlay/S.modal)
                                                   as the create/edit delegate
                                                   and map-preview modals.
-                                                  Content unchanged: one card
-                                                  per coach (boarded/capacity
-                                                  progress bar, "All in" badge
-                                                  or "N missing"), each listing
-                                                  its still-missing delegates
-                                                  (avatar, VIP flag, last seen)
-                                                  with the same map-pin →
-                                                  DelegateLocationMap popup
-                                                  pattern as "All delegates".
-                                                  Reuses data already fetched
-                                                  for the Delegate tab
-                                                  (data.coaches + missing, the
-                                                  latter carrying coachId from
-                                                  getMissing() in data.js so it
-                                                  can group by coach) — no new
-                                                  endpoint.
+                                                  Content: one card per coach
+                                                  (boarded/capacity progress
+                                                  bar, "Arrived" badge or "N
+                                                  missing"), each listing its
+                                                  still-unaccounted-for
+                                                  delegates (avatar, VIP flag,
+                                                  last known location) with the
+                                                  same map-pin → DelegateLocat
+                                                  ionMap popup pattern as "All
+                                                  delegates". Its missing-list
+                                                  filter is `status ===
+                                                  "MISSING" || status ===
+                                                  "LATE"` (not the getMissing()
+                                                  array, which is MISSING-only
+                                                  — this modal reads straight
+                                                  off the full `delegates`
+                                                  list instead so LATE
+                                                  delegates show up here too).
+                                                  The button that opens this
+                                                  modal was renamed "Reverse
+                                                  headcount" → "More details"
+                                                  (2026-07-19) for UX clarity.
+                                                • Coach status logic
+                                                  (2026-07-19, went through two
+                                                  iterations same day): first
+                                                  pass added a 3-way severity
+                                                  badge (Missing ▸ Late ▸ All
+                                                  in, with a separate orange "N
+                                                  late" badge) — the user then
+                                                  asked to simplify back to TWO
+                                                  states, so LATE now folds
+                                                  into the same bucket as
+                                                  MISSING with no separate Late
+                                                  badge: a coach reads
+                                                  "Arrived" only when every
+                                                  assigned delegate has
+                                                  actually boarded, and
+                                                  "Missing" whenever it holds
+                                                  ANYONE not yet accounted for
+                                                  (`attention = missing +
+                                                  late`). Same logic on desktop
+                                                  CoachBar, the More details
+                                                  modal (above), and mobile
+                                                  MobileHomePage.jsx's coach
+                                                  rows. Backed by a per-coach
+                                                  `late` count added to
+                                                  getDashboard (data.js) — the
+                                                  same pass ALSO fixed
+                                                  getDashboard counting
+                                                  `present`/`boarded` as
+                                                  PRESENT-only (undercounted
+                                                  every ARRIVED delegate after
+                                                  the check-in migration) — now
+                                                  an isBoarded() helper counts
+                                                  PRESENT+ARRIVED. Mobile's
+                                                  per-coach row tap target
+                                                  changed from a hardcoded
+                                                  `status=MISSING` link to
+                                                  `status=ALL` — with Late
+                                                  folded into the badge's
+                                                  "missing" count, a
+                                                  MISSING-only link could land
+                                                  on an empty list for a
+                                                  late-only coach.
+                                                • Missing-delegate subtitle
+                                                  (2026-07-19): the More
+                                                  details modal used to show
+                                                  each delegate's `lastSeen`
+                                                  free-text note, falling back
+                                                  to a status-sounding string
+                                                  ("No status", later "No last
+                                                  seen recorded") that read as
+                                                  if the delegate had no status
+                                                  at all. Changed to show
+                                                  `lastLocation` instead
+                                                  (falling back to the label
+                                                  "Last known location" itself
+                                                  when none is recorded) —
+                                                  matches what the map-pin
+                                                  button right next to it
+                                                  already opens, and is what
+                                                  this screen is actually for.
+                                                • "Open exceptions" KPI tile
+                                                  REPLACED (2026-07-19) with a
+                                                  "Late" tile (Clock icon,
+                                                  --st-late orange, backed by
+                                                  the new kpis.late field) —
+                                                  the exceptions-count KPI and
+                                                  its /exceptions link (added
+                                                  earlier the same day) were
+                                                  both removed along with it —
+                                                  exceptions are still fully
+                                                  reachable via the sidebar,
+                                                  just not from this tile.
+                                                • All 4 KPI tiles clickable
+                                                  (2026-07-19, follow-up pass
+                                                  the same day): Missing/
+                                                  Present/Unassigned got the
+                                                  same drill-down behavior Late
+                                                  already had — the one-off
+                                                  showLateDelegates() was
+                                                  generalized into
+                                                  showDelegatesFiltered(status),
+                                                  which switches to the
+                                                  Delegate tab, sets the status
+                                                  filter (MISSING/ARRIVED/
+                                                  UNASSIGNED/LATE), and scrolls
+                                                  the delegate table
+                                                  (delegateTableRef) into view.
+                                                • Tile order (2026-07-19,
+                                                  follow-up): Missing, Late,
+                                                  Present, Unassigned (was
+                                                  Missing, Present, Unassigned,
+                                                  Late) — groups the two
+                                                  "needs attention" statuses
+                                                  together up front. Mobile
+                                                  MobileHomePage.jsx's 3-tile
+                                                  row reordered the same way:
+                                                  Missing, Late, Present.
+                                                • KPI grid layout fix
+                                                  (2026-07-19): the tiles used
+                                                  `repeat(auto-fit,
+                                                  minmax(210px,1fr))`, whose
+                                                  fluid track produces an
+                                                  uneven trailing card width/
+                                                  gap depending on exact
+                                                  container width — read as
+                                                  "unaligned." Replaced with an
+                                                  explicit `.kpi-grid` class:
+                                                  4 equal columns, breakpoints
+                                                  to 2 at <=960px and 1 at
+                                                  <=480px, `min-height:132px`
+                                                  on every card so they're
+                                                  identically sized at every
+                                                  width (not just per-row).
+                                                • KPI hover-color bug fix
+                                                  (2026-07-19): `.kpi-clickable
+                                                  :hover`/`:focus-visible`
+                                                  hardcoded `var(--st-normal)`
+                                                  (purple) — a leftover from
+                                                  when this rule was written
+                                                  for the single old "Open
+                                                  exceptions" tile — so every
+                                                  OTHER clickable card,
+                                                  including Late, incorrectly
+                                                  flashed purple on hover
+                                                  instead of its own color.
+                                                  Fixed by setting
+                                                  `--kpi-tone: var(--st-
+                                                  ${tone})` inline per Kpi
+                                                  instance and having the
+                                                  hover/focus rules reference
+                                                  `var(--kpi-tone)` instead.
+                                                • Mobile KPI restructuring
+                                                  (2026-07-19, two passes same
+                                                  day): first pass made the
+                                                  strip a 2x2 grid (Missing/
+                                                  Present/Late/Total). Second
+                                                  pass dropped Total from the
+                                                  tile row entirely — back to
+                                                  a clean 3-across Missing/
+                                                  Present/Late — and moved
+                                                  Total to a small "Total
+                                                  delegates: N" text line
+                                                  directly under the page
+                                                  title/greeting instead, so
+                                                  the tile row stays dedicated
+                                                  to actionable/at-risk
+                                                  statuses. Same /mobile/
+                                                  attendance?status=LATE link.
+                                                • Export button now opens
+                                                  ExportModal.jsx (configurable
+                                                  multi-sheet export — see that
+                                                  component + routes/export.js)
+                                                  instead of the old one-click
+                                                  blob download (removed).
                                                 • "Staff operations" tab —
                                                   admin-only (manageAccounts),
                                                   gated the same as Account
@@ -878,6 +1229,17 @@ Pages (src/pages/) — one file per route:
                                                   else) while this tab is
                                                   open, and non-admins never
                                                   see the tab button at all.
+                                                  Admin/staff breakdown
+                                                  (2026-07-19): "Total staff
+                                                  accounts" now shows a second
+                                                  line — "N Admin · N Staff" —
+                                                  backed by adminCount/
+                                                  staffCount added to GET
+                                                  /api/staff/active-sessions'
+                                                  response (server.js filters
+                                                  the already-fetched
+                                                  listAccounts() by role, no
+                                                  new query).
                                                   The top "Refresh" button now
                                                   also re-fetches this data
                                                   when the Staff operations tab
@@ -1166,6 +1528,14 @@ Pages (src/pages/) — one file per route:
                                                   which would have hit the
                                                   same crash on a malformed
                                                   :id param.
+                                                • Tab border-radius
+                                                  (2026-07-18): the two tab
+                                                  buttons ("Document parsing"/
+                                                  "Boarding passes") had
+                                                  `borderRadius: 0` — changed
+                                                  to `"10px 10px 0 0"` for the
+                                                  standard rounded-top tab
+                                                  shape.
                                                 "Document parsing" (default):
                                                 upload a directory / attendee
                                                 list / scanned passport, AI
@@ -1493,6 +1863,29 @@ Pages (src/pages/) — one file per route:
                                                 Theme + Language preference
                                                 controls. Reached via the
                                                 Sidebar's account block.
+                                                Renders <MediaManager /> at
+                                                the bottom when
+                                                perms.manageAccounts
+                                                (2026-07-19) — see that
+                                                component below.
+  MediaManager.jsx         (in Settings)       New (2026-07-19). Thumbnail
+                                                grid over GET /api/media/
+                                                images (routes/media.js) —
+                                                click a thumbnail to select,
+                                                "Select all"/"Delete selected
+                                                (N)" (window.confirm, extra
+                                                warning line if any selection
+                                                is a delegate's live photo),
+                                                "Purge all" opens its own
+                                                modal requiring the exact
+                                                phrase "DELETE ALL" typed
+                                                before the confirm button
+                                                enables — the one genuinely
+                                                destructive, no-undo action
+                                                anywhere in this app. Each
+                                                thumbnail is labelled with
+                                                its owning delegate's name,
+                                                or "Unlinked" if orphaned.
   HistoryLogPage.jsx       /history            Standalone audit-log page —
                                                 the same activity_log data as
                                                 the Dashboard's inline
@@ -1519,6 +1912,58 @@ Pages (src/pages/) — one file per route:
                                                 (not a Sidebar item — same
                                                 button-launch pattern as
                                                 Reverse headcount).
+  UserGuidePage.jsx        /guide              New (2026-07-19). Onboarding
+                                                page for anyone new to the
+                                                app — no permission gate
+                                                (unlike most Sidebar items,
+                                                deliberately open to every
+                                                signed-in account regardless
+                                                of what they can edit). A
+                                                video-placeholder card (play
+                                                icon, "coming soon" — no
+                                                player wired up, genuinely
+                                                just a placeholder per the
+                                                request) followed by a plain-
+                                                language explainer for all 5
+                                                delegate statuses: a small
+                                                flow diagram (Unassigned →
+                                                Assigned → Arrived, with Late
+                                                and Missing called out as
+                                                separate branches) plus one
+                                                card per status covering what
+                                                it means, an "● Automatic" /
+                                                "● Manual" tag (Late flips on
+                                                its own past a trip's cutoff;
+                                                Missing is ALWAYS set by hand
+                                                — this is the one distinction
+                                                a newcomer is most likely to
+                                                miss), and a concrete "what to
+                                                do" line. A "Quick tips"
+                                                section covers QR-scan-is-
+                                                fastest, Missing-always-needs-
+                                                a-location, and cutoffs-are-
+                                                per-trip. Status badge colors
+                                                use the same `badge-*` classes
+                                                as everywhere else in the app,
+                                                so this page's swatches always
+                                                match what a newcomer actually
+                                                sees elsewhere — including
+                                                Unassigned, which is grey
+                                                app-wide as of 2026-07-19 (see
+                                                tokens.css; was amber when
+                                                this page was first written,
+                                                deliberately kept distinct
+                                                from DelegateAvatar.jsx's
+                                                separate grey convention at
+                                                the time — both are the same
+                                                grey now). Reached
+                                                from the desktop Sidebar
+                                                ("User guide" nav item) and
+                                                from MobileProfilePage.jsx
+                                                (links out to this same
+                                                shared page — mobile has no
+                                                dedicated onboarding surface
+                                                of its own).
 
 Mobile pages (src/pages/mobile/):
 
@@ -1673,17 +2118,30 @@ Mobile pages (src/pages/mobile/):
                                                  card's inner row gap 10→12,
                                                  padding 14→16 — was reading as
                                                  cramped on a real phone.
-                                                 A MISSING delegate with a
-                                                 phone number on file also gets
-                                                 a one-tap `tel:` call button —
+                                                 Every MISSING or LATE
+                                                 delegate gets a one-tap `tel:`
+                                                 call button (callDelegate(),
+                                                 formerly gated on `d.phone`
+                                                 already being populated —
+                                                 changed 2026-07-18 after that
+                                                 turned out to hide the button
+                                                 entirely, since none of the
+                                                 demo delegates have a phone
+                                                 on file; now prompts for one
+                                                 via window.prompt the first
+                                                 time, saves it back onto the
+                                                 delegate through the existing
+                                                 PATCH, then calls — and was
+                                                 extended from MISSING-only to
+                                                 also cover LATE, since staff
+                                                 want to ring someone running
+                                                 behind the cutoff too, not
+                                                 just someone unaccounted for).
                                                  delegates.phone already
                                                  existed (added by Vance's
                                                  onboarding parser for the
                                                  document-upload flow), so this
-                                                 needed no new backend column,
-                                                 just reading `d.phone` (already
-                                                 included since listDelegates
-                                                 does SELECT *).
+                                                 needed no new backend column.
                                                  Each row also still shows a
                                                  map-pin button when that
                                                  delegate has a lastLocation
@@ -1732,13 +2190,22 @@ Mobile pages (src/pages/mobile/):
                                                  embedded />`. Rendered once
                                                  from MobileLayout.jsx so it
                                                  persists across every mobile
-                                                 route. Scroll-reveal
-                                                 (2026-07-18): same
-                                                 `scrolled`/`SCROLL_REVEAL_PX`
-                                                 pattern as desktop
-                                                 ChatBubble.jsx — hidden until
-                                                 `window.scrollY > 120`, stays
-                                                 visible once opened. See
+                                                 route. No longer strictly
+                                                 "bottom-right" as of
+                                                 2026-07-18 — draggable to any
+                                                 of the four corners, position
+                                                 persisted to localStorage.
+                                                 Scroll-reveal + auto-hide +
+                                                 drag-to-corner (2026-07-18):
+                                                 same activity-based
+                                                 `recentlyActive`/5s-timer/
+                                                 Pointer-Events-drag pattern
+                                                 as desktop ChatBubble.jsx —
+                                                 hidden by default, fades in
+                                                 on scroll, fades out 5s after
+                                                 scrolling stops, stays
+                                                 visible once opened or while
+                                                 being dragged. See
                                                  ChatBubble.jsx's entry above
                                                  for the full rationale.
   MobileTripsPage.jsx       /mobile/trips       New. Genuinely blank

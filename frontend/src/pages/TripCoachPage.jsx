@@ -353,7 +353,11 @@ function DelegateDetailPanel({ delegate, coaches, coachLabel, onClose, onSave, o
   // directly (see normalize() in backend/data.js), not yet migrated to
   // ARRIVED (deferred, see the 5-status plan).
   const STATUS_LABEL = { PRESENT: "Arrived", ARRIVED: "Arrived", ASSIGNED: "Assigned", LATE: "Late", MISSING: "Missing", UNASSIGNED: "Unassigned" };
-  const STATUS_COLOR2 = { PRESENT: "green", ARRIVED: "green", ASSIGNED: "blue", LATE: "orange", MISSING: "red", UNASSIGNED: "yellow" };
+  // UNASSIGNED is muted grey (2026-07-19, was yellow) — a delegate with no
+  // live status yet reads as "no signal", not "needs attention" (yellow is
+  // still used elsewhere, e.g. the unassigned drop-zone fleet card, which is
+  // a different concept: an empty coach lane, not a delegate's own status).
+  const STATUS_COLOR2 = { PRESENT: "green", ARRIVED: "green", ASSIGNED: "blue", LATE: "orange", MISSING: "red", UNASSIGNED: "grey" };
   const colorKey = avatarColorKey(delegate.id);
 
   return (

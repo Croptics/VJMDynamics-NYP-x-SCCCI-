@@ -11,6 +11,7 @@ import {
   Sun,
   Moon,
   QrCode,
+  HelpCircle,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -36,6 +37,7 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
     // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
     // Layout.jsx on every route) instead of a dedicated destination.
+    { to: "/guide", label: "User guide", icon: HelpCircle },
     ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
   ];
 

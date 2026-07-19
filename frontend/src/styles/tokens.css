@@ -37,8 +37,12 @@
   --st-arrived-bg: #e7f6ec;
   --st-missing: #e1232a;   /* red     — missing / critical      */
   --st-missing-bg: #fdecec;
-  --st-unassigned: #d97706;/* amber   — unassigned / needs coach*/
-  --st-unassigned-bg: #fef3e2;
+  /* Was amber (#d97706) — changed to a light grey (2026-07-19) per direct
+     request; same slate as --st-neutral so "Unassigned" reads as a calm
+     "no status yet" everywhere it appears (badges, KPI tiles, filters), not
+     an "attention needed" amber. */
+  --st-unassigned: #6b7280;/* slate   — unassigned / needs coach*/
+  --st-unassigned-bg: #f1f3f5;
   --st-assigned: #2563eb;  /* blue    — assigned, not yet checked in */
   --st-assigned-bg: #e7eefb;
   --st-late: #ea580c;      /* orange  — late, hasn't scanned by cutoff */
@@ -115,7 +119,7 @@
   --st-present-bg: #17392a;
   --st-arrived-bg: #17392a;
   --st-missing-bg: #432427;
-  --st-unassigned-bg: #423313;
+  --st-unassigned-bg: #2b2f34;
   --st-assigned-bg: #1f2f4d;
   --st-late-bg: #3d2a16;
   --st-review-bg: #3c3013;
