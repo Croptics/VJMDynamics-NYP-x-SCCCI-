@@ -1575,6 +1575,20 @@ router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
   res.json({ delegates: r.rows });
 }));
 
+/* Compact live "trip pulse" for the page headers (Onboarding + Assistant):
+ * trip context + attendance KPIs + the top ranked risks. Reuses the cached
+ * assistant snapshot and computeRisk(), so repeated polls are cheap. */
+router.get("/api/assistant/pulse", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const s = await getSnapshot();
+  res.json({
+    trip: { name: s.trip?.name || null, dayOf: s.trip?.dayOf ?? null, totalDays: s.trip?.totalDays ?? null, departsIn: s.trip?.departsIn || null },
+    kpis: s.kpis || { total: 0, present: 0, missing: 0, unassigned: 0 },
+    risk: computeRisk(s).slice(0, 3),
+    asOf: s.asOf,
+  });
+}));
+
 router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const r = await q(`DELETE FROM chat_sessions WHERE id = $1 AND account_id = $2`, [req.params.id, req.account.id]);

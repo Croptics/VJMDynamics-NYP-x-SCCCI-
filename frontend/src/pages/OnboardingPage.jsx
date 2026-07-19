@@ -28,6 +28,7 @@ import {
 } from "../lib/claudeParse.js";
 import { useLang } from "../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
+import TripPulse from "../components/TripPulse.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -232,9 +233,14 @@ export default function OnboardingPage() {
   /* --------------------------------------------------------------------- */
   return (
     <div className="page">
-      <div className="page-eyebrow">{t("Onboarding")}</div>
-      <h1 className="page-title">{t("Document parsing")}</h1>
-      <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
+      <div className="row between" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="page-eyebrow">{t("Onboarding")}</div>
+          <h1 className="page-title">{t("Document parsing")}</h1>
+          <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
+        </div>
+        <TripPulse mode="onboarding" />
+      </div>
 
       {/* Tabs */}
       <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>

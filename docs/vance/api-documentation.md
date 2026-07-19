@@ -178,6 +178,7 @@ Drops the last assistant reply and re-answers the same question **via the model*
 | `PATCH` | `/api/chat/sessions/:id` | `{ title?, pinned? }` | `{ id, title, pinned }` | `404 NOT_FOUND`, `400 NOTHING_TO_UPDATE` |
 | `DELETE` | `/api/chat/sessions/:id` | — | `{ deleted: true }` | `404 NOT_FOUND` |
 | `GET` | `/api/assistant/roster` | — | `{ delegates:[{name,company,role,industry,status,vip,coach,coach_city}] }` | — |
+| `GET` | `/api/assistant/pulse` | — | `{ trip:{name,dayOf,totalDays,departsIn}, kpis:{total,present,missing,unassigned}, risk:[{level,text}], asOf }` — powers the live header widget | — |
 
 ---
 

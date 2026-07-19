@@ -5,6 +5,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import TripPulse from "../components/TripPulse.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -325,9 +326,14 @@ export default function ChatAssistantPage() {
 
   return (
     <div className="page" style={{ maxWidth: 1100 }}>
-      <div className="page-eyebrow">{t("Assistant")}</div>
-      <h1 className="page-title">{t("Trip assistant")}</h1>
-      <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
+      <div className="row between" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="page-eyebrow">{t("Assistant")}</div>
+          <h1 className="page-title">{t("Trip assistant")}</h1>
+          <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
+        </div>
+        <TripPulse mode="assistant" />
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, marginTop: 20 }}>
         {/* History sidebar */}

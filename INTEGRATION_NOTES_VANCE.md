@@ -17,6 +17,7 @@ frontend/src/lib/claudeParse.js            ← parse / confirm / badges / check-
 frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (2 tabs: parse / boarding passes)
 frontend/src/pages/BoardingPassesView.jsx  ← pass desk: search/filter, per-coach list, view/print a pass
 frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6 (streaming AI + saved history)
+frontend/src/components/TripPulse.jsx       ← header status widget: onboarding progress (Onboarding tab) / ranked "what to watch" risks (Assistant)
 frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
 ```
 
@@ -52,6 +53,7 @@ Dependencies added by this module: `unpdf` (backend PDF text extraction) and
 | PATCH | `/api/chat/sessions/:id` | signed-in | Rename and/or pin a chat |
 | DELETE | `/api/chat/sessions/:id` | signed-in | Delete a chat |
 | GET | `/api/assistant/roster` | signed-in | Delegate details → clickable delegate cards |
+| GET | `/api/assistant/pulse` | signed-in | Compact live status (trip, KPIs, top risks) for the header widget |
 
 ## Connective tissue (how this integrates with the team)
 
