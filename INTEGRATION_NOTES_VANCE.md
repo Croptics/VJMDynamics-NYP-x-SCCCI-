@@ -120,6 +120,11 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   `/chat/messages` and the `/stream` endpoint (which emits the whole answer as one
   SSE token); `source:"local"` marks a fast-path reply. Not applied to
   `/regenerate` (that always re-attempts via the model).
+- **Risk scoring (`computeRisk`)** ranks what to worry about from the live
+  snapshot — missing VIPs and CRITICAL exceptions first, then the coach furthest
+  from boarded, then ordinary open tickets. It powers the fast-path "who should I
+  worry about" answer *and* a ranked `PRIORITIES` block in the model prompt, so
+  both the instant and the LLM answers lead with the same computed judgement.
 - **Snapshot cache + model warm-up (speed):** `getSnapshot()` caches the ~6-query
   snapshot for 5s (invalidated on confirm and QR check-in, so the bot never shows
   stale counts after a write); a fire-and-forget warm-up call on first module use

@@ -962,6 +962,11 @@ function buildSystemPrompt(snapshot, lang) {
     ? snapshot.itinerary.map((i) => `- ${i.start_time} ${i.title}${i.location ? ` @ ${i.location}` : ""}`).join("\n")
     : "(no itinerary items for today)";
 
+  const risks = computeRisk(snapshot);
+  const prioritiesBlock = risks.length
+    ? risks.map((r) => `- [${r.level}] ${r.text}`).join("\n")
+    : "(nothing urgent — no missing VIPs or critical exceptions)";
+
   const industryLines = snapshot.byIndustry.length
     ? snapshot.byIndustry.map(([name, n]) => `- ${name}: ${n}`).join("\n")
     : "(no industry data captured)";
@@ -1028,6 +1033,9 @@ Attendance right now (these are distinct counts that add up to the total — use
 - Missing (expected, not checked in): ${snapshot.kpis.missing}
 - Unassigned (not on any coach yet): ${snapshot.kpis.unassigned}
 Ready-made attendance summary — if asked to summarise attendance, reply with ONLY this exact sentence and NOTHING after it (no extra explanation, no "this means…"): "${snapshot.kpis.total} delegates total — ${snapshot.kpis.present} present, ${snapshot.kpis.missing} missing, ${snapshot.kpis.unassigned} unassigned (not yet on a coach)."
+
+Top priorities right now (already ranked most-urgent first — use this for "who should I worry about / what should I focus on" questions):
+${prioritiesBlock}
 
 Coaches:
 ${coachLines}
@@ -1122,6 +1130,47 @@ function findDelegateInText(q, roster) {
 function coachNameById(id, coaches) {
   const c = coaches.find((x) => x.id === id || x.label === id);
   return c ? `${c.name}${c.city ? ` (${c.city})` : ""}` : null;
+}
+
+/* Rank what an organiser should worry about right now, from the live snapshot.
+ * Returns concerns sorted most-urgent first: missing VIPs and CRITICAL
+ * exceptions outrank operational gaps (a coach far from full) which outrank
+ * ordinary open tickets. Shared by the fast-path "who should I worry about"
+ * answer and the model prompt's PRIORITIES block, so both lead with the same
+ * computed judgement. Plain text (no markdown) so it reads cleanly in either. */
+function computeRisk(snapshot) {
+  const { missing = [], exceptions = [], coaches = [] } = snapshot || {};
+  const items = [];
+
+  const missingVips = missing.filter((m) => m.vip);
+  if (missingVips.length) {
+    items.push({ score: 1000 + missingVips.length, level: "critical",
+      text: `${missingVips.length} VIP${missingVips.length > 1 ? "s" : ""} still missing: ${missingVips.map((m) => m.name).join(", ")}` });
+  }
+
+  const critical = exceptions.filter((e) => (e.priority || "").toUpperCase() === "CRITICAL");
+  if (critical.length) {
+    items.push({ score: 900 + critical.length, level: "critical",
+      text: `${critical.length} critical exception${critical.length > 1 ? "s" : ""}: ${critical.map((e) => e.type + (e.delegate ? ` (${e.delegate})` : "")).join("; ")}` });
+  }
+
+  // Operational gap: the coach furthest from boarded (most still missing).
+  const worstCoach = [...coaches]
+    .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c.missing ?? 0) }))
+    .filter((c) => c.v > 0)
+    .sort((a, b) => b.v - a.v)[0];
+  if (worstCoach) {
+    items.push({ score: 500 + worstCoach.v, level: "high",
+      text: `${worstCoach.label} has the most still to board (${worstCoach.v} missing)` });
+  }
+
+  const normal = exceptions.filter((e) => (e.priority || "").toUpperCase() !== "CRITICAL");
+  if (normal.length) {
+    items.push({ score: 100, level: "medium",
+      text: `${normal.length} other open exception${normal.length > 1 ? "s" : ""} to review` });
+  }
+
+  return items.sort((a, b) => b.score - a.score);
 }
 
 function answerLocally(question, snapshot) {
@@ -1246,19 +1295,11 @@ function answerLocally(question, snapshot) {
     return `Today's itinerary:\n${lines.join("\n")}`;
   }
 
-  // 13) Risk / "who should I worry about" — a computed priority list
+  // 13) Risk / "who should I worry about" — a ranked, computed priority list
   if (has("worry", "worried", "concern", "risk", "chase", "priorit", "attention", "watch", "focus on", "urgent", "trouble")) {
-    const missingVips = missing.filter((m) => m.vip);
-    const critical = exceptions.filter((e) => (e.priority || "").toUpperCase() === "CRITICAL");
-    const topMissingCoach = [...coaches]
-      .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c.missing ?? 0) }))
-      .sort((a, b) => b.v - a.v)[0];
-    const lines = [];
-    if (missingVips.length) lines.push(`- ${bold(missingVips.length)} VIP${missingVips.length > 1 ? "s" : ""} still missing: ${missingVips.map((m) => m.name).join(", ")}`);
-    if (critical.length) lines.push(`- ${bold(critical.length)} critical exception${critical.length > 1 ? "s" : ""}: ${critical.map((e) => e.type + (e.delegate ? ` (${e.delegate})` : "")).join("; ")}`);
-    if (topMissingCoach && topMissingCoach.v > 0) lines.push(`- ${topMissingCoach.label} has the most missing (${bold(topMissingCoach.v)})`);
-    if (!lines.length) return `Nothing urgent right now — no missing VIPs and no critical exceptions.${kpis.missing ? ` ${kpis.missing} delegates are still to check in.` : " Everyone's accounted for."}`;
-    return `Here's what to watch right now:\n${lines.join("\n")}`;
+    const risks = computeRisk(snapshot);
+    if (!risks.length) return `Nothing urgent right now — no missing VIPs and no critical exceptions.${kpis.missing ? ` ${kpis.missing} delegates are still to check in.` : " Everyone's accounted for."}`;
+    return `Here's what to watch right now, most urgent first:\n${risks.map((r) => `- ${r.text}`).join("\n")}`;
   }
 
   return null; // no confident match → let the model answer
@@ -1512,4 +1553,5 @@ export {
   toRow,
   isPlausibleDelegate,
   answerLocally,
+  computeRisk,
 };
