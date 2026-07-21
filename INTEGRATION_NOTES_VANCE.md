@@ -76,7 +76,11 @@ Dependencies added by this module: `unpdf` (backend PDF text extraction) and
   method breakdown (`check_in_logs`), and today's itinerary (Desmond). Every
   cross-feature read is `try/catch`-isolated, so a missing teammate table never
   breaks the chat. Only this developer-authored snapshot reaches the model — it
-  cannot query arbitrary rows.
+  cannot query arbitrary rows. **The snapshot is scoped to the Beijing study
+  mission (`t-1`)** — `buildSnapshot()` passes `resolveTripUuid("t-1")` to
+  `getTrip/getDashboard/getMissing` and filters the roster by `trip_id`, so the
+  assistant + Trip Pulse widgets never mix trips or disagree with the dashboard
+  (JQ's `getTrip/getDashboard` default to an arbitrary `LIMIT 1` trip otherwise).
 - **Trip scoping uses `resolveTripUuid()`** (a local helper in `vance.js` — kept
   self-contained rather than editing JQ's `data.js`) everywhere a trip id arrives
   from the client: `onboarding/confirm`, `onboarding/context`, `onboarding/badges`.

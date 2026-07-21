@@ -911,13 +911,24 @@ function checkPassportExpiry(expiry, now = new Date()) {
 }
 
 async function buildSnapshot() {
-  const [trip, dashboard, missing] = await Promise.all([getTrip(), getDashboard(), getMissing()]);
+  // The assistant is scoped to the Beijing study mission (t-1). Resolve its uuid
+  // once and scope every read to it, so the snapshot never mixes trips — JQ's
+  // getTrip/getDashboard/getMissing otherwise default to an arbitrary "LIMIT 1"
+  // (no ORDER BY) trip, which made the assistant + pulse show a different trip
+  // and counts than the dashboard.
+  const tripUuid = await resolveTripUuid("t-1");
+  const [trip, dashboard, missing] = await Promise.all([
+    getTrip(tripUuid), getDashboard(tripUuid), getMissing(tripUuid),
+  ]);
 
-  /* Rich delegate roster (drives company/industry/VIP analytics + lookups). */
+  /* Rich delegate roster (scoped to the same trip; drives company/industry/VIP
+   * analytics + look-ups). */
   let roster = [];
   try {
-    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry
-                         FROM delegates ORDER BY name`);
+    const cols = `name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry`;
+    const r = tripUuid
+      ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
+      : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
     roster = r.rows;
   } catch { /* delegate doc columns not present yet */ }
 
