@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { MessageCircle, X } from "lucide-react";
-import ChatAssistantPage from "../pages/ChatAssistantPage.jsx";
+import ChatAssistantPage from "../pages/desktop/ChatAssistantPage.jsx";
 import { useLang } from "../lib/i18n.jsx";
 
 // Hidden by default, regardless of scroll position — fades in only while the

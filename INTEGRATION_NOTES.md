@@ -1,5 +1,10 @@
 # Feature Integration Notes
 
+> **Use this file when you're asking "whose file is this, can I touch it, what broke last time someone merged a branch?"** It's organized by feature/contributor and documents ownership boundaries + integration gotchas.
+> Asking "what does `X.jsx` do / how does it work?" instead? Use **`PROJECT_STRUCTURE.md`** — organized by file path instead of by feature.
+>
+> _Example: "Can I edit `vance.js`, and what should I know before merging Vance's next branch?" → this file's Feature 3 section. "How does the Dashboard's KPI row work?" → `PROJECT_STRUCTURE.md`'s `DashboardPage.jsx` entry._
+
 Five people's work makes up MusterGo. **Base** is the foundation everything
 else is built on and integrates into; the other four are features merged into
 it:
@@ -36,7 +41,7 @@ npm run dev            # http://localhost:5173  (proxies /api to :4000)
 ```
 
 Sign in with **`staff_194` / `password123!`**. If that login fails (common on a
-shared database — see PROJECT_STRUCTURE.txt), run `npm run reset:login` in
+shared database — see PROJECT_STRUCTURE.md), run `npm run reset:login` in
 `backend/`.
 
 **No manual database steps.** Every table all three features need is created
@@ -132,17 +137,20 @@ elsewhere in the app:
   by `manageDelegates`. So a full trip editor should have **both** `manageTrips`
   and `manageDelegates`.
 
-**Vance's feature deliberately did NOT add a new permission:**
+**Vance's feature originally reused `manageDelegates` rather than adding its own
+permission** — document parsing/confirm bulk-creates delegates, which is exactly
+what `manageDelegates` already governs, so a separate permission would have been
+redundant. **Updated 2026-07-21**: as part of a broader permissions reorganization,
+document parsing/confirm now has its own **`manageDocuments`** permission, carved
+out of `manageDelegates` (defaults **on** for every existing account, so nobody
+silently lost upload access the moment this shipped — an admin can now narrow it
+per-account going forward). The `/onboarding` page/sidebar item's *visibility* is
+still `viewDocuments` (unchanged); `manageDocuments` gates the actual parse/confirm
+writes.
 
-- **Document parsing / onboarding** reuses the existing **`manageDelegates`**
-  permission — it bulk-creates delegates, which is exactly what `manageDelegates`
-  already governs. (The `/onboarding` page and its sidebar item are hidden for
-  accounts without it, matching the backend's `403`.)
-- **The chat assistant** is open to **any signed-in user** (read-only Q&A over
-  live data — same access level as the Dashboard's "Generate Insights").
-
-So adding an onboarding-specific permission would have been redundant, and would
-have created the odd state of "can bulk-add delegates by upload but not manually."
+- **The chat assistant** was open to **any signed-in user** with no permission at
+  all; now gated on **`viewChatbot`** (desktop) / **`viewMobileChatbot`** (mobile),
+  both defaulting **on** for the same "don't silently revoke existing access" reason.
 
 ---
 
@@ -154,21 +162,39 @@ the live Dashboard, Account control, and the mobile app shell.
 
 ### Files
 
-**Backend:** `server.js`, `auth.js`, `data.js`, `cloudinary.js`, `reset-login.js`,
-`seed-team.js`, `routes/insights.js` (AI insights), `routes/export.js` (Excel
-export), `routes/media.js` (Cloudinary photo storage).
+**Backend:** `server.js` (now just Express bootstrap + mounting — see "Updates
+since initial merge" 2026-07-22 for the routes split), `auth.js`, `data.js`
+(now a barrel over `db/*.js`), `cloudinary.js`, `reset-login.js`,
+`seed-team.js`, `routes/auth.js`/`accounts.js`/`dashboard.js`/`delegates.js`/
+`history.js` (JQ's own routes, split out of `server.js` 2026-07-22),
+`lib/wrap.js`/`actor.js`/`rateLimit.js` (shared helpers), `routes/insights.js`
+(AI insights), `routes/export.js` (Excel export), `routes/media.js`
+(Cloudinary photo storage).
 
-**Frontend:** `LoginPage.jsx`, `DashboardPage.jsx`, `AccountControlPage.jsx`,
-`HistoryLogPage.jsx`, `SettingsPage.jsx`, `UserGuidePage.jsx`,
-`components/Layout.jsx`, `components/Sidebar.jsx`, `lib/api.js`, `lib/i18n.jsx`,
-`lib/theme.jsx`, `permissions.js` (root — shared with the backend, the single
-source of truth for every permission in the app). Also owns the mobile app
-shell (`MobileLayout.jsx`, `MobileHomePage.jsx`, `MobileAttendancePage.jsx`,
-`MobileTripsPage.jsx`, `MobileProfilePage.jsx`, `MobileIssuesPage.jsx`) and the
-three scanner surfaces built on top of Vimal's Face/QR primitives:
-`UnifiedScannerPage.jsx` (desktop entrance-kiosk scanner), `KioskScannerPage.jsx`
-(passwordless entrance kiosk), `MobileScannerPage.jsx` (mobile-native scanner) —
-see "Updates since initial merge" for all three.
+**Frontend:** `LoginPage.jsx` and `KioskScannerPage.jsx` at the `pages/` root
+(render outside both layouts); everything else moved into `pages/desktop/`
+2026-07-22 (mirrors `pages/mobile/`): `DashboardPage.jsx`,
+`AccountControlPage.jsx`, `HistoryLogPage.jsx`, `SettingsPage.jsx`,
+`UserGuidePage.jsx` (now a 5-tab page), plus `TripsListPage.jsx`,
+`BoardingPassesView.jsx`, `ChatAssistantPage.jsx` (embedded sub-views, not
+routed directly). Also: `components/Layout.jsx`, `components/Sidebar.jsx`,
+`lib/api.js`, `lib/i18n.jsx`, `lib/theme.jsx`, `permissions.js` (root — shared
+with the backend, the single source of truth for every permission in the
+app — restructured 2026-07-21/22, see its own file for the current full list
+and the `parent`/`adminOnly` fields). Also owns the mobile app shell
+(`MobileLayout.jsx`, `MobileHomePage.jsx`, `MobileAttendancePage.jsx`,
+`MobileTripsPage.jsx`, `MobileProfilePage.jsx`, `MobileIssuesPage.jsx`,
+`MobileUserGuidePage.jsx` — new 2026-07-21) and the three scanner surfaces
+built on top of Vimal's Face/QR primitives: `UnifiedScannerPage.jsx` (desktop
+entrance-kiosk scanner), `KioskScannerPage.jsx` (passwordless entrance kiosk),
+`MobileScannerPage.jsx` (mobile-native scanner) — see "Updates since initial
+merge" for all three.
+
+**A teammate's local copy predates the 2026-07-22 backend/frontend reorgs** —
+if integrating their branch, watch for stale flat-path imports
+(`../pages/XPage.jsx` instead of `../pages/desktop/XPage.jsx`) and check
+whether they import anything from `data.js` that the new barrel doesn't
+re-export (unlikely — verified against every existing consumer at split time).
 
 ### Database (created in `createSchema()`/`seed()` in `data.js`)
 
@@ -537,7 +563,7 @@ above wholesale:
   (`UNASSIGNED`/`PRESENT`/`MISSING`) expanded to 5:
   `UNASSIGNED → ASSIGNED → ARRIVED → LATE → MISSING`. `PRESENT` is kept as a
   legacy alias mapped to `ARRIVED` in `data.js`'s `normalize()`, so old rows
-  and any not-yet-migrated writer keep working. See `PROJECT_STRUCTURE.txt`
+  and any not-yet-migrated writer keep working. See `PROJECT_STRUCTURE.md`
   for the full rollout history across Dashboard, TripCoachPage, and mobile.
 - **Trip-page reassignment now sets `ASSIGNED`, not `MISSING`.** Dragging a
   delegate onto a coach used to mark them `MISSING` ("still has to prove they
@@ -614,12 +640,48 @@ above wholesale:
   entire frontend was cross-checked against `i18n.jsx`'s dictionary; 36
   missing keys were filled in and 3 duplicate keys removed. 0 missing, 0
   duplicates as of this writing.
+- **`backend/server.js` split (2026-07-22).** JQ's own routes (auth, accounts,
+  dashboard reads, delegate CRUD, activity/history) moved out of the single
+  ~550-line `server.js` into `backend/routes/{auth,accounts,dashboard,
+  delegates,history}.js`; shared helpers (`wrap`, `actorOf`, the auth rate
+  limiter) moved into `backend/lib/{wrap,actor,rateLimit}.js`. `server.js`
+  itself is now ~140 lines — just Express bootstrap, middleware, and mounting
+  every router (JQ's + every teammate's, unchanged mount points). `auth.js`'s
+  own duplicate local `wrap()` was deduped into an import from `lib/wrap.js`.
+  Verified via a full live smoke test (login/session/logout, RBAC-gated
+  routes, kiosk mint + scan, every teammate router, the 404 fallback) —
+  zero behavior change.
+- **`frontend/src/pages/desktop/` folder (2026-07-22).** All 15 desktop-shell
+  pages (the 7 sidebar pages plus History/Settings/User Guide and 3 embedded
+  sub-views) moved out of the flat `pages/` root into `pages/desktop/`,
+  mirroring the existing `pages/mobile/` pattern. `LoginPage.jsx`/
+  `KioskScannerPage.jsx` stayed at the root (they render outside both
+  layouts). Every relative import was updated for the new depth; confirmed
+  via `git status` that all 15 moves tracked as renames (history preserved),
+  and `vite build` produces an identical output bundle.
+- **Permission nesting + tabbed User Guide (2026-07-22).** `viewHistory` now
+  nests under `viewDelegates` (`viewDashboard → viewDelegates → viewHistory`,
+  2 levels deep) — `AccountControlPage.jsx`'s checkbox renderer became a
+  recursive `PermRow` to support it. Desktop `UserGuidePage.jsx` was rewritten
+  into a 5-tab page (Getting Started / Dashboard & Metrics / Live Trip &
+  Attendance / Scanner & Kiosk / Account & Permissions); a new
+  `MobileUserGuidePage.jsx` fixes a bug where the mobile "User guide" link
+  used to render the desktop guide with desktop chrome.
+- **Dashboard KPI redesign (2026-07-22).** Added an `assigned` count to
+  `getDashboard()`'s `kpis`. Desktop folded Arrived/Assigned/Unassigned into
+  one "Roster breakdown" card (a proportional bar + 3 compact stats) instead
+  of 5 equal-weight tiles; mobile Home added a 4th tile in a 2×2 grid.
+- **Fixed: mobile Attendance filter-chip colors.** Every selected filter chip
+  except Missing rendered green (`badge-present`) regardless of which status
+  it actually was — selecting "Assigned" visually read as "Arrived". Each
+  status now keeps its own color (`badge-assigned`/`badge-late`/etc.) when
+  selected.
 
 ---
 
 ## Open items for the team
 
-1. **Own database per developer.** Everyone currently shares one Neon database, which causes the "can't log in after clone" issue (see PROJECT_STRUCTURE.txt → "CAN'T LOG IN AFTER CLONING?"). Giving each developer their own Neon DB (free tier allows several) would remove that whole class of problem.
+1. **Own database per developer.** Everyone currently shares one Neon database, which causes the "can't log in after clone" issue (see PROJECT_STRUCTURE.md → "CAN'T LOG IN AFTER CLONING?"). Giving each developer their own Neon DB (free tier allows several) would remove that whole class of problem.
 2. **`CANCELLED` ticket status** (Jayden): the exception status enum is `OPEN | RESOLVED` only, so a ticket raised in error is hard-deleted rather than soft-cancelled — losing the audit trail. Adding `CANCELLED` back is a small change but needs a team decision.
 3. **SSE vs WebSockets** (Jayden): the live alert channel uses SSE. If Vimal/Vance are assuming WebSockets elsewhere, align before deployment.
 4. **Deployment bug in the base** (flagged by Jayden, still open): `frontend/src/lib/api.js` imports `../../../permissions.js` from *outside* `frontend/`. It works locally (Vite `fs.allow`) but a Vercel build rooted at `frontend/` won't have that parent file and will fail. Worth fixing before deployment day.

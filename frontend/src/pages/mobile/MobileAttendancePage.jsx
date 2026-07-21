@@ -232,9 +232,14 @@ export default function MobileAttendancePage() {
           // Missing stays red at all times, active or not — it's the one
           // status that needs to read as urgent on sight, not just when
           // selected, so it doesn't blend in as just another neutral tab.
+          // Every other filter uses ITS OWN status color when selected
+          // (Assigned -> blue, Arrived -> green, Late -> orange) instead of
+          // always turning green — a selected "Assigned" chip that renders
+          // green reads as "Arrived", which is a different status entirely.
           const isMissing = f === "MISSING";
           const active = filter === f;
-          const cls = isMissing ? "badge-missing" : active ? "badge-present" : "badge-neutral";
+          const activeTone = { ASSIGNED: "assigned", ARRIVED: "present", LATE: "late", UNASSIGNED: "unassigned" }[f] || "present";
+          const cls = isMissing ? "badge-missing" : active ? `badge-${activeTone}` : "badge-neutral";
           return (
             <button
               key={f}

@@ -44,6 +44,18 @@
  *             (same, for the /mobile/* routes). Purely groups the checkboxes
  *             in Account control into labelled sections — carries no other
  *             meaning.
+ *   parent  — (optional) another permission's `key`. Purely a RENDERING hint
+ *             for Account control — indents this checkbox under its parent's
+ *             ("dashboard -> Delegate/Analytics", "Home -> QR + Face Scanner/
+ *             Exception") so related toggles read as a group. Carries no
+ *             enforcement meaning — a child is NOT auto-disabled if its
+ *             parent is unticked; each key is still checked independently
+ *             everywhere it's actually enforced.
+ *   adminOnly — (optional) this permission is never rendered as a toggle for
+ *             a Staff account — only Admins get it (Admin already bypasses
+ *             every check regardless of what's stored). Used for things that
+ *             should never be individually grantable to Staff, like Account
+ *             control access.
  */
 export const PERMISSIONS = [
   // ---- Action permissions: capabilities enforced by the backend --------
@@ -56,11 +68,43 @@ export const PERMISSIONS = [
     group: "action",
   },
   {
+    key: "exportData",
+    label: "Export data",
+    desc: "Download the attendance report as Excel",
+    chip: "Export",
+    default: false,
+    group: "action",
+    parent: "manageDelegates",
+  },
+  {
     key: "manageTrips",
     label: "Manage trips",
     desc: "Edit trips, coaches and itineraries on the Trips board",
     chip: "Trips",
     default: false,
+    group: "action",
+  },
+  {
+    key: "manageDocuments",
+    label: "Manage documents",
+    desc: "Upload/parse documents and confirm extracted delegates onto the trip (Onboarding)",
+    chip: "Documents",
+    // Carved out of manageDelegates (which used to gate this too) — default
+    // TRUE so no existing staff account silently loses upload/confirm access
+    // the moment this permission starts being checked; an admin can now
+    // narrow it per-account going forward.
+    default: true,
+    group: "action",
+  },
+  {
+    key: "manageScanner",
+    label: "Manage scanner",
+    desc: "Perform Face/QR check-ins from a signed-in session (the passwordless entrance kiosk is unaffected either way)",
+    chip: "Scanner",
+    // Check-in used to be open to any signed-in account with no dedicated
+    // permission at all — default TRUE for the same "don't silently revoke
+    // existing capability" reason as manageDocuments above.
+    default: true,
     group: "action",
   },
   {
@@ -72,20 +116,16 @@ export const PERMISSIONS = [
     group: "action",
   },
   {
-    key: "exportData",
-    label: "Export data",
-    desc: "Download the attendance report as Excel",
-    chip: "Export",
-    default: false,
-    group: "action",
-  },
-  {
     key: "manageAccounts",
     label: "Manage accounts",
     desc: "Access Account control — create, edit and delete accounts",
     chip: "Accounts",
     default: false,
     group: "action",
+    // Never offered as a Staff toggle — only a real Admin should ever be
+    // able to grant/revoke everyone else's access (see AccountControlPage.jsx,
+    // which filters this out of the Staff-role form entirely).
+    adminOnly: true,
   },
 
   // ---- Desktop web views: which /routes this account can even see -------
@@ -99,17 +139,31 @@ export const PERMISSIONS = [
   },
   {
     key: "viewDelegates",
-    label: "All delegates",
+    label: "Delegate",
     desc: "See the Dashboard's Delegate tab — the full roster table",
-    chip: "All delegates",
+    chip: "Delegate",
     default: true,
     group: "desktopView",
+    parent: "viewDashboard",
+  },
+  {
+    key: "viewAnalytics",
+    label: "Analytics",
+    desc: "See the Dashboard's Analytics tab (charts + AI insights)",
+    chip: "Analytics",
+    // Was hardcoded role==="admin" only, never a toggle at all — this is a
+    // genuinely NEW capability being made grantable to Staff, so (unlike
+    // manageDocuments/manageScanner above) default FALSE is correct here:
+    // nothing regresses, an admin opts specific staff IN.
+    default: false,
+    group: "desktopView",
+    parent: "viewDashboard",
   },
   {
     key: "viewTrips",
-    label: "Trips board",
+    label: "Trips",
     desc: "See the Trips & coach management board",
-    chip: "Trips page",
+    chip: "Trips",
     default: true,
     group: "desktopView",
   },
@@ -131,7 +185,7 @@ export const PERMISSIONS = [
   },
   {
     key: "viewScanner",
-    label: "Face/QR scanner",
+    label: "Face + QR scan",
     desc: "See the desktop entrance-kiosk Face + QR scanner",
     chip: "Scanner",
     default: true,
@@ -139,9 +193,20 @@ export const PERMISSIONS = [
   },
   {
     key: "viewExceptions",
-    label: "Exceptions page",
+    label: "Exceptions",
     desc: "See the exception ticket inbox",
-    chip: "Exceptions page",
+    chip: "Exceptions",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewChatbot",
+    label: "Chatbot",
+    desc: "See the floating Trip Assistant chat bubble",
+    chip: "Chatbot",
+    // Was open to every signed-in user with no gate at all — default TRUE so
+    // nobody silently loses the assistant when this permission starts being
+    // checked.
     default: true,
     group: "desktopView",
   },
@@ -152,20 +217,42 @@ export const PERMISSIONS = [
     chip: "History",
     default: true,
     group: "desktopView",
+    // Nested two levels deep (dashboard -> Delegate -> History logs) per
+    // request — Account control's rendering supports this recursively, see
+    // AccountControlPage.jsx's PermRow.
+    parent: "viewDelegates",
   },
 
   // ---- Mobile views: which /mobile/* routes this account can see -------
   {
     key: "viewMobileHome",
-    label: "Mobile check-in home",
+    label: "Home",
     desc: "See the mobile Home tab (trip + per-coach live status)",
-    chip: "Mobile home",
+    chip: "Home",
     default: true,
     group: "mobileView",
   },
   {
+    key: "viewMobileScanner",
+    label: "QR + Face Scanner",
+    desc: "See the mobile Face/QR/Manual entrance scanner",
+    chip: "Mobile scanner",
+    default: true,
+    group: "mobileView",
+    parent: "viewMobileHome",
+  },
+  {
+    key: "viewMobileIssues",
+    label: "Exception",
+    desc: "See the mobile Issues/Exceptions tracking page",
+    chip: "Mobile issues",
+    default: true,
+    group: "mobileView",
+    parent: "viewMobileHome",
+  },
+  {
     key: "viewMobileAttendance",
-    label: "Attendance sheet",
+    label: "Attendance",
     desc: "See the mobile Attendance tab (full roster on the go)",
     chip: "Attendance",
     default: true,
@@ -173,25 +260,17 @@ export const PERMISSIONS = [
   },
   {
     key: "viewMobileTrips",
-    label: "Live trip trackers",
+    label: "Trips",
     desc: "See the mobile Trips tab",
     chip: "Mobile trips",
     default: true,
     group: "mobileView",
   },
   {
-    key: "viewMobileScanner",
-    label: "Mobile scanner",
-    desc: "See the mobile Face/QR/Manual entrance scanner",
-    chip: "Mobile scanner",
-    default: true,
-    group: "mobileView",
-  },
-  {
-    key: "viewMobileIssues",
-    label: "Mobile exceptions",
-    desc: "See the mobile Issues/Exceptions tracking page",
-    chip: "Mobile issues",
+    key: "viewMobileChatbot",
+    label: "Chatbot",
+    desc: "See the floating Trip Assistant chat bubble on mobile",
+    chip: "Mobile chatbot",
     default: true,
     group: "mobileView",
   },

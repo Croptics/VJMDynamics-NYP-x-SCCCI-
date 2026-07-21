@@ -5,18 +5,18 @@ import { getToken, clearToken, getPermissions, apiPost } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
-import OnboardingPage from "./pages/OnboardingPage.jsx";
+import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
 
 // Scaffolds — owned by teammates
-import DashboardPage from "./pages/DashboardPage.jsx";
-import TripCoachPage from "./pages/TripCoachPage.jsx";
-import QRCheckInPage from "./pages/QRCheckInPage.jsx";
-import UnifiedScannerPage from "./pages/UnifiedScannerPage.jsx";
-import ExceptionInboxPage from "./pages/ExceptionInboxPage.jsx";
-import AccountControlPage from "./pages/AccountControlPage.jsx";
-import SettingsPage from "./pages/SettingsPage.jsx";
-import HistoryLogPage from "./pages/HistoryLogPage.jsx";
-import UserGuidePage from "./pages/UserGuidePage.jsx";
+import DashboardPage from "./pages/desktop/DashboardPage.jsx";
+import TripCoachPage from "./pages/desktop/TripCoachPage.jsx";
+import QRCheckInPage from "./pages/desktop/QRCheckInPage.jsx";
+import UnifiedScannerPage from "./pages/desktop/UnifiedScannerPage.jsx";
+import ExceptionInboxPage from "./pages/desktop/ExceptionInboxPage.jsx";
+import AccountControlPage from "./pages/desktop/AccountControlPage.jsx";
+import SettingsPage from "./pages/desktop/SettingsPage.jsx";
+import HistoryLogPage from "./pages/desktop/HistoryLogPage.jsx";
+import UserGuidePage from "./pages/desktop/UserGuidePage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
@@ -26,6 +26,7 @@ import MobileTripsPage from "./pages/mobile/MobileTripsPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
+import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 
 // Which UI (desktop or mobile) to land in — derived automatically at login
@@ -292,6 +293,14 @@ export default function App() {
             for someone already using the app who just wants the scanner. */}
         <Route path="/mobile/scanner" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
+        {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
+            where MobileProfilePage's "User guide" button used to send you to
+            the shared desktop /guide route, which only lives inside the
+            DESKTOP Layout's Route group — opening it on mobile rendered the
+            desktop sidebar/chrome around the content. This route lives here
+            instead, so it gets the normal mobile topbar + tab bar. Ungated,
+            same as /guide — a help resource open to any signed-in account. */}
+        <Route path="/mobile-user-guide" element={<MobileUserGuidePage />} />
       </Route>
     </Routes>
   );

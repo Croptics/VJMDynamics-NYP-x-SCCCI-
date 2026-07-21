@@ -1,4 +1,4 @@
-// frontend/src/pages/QRCheckInPage.jsx
+// frontend/src/pages/desktop/QRCheckInPage.jsx
 // OWNED BY: FaceCheck-Pro (Vimal)
 // Feature: Privacy-First Biometric & Multi-Modal Fusion Scanner
 // Route:   /checkin  (registered by JQ in App.jsx — not modified here)
@@ -28,12 +28,12 @@ import {
   RefreshCw, ShieldCheck, X, Zap, Turtle, Camera, Sparkles,
   ChevronRight, CheckCircle2, Users,
 } from "lucide-react";
-import { apiGet, apiPost, getUser } from "../lib/api.js";
+import { apiGet, apiPost, getUser } from "../../lib/api.js";
 // Jayden — QR check-in module (self-contained; mounted into the "QR" slot below)
-import QRScannerPanel from "../components/QRScannerPanel.jsx";
+import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 // Jayden — Issues tab (exception logging) + Manual attendance tracking
-import IssuesPanel from "../components/IssuesPanel.jsx";
-import ManualTrackingPanel from "../components/ManualTrackingPanel.jsx";
+import IssuesPanel from "../../components/IssuesPanel.jsx";
+import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
 
 const TRIP_ID = "t-1"; // the base app's single seeded trip (see backend/data.js)
 const COLLAPSED_MISSING = 3; // Figma shows 3 cards + "+ N more"

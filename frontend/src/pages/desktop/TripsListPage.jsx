@@ -1,4 +1,4 @@
-// frontend/src/pages/TripsListPage.jsx
+// frontend/src/pages/desktop/TripsListPage.jsx
 // Owner: Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
 //
 // Grid of every trip. Clicking a card navigates to /trips?tripId=<uuid> —
@@ -25,9 +25,9 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin } from "lucide-react";
-import { apiGet, apiPost, getPermissions } from "../lib/api.js";
-import { useLang } from "../lib/i18n.jsx";
-import { useTheme } from "../lib/theme.jsx";
+import { apiGet, apiPost, getPermissions } from "../../lib/api.js";
+import { useLang } from "../../lib/i18n.jsx";
+import { useTheme } from "../../lib/theme.jsx";
 import "./TripCoachPage.css";
 
 /** Shared light/dark toggle for the Trips feature — now just a thin wrapper

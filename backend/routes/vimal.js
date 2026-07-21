@@ -27,7 +27,7 @@
  * ============================================================================= */
 
 import { Router } from "express";
-import { requireAuth, requireKioskOrAuth } from "../auth.js";
+import { requireAuth, requireKioskOrPermission } from "../auth.js";
 import {
   listDelegates,
   getDelegateById,
@@ -133,9 +133,11 @@ router.get("/api/attendance/coaches", requireAuth(), wrap(async (_req, res) => {
  * 200 -> { delegateId, name, status: "PRESENT", method, processedInMs }
  * 404 -> { error: "SCAN_FAILED" }
  * ========================================================================== */
-// requireKioskOrAuth: a normal signed-in user OR the passwordless kiosk token
-// (the /kiosk-scan entrance scanner's Face mode). See auth.js.
-router.post("/api/attendance/scan", requireKioskOrAuth(), wrap(async (req, res) => {
+// requireKioskOrPermission("manageScanner"): a signed-in user with the
+// "Manage scanner" permission, OR the passwordless kiosk token (the
+// /kiosk-scan entrance scanner's Face mode — unaffected by the permission,
+// by design). See auth.js.
+router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), wrap(async (req, res) => {
   const started = Date.now();
   const { tripId, scanData, timestamp, coachId } = req.body || {};
 

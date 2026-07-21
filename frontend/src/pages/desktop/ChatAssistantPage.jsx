@@ -3,9 +3,9 @@
  * ============================================================================= */
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../lib/api.js";
-import { useLang } from "../lib/i18n.jsx";
-import TripPulse from "../components/TripPulse.jsx";
+import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../../lib/api.js";
+import { useLang } from "../../lib/i18n.jsx";
+import TripPulse from "../../components/TripPulse.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 

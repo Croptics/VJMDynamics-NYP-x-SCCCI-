@@ -14,31 +14,73 @@ import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
 
 // One-time cleanup: earlier builds stored the plaintext password in
-// localStorage (under these two keys, across two iterations of the "Remember
-// password" feature) to prefill the login form. "Remember password" is now
-// secure/token-based instead — see the checkbox's onChange below — so any
-// value left under either old key is purged on load rather than kept around
-// or silently reused. This runs for every returning visitor exactly once
-// (removeItem is a no-op once the key's gone), cleaning up whatever a prior
-// build already wrote to their browser.
+// localStorage under these two keys, across two iterations of a since-removed
+// "Remember password" feature. Purged unconditionally for any returning
+// visitor (removeItem is a no-op once the key's gone) before the CURRENT
+// "Remember password" (see REMEMBER_KEY below) has a chance to write its own
+// — the two are unrelated, this just clears whatever a prior build left
+// behind under the old names.
 try {
   localStorage.removeItem("mg_remember");
   localStorage.removeItem("mg_remember_v2");
 } catch { /* ignore */ }
+
+// "Remember password" (2026-07-21): stores { staffId, password } in
+// localStorage in plain JSON so the form can prefill itself on a later
+// visit. This is a DELIBERATE, requested trade-off, not an oversight — the
+// project had previously and intentionally avoided this exact pattern (see
+// the cleanup above), because Chrome's own native "Save password?" prompt
+// never reliably fires for this SPA (confirmed via diagnostic logging:
+// navigator.credentials.store() resolves without error, isSecureContext is
+// true, PasswordCredential exists, yet nothing is actually persisted to
+// Chrome's own password manager). Given the browser-native path is a dead
+// end in practice, this trades a small amount of security (the password
+// sits in this browser's local storage, readable by anyone with access to
+// the device/browser profile — not sent anywhere, but not OS-keychain-
+// encrypted like a real password manager either) for a login flow that
+// reliably prefills every time. Unticking "Remember password" on a
+// subsequent login clears it immediately.
+//
+// ENVIRONMENT-GATED (2026-07-21): `import.meta.env.DEV` is Vite's own
+// dev-vs-production flag — true only under `vite dev` (a local `npm run
+// dev`), false in whatever `vite build` produces, regardless of which host
+// that build ends up deployed to. That's the right switch here: this
+// trade-off is acceptable for local dev on a trusted team's own machines,
+// but must NOT be reachable once this app is built and put on the public
+// internet. When REMEMBER_ENABLED is false these three functions are
+// no-ops — there is no code path in a production build that reads or
+// writes a plaintext password. The "Remember password" checkbox itself
+// stays visible either way, since it also controls the harmless, separate
+// "keep me signed in" behavior (session token in localStorage vs.
+// sessionStorage, via setToken(token, keep) below) — only the
+// plaintext-password half of the feature is disabled in production.
+const REMEMBER_ENABLED = import.meta.env.DEV;
+const REMEMBER_KEY = "mg_remembered_login";
+function loadRemembered() {
+  if (!REMEMBER_ENABLED) return null;
+  try {
+    const raw = localStorage.getItem(REMEMBER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveRemembered(staffId, password) {
+  if (!REMEMBER_ENABLED) return;
+  try { localStorage.setItem(REMEMBER_KEY, JSON.stringify({ staffId, password })); } catch { /* ignore */ }
+}
+function clearRemembered() {
+  if (!REMEMBER_ENABLED) return;
+  try { localStorage.removeItem(REMEMBER_KEY); } catch { /* ignore */ }
+}
 
 /**
  * Screen 1 — Login / Authentication (shared across team; Vance leads).
  * Split layout: SCCCI-Red brand panel + sign-in form.
  *
  * Login validates against the backend (POST /api/auth/login) using accounts
- * managed on the Account control page. "Remember password" is secure and
- * token-based: it does NOT store your password anywhere — ticking it just
- * puts the signed JWT session token in localStorage (survives closing the
- * browser) instead of sessionStorage (cleared when the tab/browser closes),
- * via setToken(token, keep) below. No plaintext credential of any kind is
- * ever written to disk. (An earlier build did store the raw password to
- * prefill the form — see the cleanup at the top of this file, which purges
- * that from any browser that still has it.)
+ * managed on the Account control page. "Remember password" (see the
+ * REMEMBER_KEY note above) both keeps the session token in localStorage
+ * (survives closing the browser, via setToken(token, keep) below) AND
+ * prefills the Staff ID/password fields on a later visit.
  *
  * Which UI you land in (desktop or mobile) is no longer chosen here — there's
  * a single "Sign in" button. App.jsx's handleSignIn figures out desktop vs.
@@ -50,10 +92,11 @@ export default function LoginPage({ onSignIn }) {
   const navigate = useNavigate();
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
-  const [staffId, setStaffId] = useState("");
-  const [password, setPassword] = useState("");
+  const remembered = loadRemembered();
+  const [staffId, setStaffId] = useState(remembered?.staffId || "");
+  const [password, setPassword] = useState(remembered?.password || "");
   const [showPw, setShowPw] = useState(false);
-  const [keep, setKeep] = useState(false); // "Remember password" — see the token-based note above
+  const [keep, setKeep] = useState(!!remembered); // "Remember password" — see REMEMBER_KEY note above
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
@@ -75,27 +118,11 @@ export default function LoginPage({ onSignIn }) {
       if (token) {
         setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
-        // Explicitly hand the credential to the browser's password manager via
-        // the Credential Management API, instead of relying on Chrome's own
-        // heuristic (watch the form submit, infer success from the page
-        // changing). That heuristic is unreliable in an SPA like this one —
-        // there's no full-page navigation for the browser to key off, so the
-        // "Save password?" prompt can silently never fire even though the
-        // form/autoComplete attributes are correct. This API tells the
-        // browser directly "here's a credential, offer to save it" — no
-        // guessing. Chrome/Edge/Brave support it; Firefox/Safari don't, so
-        // this is feature-detected and never blocks login if unsupported or
-        // if the user declines the OS/browser's own save prompt.
-        if (keep && window.PasswordCredential) {
-          try {
-            const cred = new window.PasswordCredential({
-              id: staffId.trim(),
-              password,
-              name: staffId.trim(),
-            });
-            await navigator.credentials.store(cred);
-          } catch { /* not fatal — login already succeeded */ }
-        }
+        // See REMEMBER_KEY note at the top of this file for why this stores
+        // the actual password (a deliberate, requested trade-off) rather
+        // than relying on the browser's own save-password prompt.
+        if (keep) saveRemembered(staffId.trim(), password);
+        else clearRemembered();
       }
       onSignIn?.(); // success -> enter the app; App.jsx picks desktop/mobile automatically
     } catch (e) {

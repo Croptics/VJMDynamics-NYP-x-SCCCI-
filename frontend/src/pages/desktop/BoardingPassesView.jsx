@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import QRCode from "qrcode";
 import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode } from "lucide-react";
-import { getBadges } from "../lib/claudeParse.js";
-import { useLang } from "../lib/i18n.jsx";
+import { getBadges } from "../../lib/claudeParse.js";
+import { useLang } from "../../lib/i18n.jsx";
 
 /**
  * Boarding passes — the organiser's pass desk (Vance).

@@ -11,14 +11,14 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback } from "react";
 import { AlertTriangle, Plus, UserCheck } from "lucide-react";
-import StatusBadge from "../components/StatusBadge.jsx";
-import LogExceptionModal from "../components/LogExceptionModal.jsx";
-import { getPermissions } from "../lib/api.js";
-import { useLang } from "../lib/i18n.jsx";
+import StatusBadge from "../../components/StatusBadge.jsx";
+import LogExceptionModal from "../../components/LogExceptionModal.jsx";
+import { getPermissions } from "../../lib/api.js";
+import { useLang } from "../../lib/i18n.jsx";
 import {
   listExceptions, resolveException, deleteException, manualOverride,
   subscribeStream, fmtTime, issueLabel,
-} from "../lib/exceptionsApi.js";
+} from "../../lib/exceptionsApi.js";
 import "./ExceptionInboxPage.css";
 
 const TABS = [
