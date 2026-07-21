@@ -14,15 +14,17 @@
  *       a typed list…), that text is structured by an LLM — cheap, fast, works
  *       across many pages, and even runs on a free local Ollama.
  *    2. If a PDF has little/no extractable text (a SCANNED passport, a photo),
- *       or the upload is an image, it falls back to Claude VISION, which can
- *       actually "see" the document.
+ *       or the upload is an image, it falls back to VISION. Claude vision is used
+ *       when a key is set; otherwise images are read by LOCAL OCR (Tesseract), so
+ *       scanned attendee lists and passport/ID photos still work fully offline —
+ *       the OCR text then flows through the same LLM structuring step.
  *    This is why one uploader handles directories, spreadsheets AND passport
  *    scans — the strongest talking point for the Section C AI reflection.
  *
  *  Provider split:
  *    - Parsing prefers Claude when a key is set (best extraction accuracy),
  *      and falls back to local Ollama for text-based docs when it isn't.
- *      Vision (scanned docs / images) needs Claude — Ollama can't see.
+ *      Vision uses Claude when available, else local Tesseract OCR for images.
  *    - The chatbot is Ollama-first, Claude-fallback (mirrors JQ's insights.js),
  *      because it is high-volume and text-only.
  * ============================================================================= */
@@ -36,10 +38,9 @@ import {
   getTrip,
   getDashboard,
   getMissing,
-  resolveTripUuid,
   COACHES,
 } from "../data.js";
-import { requireAuth, requirePermission } from "../auth.js";
+import { requireAuth, requirePermission, requireKioskOrAuth } from "../auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -70,6 +71,21 @@ function readConfig() {
 }
 
 const q = (text, params) => pool.query(text, params);
+
+/* Resolve a client-supplied trip identifier to its uuid_id. Accepts EITHER the
+ * trips.id string (e.g. "t-1", the seed trip) OR the uuid_id itself (what
+ * /api/all-trips returns as `id`, which is what the onboarding trip picker now
+ * sends). Returns null when nothing matches. Matching only the string id used
+ * to silently orphan delegates onboarded to any non-seed trip. Call after
+ * ensureReady() so the pool exists. */
+async function resolveTripUuid(tripId) {
+  if (!tripId) return null;
+  const r = await q(
+    `SELECT uuid_id FROM trips WHERE id = $1 OR uuid_id::text = $1 LIMIT 1`,
+    [String(tripId)]
+  );
+  return r.rows[0]?.uuid_id || null;
+}
 
 /* ---- Lazy schema init (additive only — never drops base tables) ---------- */
 let readyPromise = null;
@@ -114,6 +130,7 @@ async function init() {
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
   console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages");
+  warmUpModel(); // preload the chat model so the first question isn't a cold start
 }
 
 /* =============================================================================
@@ -324,6 +341,25 @@ const chunk = (arr, n) => {
   return out;
 };
 
+/* Local OCR fallback (no cloud). When an uploaded IMAGE has no text layer and no
+ * Claude vision key is set, read it with Tesseract so scanned attendee lists and
+ * passport/ID photos still work fully offline. The recognised text then flows
+ * through the same text-structuring pipeline. Returns "" on failure. (A scanned,
+ * image-only PDF would need rasterising to images first — not handled here; users
+ * can upload it as an image.) */
+async function ocrImage(buf) {
+  try {
+    const { createWorker } = await import("tesseract.js");
+    const worker = await createWorker("eng");
+    const { data: { text } } = await worker.recognize(buf);
+    await worker.terminate();
+    return (text || "").trim();
+  } catch (err) {
+    console.warn("  OCR (tesseract) unavailable:", err.message || err);
+    return "";
+  }
+}
+
 function dedupeByName(records) {
   const seen = new Map();
   for (const r of records) {
@@ -530,12 +566,31 @@ async function runParseJob(job, buf, mediaType, isPdf) {
       }
     }
 
-    // Vision path (scanned PDF / image) — Claude only.
+    // Vision path (scanned PDF / image). Prefer Claude vision when a key is set;
+    // otherwise fall back to LOCAL OCR (Tesseract) for images so scans work
+    // offline. OCR still needs a text engine (Ollama) to structure the result.
+    const isImage = mediaType.startsWith("image/");
     if (!hasClaude) {
+      if (isImage && hasOllama) {
+        job.total = 1;
+        job.method = "ocr/tesseract";
+        const text = await ocrImage(buf);
+        if (text.replace(/\s/g, "").length >= 20) {
+          const recs = await structurePage(text);
+          all.push(...(recs || []));
+          job.done = 1;
+          job.rows = finalizeRecords(all).map((r, i) => toRow(r, i, job.name));
+          job.status = "done";
+          return;
+        }
+        job.status = "error";
+        job.error = "Couldn't read any text from that image. Try a sharper photo, or a text-based PDF.";
+        return;
+      }
       job.status = "error";
-      job.error = mediaType.startsWith("image/")
-        ? "Reading images/scans needs Claude vision. Set ANTHROPIC_API_KEY in backend/.env."
-        : "This looks like a scanned document, which needs Claude vision. Set ANTHROPIC_API_KEY, or upload a text-based PDF.";
+      job.error = isImage
+        ? "Reading this image needs the local AI engine for OCR. Start Ollama, or set ANTHROPIC_API_KEY in backend/.env."
+        : "This looks like a scanned PDF. Local OCR currently supports images — upload it as a photo/screenshot, set a Claude key, or use a text-based PDF.";
       return;
     }
     job.total = 1;
@@ -598,15 +653,8 @@ router.get("/api/documents/parse-async/:id", requireAuth(), wrap(async (req, res
  * detection) + the trip's coaches (for per-row assignment). */
 router.get("/api/onboarding/context", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
-  // WHY resolveTripUuid(): the frontend's trip picker sends the SAME id shape
-  // as everywhere else in the app — "t-1" for the base Beijing trip, or a real
-  // trip's uuid_id for any other trip (see DashboardPage.jsx's trip switcher).
-  // This used to do `SELECT uuid_id FROM trips WHERE id = $1`, which only ever
-  // matches trips.id (a legacy short code that's ONLY ever "t-1" for the seed
-  // trip — every other trip's `id` column holds an unrelated random uuid, see
-  // desmond.js's trip-seed INSERT), so passing a real trip's uuid here never
-  // matched anything and silently fell back to trip_id IS NULL (unscoped).
-  const tripUuid = await resolveTripUuid(req.query.tripId);
+  const tripId = req.query.tripId;
+  const tripUuid = await resolveTripUuid(tripId);
   const dq = tripUuid
     ? await q(`SELECT name FROM delegates WHERE trip_id = $1`, [tripUuid])
     : await q(`SELECT name FROM delegates`);
@@ -715,10 +763,6 @@ router.post(
     if (rows.length === 0) {
       return res.status(400).json({ error: "NO_ROWS", message: "There are no delegates to add." });
     }
-    // See the comment on GET /api/onboarding/context above for why
-    // resolveTripUuid() (not a raw `trips WHERE id = $1` lookup) is required
-    // here — this is the actual fix for uploaded lists not reaching the
-    // right trip's check-in module / dashboard.
     const tripUuid = await resolveTripUuid(req.params.id);
     if (!tripUuid) {
       // Fail loudly rather than create delegates with a null trip_id (orphaned
@@ -735,15 +779,12 @@ router.post(
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
       const coachId = r.coachId || null;
-      // tripUuid passed directly at creation (not just patched in below) so the
-      // delegate is correctly scoped from the very first INSERT — no window
-      // where it exists with trip_id NULL and is invisible everywhere.
       const delegate = await createDelegate({
         name,
         status: coachId ? "MISSING" : "UNASSIGNED",
         vip: !!r.vip,
         coachId,
-      }, tripUuid, req.account?.name || req.account?.username || null);
+      });
       await q(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,
@@ -760,15 +801,16 @@ router.post(
       );
       added.push({ ...delegate, company: r.company || null, role: r.role || null });
     }
+    if (added.length) invalidateSnapshot(); // the assistant's cached view is now stale
     res.status(201).json({ added: added.length, skippedInvalid, delegates: added });
   })
 );
 
-/* ============================================================================
- *  BOARDING PASSES + QR CHECK-IN  (document reader → on-site scanner → coach board)
- *  Each onboarded delegate gets a unique qr_code. The on-site scanner resolves a
- *  scanned code and flips the delegate to PRESENT (+ coach), writing the shared
- *  delegates + check_in_logs tables — which Desmond's coach board already reads.
+/* =============================================================================
+ *  BOARDING PASSES  (output of the document reader)
+ *  Each onboarded delegate gets a unique qr_code, rendered as a printable QR
+ *  boarding pass. Reading/scanning those codes to check delegates in on-site is
+ *  Vimal's feature (POST /api/checkins) — deliberately NOT owned here.
  * ========================================================================== */
 function newQrCode() {
   return "MG-" + randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
@@ -781,28 +823,26 @@ async function backfillQrCodes(tripUuid) {
   for (const row of rows) await q(`UPDATE delegates SET qr_code = $1 WHERE id = $2`, [newQrCode(), row.id]);
 }
 
-// Delegates (with QR tokens) for a trip — powers the printable boarding passes
-// and the scanner's roster/headcount.
+// Delegates (with QR tokens) for a trip — powers the printable boarding passes.
 router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
-  // See the comment on GET /api/onboarding/context above.
-  const tripUuid = await resolveTripUuid(req.query.tripId);
+  const tripId = req.query.tripId;
+  const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
   const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
   const r = tripUuid
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
   const coaches = (await q(`SELECT id, label, name, city FROM coaches ORDER BY sort_order NULLS LAST, id`)).rows;
-  // PRESENT is the legacy value this route itself still writes on scan-in
-  // (see /api/onboarding/checkin below); ARRIVED is the newer 5-status value
-  // set from Dashboard/TripCoachPage/mobile — both mean "boarded" here.
-  const present = r.rows.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
+  const present = r.rows.filter((d) => d.status === "PRESENT").length;
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
 }));
 
 // Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
 // the scan. This is what the on-site scanner calls.
-router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async (req, res) => {
+// requireKioskOrAuth: a normal signed-in user OR the passwordless kiosk token
+// (the /kiosk-scan entrance scanner's QR mode). See auth.js.
+router.post("/api/onboarding/checkin", requireKioskOrAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const code = (req.body?.code || "").toString().trim();
   const requestedTripId = (req.body?.tripId || "t-1").toString();
@@ -825,8 +865,37 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
   const tripId = del.trip_str || requestedTripId;
-  // PRESENT kept in this check too — a delegate scanned before this route
-  // was migrated to write ARRIVED still has PRESENT in the database.
+
+  // Cross-coach guard: a scanner scoped to one coach (coachOverride, from the
+  // scan panel's own coach picker) must NOT be able to silently reassign a
+  // delegate who is already assigned to a DIFFERENT coach — that used to
+  // happen here (coachOverride unconditionally won in the COALESCE below),
+  // so scanning a Coach 5 delegate on a Coach 1 scanner quietly moved them
+  // onto Coach 1 and checked them in there. An UNASSIGNED delegate (no
+  // coach_id yet) is still fine to assign on first scan — that's the
+  // legitimate "muster onto whichever coach is scanning" case.
+  if (coachOverride && del.coach_id && del.coach_id !== coachOverride) {
+    const dash = await getDashboard();
+    const assignedCoach = (dash.coaches || []).find((c) => c.id === del.coach_id);
+    const scannerCoach = (dash.coaches || []).find((c) => c.id === coachOverride);
+    const assignedLabel = assignedCoach?.label || assignedCoach?.name || del.coach_id;
+    const scannerLabel = scannerCoach?.label || scannerCoach?.name || coachOverride;
+    return res.status(409).json({
+      error: "COACH_MISMATCH",
+      message: `${del.name} is assigned to ${assignedLabel}, not ${scannerLabel}.`,
+      delegateId: del.id,
+      delegateName: del.name,
+      assignedCoachId: del.coach_id,
+      assignedCoachLabel: assignedLabel,
+      scannerCoachId: coachOverride,
+    });
+  }
+
+  // ARRIVED is the current 5-status value; PRESENT is the legacy alias this
+  // endpoint itself still writes below. Checking only PRESENT here missed a
+  // delegate who'd already boarded via face scan or manual override (both
+  // write ARRIVED), so a re-scan of their QR code would report
+  // alreadyBoarded:false instead of the correct duplicate-check-in notice.
   const alreadyBoarded = del.status === "PRESENT" || del.status === "ARRIVED";
   const coachId = coachOverride || del.coach_id || null;
   const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -840,17 +909,12 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   } catch (err) {
     console.error("  QR check-in log failed (continuing to update delegate):", err.message || err);
   }
-  // ARRIVED — the 5-status value (was the legacy PRESENT literal; the whole
-  // point of this feature is that scanning a delegate's own badge at the
-  // start of the event moves them Assigned -> Arrived, so this needs to
-  // write the real current value, not the alias). Works from any prior
-  // status, not just ASSIGNED — someone scanning back in after being marked
-  // Late should also read as Arrived, not stay stuck.
-  await q(`UPDATE delegates SET status='ARRIVED', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
+  await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
     [coachOverride, `QR check-in · ${nowStr}`, del.id]);
+  invalidateSnapshot(); // a delegate just boarded — refresh the assistant's view
 
   const counts = await q(
-    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
        FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
   res.json({
     ok: true,
@@ -864,13 +928,28 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
 /* =============================================================================
  *  FEATURE 2 — TRIP ASSISTANT  (Use Case 2)
  * ========================================================================== */
+/* Passport validity for overseas travel: "expired", or "expiring" within 6
+ * months (the common 6-month passport-validity rule), else "ok". A missing or
+ * unparseable expiry is "unknown" (never flagged). Pure + exported for tests. */
+function checkPassportExpiry(expiry, now = new Date()) {
+  if (!expiry) return { status: "unknown", daysLeft: null };
+  const d = new Date(expiry);
+  if (Number.isNaN(d.getTime())) return { status: "unknown", daysLeft: null };
+  const daysLeft = Math.round((d.getTime() - now.getTime()) / 86400000);
+  const sixMonths = new Date(now.getTime());
+  sixMonths.setMonth(sixMonths.getMonth() + 6);
+  if (d.getTime() < now.getTime()) return { status: "expired", daysLeft };
+  if (d.getTime() < sixMonths.getTime()) return { status: "expiring", daysLeft };
+  return { status: "ok", daysLeft };
+}
+
 async function buildSnapshot() {
   const [trip, dashboard, missing] = await Promise.all([getTrip(), getDashboard(), getMissing()]);
 
   /* Rich delegate roster (drives company/industry/VIP analytics + lookups). */
   let roster = [];
   try {
-    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email
+    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry
                          FROM delegates ORDER BY name`);
     roster = r.rows;
   } catch { /* delegate doc columns not present yet */ }
@@ -886,6 +965,13 @@ async function buildSnapshot() {
   const byIndustry = tally(roster, "industry");
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
+
+  /* Passport validity — delegates whose passport is expired or expires within
+   * 6 months. Soonest-to-expire / most-overdue first. */
+  const passportIssues = roster
+    .map((d) => ({ name: d.name, vip: !!d.vip, expiry: d.passport_expiry, ...checkPassportExpiry(d.passport_expiry) }))
+    .filter((x) => x.status === "expired" || x.status === "expiring")
+    .sort((a, b) => (a.daysLeft ?? 0) - (b.daysLeft ?? 0));
 
   let exceptions = [];
   try {
@@ -927,9 +1013,24 @@ async function buildSnapshot() {
     trip, kpis: dashboard.kpis,
     coaches: dashboard.coaches.length ? dashboard.coaches : COACHES,
     missing, exceptions, checkins, itinerary,
-    roster, byIndustry, byCompany, vips,
+    roster, byIndustry, byCompany, vips, passportIssues,
   };
 }
+
+/* Short-TTL cache over buildSnapshot(). Every chat turn rebuilds the snapshot
+ * from ~6 DB queries; within a few seconds the data barely changes, so caching
+ * it makes rapid follow-up questions (and the fast-path below) much cheaper.
+ * Writes that change the picture (confirm, check-in) call invalidateSnapshot(). */
+let _snapshotCache = { at: 0, data: null };
+const SNAPSHOT_TTL_MS = 5000;
+async function getSnapshot() {
+  const now = Date.now();
+  if (_snapshotCache.data && now - _snapshotCache.at < SNAPSHOT_TTL_MS) return _snapshotCache.data;
+  const data = await buildSnapshot();
+  _snapshotCache = { at: now, data };
+  return data;
+}
+function invalidateSnapshot() { _snapshotCache = { at: 0, data: null }; }
 
 function buildSystemPrompt(snapshot, lang) {
   const languageLine = lang === "zh"
@@ -948,6 +1049,10 @@ function buildSystemPrompt(snapshot, lang) {
     ? snapshot.exceptions.map((e) => `- [${e.priority}] ${e.type}${e.delegate ? ` · ${e.delegate}` : ""}${e.note ? ` — ${e.note}` : ""}`).join("\n")
     : "(no open exception tickets)";
 
+  const passportLines = snapshot.passportIssues?.length
+    ? snapshot.passportIssues.map((p) => `- ${p.name}${p.vip ? " (VIP)" : ""}: passport ${p.status === "expired" ? "EXPIRED" : "expiring"} (${p.expiry})`).join("\n")
+    : "(no passport issues — all captured expiries valid 6+ months)";
+
   const methodLine = Object.keys(snapshot.checkins.byMethod).length
     ? Object.entries(snapshot.checkins.byMethod).map(([m, n]) => `${m}: ${n}`).join(", ")
     : "no check-ins logged yet";
@@ -955,6 +1060,11 @@ function buildSystemPrompt(snapshot, lang) {
   const itineraryLines = snapshot.itinerary.length
     ? snapshot.itinerary.map((i) => `- ${i.start_time} ${i.title}${i.location ? ` @ ${i.location}` : ""}`).join("\n")
     : "(no itinerary items for today)";
+
+  const risks = computeRisk(snapshot);
+  const prioritiesBlock = risks.length
+    ? risks.map((r) => `- [${r.level}] ${r.text}`).join("\n")
+    : "(nothing urgent — no missing VIPs or critical exceptions)";
 
   const industryLines = snapshot.byIndustry.length
     ? snapshot.byIndustry.map(([name, n]) => `- ${name}: ${n}`).join("\n")
@@ -1023,6 +1133,9 @@ Attendance right now (these are distinct counts that add up to the total — use
 - Unassigned (not on any coach yet): ${snapshot.kpis.unassigned}
 Ready-made attendance summary — if asked to summarise attendance, reply with ONLY this exact sentence and NOTHING after it (no extra explanation, no "this means…"): "${snapshot.kpis.total} delegates total — ${snapshot.kpis.present} present, ${snapshot.kpis.missing} missing, ${snapshot.kpis.unassigned} unassigned (not yet on a coach)."
 
+Top priorities right now (already ranked most-urgent first — use this for "who should I worry about / what should I focus on" questions):
+${prioritiesBlock}
+
 Coaches:
 ${coachLines}
 
@@ -1031,6 +1144,9 @@ ${missingLines}
 
 Open exception tickets:
 ${exceptionLines}
+
+Passport issues (expired, or expiring within 6 months of today):
+${passportLines}
 
 Check-ins so far: ${snapshot.checkins.total} total (${methodLine}).
 
@@ -1070,13 +1186,259 @@ async function ollamaUp() {
   } catch { return false; }
 }
 
+/* Load the chat model into memory ahead of the first real question. Ollama only
+ * loads a model on first use (a ~20-30s cold start on CPU); firing one tiny
+ * request at startup means the first user isn't the one who pays it. Runs once,
+ * fire-and-forget, and fully guarded — if Ollama isn't up it just no-ops. */
+let _warmedUp = false;
+function warmUpModel() {
+  if (_warmedUp) return;
+  _warmedUp = true;
+  const base = process.env.OLLAMA_HOST || "http://localhost:11434";
+  fetch(`${base}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: CHAT_MODEL(), prompt: "ok", stream: false, keep_alive: "30m", options: { num_predict: 1 } }),
+    signal: AbortSignal.timeout(90000),
+  })
+    .then(() => console.log(`  Assistant model warmed up (${CHAT_MODEL()})`))
+    .catch(() => { /* Ollama not running or slow — the first real question will load it */ });
+}
+
+/* =============================================================================
+ *  ASSISTANT FAST-PATH — deterministic answers straight from the snapshot.
+ *
+ *  The chat model runs on CPU (tens of seconds per reply), so the biggest speed
+ *  win is to NOT call it for the common, factual questions we can answer exactly
+ *  from live data. answerLocally() returns a formatted reply for those — instant
+ *  and never hallucinated — or null to let the LLM handle anything open-ended.
+ *  English only for now; Chinese questions fall through to the model.
+ * ========================================================================== */
+const bold = (n) => `**${n}**`;
+
+/* Only match a delegate name distinctive enough to avoid false positives:
+ * multi-word, or a single token of 5+ letters. Returns the longest match. */
+function findDelegateInText(q, roster) {
+  let best = null;
+  for (const d of roster) {
+    const name = (d.name || "").toLowerCase();
+    if (!name) continue;
+    const distinctive = name.includes(" ") || name.replace(/[^a-z]/g, "").length >= 5;
+    if (distinctive && q.includes(name) && (!best || name.length > best.name.length)) best = d;
+  }
+  return best;
+}
+
+function coachNameById(id, coaches) {
+  const c = coaches.find((x) => x.id === id || x.label === id);
+  return c ? `${c.name}${c.city ? ` (${c.city})` : ""}` : null;
+}
+
+/* Rank what an organiser should worry about right now, from the live snapshot.
+ * Returns concerns sorted most-urgent first: missing VIPs and CRITICAL
+ * exceptions outrank operational gaps (a coach far from full) which outrank
+ * ordinary open tickets. Shared by the fast-path "who should I worry about"
+ * answer and the model prompt's PRIORITIES block, so both lead with the same
+ * computed judgement. Plain text (no markdown) so it reads cleanly in either. */
+function computeRisk(snapshot) {
+  const { missing = [], exceptions = [], coaches = [], passportIssues = [] } = snapshot || {};
+  const items = [];
+
+  const missingVips = missing.filter((m) => m.vip);
+  if (missingVips.length) {
+    items.push({ score: 1000 + missingVips.length, level: "critical",
+      text: `${missingVips.length} VIP${missingVips.length > 1 ? "s" : ""} still missing: ${missingVips.map((m) => m.name).join(", ")}` });
+  }
+
+  const critical = exceptions.filter((e) => (e.priority || "").toUpperCase() === "CRITICAL");
+  if (critical.length) {
+    items.push({ score: 900 + critical.length, level: "critical",
+      text: `${critical.length} critical exception${critical.length > 1 ? "s" : ""}: ${critical.map((e) => e.type + (e.delegate ? ` (${e.delegate})` : "")).join("; ")}` });
+  }
+
+  const expiredPp = passportIssues.filter((p) => p.status === "expired");
+  if (expiredPp.length) {
+    items.push({ score: 850 + expiredPp.length, level: "critical",
+      text: `${expiredPp.length} expired passport${expiredPp.length > 1 ? "s" : ""}: ${expiredPp.map((p) => p.name).join(", ")}` });
+  }
+  const expiringPp = passportIssues.filter((p) => p.status === "expiring");
+  if (expiringPp.length) {
+    items.push({ score: 300 + expiringPp.length, level: "medium",
+      text: `${expiringPp.length} passport${expiringPp.length > 1 ? "s" : ""} expiring within 6 months` });
+  }
+
+  // Operational gap: the coach furthest from boarded (most still missing).
+  const worstCoach = [...coaches]
+    .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c.missing ?? 0) }))
+    .filter((c) => c.v > 0)
+    .sort((a, b) => b.v - a.v)[0];
+  if (worstCoach) {
+    items.push({ score: 500 + worstCoach.v, level: "high",
+      text: `${worstCoach.label} has the most still to board (${worstCoach.v} missing)` });
+  }
+
+  const normal = exceptions.filter((e) => (e.priority || "").toUpperCase() !== "CRITICAL");
+  if (normal.length) {
+    items.push({ score: 100, level: "medium",
+      text: `${normal.length} other open exception${normal.length > 1 ? "s" : ""} to review` });
+  }
+
+  return items.sort((a, b) => b.score - a.score);
+}
+
+function answerLocally(question, snapshot) {
+  if (!snapshot) return null;
+  const q = (question || "").toLowerCase().trim();
+  if (!q || q.length > 200) return null; // very long → probably freeform; let the model handle it
+  const {
+    kpis = {}, coaches = [], missing = [], roster = [], byCompany = [],
+    byIndustry = [], vips = [], exceptions = [], itinerary = [], trip = {},
+    passportIssues = [],
+  } = snapshot;
+  const has = (...ws) => ws.some((w) => q.includes(w));
+  const asksCount = /\b(how many|number of|count|total)\b/.test(q);
+  const asksWho = /\b(who|whom|which delegates?|names?|list|show me)\b/.test(q);
+
+  // 1) Greetings / thanks
+  if (/^(hi|hello|hey|yo|hiya|greetings|good (morning|afternoon|evening))\b/.test(q)
+    || /^(thanks|thank you|thx|ty|cheers|great|nice|ok|okay)\b[\s!.]*$/.test(q)) {
+    return `Hi! I can help with the ${trip.name || "trip"} — attendance, who's missing, coach status, open exceptions, today's itinerary, or delegate and company look-ups. What would you like?`;
+  }
+
+  // Open-ended / generative requests ("draft an email…", "explain why…") want
+  // the model, not a data lookup — even if they mention a keyword like "missing".
+  if (/\b(draft|write|compose|email|notify|remind|suggest|recommend|advise|explain|translate|why|how should|what should i (do|say)|help me (write|draft|plan))\b/.test(q)) {
+    return null;
+  }
+
+  // 2) Person look-up / status of a specific named delegate. Checked before the
+  //    aggregate + breakdown intents so "what company is X from" isn't misread.
+  const named = findDelegateInText(q, roster);
+  if (named && /\b(who|what|which|where|whose|is|are|does|has|from|on|about|status|company|industry|role|coach|bus|here|present|missing|checked|arrived|boarded)\b/.test(q)) {
+    const statusText = named.status === "PRESENT" ? "checked in"
+      : named.status === "MISSING" ? "missing" : "not on a coach yet";
+    const facts = [];
+    if (named.role) facts.push(named.role);
+    if (named.company) facts.push(`from ${bold(named.company)}`);
+    if (named.industry) facts.push(`${named.industry} sector`);
+    const coach = coachNameById(named.coach_id, coaches);
+    let s = `${named.name}${named.vip ? " (VIP)" : ""}${facts.length ? " — " + facts.join(", ") : ""}. Currently ${bold(statusText)}`;
+    if (coach) s += `, on ${coach}`;
+    return s + ".";
+  }
+
+  // 3) Coach superlative (most/fewest missing or boarded) — checked before the
+  //    plain missing/present intents since "which coach has the most missing"
+  //    also contains "missing".
+  if (has("coach", "bus", "vehicle") && has("most", "least", "fewest", "highest", "lowest", "fullest", "emptiest", "biggest", "smallest")) {
+    const metric = has("missing", "unaccounted", "not checked", "not boarded") ? "missing" : "boarded";
+    const least = has("least", "fewest", "lowest", "emptiest", "smallest");
+    const vals = coaches
+      .map((c) => ({ label: `${c.name}${c.city ? ` (${c.city})` : ""}`, v: Number(c[metric] ?? 0) }))
+      .filter((x) => Number.isFinite(x.v));
+    if (vals.length) {
+      vals.sort((a, b) => b.v - a.v);
+      const pick = least ? vals[vals.length - 1] : vals[0];
+      return `${pick.label} has the ${least ? "fewest" : "most"} ${metric} — ${bold(pick.v)}.`;
+    }
+  }
+
+  // 4) Attendance summary / overview
+  if (has("attendance", "summary", "summarise", "summarize", "overview", "how are we doing", "how's it going", "hows it going", "where are we", "overall")) {
+    return `${kpis.total} delegates total — ${kpis.present} present, ${kpis.missing} missing, ${kpis.unassigned} unassigned (not yet on a coach).`;
+  }
+
+  // 4) Present / checked-in count
+  if (!named && (/\b(present|checked[- ]?in|turnout|arrived)\b/.test(q) || has("here yet", "how many are here"))) {
+    return `${bold(kpis.present)} of ${bold(kpis.total)} delegates are checked in — ${kpis.missing} still missing, ${kpis.unassigned} not yet on a coach.`;
+  }
+
+  // 5) Missing (count or list)
+  if (!named && has("missing", "not checked in", "not here", "haven't arrived", "havent arrived", "unaccounted", "who's left", "still to board", "not boarded")) {
+    if (asksCount && !asksWho) return `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
+    if (!missing.length) return "Nobody is currently marked missing — everyone expected is accounted for.";
+    const ordered = [...missing].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
+    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${m.coach ? ` · ${m.coach}` : ""}`);
+    const more = missing.length > 15 ? `\n…and ${missing.length - 15} more.` : "";
+    return `${bold(missing.length)} missing:\n${lines.join("\n")}${more}`;
+  }
+
+  // 6) Unassigned (not on any coach yet)
+  if (!named && has("unassigned", "not on a coach", "no coach", "not placed", "without a coach", "not yet assigned", "not on any coach")) {
+    const un = roster.filter((d) => !d.coach_id && d.status !== "PRESENT");
+    if ((asksCount && !asksWho) || !un.length) return `${bold(kpis.unassigned)} delegates aren't on any coach yet.`;
+    const lines = un.slice(0, 15).map((d) => `- ${d.name}${d.company ? ` · ${d.company}` : ""}`);
+    const more = un.length > 15 ? `\n…and ${un.length - 15} more.` : "";
+    return `${bold(kpis.unassigned)} not yet on a coach:\n${lines.join("\n")}${more}`;
+  }
+
+  // 8) Company breakdown
+  if (has("compan", "organisation", "organization", "employer", "firms")) {
+    if (!byCompany.length) return "No company information has been captured for the delegates yet.";
+    const top = byCompany.slice(0, 8).map(([name, n]) => `- ${name} — ${bold(n)}`);
+    return `Delegates by company:\n${top.join("\n")}`;
+  }
+
+  // 9) Industry breakdown
+  if (has("industr", "sector")) {
+    if (!byIndustry.length) return "No industry information has been captured for the delegates yet.";
+    const top = byIndustry.slice(0, 8).map(([name, n]) => `- ${name} — ${bold(n)}`);
+    return `Delegates by industry:\n${top.join("\n")}`;
+  }
+
+  // 10) VIPs
+  if (has("vip", "important", "priority guest", "priority delegate")) {
+    if (!vips.length) return "No delegates are flagged as VIPs.";
+    const missingVips = vips.filter((v) => v.status === "MISSING");
+    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${v.status === "PRESENT" ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
+    const head = `${bold(vips.length)} VIP${vips.length > 1 ? "s" : ""}${missingVips.length ? `, ${bold(missingVips.length)} still missing` : ""}:`;
+    return `${head}\n${lines.join("\n")}`;
+  }
+
+  // 11) Open exception tickets (but not "passport issues" — that's its own intent)
+  if (!has("passport") && has("exception", "issue", "problem", "ticket", "incident", "anything wrong", "any issues")) {
+    if (!exceptions.length) return "No open exception tickets right now.";
+    const lines = exceptions.slice(0, 10).map((e) => `- [${e.priority}] ${e.type}${e.delegate ? ` · ${e.delegate}` : ""}`);
+    return `${bold(exceptions.length)} open exception${exceptions.length > 1 ? "s" : ""}:\n${lines.join("\n")}`;
+  }
+
+  // 12) Today's itinerary
+  if (has("itinerary", "schedule", "agenda", "what's on", "whats on", "plan for today", "today's plan", "programme", "program")) {
+    if (!itinerary.length) return "There are no itinerary items scheduled for today.";
+    const lines = itinerary.map((i) => `- ${i.start_time} ${i.title}${i.location ? ` @ ${i.location}` : ""}`);
+    return `Today's itinerary:\n${lines.join("\n")}`;
+  }
+
+  // 13) Passport validity
+  if (has("passport", "expiry", "expiring", "expire", "travel doc", "travel document")) {
+    if (!passportIssues.length) return "No passport issues — every captured passport expiry is valid for at least 6 months.";
+    const lines = passportIssues.slice(0, 15).map((p) => `- ${p.name}${p.vip ? " (VIP)" : ""} — ${p.status === "expired" ? "EXPIRED" : "expires"} ${p.expiry}`);
+    const more = passportIssues.length > 15 ? `\n…and ${passportIssues.length - 15} more.` : "";
+    return `${bold(passportIssues.length)} passport${passportIssues.length > 1 ? "s" : ""} to check:\n${lines.join("\n")}${more}`;
+  }
+
+  // 14) Risk / "who should I worry about" — a ranked, computed priority list
+  if (has("worry", "worried", "concern", "risk", "chase", "priorit", "attention", "watch", "focus on", "urgent", "trouble")) {
+    const risks = computeRisk(snapshot);
+    if (!risks.length) return `Nothing urgent right now — no missing VIPs and no critical exceptions.${kpis.missing ? ` ${kpis.missing} delegates are still to check in.` : " Everyone's accounted for."}`;
+    return `Here's what to watch right now, most urgent first:\n${risks.map((r) => `- ${r.text}`).join("\n")}`;
+  }
+
+  return null; // no confident match → let the model answer
+}
+
 async function answer(messages, lang) {
-  const snapshot = await buildSnapshot();
-  const system = buildSystemPrompt(snapshot, lang === "zh" ? "zh" : "en");
+  const snapshot = await getSnapshot();
   const history = normaliseHistory(messages);
   if (history.length === 0 || history[history.length - 1].role !== "user") {
     return { content: "What would you like to know about the trip?", source: "none" };
   }
+  // Deterministic fast-path (English) — instant, exact answers with no model call.
+  if (lang !== "zh") {
+    const local = answerLocally(history[history.length - 1].content, snapshot);
+    if (local != null) return { content: local, source: "local" };
+  }
+  const system = buildSystemPrompt(snapshot, lang === "zh" ? "zh" : "en");
   // Generous timeout: a cold model load (~27s) plus generation can exceed a
   // minute, and Ollama serialises requests (a running parse blocks chat).
   const viaOllama = await ollamaChat(history, system, { timeoutMs: 120000 });
@@ -1096,9 +1458,14 @@ async function answer(messages, lang) {
     e.status = 503;
     throw e;
   }
-  const e = new Error("The AI assistant isn't running. Start Ollama (it should be running in the background), or ask an admin to set ANTHROPIC_API_KEY in backend/.env.");
-  e.status = 503;
-  throw e;
+  // No AI text engine available (e.g. the deployed cloud host, where Ollama can't
+  // run). The fast-path above already answers the common factual questions with
+  // no model at all, so rather than error out, degrade gracefully for open-ended
+  // ones and point the user at what still works instantly.
+  return {
+    content: "I can answer questions about attendance, who's missing, coach status, exceptions, the itinerary, VIPs, and specific delegates or companies — all instantly. Open-ended questions need the AI text engine, which isn't available in this environment. Try asking, for example, \"who's missing?\", \"which coach has the most missing?\", or \"who should I worry about?\"",
+    source: "unavailable",
+  };
 }
 
 /* ---- Stateless chat (mobile) -------------------------------------------- */
@@ -1198,8 +1565,8 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   const prior = await q(`SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId]);
   const priorRows = prior.rows;
   const history = normaliseHistory([...priorRows, { role: "user", content: userText }]);
-  const snapshot = await buildSnapshot();
-  const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
+  const snapshot = await getSnapshot();
+  const lang = req.body?.lang === "zh" ? "zh" : "en";
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -1208,18 +1575,25 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   res.flushHeaders?.();
   const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
-  let full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
-
-  // Fallback if Ollama couldn't stream (not running / busy) — use the same
-  // non-streaming path (Claude, or a clear error message).
-  if (full == null) {
-    try {
-      const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
-      full = r.content;
-      sse({ token: full });
-    } catch (err) {
-      sse({ error: err.message });
-      return res.end();
+  // Fast-path: answer common factual questions instantly from the snapshot
+  // (English only; Chinese and open-ended questions fall through to the model).
+  let full = lang === "en" ? answerLocally(userText, snapshot) : null;
+  if (full != null) {
+    sse({ token: full });
+  } else {
+    const system = buildSystemPrompt(snapshot, lang);
+    full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
+    // Fallback if Ollama couldn't stream (not running / busy) — use the same
+    // non-streaming path (Claude, or a clear error message).
+    if (full == null) {
+      try {
+        const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
+        full = r.content;
+        sse({ token: full });
+      } catch (err) {
+        sse({ error: err.message });
+        return res.end();
+      }
     }
   }
 
@@ -1250,7 +1624,7 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
   }
 
   const history = normaliseHistory(msgs);
-  const snapshot = await buildSnapshot();
+  const snapshot = await getSnapshot();
   const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -1283,6 +1657,20 @@ router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
   res.json({ delegates: r.rows });
 }));
 
+/* Compact live "trip pulse" for the page headers (Onboarding + Assistant):
+ * trip context + attendance KPIs + the top ranked risks. Reuses the cached
+ * assistant snapshot and computeRisk(), so repeated polls are cheap. */
+router.get("/api/assistant/pulse", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const s = await getSnapshot();
+  res.json({
+    trip: { name: s.trip?.name || null, dayOf: s.trip?.dayOf ?? null, totalDays: s.trip?.totalDays ?? null, departsIn: s.trip?.departsIn || null },
+    kpis: s.kpis || { total: 0, present: 0, missing: 0, unassigned: 0 },
+    risk: computeRisk(s).slice(0, 3),
+    asOf: s.asOf,
+  });
+}));
+
 router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const r = await q(`DELETE FROM chat_sessions WHERE id = $1 AND account_id = $2`, [req.params.id, req.account.id]);
@@ -1291,3 +1679,21 @@ router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => 
 }));
 
 export default router;
+
+/* ---- Exposed for unit testing (tests/vance/) ----------------------------- *
+ * These are the pure, side-effect-free helpers behind document parsing and the
+ * confirm-time junk guard. They're exported here so the test suite can exercise
+ * them directly without spinning up the HTTP layer or a database. The live app
+ * only ever consumes the router (default export above). */
+export {
+  extractRecords,
+  cleanName,
+  dedupeByName,
+  preferRomanised,
+  finalizeRecords,
+  toRow,
+  isPlausibleDelegate,
+  answerLocally,
+  computeRisk,
+  checkPassportExpiry,
+};

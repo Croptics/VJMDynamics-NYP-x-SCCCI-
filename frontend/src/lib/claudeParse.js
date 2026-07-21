@@ -126,6 +126,12 @@ export function getOnboardingContext(tripId) {
   return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
 }
 
+/* Live "trip pulse" for the page headers — trip context, attendance KPIs, and
+ * the top ranked risks. Cheap (reuses the assistant's cached snapshot). */
+export function getTripPulse() {
+  return apiGet("/assistant/pulse"); // { trip, kpis, risk, asOf }
+}
+
 /* Real trips for the onboarding "Assign to trip" picker. Reads the shared
  * all-trips list so the option values are the ACTUAL trip ids in the database.
  * The old hardcoded t-1/t-2/t-3 list only matched the seed trip — the other two

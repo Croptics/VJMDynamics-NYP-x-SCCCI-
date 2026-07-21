@@ -495,7 +495,8 @@ export default function QRCheckInPage() {
     } catch (e) {
       playErrorTone();
       setScanError(
-        e.code === "SCAN_FAILED" || e.status === 404
+        e.code === "COACH_MISMATCH" ? `Coach mismatch — ${e.message}`
+        : e.code === "SCAN_FAILED" || e.status === 404
           ? "SCAN_FAILED — no missing delegate matched on this coach. Retry, or log an exception (Issues tab)."
           : e.message || "Scan failed — check the backend connection."
       );
@@ -1267,6 +1268,8 @@ export default function QRCheckInPage() {
 
 function isValidBiometricToken(token) {
   if (!token || typeof token !== "string") return false;
-  // Same loose check used server-side: <type>:v1:<hex>:
-  return /^(face|voice):v1:[0-9a-f]+:/i.test(token) && token.length > 20 && !/deadbeef/i.test(token);
+  // Version-agnostic ("v\d+", not just "v1") — vectorizeFaceLandmarks above
+  // emits "v2" tokens, so this used to silently reject every real face scan
+  // before it even left the browser. Matches routes/vimal.js's VALID_TOKEN.
+  return /^(face|voice):v\d+:[0-9a-f]+:/i.test(token) && token.length > 20 && !/deadbeef/i.test(token);
 }

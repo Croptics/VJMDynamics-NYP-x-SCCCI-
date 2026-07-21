@@ -409,6 +409,39 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
   res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
 }));
 
+/* ---- Undo a manual attendance override ------------------------------------
+ * The revert half of the Manual panel's "Mark present" — for the accidental-
+ * click case ("Undo" shown right next to a just-marked delegate). Same
+ * manageExceptions gate as the mark-present action itself, so whoever can do
+ * one can do the other. Sets the delegate back to ASSIGNED (not MISSING —
+ * matches the spec's explicit target status; a delegate whose real-world
+ * whereabouts is unknown again is "assigned to a coach, not yet checked in",
+ * not automatically re-flagged as missing) and removes the MANUAL check-in
+ * log row this override created, so the audit trail doesn't keep a phantom
+ * check-in for a status that was immediately undone. Best-effort on the log
+ * delete (only ever removes the single most recent MANUAL row for this
+ * delegate, so it can't accidentally wipe an earlier, real check-in). */
+router.post("/api/checkins/manual/undo", requirePermission("manageExceptions"), wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  if (!delegateId) return res.status(400).json({ error: "MISSING_FIELDS", message: "delegateId is required." });
+
+  const d = await q('SELECT id, name FROM delegates WHERE id = $1', [delegateId]);
+  if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
+
+  await q(
+    `DELETE FROM check_in_logs WHERE id = (
+       SELECT id FROM check_in_logs
+        WHERE delegate_id = $1 AND method = 'MANUAL'
+        ORDER BY client_ts DESC NULLS LAST LIMIT 1
+     )`,
+    [delegateId]
+  );
+  await q(`UPDATE delegates SET status='ASSIGNED', "lastSeen"=NULL WHERE id=$1`, [delegateId]);
+
+  broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL_UNDO" });
+  res.json({ delegateId, status: "ASSIGNED" });
+}));
+
 /* ---------------------------------------------------------------------------
  * POST /api/checkins/qr
  * The QR half of HLD §3.5 (check_in_logs). A delegate badge scanned in the

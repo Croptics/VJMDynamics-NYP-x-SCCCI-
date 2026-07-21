@@ -11,6 +11,7 @@ import {
   Sun,
   Moon,
   QrCode,
+  ScanFace,
   HelpCircle,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
@@ -27,17 +28,31 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
   const isAdmin = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
+  // Every item (except Account control, still its own manageAccounts check)
+  // is now gated by a "desktopView" permission from permissions.js — an
+  // account with a view unchecked simply never sees that nav item, matching
+  // the matching ViewGate on the route itself in App.jsx. Missing/legacy
+  // accounts default every view permission to true (see cleanPermissions in
+  // permissions.js), so this is a no-op for every account that existed
+  // before per-page view permissions did.
   const items = [
-    { to: "/dashboard", label: "Dashboard", icon: LayoutGrid },
-    { to: "/trips", label: "Trips", icon: MapPin },
-    // Onboarding (document parsing) bulk-creates delegates → manageDelegates.
-    ...(perms.manageDelegates ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
-    // Face/QR/Manual check-in — not permission-gated, any signed-in staff can scan.
-    { to: "/checkin", label: "Check-in", icon: QrCode },
-    { to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount },
+    ...(perms.viewDashboard ? [{ to: "/dashboard", label: "Dashboard", icon: LayoutGrid }] : []),
+    ...(perms.viewTrips ? [{ to: "/trips", label: "Trips", icon: MapPin }] : []),
+    ...(perms.viewDocuments ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
+    // Vimal's phone-frame check-in app — restored 2026-07-20 after a same-
+    // day removal, now kept-but-hideable via viewCheckin instead of deleted.
+    ...(perms.viewCheckin ? [{ to: "/checkin", label: "Check-in", icon: QrCode }] : []),
+    // Desktop entrance-kiosk scanner (Face + QR + Manual).
+    ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
+    ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),
     // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
     // Layout.jsx on every route) instead of a dedicated destination.
-    { to: "/guide", label: "User guide", icon: HelpCircle },
+    // NOTE: "User guide" is intentionally NOT here — it's a help/reference
+    // resource, not a workflow destination, so it lives with the utility
+    // controls in the footer (a "?" icon next to the theme toggle) instead.
+    // Account control stays on the manageAccounts ACTION permission, not a
+    // view toggle — only a real admin should ever grant/revoke everyone
+    // else's access (see permissions.js's group doc for why).
     ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
   ];
 
@@ -69,17 +84,23 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
         <ClipboardCheck size={22} strokeWidth={2.4} /> MusterGo
       </div>
 
-      {items.map(({ to, label, icon: Icon, badge }) => (
-        <NavLink
-          key={to}
-          to={to}
-          className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}
-        >
-          <Icon size={18} strokeWidth={2} />
-          {t(label)}
-          {badge ? <span className="nav-badge">{badge}</span> : null}
-        </NavLink>
-      ))}
+      {/* Only THIS list scrolls when it doesn't fit — the footer below (theme/
+          language, account, Log out) stays pinned and always visible instead
+          of being pushed off the bottom of a short viewport (e.g. a tablet in
+          landscape) with no visible way to reach it. */}
+      <div className="sidebar-nav-scroll">
+        {items.map(({ to, label, icon: Icon, badge }) => (
+          <NavLink
+            key={to}
+            to={to}
+            className={({ isActive }) => "nav-item" + (isActive ? " active" : "")}
+          >
+            <Icon size={18} strokeWidth={2} />
+            {t(label)}
+            {badge ? <span className="nav-badge">{badge}</span> : null}
+          </NavLink>
+        ))}
+      </div>
 
       {/* Account + logout, pinned to the bottom */}
       <div style={S.footer}>
@@ -98,6 +119,17 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
               <div style={S.name}>{displayName}</div>
               <div className="muted" style={{ fontSize: 11 }}>{roleLabel}</div>
             </div>
+          </NavLink>
+          {/* Help / User guide — a utility affordance next to the theme
+              toggle, not a primary nav destination (see the items array). */}
+          <NavLink
+            to="/guide"
+            className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
+            style={S.themeBtn}
+            title={t("User guide")}
+            aria-label={t("User guide")}
+          >
+            <HelpCircle size={16} />
           </NavLink>
           <button
             className="btn btn-ghost"

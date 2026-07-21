@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { Home, ClipboardList, MapPin, User, Languages, Moon, Sun } from "lucide-react";
+import { getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
@@ -31,10 +32,14 @@ export default function MobileLayout({ onLogout }) {
   const { theme, toggleTheme } = useTheme();
 
   useSessionGuard(onLogout);
+  const perms = getPermissions();
+  // Same "mobileView" permission group as the /mobile/* route gates in
+  // App.jsx — an account with a view unchecked doesn't see the tab either.
+  // Profile stays ungated (account settings, not a feature view).
   const tabs = [
-    { to: "/mobile", label: "Home", icon: Home, end: true },
-    { to: "/mobile/attendance", label: "Attendance", icon: ClipboardList },
-    { to: "/mobile/trips", label: "Trips", icon: MapPin },
+    ...(perms.viewMobileHome ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
+    ...(perms.viewMobileAttendance ? [{ to: "/mobile/attendance", label: "Attendance", icon: ClipboardList }] : []),
+    ...(perms.viewMobileTrips ? [{ to: "/mobile/trips", label: "Trips", icon: MapPin }] : []),
     { to: "/mobile/profile", label: "Profile", icon: User },
   ];
 

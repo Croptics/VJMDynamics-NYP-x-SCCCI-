@@ -56,7 +56,7 @@ import {
   clearLastSeen,
   listActiveAccounts,
 } from "./data.js";
-import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
+import { makeToken, accountFromReq, requireAuth, requirePermission, signKioskToken } from "./auth.js";
 import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "./cloudinary.js";
 
 const app = express();
@@ -236,6 +236,19 @@ app.post("/api/auth/logout", requireAuth(), wrap(async (req, res) => {
   if (acc) await clearLastSeen(acc.id);
   res.json({ ok: true });
 }));
+
+/**
+ * POST /api/auth/kiosk — mint a passwordless, scoped KIOSK token for the
+ * entrance scanner. Public BY DESIGN (the passwordless kiosk fetches it with
+ * no credentials); the token grants nothing beyond the two camera check-in
+ * endpoints that opt into requireKioskOrAuth() — see auth.js's signKioskToken/
+ * requireKioskOrAuth and KioskScannerPage.jsx. Cheap + stateless, so no rate
+ * limiter needed (it authorises no reads and only the same check-ins a normal
+ * scan would).
+ */
+app.post("/api/auth/kiosk", (_req, res) => {
+  res.json({ token: signKioskToken() });
+});
 
 /**
  * GET /api/staff/active-sessions — Staff Operations dashboard. Requires

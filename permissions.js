@@ -14,10 +14,11 @@
  * browser APIs, no Node-only APIs — because it's imported on both sides.
  *
  * TO ADD A NEW PERMISSION:
- *   1. Add one entry to PERMISSIONS below (key, label, desc, chip, default).
- *      → the checkbox appears in the New/Edit account modal automatically,
- *      → the chip appears in the accounts table automatically,
- *      → the backend accepts/stores/returns it automatically.
+ *   1. Add one entry to PERMISSIONS below (key, label, desc, chip, default,
+ *      group). → the checkbox appears in the New/Edit account modal
+ *      automatically (grouped under `group`'s section), the chip appears in
+ *      the accounts table automatically, the backend accepts/stores/returns
+ *      it automatically.
  *   2. ENFORCE it where it matters (this part is always manual, by design):
  *      → backend/server.js:  wrap the route with requirePermission("yourKey")
  *      → frontend UI:        hide the control with getPermissions().yourKey
@@ -27,15 +28,32 @@
  *   label   — checkbox title shown to the user
  *   desc    — one-line description under the checkbox
  *   chip    — short label shown in the accounts table
- *   default — whether the checkbox starts ticked on a NEW account
+ *   default — the value used for an account whose STORED permissions predate
+ *             this key (see cleanPermissions below) — also what a brand-new
+ *             account's checkbox starts as. Action permissions (things that
+ *             let you CHANGE data) default closed; view permissions (things
+ *             that just let you SEE a page) default open, so rolling out a
+ *             new page-level toggle never silently locks out staff who could
+ *             already reach that page before the toggle existed — an admin
+ *             opts a specific account OUT going forward, rather than every
+ *             existing account being opted out by default.
+ *   group   — "action" (a capability, enforced by the backend too) |
+ *             "desktopView" (can this account see this desktop page/route —
+ *             frontend-only gating, alongside whatever action permission
+ *             actually protects the writes on that page) | "mobileView"
+ *             (same, for the /mobile/* routes). Purely groups the checkboxes
+ *             in Account control into labelled sections — carries no other
+ *             meaning.
  */
 export const PERMISSIONS = [
+  // ---- Action permissions: capabilities enforced by the backend --------
   {
     key: "manageDelegates",
     label: "Manage delegates",
     desc: "Add, edit and delete delegates (including delete all)",
     chip: "Delegates",
     default: true,
+    group: "action",
   },
   {
     key: "manageTrips",
@@ -43,6 +61,7 @@ export const PERMISSIONS = [
     desc: "Edit trips, coaches and itineraries on the Trips board",
     chip: "Trips",
     default: false,
+    group: "action",
   },
   {
     key: "manageExceptions",
@@ -50,6 +69,7 @@ export const PERMISSIONS = [
     desc: "Log, resolve, delete tickets and perform manual attendance overrides",
     chip: "Exceptions",
     default: false,
+    group: "action",
   },
   {
     key: "exportData",
@@ -57,6 +77,7 @@ export const PERMISSIONS = [
     desc: "Download the attendance report as Excel",
     chip: "Export",
     default: false,
+    group: "action",
   },
   {
     key: "manageAccounts",
@@ -64,6 +85,115 @@ export const PERMISSIONS = [
     desc: "Access Account control — create, edit and delete accounts",
     chip: "Accounts",
     default: false,
+    group: "action",
+  },
+
+  // ---- Desktop web views: which /routes this account can even see -------
+  {
+    key: "viewDashboard",
+    label: "Main dashboard",
+    desc: "See the live attendance dashboard (Screen 2)",
+    chip: "Dashboard",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewDelegates",
+    label: "All delegates",
+    desc: "See the Dashboard's Delegate tab — the full roster table",
+    chip: "All delegates",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewTrips",
+    label: "Trips board",
+    desc: "See the Trips & coach management board",
+    chip: "Trips page",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewDocuments",
+    label: "Documents",
+    desc: "See document parsing + boarding passes (Onboarding)",
+    chip: "Documents",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewCheckin",
+    label: "Check-in",
+    desc: "See the mobile-style Face/QR/Manual check-in screen",
+    chip: "Check-in",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewScanner",
+    label: "Face/QR scanner",
+    desc: "See the desktop entrance-kiosk Face + QR scanner",
+    chip: "Scanner",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewExceptions",
+    label: "Exceptions page",
+    desc: "See the exception ticket inbox",
+    chip: "Exceptions page",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewHistory",
+    label: "History logs",
+    desc: "See the full date-stamped activity audit trail",
+    chip: "History",
+    default: true,
+    group: "desktopView",
+  },
+
+  // ---- Mobile views: which /mobile/* routes this account can see -------
+  {
+    key: "viewMobileHome",
+    label: "Mobile check-in home",
+    desc: "See the mobile Home tab (trip + per-coach live status)",
+    chip: "Mobile home",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    key: "viewMobileAttendance",
+    label: "Attendance sheet",
+    desc: "See the mobile Attendance tab (full roster on the go)",
+    chip: "Attendance",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    key: "viewMobileTrips",
+    label: "Live trip trackers",
+    desc: "See the mobile Trips tab",
+    chip: "Mobile trips",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    key: "viewMobileScanner",
+    label: "Mobile scanner",
+    desc: "See the mobile Face/QR/Manual entrance scanner",
+    chip: "Mobile scanner",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    key: "viewMobileIssues",
+    label: "Mobile exceptions",
+    desc: "See the mobile Issues/Exceptions tracking page",
+    chip: "Mobile issues",
+    default: true,
+    group: "mobileView",
   },
 ];
 
@@ -75,9 +205,18 @@ export const DEFAULT_PERMISSIONS = Object.fromEntries(
   PERMISSIONS.map((p) => [p.key, !!p.default])
 );
 
-/** Coerce any input object into a clean { key: boolean } for every known key. */
+/**
+ * Coerce any input object into a clean { key: boolean } for every known key.
+ * A key EXPLICITLY present in `input` (even `false`) always wins — that's a
+ * real, saved admin decision. A key ABSENT from `input` (an account saved
+ * before that permission existed) falls back to its declared `default`, not
+ * a hardcoded false — see the `default` field doc above for why.
+ */
 export function cleanPermissions(input) {
   const out = {};
-  for (const k of PERM_KEYS) out[k] = !!(input && input[k]);
+  for (const p of PERMISSIONS) {
+    const present = !!input && Object.prototype.hasOwnProperty.call(input, p.key);
+    out[p.key] = present ? !!input[p.key] : !!p.default;
+  }
   return out;
 }

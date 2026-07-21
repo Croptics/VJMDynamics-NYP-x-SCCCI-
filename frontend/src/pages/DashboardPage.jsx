@@ -80,7 +80,19 @@ export default function DashboardPage() {
     window.scrollTo(0, 0);
   }, []);
 
-  const [tab, setTab] = useState("delegate"); // "delegate" | "analytics" | "headcount" | "staffops"
+  // Default to the first tab this account can actually see — viewDelegates
+  // gates the Delegate tab the same way Analytics is already gated on
+  // isAdmin and Staff operations on manageAccounts (see the tab buttons
+  // below); an account with none of the three still needs SOME initial
+  // value, so it falls back to "delegate" (its content block is itself
+  // gated, so nothing renders — same "no visible tabs" edge case the
+  // desktop/mobile route fallbacks in App.jsx already accept).
+  const [tab, setTab] = useState(() => {
+    if (perms.viewDelegates) return "delegate";
+    if (getUser()?.role === "admin") return "analytics";
+    if (perms.manageAccounts) return "staffops";
+    return "delegate";
+  }); // "delegate" | "analytics" | "headcount" | "staffops"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
   const [delegates, setDelegates] = useState([]);
@@ -96,6 +108,7 @@ export default function DashboardPage() {
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId> | UNASSIGNED
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
   const [showAllDelegates, setShowAllDelegates] = useState(false);
   const [showAllCoaches, setShowAllCoaches] = useState(false);
@@ -431,6 +444,13 @@ export default function DashboardPage() {
     const query = delegateQuery.trim().toLowerCase();
     let list = delegates.filter((d) => {
       if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
+      // Coach filter: a real coach id matches that coach; "UNASSIGNED" matches
+      // delegates with no coach (coachId null/empty).
+      if (coachFilter === "UNASSIGNED") {
+        if (d.coachId) return false;
+      } else if (coachFilter !== "ALL" && d.coachId !== coachFilter) {
+        return false;
+      }
       if (query) {
         const hay = `${d.name || ""} ${d.company || ""}`.toLowerCase();
         if (!hay.includes(query)) return false;
@@ -446,7 +466,7 @@ export default function DashboardPage() {
     });
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [delegates, delegateQuery, statusFilter, sortMode, coaches]);
+  }, [delegates, delegateQuery, statusFilter, coachFilter, sortMode, coaches]);
 
   /* ---- Trip switcher derived state -------------------------------------- */
   // The uuid of the trip currently shown (for the "open in Trips board" links).
@@ -527,17 +547,19 @@ export default function DashboardPage() {
 
       {/* ---- Tabs ----------------------------------------------------------- */}
       <div className="row" style={{ gap: 8, marginTop: 18 }}>
-        <button
-          className="btn"
-          onClick={() => setTab("delegate")}
-          style={{
-            background: tab === "delegate" ? "var(--scc-red-tint)" : "transparent",
-            color: tab === "delegate" ? "var(--scc-red)" : "var(--ink-2)",
-            border: `1px solid ${tab === "delegate" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
-          }}
-        >
-          {t("Delegate")}
-        </button>
+        {perms.viewDelegates && (
+          <button
+            className="btn"
+            onClick={() => setTab("delegate")}
+            style={{
+              background: tab === "delegate" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "delegate" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "delegate" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            }}
+          >
+            {t("Delegate")}
+          </button>
+        )}
         {isAdmin && (
           <button
             className="btn"
@@ -749,7 +771,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {tab === "delegate" && (
+      {tab === "delegate" && perms.viewDelegates && (
       <>
       {/* ---- KPI tiles ---------------------------------------------------- */}
       {k && (
@@ -908,6 +930,16 @@ export default function DashboardPage() {
                 <option value="ARRIVED">{t("Arrived")}</option>
                 <option value="LATE">{t("Late")}</option>
                 <option value="MISSING">{t("Missing")}</option>
+              </select>
+              {/* Coach-assignment filter — matches the mobile Attendance
+                  page's coach filter. Options come from the live coach list
+                  plus an explicit "Unassigned" (delegates with no coach). */}
+              <select className="select" style={{ maxWidth: 190 }} value={coachFilter} onChange={(e) => setCoachFilter(e.target.value)}>
+                <option value="ALL">{t("All coaches")}</option>
+                {coaches.map((c) => (
+                  <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
+                ))}
+                <option value="UNASSIGNED">{t("Unassigned")}</option>
               </select>
               <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
                 <option value="name">{t("Sort: Name")}</option>

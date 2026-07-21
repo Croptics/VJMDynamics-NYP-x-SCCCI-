@@ -84,7 +84,7 @@ const JAYDEN_CSS = `
 }
 `;
 
-export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedIn }) {
+export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedIn, facingMode = "environment" }) {
   const [camState, setCamState] = useState("starting"); // starting | live | error
   const [result, setResult] = useState(null);           // { kind, title, sub }
   const [submitting, setSubmitting] = useState(false);
@@ -123,11 +123,17 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
       // Log the exact bytes jsQR handed us — invaluable if a real badge is
       // ever mis-scanned (partial read, wrong QR, stale/reprinted code, etc.).
       console.debug("[QRScannerPanel] rejected scan:", JSON.stringify(badge.code));
+      // Coach mismatch (409) gets its own distinct title/tone — this is NOT
+      // "the badge is bad", it's "you're scanning under the wrong coach", a
+      // meaningfully different fix for field staff (switch coach, don't
+      // retry the same scan).
+      const isMismatch = e.status === 409 && e.code === "COACH_MISMATCH";
       const msg =
-        e.status === 404 ? "That badge isn't recognised. Make sure it's from the Boarding passes tab."
+        isMismatch ? e.message
+        : e.status === 404 ? "That badge isn't recognised. Make sure it's from the Boarding passes tab."
         : e.status === 401 ? "Session expired — sign in again."
         : e.message || "Check-in failed — retry, or use Manual.";
-      setResult({ kind: "error", title: "QR code invalid", sub: msg });
+      setResult({ kind: "error", title: isMismatch ? "Coach mismatch" : "QR code invalid", sub: msg });
     } finally {
       setSubmitting(false);
       busyRef.current = false;
@@ -161,7 +167,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
           // "keeps blurring while scanning" report). `ideal` still gracefully
           // falls back on webcams that can't do 720p.
           video: {
-            facingMode: { ideal: "environment" },
+            facingMode: { ideal: facingMode },
             width: { ideal: 1280 },
             height: { ideal: 720 },
           },
@@ -219,7 +225,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
       if (videoRef.current) videoRef.current.srcObject = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handleDecoded]);
+  }, [handleDecoded, facingMode]);
 
   const submitManual = () => {
     const v = manualText.trim();
@@ -231,7 +237,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
 
   const S = {
     root: { position: "absolute", inset: 0, overflow: "hidden", borderRadius: "inherit" },
-    video: { width: "100%", height: "100%", objectFit: "cover" },
+    video: { width: "100%", height: "100%", objectFit: "cover", transform: facingMode === "user" ? "scaleX(-1)" : "none" },
     hint: {
       position: "absolute", left: 0, right: 0, bottom: 0, padding: "26px 14px 14px",
       background: "linear-gradient(transparent, rgba(0,0,0,.62))",

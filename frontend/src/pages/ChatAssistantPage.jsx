@@ -5,6 +5,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import TripPulse from "../components/TripPulse.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -142,6 +143,7 @@ export default function ChatAssistantPage({ embedded = false }) {
   const [card, setCard] = useState(null);      // delegate shown in the info card
   const [renaming, setRenaming] = useState(null); // { id, value }
   const messagesRef = useRef(null); // the scrollable message-list div itself
+  const taRef = useRef(null);       // auto-growing composer
 
   const copyMsg = (i, text) => {
     navigator.clipboard?.writeText(text);
@@ -161,6 +163,12 @@ export default function ChatAssistantPage({ embedded = false }) {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, sending]);
+
+  // Keep the composer sized to its content (max ~5 lines).
+  useEffect(() => {
+    const el = taRef.current;
+    if (el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; }
+  }, [draft]);
 
   /* ---- delegate roster → clickable-name context ------------------------ */
   useEffect(() => { apiGet("/assistant/roster").then((r) => setRoster(r.delegates || [])).catch(() => {}); }, []);
@@ -333,11 +341,16 @@ export default function ChatAssistantPage({ embedded = false }) {
         ? { height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }
         : { maxWidth: 1100 }}
     >
-      {!embedded && (<>
-        <div className="page-eyebrow">{t("Assistant")}</div>
-        <h1 className="page-title">{t("Trip assistant")}</h1>
-        <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
-      </>)}
+      {!embedded && (
+        <div className="row between" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+          <div>
+            <div className="page-eyebrow">{t("Assistant")}</div>
+            <h1 className="page-title">{t("Trip assistant")}</h1>
+            <p className="page-sub">{t("Conversational queries · live data · translation")}</p>
+          </div>
+          <TripPulse mode="assistant" />
+        </div>
+      )}
 
       <div style={embedded
         ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }
@@ -435,9 +448,13 @@ export default function ChatAssistantPage({ embedded = false }) {
 
           <div ref={messagesRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
             {messages.length === 0 && (
-              <div style={{ margin: "auto 0", textAlign: "center" }}>
-                <p className="muted" style={{ fontSize: 14, marginBottom: 14 }}>
-                  {t("Ask about live attendance, missing delegates, exceptions or the itinerary.")}
+              <div style={{ margin: "auto 0", textAlign: "center", padding: "0 20px" }}>
+                <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", width: 46, height: 46, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Bot size={22} />
+                </span>
+                <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 5 }}>{t("Ask about the trip")}</div>
+                <p className="muted" style={{ fontSize: 13.5, marginBottom: 18, maxWidth: 430, marginLeft: "auto", marginRight: "auto", lineHeight: 1.5 }}>
+                  {t("Live attendance, missing delegates, coach status, open exceptions or today's itinerary — in English or 中文.")}
                 </p>
                 <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
                   {STARTERS.map((s) => (
@@ -492,10 +509,19 @@ export default function ChatAssistantPage({ embedded = false }) {
             )}
           </div>
 
-          <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
-            <input className="input" placeholder={t("Ask anything about the trip…")} value={draft} disabled={sending}
-              onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} />
-            <button className="btn btn-primary" onClick={() => send()} disabled={sending}>
+          <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)", alignItems: "flex-end" }}>
+            <textarea
+              ref={taRef}
+              className="input"
+              rows={1}
+              placeholder={t("Ask anything about the trip…")}
+              value={draft}
+              disabled={sending}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              style={{ resize: "none", maxHeight: 120, overflowY: "auto", lineHeight: 1.45, paddingTop: 9, paddingBottom: 9 }}
+            />
+            <button className="btn btn-primary" onClick={() => send()} disabled={sending || !draft.trim()}>
               <Send size={16} /> {t("Send")}
             </button>
           </div>

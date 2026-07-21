@@ -290,6 +290,20 @@ async function seed() {
   // Admin/Staff. Runs on every startup (idempotent — a no-op once none are
   // left) so every deploy picks it up without a manual DB fix.
   await run(`UPDATE accounts SET role = 'admin' WHERE role = 'main'`);
+  // Passwordless-kiosk backing account. The entrance scanner (KioskScannerPage
+  // .jsx) mints a scoped {kiosk:true} token (auth.js signKioskToken) that grants
+  // ONLY the two camera check-in endpoints; requireKioskOrAuth() maps those
+  // requests to THIS row so writes that FK onto accounts.id (check_in_logs
+  // .checked_in_by) still resolve. It has an unguessable random password and is
+  // never meant to be logged into via the password flow. Role "staff" (its
+  // stored permissions are moot — requireKioskOrAuth never checks them, and no
+  // password login can reach it).
+  if (!(await get("SELECT id FROM accounts WHERE username = $1", ["__kiosk__"]))) {
+    const throwaway = `kiosk-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
+      "u-kiosk", "__kiosk__", "Entrance Kiosk", await hashPassword(throwaway), "staff", JSON.stringify(defaultPermsForRole("staff")), new Date().toISOString(),
+    ]);
+  }
   // Trip (once).
   if (!(await get("SELECT id FROM trips LIMIT 1"))) {
     await run(
@@ -946,7 +960,11 @@ export async function listActiveAccounts(withinSeconds = 45) {
 }
 
 async function nextAccountId() {
-  const row = await get(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts`);
+  // Only consider rows shaped like "u-<number>" — the seeded "__kiosk__"
+  // backing account uses the non-numeric id "u-kiosk" (see seed()), which
+  // used to blow up this query's CAST(... AS INTEGER) for every account
+  // creation once that row existed.
+  const row = await get(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts WHERE id ~ '^u-[0-9]+$'`);
   return `u-${Number(row?.m || 0) + 1}`;
 }
 
@@ -956,7 +974,10 @@ export async function getAccountByUsername(username) {
 }
 
 export async function listAccounts() {
-  return (await all("SELECT * FROM accounts ORDER BY id")).map(accountPublic);
+  // Hide the internal __kiosk__ backing account (see seed() in this file) —
+  // it's plumbing for passwordless check-ins, not a manageable staff account,
+  // so it should never show up in Account control or the staff-count tiles.
+  return (await all("SELECT * FROM accounts WHERE username <> '__kiosk__' ORDER BY id")).map(accountPublic);
 }
 
 export async function createAccount(input) {

@@ -1,5 +1,7 @@
 node_modules/
 .env
+# Tesseract OCR language data — downloaded at runtime on first use, not committed
+*.traineddata
 delegates.json
 database.db
 database.db-journal

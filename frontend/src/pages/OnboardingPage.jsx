@@ -28,6 +28,7 @@ import {
 } from "../lib/claudeParse.js";
 import { useLang } from "../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
+import TripPulse from "../components/TripPulse.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -57,6 +58,21 @@ const LS_TRIP = "mg_parse_trip";
 const POLL_MS = 2500;
 
 const keyOf = (name) => (name || "").trim().toLowerCase();
+
+/* Review-time passport check — mirrors the backend rule: flag a parsed row whose
+ * passport is expired or expires within 6 months (the overseas-travel rule), so
+ * the organiser can catch it before confirming. Returns null when there's no
+ * usable expiry (never a false alarm). */
+const passportFlag = (expiry) => {
+  if (!expiry) return null;
+  const d = new Date(expiry);
+  if (Number.isNaN(d.getTime())) return null;
+  const now = new Date();
+  const six = new Date(now); six.setMonth(six.getMonth() + 6);
+  if (d < now) return "expired";
+  if (d < six) return "expiring";
+  return null;
+};
 
 export default function OnboardingPage() {
   const { t } = useLang();
@@ -232,15 +248,28 @@ export default function OnboardingPage() {
   /* --------------------------------------------------------------------- */
   return (
     <div className="page">
-      <div className="page-eyebrow">{t("Onboarding")}</div>
-      <h1 className="page-title">{t("Document parsing")}</h1>
-      <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
+      <div className="row between" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="page-eyebrow">{t("Onboarding")}</div>
+          <h1 className="page-title">{t("Document parsing")}</h1>
+          <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
+        </div>
+        <TripPulse mode="onboarding" />
+      </div>
 
-      {/* Tabs */}
-      <div className="mg-tabbar row" style={{ gap: 4, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
+      {/* Tabs — rounded tinted pills, matching the Dashboard's tab group
+          (Delegate/Analytics/Staff operations) so the whole app's tab
+          treatment is consistent. Was a flat borderRadius:0 underline
+          before, which clashed with the design system's rounded controls. */}
+      <div className="row" style={{ gap: 8, marginTop: 16 }}>
         {[["parse", "Document parsing"], ["passes", "Boarding passes"]].map(([k, label]) => (
-          <button key={k} onClick={() => setView(k)} className="btn btn-ghost"
-            style={{ borderRadius: "10px 10px 0 0", borderBottom: `2px solid ${view === k ? "var(--scc-red)" : "transparent"}`, color: view === k ? "var(--scc-red)" : "var(--ink-2)", fontWeight: 600 }}>
+          <button key={k} onClick={() => setView(k)} className="btn"
+            style={{
+              background: view === k ? "var(--scc-red-tint)" : "transparent",
+              color: view === k ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${view === k ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+              fontWeight: 600,
+            }}>
             {t(label)}
           </button>
         ))}
@@ -420,6 +449,11 @@ export default function OnboardingPage() {
                           <span style={{ fontWeight: 700, fontSize: 15.5 }}>{r.fullName}</span>
                           {dup && <span className="mg-pill" style={{ color: "var(--st-missing)", background: "var(--surface-2)" }}>{t("Already in trip")}</span>}
                           {flagged && !dup && <span className="mg-pill" style={{ color: "var(--st-review)", background: "var(--surface-2)" }}>{t("Needs review")}</span>}
+                          {passportFlag(r.passportExpiry) && (
+                            <span className="mg-pill" style={{ color: passportFlag(r.passportExpiry) === "expired" ? "var(--st-missing)" : "var(--st-review)", background: "var(--surface-2)" }}>
+                              {passportFlag(r.passportExpiry) === "expired" ? t("Passport expired") : t("Passport expiring")}
+                            </span>
+                          )}
                         </div>
                       )}
 

@@ -144,6 +144,12 @@ export async function manualOverride(delegateId) {
   });
 }
 
+/** Undo a manual attendance override — reverts the delegate to ASSIGNED and
+ *  removes the check-in log row manualOverride() just created. */
+export async function undoManualOverride(delegateId) {
+  return apiPost(`/checkins/manual/undo`, { delegateId });
+}
+
 /**
  * QR badge check-in — count a delegate present from a scanned delegate badge.
  * Writes a method='QR' row to check_in_logs and flips the delegate to PRESENT,

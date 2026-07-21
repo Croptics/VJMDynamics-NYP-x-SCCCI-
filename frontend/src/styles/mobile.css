@@ -6,7 +6,21 @@
    ========================================================================== */
 
 .mobile-shell {
-  min-height: 100vh;
+  /* The shell owns the scroll (not the document body). Why: the fixed
+     bottom tab bar is positioned against the viewport, so when the BODY
+     gained a scrollbar on tall pages (the Attendance roster) but not on
+     short ones (Home), the bar's right edge moved by the scrollbar width
+     and its evenly-spaced tabs visibly shifted between pages. With the
+     shell as the scroll container the body never scrolls (its width is
+     constant), and `scrollbar-gutter: stable` reserves the shell's own
+     scrollbar gutter on EVERY mobile view — so both the tab bar and the
+     page content stay pixel-static across Home / Attendance / Trips /
+     Profile / Issues. Scoped to .mobile-shell so desktop is untouched
+     (mobile.css is imported app-wide via App.jsx). */
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   background: var(--bg);

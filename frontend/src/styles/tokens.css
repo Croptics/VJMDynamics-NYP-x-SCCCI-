@@ -258,6 +258,14 @@ a { color: inherit; }
   overflow-y: auto;
 }
 .sidebar-brand { padding: 4px 10px 14px; font-size: 22px; }
+/* The nav-item list is the ONLY part that scrolls when the sidebar is
+   taller than the viewport (e.g. a tablet browser with a short viewport
+   height) — .sidebar-brand above and the account/Log out footer below stay
+   put, so Log out is always visible without having to scroll past the nav
+   list first. min-height: 0 is required for a flex child to be allowed to
+   shrink/scroll instead of stretching its flex parent. On a normal desktop
+   viewport this list already fits, so nothing here is visibly different. */
+.sidebar-nav-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   display: flex;
   align-items: center;

@@ -1,8 +1,9 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight } from "lucide-react";
-import { apiGet, getUser } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, ChevronRight, ScanFace } from "lucide-react";
+import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
 
 const TRIP_ID = "t-1";
 
@@ -14,24 +15,25 @@ function greeting() {
 
 /**
  * Mobile Home — pulls the same live summary as the desktop Dashboard
- * (GET /api/trips/:id/dashboard), condensed for a phone screen.
- *
- * Layout mirrors the Check-in screen's own "Trips" home tab
- * (QRCheckInPage.jsx's HomeView) so both mobile surfaces feel like the same
- * app: a personalized greeting header, a live Active Trip panel, a
- * glanceable KPI strip, and a Coach status card. Differences from that
- * reference, all deliberate:
- *   - The KPI strip here is Missing/Present/Late (3 cards), not Check-in's
- *     Missing/Present/Unassigned — Unassigned stays reachable via the
- *     Attendance page's own filter chips, and Late gets the dedicated tile
- *     instead since it's the higher-risk operational number during a live
- *     trip. Total isn't a card here at all — it's a small text line under
- *     the page title instead (2026-07-19), keeping the main tile row
- *     dedicated to actionable/at-risk statuses rather than a plain count.
+ * (GET /api/trips/:id/dashboard), condensed for a phone screen: a
+ * personalized greeting header, a live Active Trip panel, a glanceable KPI
+ * strip, an expandable Issues section (below), and a Coach status card.
+ *   - The KPI strip is Missing/Present/Late (3 cards) — Unassigned stays
+ *     reachable via the Attendance page's own filter chips, and Late gets
+ *     the dedicated tile instead since it's the higher-risk operational
+ *     number during a live trip. Total isn't a card here at all — it's a
+ *     small text line under the page title instead, keeping the main tile
+ *     row dedicated to actionable/at-risk statuses rather than a plain count.
  *   - The whole "Coach status" card is ONE tap target that jumps straight to
- *     the Attendance page pre-filtered to Missing — Check-in's version lets
- *     you tap into any one coach's own headcount view instead. Each KPI tile
- *     is still its own shortcut into Attendance, pre-filtered to that status.
+ *     the Attendance page pre-filtered to Missing. Each KPI tile is its own
+ *     shortcut into Attendance, pre-filtered to that status.
+ *   - Issues: an actionable card under the metric cards links to the
+ *     dedicated /mobile/issues page (MobileIssuesPage.jsx). Was briefly an
+ *     inline expandable accordion right here (2026-07-20, "Mobile UI
+ *     Consolidation" Option A); moved to its own route the same day — the
+ *     full log-a-ticket form + open-tickets list reads better as its own
+ *     screen than squeezed into an accordion on a small viewport. This card
+ *     just fetches the open-critical count for its badge and navigates.
  */
 export default function MobileHomePage() {
   const { t, lang } = useLang();
@@ -39,6 +41,16 @@ export default function MobileHomePage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Issues card badge — open-critical count only; the form/list themselves
+  // live on the dedicated /mobile/issues page now.
+  const [openIssueCount, setOpenIssueCount] = useState(0);
+
+  useEffect(() => {
+    getCriticalOpenCount().then(setOpenIssueCount).catch(() => {});
+    const id = setInterval(() => { getCriticalOpenCount().then(setOpenIssueCount).catch(() => {}); }, 2000);
+    return () => clearInterval(id);
+  }, []);
 
   // Guards against overlapping polls (a slow response still in flight when
   // the next tick fires) — same pattern as the desktop Dashboard.
@@ -141,6 +153,54 @@ export default function MobileHomePage() {
           <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
           <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
         </div>
+      )}
+
+      {/* Scanner — quick shortcut into the mobile Face/QR/Manual scanner for
+          a staff member already signed into the app. Gated behind
+          viewMobileScanner so an admin can hide it per-account, same as
+          every other mobile tile. */}
+      {getPermissions().viewMobileScanner && (
+        <button
+          className="mobile-card row between"
+          onClick={() => navigate("/mobile/scanner")}
+          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
+        >
+          <div className="row" style={{ gap: 10 }}>
+            <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+              <ScanFace size={16} />
+            </span>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Scanner")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("Face + QR scan")}</div>
+            </div>
+          </div>
+          <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+        </button>
+      )}
+
+      {/* Issues — actionable card under the metric cards; navigates to the
+          dedicated /mobile/issues page rather than expanding inline. Gated
+          behind viewMobileIssues so an admin can hide it per-account. */}
+      {getPermissions().viewMobileIssues && (
+        <button
+          className="mobile-card row between"
+          onClick={() => navigate("/mobile/issues")}
+          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
+        >
+          <div className="row" style={{ gap: 10 }}>
+            <span className="avatar" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
+              <AlertTriangle size={16} />
+            </span>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Issues")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("Report or view exceptions")}</div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+            {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
+            <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
+          </div>
+        </button>
       )}
 
       {/* Coach status — header links to the full missing list across every

@@ -16,16 +16,8 @@ import { useLang } from "../lib/i18n.jsx";
  * report" (counts folded into the header, no stat-card row), Jayden's filter
  * tabs, and Vimal's per-coach grouping.
  */
-// PRESENT/ARRIVED both mean "boarded" — PRESENT is the legacy value some
-// check-in routes still write directly (see normalize() in backend/data.js);
-// ASSIGNED/LATE are the newer 5-status values (see the 5-status plan) that
-// this page didn't originally know about, so they need their own entries
-// rather than silently falling through to the UNASSIGNED default below.
 const STATUS_META = {
   PRESENT: { label: "Boarded", color: "var(--st-present)" },
-  ARRIVED: { label: "Boarded", color: "var(--st-present)" },
-  ASSIGNED: { label: "Not boarded", color: "var(--st-review)" },
-  LATE: { label: "Not boarded", color: "var(--st-review)" },
   MISSING: { label: "Not boarded", color: "var(--st-review)" },
   UNASSIGNED: { label: "No coach", color: "var(--ink-3)" },
 };
@@ -65,9 +57,8 @@ export default function BoardingPassesView({ tripId }) {
   const visible = useMemo(() => {
     const s = search.trim().toLowerCase();
     return data.delegates.filter((d) => {
-      const boarded = d.status === "PRESENT" || d.status === "ARRIVED";
-      if (filter === "boarded" && !boarded) return false;
-      if (filter === "pending" && boarded) return false;
+      if (filter === "boarded" && d.status !== "PRESENT") return false;
+      if (filter === "pending" && d.status === "PRESENT") return false;
       if (!s) return true;
       return [d.name, d.company, d.qr_code].some((v) => (v || "").toLowerCase().includes(s));
     });
@@ -243,7 +234,7 @@ export default function BoardingPassesView({ tripId }) {
       <style>{`
         .mg-chip{font-size:12.5px;font-weight:600;padding:6px 12px;border-radius:999px;cursor:pointer;transition:background .12s ease}
         .mg-passrow{width:100%;display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:6px;
-          background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:10px;cursor:pointer;
+          background:var(--surface);border:1px solid var(--line);border-radius:10px;cursor:pointer;
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
         .mg-print-sheet{display:none}

@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 .env.local
+# mkcert-generated local dev certs (see INTEGRATION_NOTES.md — per-machine, never shared)
+*.pem

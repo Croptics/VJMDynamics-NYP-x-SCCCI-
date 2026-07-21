@@ -1,10 +1,14 @@
 # Feature Integration Notes
 
-Three teammate features are merged into JQ's `InsightMetrics-(JQ)` branch:
+Five people's work makes up MusterGo. **Base** is the foundation everything
+else is built on and integrates into; the other four are features merged into
+it:
 
+0. **MusterGo Base** — Admin Dashboard, Auth, Accounts & Permissions (Jun Qi / JQ)
 1. **TransitFlow** — Trip Booking & Dynamic Coach Management (Desmond)
 2. **Exception Logging** — support tickets, critical alerts & manual override (Jayden)
 3. **DocuSync AI + Trip Assistant** — AI document parsing (onboarding) + chatbot (Vance)
+4. **FaceCheck-Pro** — Privacy-First Biometric & Multi-Modal Fusion Scanner (Vimal)
 
 This file describes what's **actually in the code now**, after integration.
 It intentionally differs from the teammates' original hand-off notes, because
@@ -14,7 +18,7 @@ simplified). Where something changed, it's called out.
 
 ---
 
-## Quick start (both features)
+## Quick start (all features)
 
 ```bash
 # 1. Backend — needs DATABASE_URL in backend/.env (Neon or local Postgres)
@@ -44,8 +48,66 @@ feature) need either `ANTHROPIC_API_KEY` in `backend/.env`, or a local Ollama
 (`ollama pull llama3.2`) for the text-based paths — see that feature's section.
 Everything else works without them.
 
-**One new npm package:** `unpdf` (backend), used to read text out of PDFs for
-document parsing. `npm install` pulls it in.
+**New npm packages:** `unpdf` and `tesseract.js` (backend, PDF text extraction
++ offline OCR fallback), `qrcode` (frontend, QR-pass generation), and
+`@vitejs/plugin-basic-ssl` (frontend, serves the dev server over HTTPS — see
+"Getting a trusted HTTPS cert for local dev" below). `npm install` pulls them
+all in.
+
+---
+
+## Getting a trusted HTTPS cert for local dev
+
+`frontend/vite.config.js` serves the dev site over HTTPS (`@vitejs/plugin-basic-ssl`)
+because the camera (`getUserMedia`, used by the Face/QR scanners) and the
+browser's password-save/autofill only work in a "secure context" —
+`https://` or `http://localhost`. A phone reaching the dev server over the LAN
+as plain `http://192.168.x.x:5173` gets silently blocked on both.
+
+**Default (zero setup):** the plugin auto-generates a **self-signed** cert on
+every `npm run dev`. It works immediately, but every browser flags it as "not
+secure" / shows a warning interstitial, because a self-signed cert has no
+trusted issuer — that's expected, not a bug, and safe to click through
+("Advanced" → "Proceed") on a local dev server.
+
+**If you want that warning gone (recommended if it bothers you or a teammate
+on the same LAN):** use [`mkcert`](https://github.com/FiloSottile/mkcert) to
+generate a cert your OS actually trusts:
+
+```bash
+# 1. Install mkcert (once per machine)
+choco install mkcert          # Windows (Chocolatey)
+brew install mkcert           # macOS
+# Linux: see the mkcert README for your distro's package manager
+
+# 2. Install the local CA into your OS/browser trust store (once per machine)
+mkcert -install
+
+# 3. From frontend/, generate a cert covering localhost + your LAN IP
+cd frontend
+mkcert localhost 127.0.0.1 ::1 192.168.1.11   # swap in your own LAN IP
+# → writes localhost+3.pem and localhost+3-key.pem into frontend/
+```
+
+Then point `vite.config.js`'s `basicSsl()` call at those files instead of
+letting it self-sign:
+
+```js
+import fs from "node:fs";
+// ...
+server: {
+  https: {
+    cert: fs.readFileSync("./localhost+3.pem"),
+    key: fs.readFileSync("./localhost+3-key.pem"),
+  },
+  // ... rest unchanged; drop basicSsl() from the plugins array once this is set
+},
+```
+
+Don't commit the generated `.pem`/`-key.pem` files or run `mkcert -install`
+on a shared/CI machine — the CA it installs is trusted machine-wide, so this
+is a per-developer, per-machine step, not something to bake into the repo.
+Re-run step 3 (with your own IP) whenever your LAN IP changes.
 
 ---
 
@@ -81,6 +143,90 @@ elsewhere in the app:
 
 So adding an onboarding-specific permission would have been redundant, and would
 have created the odd state of "can bulk-add delegates by upload but not manually."
+
+---
+
+# Feature 0 — MusterGo Base: Admin Dashboard, Auth, Accounts & Permissions · Jun Qi (JQ)
+
+Not a "merged" feature like the other four — this is the foundation the other
+four are built on and integrate into: authentication, the permission system,
+the live Dashboard, Account control, and the mobile app shell.
+
+### Files
+
+**Backend:** `server.js`, `auth.js`, `data.js`, `cloudinary.js`, `reset-login.js`,
+`seed-team.js`, `routes/insights.js` (AI insights), `routes/export.js` (Excel
+export), `routes/media.js` (Cloudinary photo storage).
+
+**Frontend:** `LoginPage.jsx`, `DashboardPage.jsx`, `AccountControlPage.jsx`,
+`HistoryLogPage.jsx`, `SettingsPage.jsx`, `UserGuidePage.jsx`,
+`components/Layout.jsx`, `components/Sidebar.jsx`, `lib/api.js`, `lib/i18n.jsx`,
+`lib/theme.jsx`, `permissions.js` (root — shared with the backend, the single
+source of truth for every permission in the app). Also owns the mobile app
+shell (`MobileLayout.jsx`, `MobileHomePage.jsx`, `MobileAttendancePage.jsx`,
+`MobileTripsPage.jsx`, `MobileProfilePage.jsx`, `MobileIssuesPage.jsx`) and the
+three scanner surfaces built on top of Vimal's Face/QR primitives:
+`UnifiedScannerPage.jsx` (desktop entrance-kiosk scanner), `KioskScannerPage.jsx`
+(passwordless entrance kiosk), `MobileScannerPage.jsx` (mobile-native scanner) —
+see "Updates since initial merge" for all three.
+
+### Database (created in `createSchema()`/`seed()` in `data.js`)
+
+`accounts`, the base `trips`/`delegates` columns, `activity_log`. Every other
+feature's schema is additive on top of this (`ADD COLUMN IF NOT EXISTS`,
+`CREATE TABLE IF NOT EXISTS`) — nothing here is ever dropped or renamed for
+a teammate's feature.
+
+### Endpoints
+
+**Auth:** `POST /api/auth/login`, `POST /api/auth/reset-password`,
+`GET /api/auth/session`, `POST /api/auth/logout`,
+`POST /api/auth/kiosk` (mints the passwordless kiosk token — see "Updates
+since initial merge").
+
+**Accounts** (needs `manageAccounts`): `GET|POST /api/accounts`,
+`PATCH|DELETE /api/accounts/:id`, `GET /api/staff/active-sessions`.
+
+**Dashboard / delegates:** `GET /api/trips`, `GET /api/trips/:id`,
+`GET /api/trips/:id/dashboard`, `GET /api/trips/:id/missing`,
+`GET|POST|DELETE /api/trips/:id/delegates`, `PATCH|DELETE /api/delegates/:id`,
+`POST|DELETE /api/delegates/:id/photo`.
+
+**Activity / history** (edits need `manageDelegates`): `GET /api/activity`,
+`DELETE /api/activity[/:id]`, `POST /api/activity/:id/rollback`.
+
+### Permissions system (`permissions.js` — the single source of truth)
+
+- Every permission is one entry: `key, label, desc, chip, default, group`
+  (`action` | `desktopView` | `mobileView`).
+- `cleanPermissions()` falls back to each permission's own `default` when a
+  key is **absent** from stored input (never a hardcoded `false`) — this is
+  what let well over a dozen new view permissions roll out over time without
+  silently locking out every account that existed before them.
+- Two roles only: `admin` (bypasses every check) and `staff` (whatever's
+  ticked). `ViewGate` in `App.jsx` does route-level gating on the frontend;
+  `requireAuth()`/`requirePermission()` in `auth.js` enforce it on the
+  backend for actual writes — the frontend gate alone is never the real
+  security boundary.
+
+### Good to know
+
+- **5-status delegate model** (`UNASSIGNED → ASSIGNED → ARRIVED → LATE →
+  MISSING`) lives here (`data.js`'s `normalize()`/`updateDelegate()`), and
+  every teammate's check-in writer goes through it.
+- **Field-level activity log + rollback** — most delegate edits are undoable
+  from the History Log page.
+- The mobile app shell (`MobileLayout.jsx`'s bottom-tab nav) and the desktop
+  `Layout.jsx` sidebar are both driven by the SAME permissions object, so a
+  permission unchecked in Account control disappears from both nav rails and
+  both route trees automatically — no per-feature nav-hiding code needed.
+- **Chinese/English toggle** (`i18n.jsx`) and **light/dark theme**
+  (`theme.jsx`) are app-wide and shared by every teammate's page for free —
+  no per-feature i18n/theme code needed. Every string in the app (base +
+  all four merged features) has a `DICT` entry as of 2026-07-21.
+- Login → dashboard/mobile-home auto-routing and the passwordless entrance
+  kiosk are both 2026-07-21 additions — see "Updates since initial merge"
+  below for the full detail on both.
 
 ---
 
@@ -139,7 +285,7 @@ shadowing — or being shadowed by — those.
 - **Activity feed is in-memory** — it resets if the backend restarts (mirrors the Dashboard's own activity pattern; not a persisted audit log).
 - Drag-and-drop uses plain Pointer Events (no `@dnd-kit`); the moving "bus" is a CSS-animated 2D icon (no 3D library).
 - Coach capacity is informational, not enforced. Reassigning a delegate out of "Unassigned" onto a coach sets them to `ASSIGNED` (updated from the original `MISSING` — see "Updates since initial merge" below).
-- **Partial Chinese:** the new UI strings fall back to English until added to `DICT` in `i18n.jsx`. The board works fully in English.
+- **Fully bilingual as of 2026-07-21** — every string on the board has a `DICT` entry in `i18n.jsx` (verified with a project-wide `t()`-key audit, 0 missing).
 
 ---
 
@@ -208,7 +354,8 @@ initial merge" below).
 
 # Feature 3 — DocuSync AI + Trip Assistant · Vance
 
-Two AI features in one module:
+**Screens:** 4 (Document Parsing / Onboarding) and 6 (Trip Assistant).
+Three things in one module:
 
 - **`/onboarding`** — upload a delegation directory, attendee list, spreadsheet
   export, or scanned passport; an AI reads it and returns structured delegate
@@ -223,54 +370,160 @@ Two AI features in one module:
 - **QR boarding passes + on-site check-in** — every onboarded delegate gets a
   unique `qr_code`; scanning it flips them to `ARRIVED`. This is the LIVE QR
   scan path (`POST /api/onboarding/checkin`), not Jayden's orphaned
-  `/api/checkins/qr`.
+  `/api/checkins/qr`, and it's the same endpoint the passwordless kiosk
+  scanner and the mobile scanner's QR mode both call (see "Updates since
+  initial merge" below).
 
 ### Files
 
 **New:**
-- `backend/routes/vance.js` — both features' API (document parsing + assistant), plus its own lazy schema setup.
-- `frontend/src/lib/claudeParse.js` — the parse/confirm bridge used by the onboarding page.
+- `backend/routes/vance.js` — all APIs (parsing, boarding passes, assistant), plus its own lazy schema setup.
+- `frontend/src/lib/claudeParse.js` — parse / confirm / badges / check-in bridge used by the onboarding page.
+- `frontend/src/pages/BoardingPassesView.jsx` — pass desk: search/filter, per-coach list, view/print a pass.
+- `frontend/src/components/TripPulse.jsx` — header status widget: onboarding progress (Onboarding tab) / ranked "what to watch" risks (Assistant).
 
 **Replaced (were placeholders/demos before):**
-- `frontend/src/pages/OnboardingPage.jsx` — real upload → parse → review → confirm flow.
+- `frontend/src/pages/OnboardingPage.jsx` — real upload → parse → review → confirm flow (2 tabs: parse / boarding passes).
 - `frontend/src/pages/ChatAssistantPage.jsx` — real streaming chatbot with saved history.
 - `frontend/src/pages/mobile/MobileAssistantPage.jsx` — the mobile chat, real AI.
 
 **Edited during merge:**
 - `backend/server.js` — mounted in the TEAMMATE ZONE (`import vanceRouter` + `app.use`).
-- `backend/package.json` — added `unpdf`.
+- `backend/package.json` — added `unpdf` (PDF text extraction) and `qrcode` (frontend QR-pass generation).
 - `frontend/src/App.jsx` + `frontend/src/components/Sidebar.jsx` — the `/onboarding` route and its "Documents" nav item are now gated behind `manageDelegates` (matching the backend), so an account without it doesn't land on a page that would 403.
 
 *(Auth needed no rewrite — unlike Jayden's, Vance's router already used JQ's `requireAuth`/`requirePermission` from `auth.js`.)*
 
-### Database (auto-created lazily in vance.js on first use)
+### Database (auto-created lazily in vance.js on first use, additive only)
 
-- `delegates` — added `passport_no`, `nationality`, `passport_expiry`, `role`, `industry`, `email`, `phone`, `website` (all additive; reuses Desmond's `company`).
-- `chat_sessions`, `chat_messages` — saved assistant history, one set per account.
+- `delegates` — `ADD COLUMN IF NOT EXISTS` for `passport_no, nationality, passport_expiry, role, industry, email, phone, website, qr_code` (+ a partial unique index on `qr_code`). Reuses Desmond's existing `company`.
+- `chat_sessions` (incl. `pinned`), `chat_messages` — saved assistant history, one set per account.
 
 ### Endpoints
 
-Document parsing (needs `manageDelegates`):
-`POST /api/documents/parse`, `POST /api/documents/parse-async` (+ `GET .../:id` to poll),
-`GET /api/onboarding/context`, `POST /api/trips/:id/onboarding/confirm`.
+**Document parsing & onboarding** (needs `manageDelegates` unless noted):
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| POST | `/api/documents/parse` | `manageDelegates` | Synchronous parse → structured rows + confidence |
+| POST | `/api/documents/parse-async` | `manageDelegates` | Start a **background** parse job (returns `jobId`) |
+| GET | `/api/documents/parse-async/:id` | signed-in | Poll job: `status`, `done/total`, streamed `rows` |
+| GET | `/api/onboarding/context` | signed-in | Existing delegate names (dedup) + coaches |
+| POST | `/api/trips/:id/onboarding/confirm` | `manageDelegates` | Commit rows to shared `delegates`; mints a `qr_code` each |
 
-Assistant (any signed-in user):
+**QR boarding passes & check-in** ⭐ shared contract:
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/onboarding/badges` | signed-in | Delegates + generated `qr_code` for the printable passes |
+| POST | `/api/onboarding/checkin` | signed-in, **or a passwordless kiosk token** (`requireKioskOrAuth`) | Resolve a scanned `qr_code` → `ARRIVED` (+coach) → `check_in_logs` |
+
+**Trip assistant (chatbot)** (any signed-in user):
 `POST /api/chat/messages` (mobile, stateless), `GET|POST /api/chat/sessions`,
 `GET|PATCH|DELETE /api/chat/sessions/:id`, `POST /api/chat/sessions/:id/messages`,
-`POST /api/chat/sessions/:id/stream` (live tokens), `.../regenerate`, `GET /api/assistant/roster`.
+`POST /api/chat/sessions/:id/stream` (live SSE token streaming), `.../regenerate`,
+`GET /api/assistant/roster` (delegate details → clickable cards),
+`GET /api/assistant/pulse` (compact live status for the header widget).
 
-### AI providers (deliberate split)
+### Connective tissue (how this integrates with the team)
 
-- **Parsing prefers Claude** (best accuracy, and *required* for scanned docs/images — it must "see" them). For text-based PDFs it can fall back to local Ollama. Needs `ANTHROPIC_API_KEY`, or Ollama for the text path.
-- **Chatbot is Ollama-first, Claude-fallback** (mirrors JQ's `insights.js`) — it reasons over a text snapshot, so a free local model handles it.
-- If neither is configured, each returns a clear "not configured" message, never a crash.
+- **Onboarding writes to the SHARED `delegates` table** via JQ's `createDelegate()`, scoped to the trip at creation — so a parsed delegate appears on JQ's dashboard, Desmond's Trips board, and the check-in module with no sync step.
+- **The QR boarding pass is the badge contract.** `BoardingPassesView` encodes the delegate's plain `qr_code` (e.g. `MG-86B620A4`) from the shared `delegates` table. Jayden's `QRScannerPanel.jsx` (now shared by the desktop `/scanner` page, the mobile `/mobile/scanner` page, and Vimal's `QRCheckInPage`) scans that code and registers it through `POST /api/onboarding/checkin` (via `qrCheckin()`), which flips the delegate to `ARRIVED` (+coach) and writes a `check_in_logs` QR row. Desmond's coach board counts `ARRIVED`/`PRESENT` by coach and JQ's head-count agrees. **`qr_code`, `/api/onboarding/checkin` and `qrCheckin()` are load-bearing for every scanner surface in the app: do not remove them.**
+- **Trip scoping uses `resolveTripUuid()`** (a local helper in `vance.js`, kept self-contained rather than editing JQ's `data.js`) everywhere a trip id arrives from the client. It resolves the trip by either the `trips.id` string (`"t-1"`) or its `uuid_id` (what `GET /all-trips` returns). `confirm` returns `404 UNKNOWN_TRIP` instead of writing orphans when a trip can't be resolved.
 
-### Good to know
+### AI providers (deliberate, cost-aware split)
+
+- **Document parsing — text-first, vision-fallback (hybrid):**
+  1. PDFs are read as **text server-side** with `unpdf`. If real text is present, it's structured by an LLM as text — cheap, fast, page-by-page, and runs on free local Ollama.
+  2. Scanned images (no extractable text) fall back to **vision**: Claude vision if `ANTHROPIC_API_KEY` is set, else **local Tesseract OCR** (`method: "ocr/tesseract"`) so passport/ID photos work fully offline. (Scanned image-only PDFs aren't rasterised; upload them as an image.)
+  Structuring prefers Claude if `ANTHROPIC_API_KEY` is set (best accuracy), else Ollama `OLLAMA_PARSE_MODEL` (default `llama3.2`, 3B). Bilingual (中文/English) names collapse to the romanised name; placeholder/garbage names are dropped.
+- **Chatbot — Ollama-first, Claude fallback** (mirrors JQ's `insights.js`). Uses `OLLAMA_MODEL` (`llama3.2:1b` for demo speed); replies **stream token-by-token** over SSE. Attendance figures are pre-computed into the snapshot so even a small model reports exact numbers — AI handles language, code handles arithmetic.
+- **Deterministic fast-path (`answerLocally`)** — common factual questions (attendance, present/missing/unassigned, coach superlatives, company/industry breakdowns, VIPs, exceptions, itinerary, named delegate look-ups) are answered **instantly from the snapshot with no model call**. Open-ended/generative questions and any Chinese question fall through to the LLM. Because the fast-path needs no model, the assistant still answers common factual questions even where no AI engine is reachable at all.
+- **Passport-expiry validation (`checkPassportExpiry`)** flags delegates whose passport is expired or expiring within 6 months. Surfaced three ways: a review-time pill on the onboarding cards, a fast-path assistant intent, and a `computeRisk` item so it appears in the "what to watch" widget too.
+- **Risk scoring (`computeRisk`)** ranks what to worry about — missing VIPs and CRITICAL exceptions first, then the coach furthest from boarded, then ordinary open tickets. Powers both the fast-path "who should I worry about" answer and a ranked `PRIORITIES` block in the model prompt.
+- **Snapshot cache + model warm-up:** `getSnapshot()` caches the ~6-query snapshot for 5s (invalidated on confirm and QR check-in); a fire-and-forget warm-up call preloads the chat model so the first question doesn't pay the ~20-30s cold load.
+- If neither Claude nor Ollama is configured, each feature returns a clear "not configured" message, never a crash.
+
+### Good to know / edge cases handled
 
 - **Writes to the SHARED `delegates` table** via JQ's own `createDelegate()`, so a parsed delegate instantly appears on the Dashboard, the Trips board, and the Exception delegate-picker — no separate table, no sync.
 - The chatbot reads a snapshot spanning delegates, coaches, open exceptions, check-ins, and today's itinerary — each cross-feature read is `try/catch`-wrapped, so it still works if a teammate's table isn't present yet. Only this developer-authored snapshot is sent to the model; it can't query arbitrary rows.
-- **Edge cases handled:** low-confidence rows are flagged for manual review (the model returns `null` rather than inventing a passport number); a plain directory with no passport numbers still imports; an ambiguous chatbot question triggers one clarifying question instead of a guess.
-- **Partial Chinese:** the assistant replies in the UI's selected language, but Vance's new page labels fall back to English until added to `DICT` in `i18n.jsx`.
+- **Low-confidence extraction:** rows below the threshold are flagged "Needs review" and are editable inline; the model returns `null` rather than inventing a field. A directory with no passport numbers still imports fine.
+- **Big documents:** async job with progress; the admin can leave the page and re-attach — parsing continues server-side.
+- **Duplicates / junk rows:** rows already in the trip are flagged and skipped on confirm; `onboarding/confirm` also skips implausible rows (e.g. a stray 1-2 char test entry with no supporting field) and returns `skippedInvalid` alongside `added`.
+- **Unknown / already-scanned QR:** check-in returns a clear message (404 unknown, "already boarded" otherwise), resolved from the delegate's own trip record so a mistyped `tripId` can't file against the wrong trip.
+- **Ambiguous chatbot query:** the prompt asks ONE clarifying question rather than guessing; out-of-scope questions are politely declined.
+- **Chinese is fully covered** — every string this feature introduces (onboarding review states, boarding passes, the assistant's placeholder copy, TripPulse) has a `DICT` entry in `i18n.jsx` as of 2026-07-21; nothing falls back to English anymore.
+
+### Env (`backend/.env`, see `.env.example`)
+
+```
+DATABASE_URL=postgresql://...neon.tech/...?sslmode=require   # shared team Neon
+OLLAMA_MODEL=llama3.2:1b        # chatbot model (fast). Omit for llama3.2 (3B, more accurate)
+# OLLAMA_PARSE_MODEL=llama3.2   # parsing model (defaults to llama3.2 / 3B)
+# ANTHROPIC_API_KEY=sk-ant-...  # optional: enables Claude vision (scanned docs) + higher accuracy
+```
+
+The chatbot and text-based parsing work fully offline on Ollama; a Claude key is only needed to read **scanned/image** documents (vision).
+
+---
+
+# Feature 4 — FaceCheck-Pro: Privacy-First Biometric & Multi-Modal Fusion Scanner · Vimal
+
+The `/checkin` page (phone-frame staff app): live per-coach Reverse Headcount
+plus Face/Voice scanning that resolves an anonymous biometric token to a
+missing delegate in under 1 second, with **zero images or audio ever
+touching the server**.
+
+### Files
+
+**New:**
+- `backend/routes/vimal.js` — all attendance/scan/consent/history endpoints.
+- `frontend/src/pages/QRCheckInPage.jsx` — the phone-frame staff app (Trip → coach → Reverse Headcount → scan).
+
+**Reused elsewhere:** the Face vectorizer + biometric-token validator were
+extracted into `frontend/src/lib/faceScan.js` so the desktop
+`UnifiedScannerPage.jsx`, the mobile `MobileScannerPage.jsx`, and the
+passwordless `KioskScannerPage.jsx` (all JQ-side additions, see "Updates
+since initial merge") share Vimal's original zero-image logic instead of
+each keeping its own copy.
+
+### Database
+
+No new tables — reads/writes the SHARED `delegates` table via JQ's
+`listDelegates()`/`updateDelegate()`/`createDelegate()`. Consent lifecycle +
+per-delegate check-in history are kept **in-memory** (Vimal-owned
+bookkeeping, not persisted — resets if the backend restarts).
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/attendance/coaches` | signed-in | Trip meta + every coach with live counts, for the mobile dashboard |
+| POST | `/api/attendance/scan` | signed-in, **or a passwordless kiosk token** (`requireKioskOrAuth`) | Resolve a face/voice token → the matching `MISSING` delegate → `ARRIVED` |
+| GET | `/api/attendance/:trip_id/coach/:coach_id` | signed-in | Reverse Headcount for one coach (roster + consent flags) |
+| GET | `/api/attendance/headcount` | signed-in | Boarded/missing/unassigned stats + the missing-delegate call list |
+| POST | `/api/attendance/consent` | signed-in | Grant/revoke biometric consent; stores only an irreversible checksum, never the token/image |
+| GET | `/api/attendance/history/:delegate_id` | signed-in | This delegate's check-in history across venues |
+| POST | `/api/attendance/assign-unassigned` | signed-in | Muster-prep: move `UNASSIGNED` delegates onto a coach as `MISSING` |
+| POST | `/api/attendance/demo-seed` | signed-in | Seed a small named demo roster onto an empty coach |
+
+### Good to know
+
+- **PDPA privacy design:** the server NEVER receives or stores an image or
+  audio clip. `scanData` is always an irreversible one-way token string
+  (`face:v1:…` / `voice:v1:…`) produced client-side; even a full DB leak
+  exposes no biometric imagery, only meaningless checksums.
+- **1-second SLA:** `processedInMs` is returned on every scan so the client
+  can flag a scan that took >1s as a retry rather than silently accepting a
+  slow match.
+- **Matching is coach-scoped** when a `coachId` is supplied, so mustering one
+  coach never matches a delegate expected on another.
+- **Coaches are dynamic** — every lookup goes through JQ's `getDashboard()`,
+  so coaches Desmond's module adds later (c5, c6, …) work here with zero
+  code change.
+- **Fixed 2026-07-21:** the coach-detail and headcount endpoints' "boarded"
+  counts only checked the legacy `PRESENT` status, undercounting delegates
+  already `ARRIVED` via QR/manual/kiosk check-in — both now match the same
+  `status === "PRESENT" || status === "ARRIVED"` pattern as `data.js`.
 
 ---
 
@@ -314,6 +567,53 @@ above wholesale:
   other clickable UI near the top of a page.
 - **Field-level rollback** was added to the persisted `activity_log` table —
   most delegate edits can be undone from the History Log page.
+- **Passwordless entrance-kiosk scanner (2026-07-21).** New route `/kiosk-scan`
+  (`KioskScannerPage.jsx`), reachable straight from the Login page's "Quick
+  Scanner Access" link with **no sign-in at all**. It mints a short-lived,
+  narrowly-scoped kiosk JWT (`POST /api/auth/kiosk`, `signKioskToken()` in
+  `auth.js`) that a new `requireKioskOrAuth()` middleware accepts ONLY on
+  `POST /api/attendance/scan` and `POST /api/onboarding/checkin` — every other
+  route still requires a real session. The token maps to a hidden `__kiosk__`
+  backing account (seeded once in `data.js`, excluded from `listAccounts()`)
+  for FK-safety, and lives only in a React ref in the browser (never
+  localStorage), so it can't leak into or affect a real login on the same
+  device. Face + QR only — no Manual mode, since manual override stays behind
+  a real login.
+- **Mobile-native scanner (2026-07-21).** New route `/mobile/scanner`
+  (`MobileScannerPage.jsx`) brings the same Face/QR/Manual scanner inside the
+  logged-in mobile app (gated on the new `viewMobileScanner` permission,
+  linked from a card on Mobile Home), with a front/rear camera flip button
+  (defaults to the front/selfie camera) — the same flip control was added to
+  `QRScannerPanel.jsx` (now takes a `facingMode` prop) and the kiosk scanner.
+- **Two new granular mobile permissions:** `viewMobileScanner` and
+  `viewMobileIssues` (both `mobileView` group, default on) — an admin can now
+  hide the mobile scanner or the mobile Issues page per-account, same as every
+  other `viewX` toggle.
+- **Login page simplified + auto-routing (2026-07-21).** The "Login for
+  Mobile" button is gone — there's a single "Sign in" button now. `App.jsx`'s
+  `handleSignIn` derives desktop vs. mobile automatically from the account's
+  own permissions instead: mobile-only perms → mobile UI, desktop-only →
+  desktop UI, both → current viewport width decides, a single allowed page →
+  straight to that page. See `pickModeFromPermissions()` in `App.jsx`.
+- **HTTPS on the dev server** (`@vitejs/plugin-basic-ssl`) so the camera and
+  password-autofill work when a phone reaches the dev server over the LAN —
+  see "Getting a trusted HTTPS cert for local dev" above.
+- **Fixed: all new-account creation was silently broken** (500 error on
+  `POST /api/accounts`) — the `__kiosk__` seed account's non-numeric id
+  (`"u-kiosk"`) broke `nextAccountId()`'s `MAX(CAST(... AS INTEGER))` query for
+  every account, not just kiosk-related ones. Fixed by scoping that query to
+  ids shaped like `u-<number>` (`backend/data.js`).
+- **Fixed: inconsistent "boarded" counts.** Several endpoints only checked
+  `status === "PRESENT"` for a boarded/already-checked-in delegate, undercounting
+  anyone whose status was the modern `ARRIVED` value. All boarded-count checks
+  now match `data.js`'s own `status === "PRESENT" || status === "ARRIVED"` pattern.
+- **Manual check-in "Undo"** — `POST /api/checkins/manual/undo`
+  (`manageExceptions`-gated) reverts the most recent manual check-in back to
+  `ASSIGNED`, surfaced as an inline "Undo" button in `ManualTrackingPanel.jsx`.
+- **Chinese translation audit (2026-07-21).** Every `t()` call across the
+  entire frontend was cross-checked against `i18n.jsx`'s dictionary; 36
+  missing keys were filled in and 3 duplicate keys removed. 0 missing, 0
+  duplicates as of this writing.
 
 ---
 

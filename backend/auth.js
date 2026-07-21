@@ -30,6 +30,35 @@ export function makeToken(username, tokenVersion = 0) {
   return jwt.sign({ username, tv: tokenVersion }, JWT_SECRET, { expiresIn: "7d" });
 }
 
+/**
+ * Issue a scoped, PASSWORDLESS kiosk token for the entrance scanner.
+ *
+ * It carries `{ kiosk: true }` and NO username on purpose: accountFromReq()
+ * below resolves callers by username, so a kiosk token returns null there and
+ * is therefore REJECTED by requireAuth()/requirePermission() — i.e. it grants
+ * nothing anywhere in the app EXCEPT the two camera check-in endpoints that
+ * explicitly opt in via requireKioskOrAuth(). Short-lived (8h ≈ one event
+ * shift). See the passwordless kiosk scanner (KioskScannerPage.jsx) and the
+ * public POST /api/auth/kiosk mint endpoint (server.js).
+ */
+export function signKioskToken() {
+  return jwt.sign({ kiosk: true }, JWT_SECRET, { expiresIn: "8h" });
+}
+
+/** True iff the request carries a valid, unexpired kiosk token. */
+function kioskTokenValid(req) {
+  const auth = req.headers.authorization || "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  const token = m ? m[1] : req.query?.token;
+  if (!token) return false;
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    return payload && payload.kiosk === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve the calling account from a valid, signed Authorization: Bearer token. */
 export async function accountFromReq(req) {
   const auth = req.headers.authorization || "";
@@ -59,6 +88,27 @@ export function requireAuth() {
     if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please sign in again." });
     req.account = acc;
     next();
+  });
+}
+
+/**
+ * Gate ONLY for the passwordless kiosk's camera check-in endpoints
+ * (POST /attendance/scan, POST /onboarding/checkin). Accepts either a normal
+ * signed-in account OR a valid kiosk token — and for a kiosk token, maps the
+ * caller to the dedicated `__kiosk__` account (seeded in data.js) so DB writes
+ * that foreign-key onto accounts.id (e.g. check_in_logs.checked_in_by) still
+ * work. Nothing else in the app uses this middleware, so a kiosk token is
+ * powerless beyond these two endpoints.
+ */
+export function requireKioskOrAuth() {
+  return wrap(async (req, res, next) => {
+    const acc = await accountFromReq(req);
+    if (acc) { req.account = acc; return next(); }
+    if (kioskTokenValid(req)) {
+      const kiosk = await getAccountByUsername("__kiosk__");
+      if (kiosk) { req.account = { ...kiosk, isKiosk: true }; return next(); }
+    }
+    return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please sign in again." });
   });
 }
 

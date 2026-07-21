@@ -7,10 +7,35 @@ ROOT LEVEL
 ----------
 permissions.js
     The single source of truth for permissions. Both frontend and backend
-    import this one file. Defines the 5 permissions (manageDelegates,
-    manageTrips, manageExceptions, exportData, manageAccounts) — add one
-    entry here and the checkbox/chip/enforcement appear everywhere
-    automatically.
+    import this one file. Add one entry here and the checkbox/chip/
+    enforcement appear everywhere automatically. Two kinds now (2026-07-20):
+    (1) 5 ACTION permissions (manageDelegates, manageTrips, manageExceptions,
+    exportData, manageAccounts) — enforced by the backend via
+    requirePermission(), same as always. (2) VIEW permissions
+    (viewDashboard/viewDelegates/viewTrips/viewDocuments/viewCheckin/
+    viewScanner/viewExceptions/viewHistory for desktop routes, viewMobileHome/
+    viewMobileAttendance/viewMobileTrips for /mobile/* routes — viewCheckin
+    was briefly removed alongside the /checkin page 2026-07-20, then both
+    restored the same day at the user's request: "have a backup of the
+    checkin page and put a permission to hide the page") — FRONTEND-ONLY
+    gates on whether an account can even see a
+    page/tab; no backend endpoint maps 1:1 to "can view a page", so these
+    aren't wrapped in requirePermission() — the real data-mutating actions
+    on each page stay gated by the existing action permissions exactly as
+    before. Each entry has a `group` field ("action"|"desktopView"|
+    "mobileView") purely to organize the Account control modal's checkboxes
+    into labelled sections (see AccountControlPage.jsx below) — carries no
+    other meaning. cleanPermissions() falls back to each permission's own
+    `default` (not a hardcoded false) for any key ABSENT from an account's
+    stored permissions JSON — this is WHY adding 11 new keys didn't lock out
+    every account created before this feature existed: action permissions
+    keep their old defaults (mostly closed), but the 11 view permissions
+    default true, so a pre-existing account keeps seeing everything it
+    already could, and an admin now explicitly UNCHECKS a box to restrict a
+    specific page going forward rather than the rollout silently
+    restricting everyone. Verified live against the real shared Neon DB:
+    a real pre-existing staff account (desmond, created weeks before this
+    change) now returns all 11 view keys as true with zero DB writes.
 
 README.md / HIGH_LEVEL_DESIGN.md / PROJECT_IMPLEMENTATION_PHASE.md
     Docs — setup instructions, architecture/DB schema notes, and the team's
@@ -57,6 +82,26 @@ server.js
     forget, errors ignored) from App.jsx's handleLogout BEFORE clearToken()
     wipes the JWT it needs — the local logout (clearToken + redirect to
     /login) proceeds regardless of whether this call succeeds.
+
+    POST /api/auth/kiosk (2026-07-21) — PUBLIC, no auth at all, on purpose.
+    Mints a scoped, passwordless "kiosk" token (auth.js's signKioskToken(),
+    a JWT carrying {kiosk:true} and NO username) for the entrance-kiosk
+    scanner. The token grants NOTHING by default — accountFromReq() (which
+    every requireAuth()/requirePermission() route uses) resolves a
+    username-less token to null and rejects it — it only works on the two
+    routes that explicitly opt into the new requireKioskOrAuth() middleware
+    (auth.js): POST /api/attendance/scan (vimal.js) and POST /api/onboarding
+    /checkin (vance.js). requireKioskOrAuth() accepts a real session OR a
+    valid kiosk token; for a kiosk token it maps the request to a dedicated
+    `__kiosk__` backing account (seeded once in data.js's seed(), hidden
+    from listAccounts()/Account control/staff counts by username) so writes
+    that foreign-key onto accounts.id (check_in_logs.checked_in_by) still
+    resolve. See KioskScannerPage.jsx below for the frontend half. Verified
+    via curl: a fresh kiosk token gets 401 on /api/accounts and
+    /api/trips/t-1/dashboard, but passes auth on /api/onboarding/checkin
+    (a 404 UNKNOWN_CODE for a bad badge — a data error, not an auth error);
+    a real end-to-end kiosk QR check-in flipped a real delegate MISSING→
+    PRESENT with zero credentials, then reverted.
 
 auth.js
     Session tokens + auth middleware, shared by server.js and any
@@ -314,6 +359,22 @@ routes/vimal.js
     against reserved slots in the same shell and verified not to collide
     (own camera streams, no shared re-fetching, namespaced CSS/routes).
 
+    Boarded-count sync bug fix (2026-07-20): GET /api/attendance/:trip_id/
+    coach/:coach_id and GET /api/attendance/headcount both computed
+    `boarded: payload.filter(d => d.status === "PRESENT").length` — checking
+    ONLY the legacy PRESENT value, never the current ARRIVED value that
+    manual overrides/QR scans/face scans actually write. GET /api/
+    attendance/coaches (the coach-LIST endpoint, powers the /scanner and
+    /checkin coach dropdown) goes through data.js's getDashboard(), which
+    already has the correct `isBoarded = (x) => x.status === "PRESENT" ||
+    x.status === "ARRIVED"` — so the two endpoints had quietly drifted out
+    of sync since the ARRIVED migration, and the coach-DETAIL endpoint's own
+    BOARDED/MISSING side-panel tiles undercounted every ARRIVED delegate
+    while the dropdown showed the right number for the same coach. Fixed
+    both occurrences to match isBoarded's OR-check. Verified live: /scanner's
+    Coach 7 dropdown and BOARDED tile both read 6, matching (were 6 vs 1
+    before the fix in the reporting screenshot).
+
 routes/vance.js
     Vance's DocuSync AI + Trip Assistant API — three features. (1) Document
     parsing: an uploaded directory / attendee list / spreadsheet / scanned
@@ -325,7 +386,12 @@ routes/vance.js
     check-in: GET /api/onboarding/badges returns every delegate + their QR
     token for a trip (auto-backfills a qr_code for any delegate that predates
     this feature, via backfillQrCodes()); POST /api/onboarding/checkin
-    resolves a scanned/tapped code, flips the delegate ARRIVED (+ coach), and
+    resolves a scanned/tapped code, flips the delegate ARRIVED (+ coach —
+    `alreadyBoarded` fixed 2026-07-20 to also check status==="ARRIVED", not
+    just the legacy "PRESENT", same bug class as the vimal.js fix above —
+    otherwise a QR re-scan of someone already boarded via face/manual
+    incorrectly reported alreadyBoarded:false instead of the duplicate
+    notice), and
     logs a QR row to the SHARED check_in_logs table — the same table Jayden's
     manual override and Vimal's face scan write to, and the one Desmond's
     coach board reads, so a boarding-pass scan shows up everywhere instantly.
@@ -369,6 +435,56 @@ routes/vance.js
     scoped from its very first INSERT. POST /api/onboarding/checkin's own
     trip-derivation (LEFT JOIN through the delegate's own trip_id, see the
     comment there) was already correct and untouched.
+
+    UPDATE MERGED FROM VANCE'S BRANCH (2026-07-20 — see INTEGRATION_NOTES.md
+    at the project root, "Feature 3 — DocuSync AI + Trip Assistant" section,
+    and AI Log entry for full detail; the standalone INTEGRATION_NOTES_VANCE.md
+    was folded into that doc on 2026-07-21): pulled
+    in Vance's newer v2DocuSync-AI branch, ~525 new lines here plus updates
+    to claudeParse.js/OnboardingPage.jsx/BoardingPassesView.jsx/
+    ChatAssistantPage.jsx and a brand-new TripPulse.jsx header widget.
+    New: passport-expiry validation (checkPassportExpiry — flags expired/
+    expiring-within-6-months passports on the onboarding review cards, in
+    the assistant, and in risk scoring); a deterministic fast-path
+    (answerLocally) that answers common factual questions instantly from
+    the snapshot with no model call (works even with no AI engine reachable);
+    risk scoring (computeRisk) that ranks "what to watch" for the assistant's
+    prompt and TripPulse's header widget; local Tesseract OCR fallback for
+    scanned documents when no ANTHROPIC_API_KEY is set (new tesseract.js
+    dependency); snapshot caching + a chat-model warm-up call for speed;
+    chat sessions can now be pinned (chat_sessions.pinned column, additive).
+    New dependency: tesseract.js (installed, backend/package.json +
+    package-lock.json updated; also added *.traineddata to backend/
+    .gitignore since Tesseract downloads its language data at runtime).
+    ChatAssistantPage.jsx was HAND-MERGED, not overwritten — Vance's branch
+    predates the `embedded` prop this file gained for the floating
+    ChatBubble widget (see ChatBubble.jsx), so a blind copy would have
+    broken the bubble (full page chrome + duplicate header inside the small
+    floating panel). Kept `embedded` and all its conditionals intact, and
+    layered in only Vance's real additions: the TripPulse header widget
+    (shown only in the non-embedded/full-page view), the auto-growing
+    multi-line composer (Shift+Enter for a newline), the nicer empty-state,
+    and disabling Send while the draft is blank. Also deliberately did NOT
+    adopt Vance's `var(--ink-solid)` → `var(--ink)` token change on the
+    avatar backgrounds — `--ink-solid` stays dark in both themes (needed for
+    the white Bot icon on top of it), while `--ink` flips to near-white in
+    dark mode, which would have made the icon invisible (the exact bug
+    fixed on the /scanner Refresh button the same day — see that AI Log
+    entry). mobile/MobileAssistantPage.jsx and the `html5-qrcode` frontend
+    dependency were deliberately SKIPPED: MobileAssistantPage's only diff
+    on Vance's side was that same stale ink-solid→ink change (main's copy
+    is already ahead, unrelated to this feature set), and html5-qrcode was
+    intentionally uninstalled earlier this session as dead code (see the
+    dead-code-audit AI Log entry) — pulling it back in would undo that.
+    Verified live end-to-end after merging: Onboarding page's Document
+    parsing tab (TripPulse widget rendering real onboarding-progress data)
+    and Boarding passes tab both load with zero console errors; the
+    floating ChatBubble opens correctly with the new auto-growing textarea,
+    no TripPulse/history-sidebar leaking into the embedded panel, header
+    text appears exactly once (no duplicate-header regression); sent a real
+    message through the new composer and got a real instant fast-path reply
+    from GET /api/assistant/pulse's risk scoring. Backend restarted cleanly
+    under `node --watch` with no startup errors after the vance.js swap.
 
 backend/seed-demo.js
     One-off script (npm run seed:demo) that seeds a realistic delegate
@@ -517,6 +633,26 @@ Entry point & routing:
       This is the file to check first when you want to know "what page
       does this URL show." Also remembers whether you were in the mobile
       section before logging out, so signing back in returns you there.
+      /scanner → UnifiedScannerPage.jsx (2026-07-20 — desktop entrance-kiosk
+      Face+QR scanner; see the pages list below).
+      Per-page RBAC (2026-07-20): every desktop route except /settings,
+      /guide and /accounts is now wrapped in <ViewGate perm="viewX">, a
+      small local component that renders its children if
+      getPermissions()[perm] is true, else redirects — see permissions.js's
+      new "desktopView"/"mobileView" permission groups. Every /mobile/*
+      route except /mobile/profile is wrapped the same way with
+      mode="mobile". The redirect target is never hardcoded to /dashboard —
+      firstAllowedRoute(perms, mode) walks DESKTOP_FALLBACK_ORDER /
+      MOBILE_FALLBACK_ORDER (both defined just above ViewGate) and lands on
+      the FIRST route this specific account is actually allowed, falling
+      back to /settings or /mobile/profile (never gated) if literally
+      nothing is. pickHomeRoute() (post-login landing, the index "/" route,
+      and the catch-all "*") and handleSignIn() both now call this instead
+      of a hardcoded "/dashboard"/"/mobile", so an account with Dashboard
+      view unchecked doesn't land somewhere it immediately bounces from.
+      /accounts stays gated on the manageAccounts ACTION permission, not a
+      view toggle — only a real admin should grant/revoke everyone else's
+      access.
 
   vite.config.js
       Dev server config — proxies /api/* calls to the backend on :4000
@@ -532,6 +668,19 @@ Entry point & routing:
       looks like the remember-password feature is broken. strictPort makes a
       stale process on 5173 fail loudly instead, so it gets killed rather
       than routed around.
+      HTTPS via @vitejs/plugin-basic-ssl (2026-07-21, pinned to ^1.1.0 — the
+      latest major needs Vite 6, this project is on Vite 5). WHY: getUserMedia
+      (camera) and the Credential Management API (password save/autofill)
+      BOTH only work in a browser "secure context" — https://, or
+      http://localhost specifically. A phone reaching the dev server over the
+      LAN as http://192.168.1.11:5173 is a non-secure origin, so EVERY
+      browser (Chrome, Brave, ...) silently blocks both — this was the real
+      cause of "Camera unavailable" on-phone and passwords never offering to
+      save, not a code bug in either feature. Now serves
+      https://192.168.1.11:5173 with an auto-generated self-signed cert (one-
+      time "Advanced → Proceed" browser warning on first visit from a new
+      device). On the laptop, localhost was already secure — only the scheme
+      changes there (https://localhost:5173).
 
 Shared components (src/components/):
 
@@ -558,10 +707,26 @@ Shared components (src/components/):
       name/role) links to /settings and has a hover highlight
       (.sidebar-account); the sun/moon dark-mode toggle sits right beside it.
       Takes an `open` prop from Layout.jsx (applies the .sidebar.open class);
-      unused/ignored above the 1024px breakpoint. "Check-in" nav item links
-      to /checkin (QRCheckInPage.jsx) — ungated, any signed-in staff.
+      unused/ignored above the 1024px breakpoint.
+      "Check-in" (→ /checkin, QRCheckInPage.jsx) and "Face + QR scan"
+      (→ /scanner, UnifiedScannerPage.jsx) sit next to each other — Check-in
+      was briefly removed 2026-07-20 then restored the same day (kept-but-
+      hideable via viewCheckin instead of deleted — see QRCheckInPage.jsx's
+      entry above), so its nav item and the QrCode icon import came back too.
+      Per-page RBAC (2026-07-20): every nav item except Account control is
+      now individually gated on its matching "desktopView" permission from
+      permissions.js (perms.viewDashboard/viewTrips/viewDocuments/
+      viewCheckin/viewScanner/viewExceptions), same conditional-spread
+      pattern the Documents item already used for manageDelegates — an
+      account with a view unchecked just doesn't see that nav item.
+      MobileLayout.jsx's tabs list follows the identical pattern for
+      /mobile/* using the "mobileView" permissions (Profile stays ungated).
       "Chat assistant" nav item removed — the AI Trip Assistant is now a
       floating bubble (ChatBubble.jsx), not a dedicated destination.
+      "User guide" is NOT a primary nav item (moved 2026-07-20) — it's a
+      small icon-only "?" (HelpCircle) link in the footer account row, next
+      to the theme toggle, since it's a help/reference resource rather than
+      a workflow destination.
 
   ChatBubble.jsx
       New. Floating chat widget, rendered once from Layout.jsx so it's
@@ -837,6 +1002,16 @@ Library helpers (src/lib/):
       async parse job, and commits the reviewed rows (onboarding/confirm).
       Real backend now, not a demo.
 
+  faceScan.js
+      NEW (2026-07-21). Shared face-scan helpers — the PDPA zero-image
+      vectorizer (vectorizeFaceLandmarks: draws one off-DOM frame, folds it
+      into an irreversible token, then zeroes the raw pixel buffer in place),
+      the biometric-token validator (isValidBiometricToken), and the ">1s
+      SLA missed" error tone (playErrorTone). Extracted so the desktop
+      scanner (UnifiedScannerPage.jsx) and the mobile scanner (MobileScanner
+      Page.jsx) share ONE copy instead of each keeping their own — the
+      logic originally lived (duplicated) inside those pages.
+
   exceptionsApi.js
       Jayden's data layer for the Exception Inbox — built on the shared
       apiGet/apiPost/apiPatch/apiDelete (inherits token storage/typed
@@ -989,6 +1164,31 @@ Pages (src/pages/) — one file per route:
                                                 for a school demo/small
                                                 trusted team, NOT
                                                 production-safe.
+                                                "Quick Scanner Access" button —
+                                                added 2026-07-21 as a third
+                                                submit path requiring a real
+                                                login (submit("mobile", "/mobile/
+                                                scanner")) landing on the
+                                                authenticated mobile scanner;
+                                                changed the SAME day, once the
+                                                user explicitly asked for it to
+                                                be passwordless, to a PLAIN
+                                                navigate("/kiosk-scan") that
+                                                never touches the Staff ID/
+                                                password fields or the login
+                                                API at all — see Kiosk
+                                                ScannerPage.jsx (pages/
+                                                KioskScannerPage.jsx) for why
+                                                that's still safe (its own
+                                                narrowly-scoped, server-side-
+                                                enforced kiosk token). The
+                                                earlier `dest` parameter
+                                                threaded through submit()/
+                                                onSignIn()/App.jsx's
+                                                handleSignIn() for the first
+                                                version was reverted along
+                                                with it, since nothing calls it
+                                                anymore.
   DashboardPage.jsx        /dashboard          Main admin screen — KPI tiles,
                                                 coach status, History tracker,
                                                 delegate CRUD table,
@@ -998,6 +1198,16 @@ Pages (src/pages/) — one file per route:
                                                 key is now "delegate" not
                                                 "overview"; Analytics tab
                                                 renders AnalyticsPanel.jsx).
+                                                All-delegates table filter bar
+                                                (2026-07-21): gained a coach-
+                                                assignment <select> (coachFilter
+                                                state) alongside the existing
+                                                search + status filter + sort —
+                                                options are the live coach list
+                                                plus an explicit "Unassigned"
+                                                (delegates with no coachId),
+                                                matching the mobile Attendance
+                                                page's coach filter.
                                                 • No standalone "Missing right
                                                   now" TABLE on the Delegate
                                                   tab anymore — the KPI tile
@@ -1664,34 +1874,135 @@ Pages (src/pages/) — one file per route:
                                                 panel. Setting scrollTop is
                                                 scoped to that one div and
                                                 never touches window scroll.
-  QRCheckInPage.jsx        /checkin            FULL — Vimal's phone-frame
-                                                staff check-in app, rendered
-                                                inside the desktop Layout.
-                                                Four tabs: Trips (live per-
-                                                coach mobile dashboard, tap a
-                                                coach to muster it), Scan
-                                                (Face / QR / Manual pills —
-                                                Face is Vimal's own camera +
-                                                zero-image vectorizer, low-
-                                                light auto-falls-back to a
-                                                voiceprint token, "Simulate
-                                                low light" demos it), Issues
+  QRCheckInPage.jsx        /checkin            Vimal's phone-frame staff
+                                                check-in app — four tabs:
+                                                Trips (live per-coach mobile
+                                                dashboard), Scan (Face/QR/
+                                                Manual pills), Issues
                                                 (exception logging), Me
                                                 (consent lifecycle + per-
                                                 delegate check-in history).
-                                                Jayden's QR and Manual panels
-                                                and the Issues tab plug into
-                                                three slots this file already
-                                                reserved (3 import lines +
-                                                swapping the placeholders) —
-                                                nothing else in the file
-                                                changed. Calls backend/
-                                                routes/vimal.js. Not linked
-                                                from the sidebar before this
-                                                merge (was reachable only by
-                                                URL); now has a "Check-in"
-                                                nav item, ungated (any signed-
-                                                in staff).
+                                                Briefly DELETED (2026-07-20)
+                                                as part of "Mobile UI
+                                                Consolidation" — its Trips and
+                                                Me tabs were pure duplicates of
+                                                the real desktop Trips board
+                                                and /settings + /mobile/
+                                                profile, its Scan tab is fully
+                                                covered by UnifiedScannerPage.
+                                                jsx below (which also has
+                                                Manual now, see that entry),
+                                                and its Issues tab moved to
+                                                the mobile Issues page (see
+                                                MobileIssuesPage.jsx below) —
+                                                then RESTORED the same day at
+                                                the user's explicit request:
+                                                "have a backup of the checkin
+                                                page and put a permission to
+                                                hide the page." Restored via
+                                                `git show HEAD:...` (the file
+                                                was never actually committed
+                                                as deleted, so the last real
+                                                commit WAS the backup — no
+                                                second copy kept under src/,
+                                                which would just be dead code
+                                                again). The /checkin route,
+                                                its Sidebar nav item, and the
+                                                viewCheckin permission are all
+                                                back exactly as they were —
+                                                an admin can now hide the page
+                                                per account (uncheck "Check-
+                                                in" under Desktop web views in
+                                                Account control) instead of it
+                                                being unconditionally deleted.
+  UnifiedScannerPage.jsx    /scanner            NEW (2026-07-20) — "Face Scan
+                                                + QR Code Scan", a standalone
+                                                desktop-native entrance-kiosk
+                                                page. Re-mounts the same real
+                                                check-in paths that used to
+                                                live in the now-deleted
+                                                QRCheckInPage.jsx (flip to
+                                                ARRIVED on match) but strips
+                                                everything that isn't a
+                                                scanner input: no Trips/
+                                                Issues/Me tabs, no low-light
+                                                voice fallback, no "simulate
+                                                slow" demo toggle, no
+                                                biometric enrollment step.
+                                                Three modes now (Manual added
+                                                2026-07-20 — see below): QR
+                                                slot is Jayden's
+                                                QRScannerPanel.jsx completely
+                                                unmodified; Face slot is a
+                                                trimmed LOCAL COPY of Vimal's
+                                                zero-image face vectorizer +
+                                                POST /attendance/scan call
+                                                (kept local since QRCheckInPage
+                                                never exported its internal
+                                                helpers, and this page has no
+                                                dependency on that mobile-app
+                                                state machine); Manual slot is
+                                                Jayden's ManualTrackingPanel.
+                                                jsx, also unmodified. Two-
+                                                column desktop layout: big
+                                                16:10 camera/panel viewport +
+                                                Face/QR/Manual toggle + result
+                                                card on the left, coach picker
+                                                + boarded/missing stat tiles +
+                                                still-missing list on the
+                                                right. Ungated route (App.jsx)
+                                                and Sidebar nav item — Staff
+                                                and Admin roles alike can use
+                                                it. Verified live as a genuine
+                                                Staff-role test account
+                                                (created + deleted via the
+                                                real Account control API):
+                                                confirmed sidebar/route
+                                                access, then ran a real check-
+                                                in through the QR manual-entry
+                                                path end-to-end (delegate
+                                                genuinely flipped to ARRIVED,
+                                                reverted after).
+                                                Manual mode added (2026-07-20):
+                                                a third scanMode alongside
+                                                Face/QR mounts Manual
+                                                TrackingPanel.jsx in the same
+                                                viewport (key={resetTick} like
+                                                QRScannerPanel, so Reset also
+                                                clears its search box) — the
+                                                fallback for when a face/QR
+                                                scan won't register, on the
+                                                same page instead of a
+                                                separate screen. Verified live:
+                                                Manual mode renders the real
+                                                Coach 7 roster, a real manual
+                                                check-in was performed
+                                                (delegate flipped to Present,
+                                                coach counts updated live),
+                                                reverted after via direct API.
+                                                Reset button fix (2026-07-20):
+                                                the top-right button used to
+                                                only refetch coach data — a
+                                                stuck/errored camera needed a
+                                                hard reload to recover. Now a
+                                                `resetTick` counter is in the
+                                                Face camera effect's deps
+                                                (bumping it restarts
+                                                getUserMedia) AND is passed as
+                                                QRScannerPanel's `key`, so a
+                                                reset fully REMOUNTS the QR
+                                                scanner from scratch — same
+                                                guarantee a hard reload gives,
+                                                without leaving the page.
+                                                Renamed "Refresh" → "Reset
+                                                scanner" since that's what it
+                                                now does. Verified live: typed
+                                                text into the QR manual-entry
+                                                field, clicked reset, confirmed
+                                                via DOM inspection the field
+                                                came back genuinely empty
+                                                (proof of a real remount, not
+                                                just a data refetch).
   QRScannerPanel.jsx       (Scan → QR pill)    Jayden — live camera QR
                                                 scanner (jsQR,
                                                 inversionAttempts:
@@ -1763,9 +2074,9 @@ Pages (src/pages/) — one file per route:
                                                 "INTEGRATING TEAMMATE
                                                 BRANCHES" note near the bottom
                                                 of this file.
-  ManualTrackingPanel.jsx  (Scan → Manual)     Jayden — mark a delegate
-                                                present by hand when a scan
-                                                isn't possible. Reads the
+  ManualTrackingPanel.jsx  (Scan → Manual, or   Jayden — mark a delegate
+                        UnifiedScannerPage's    present by hand when a scan
+                        Manual mode)            isn't possible. Reads the
                                                 roster from the `coach` prop
                                                 the shell already loaded (no
                                                 re-fetch), search box, "Mark
@@ -1784,6 +2095,48 @@ Pages (src/pages/) — one file per route:
                                                 checked-in delegates with the
                                                 "Mark present" button again;
                                                 fixed to accept both values.
+                                                Status display (2026-07-21):
+                                                each row's subtitle now shows
+                                                the delegate's REAL status
+                                                (Missing/Late/Assigned/Arrived/
+                                                Unassigned via STATUS_LABEL,
+                                                colour-matched to the Dashboard
+                                                badge palette via STATUS_TONE),
+                                                with any lastSeen note appended
+                                                — replaces the old "No status"
+                                                placeholder that ignored
+                                                d.status. Sort widened to
+                                                missing→late→assigned→arrived
+                                                so people still needing action
+                                                stay at the top.
+                                                Undo (2026-07-20): an "Undo"
+                                                button appears next to a
+                                                delegate's "In" badge, but
+                                                ONLY for one this panel's own
+                                                `justMarked` Set flipped THIS
+                                                session (the accidental-click
+                                                case) — not for anyone
+                                                already ARRIVED from an
+                                                earlier scan/session, which
+                                                has nothing to "undo". Calls
+                                                the new undoManualOverride()
+                                                → POST /api/checkins/manual/
+                                                undo (same manageExceptions
+                                                gate), which sets the
+                                                delegate back to ASSIGNED
+                                                (not MISSING — the spec's
+                                                explicit target status) and
+                                                deletes the single most-
+                                                recent MANUAL check_in_logs
+                                                row for that delegate (bounded
+                                                to one row so it can never
+                                                wipe an earlier real check-
+                                                in). Mounted a second place
+                                                now too: UnifiedScannerPage.
+                                                jsx's third "Manual" scanMode
+                                                (2026-07-20), unmodified,
+                                                key={resetTick} so a Reset
+                                                also clears its search box.
   IssuesPanel.jsx          (Me → Issues tab)   Jayden — mobile exception
                                                 logging: issue-type tiles
                                                 (Missing person / Lost badge
@@ -1864,6 +2217,60 @@ Pages (src/pages/) — one file per route:
                                                   everyone, so you can't
                                                   accidentally lock yourself
                                                   out of Account control.
+                                                • Per-page RBAC (2026-07-20):
+                                                  the New/Edit modal's
+                                                  checkboxes now render as 3
+                                                  labelled sections (PERM_
+                                                  GROUPS: "Feature actions" /
+                                                  "Desktop web views" /
+                                                  "Mobile views") instead of
+                                                  one flat list, grouped by
+                                                  each PERMISSIONS entry's new
+                                                  `group` field. ROLE_PRESETS
+                                                  is now derived from
+                                                  DEFAULT_PERMISSIONS/
+                                                  PERMISSIONS instead of a
+                                                  hand-maintained duplicate
+                                                  object, so a future new
+                                                  permission is automatically
+                                                  picked up here too. The
+                                                  table's "Access" chip column
+                                                  deliberately still shows
+                                                  ONLY action-group
+                                                  permissions (not all 16
+                                                  keys) — view permissions
+                                                  default open for everyone,
+                                                  so listing them all would
+                                                  put 8+ near-identical chips
+                                                  on almost every row; the
+                                                  modal is where per-page
+                                                  access actually gets
+                                                  configured/audited.
+                                                • Collapsible sections +
+                                                  select-all (2026-07-20):
+                                                  each PERM_GROUPS header is a
+                                                  <button aria-expanded>
+                                                  with a Chevron; a
+                                                  collapsedGroups Set (reset
+                                                  to all-expanded every time
+                                                  the modal opens fresh)
+                                                  hides that section's
+                                                  checkbox list entirely, not
+                                                  just visually. The
+                                                  desktopView/mobileView
+                                                  groups only (not action —
+                                                  5 checkboxes doesn't need
+                                                  one, and they're rarely
+                                                  all-or-nothing) get a
+                                                  "Select all"/"Deselect all"
+                                                  toggle button next to their
+                                                  header (setAllInGroup()),
+                                                  label flips based on
+                                                  whether every checkbox in
+                                                  THAT group is already
+                                                  checked — same convention
+                                                  the accounts table's own
+                                                  header checkbox uses.
   SettingsPage.jsx         /settings           Signed-in account info
                                                 (avatar/name/role),
                                                 permissions list, and the
@@ -1963,14 +2370,20 @@ Pages (src/pages/) — one file per route:
                                                 from DelegateAvatar.jsx's
                                                 separate grey convention at
                                                 the time — both are the same
-                                                grey now). Reached
-                                                from the desktop Sidebar
-                                                ("User guide" nav item) and
-                                                from MobileProfilePage.jsx
-                                                (links out to this same
-                                                shared page — mobile has no
-                                                dedicated onboarding surface
-                                                of its own).
+                                                grey now). Reached on desktop
+                                                from a "?" (HelpCircle) icon
+                                                button in the Sidebar FOOTER,
+                                                next to the theme toggle
+                                                (2026-07-19 — moved out of the
+                                                primary nav items, since it's
+                                                a help/reference resource, not
+                                                a workflow destination; sits
+                                                with the utility controls
+                                                instead), and on mobile from
+                                                MobileProfilePage.jsx (links
+                                                out to this same shared page —
+                                                mobile has no dedicated
+                                                onboarding surface of its own).
 
 Mobile pages (src/pages/mobile/):
 
@@ -2046,6 +2459,165 @@ Mobile pages (src/pages/mobile/):
                                                  Auto-refreshes every 2s (same
                                                  pattern/loadingRef guard as
                                                  the desktop Dashboard).
+                                                 Issues card ("Mobile UI
+                                                 Consolidation" Option A,
+                                                 2026-07-20): sits right under
+                                                 the KPI row and above Coach
+                                                 status — icon + "Report or
+                                                 view exceptions" + an open-
+                                                 critical-count badge
+                                                 (getCriticalOpenCount(),
+                                                 polled every 2s, same
+                                                 endpoint the desktop
+                                                 Sidebar's own badge uses).
+                                                 Was briefly an inline
+                                                 expandable accordion mounting
+                                                 IssuesPanel.jsx right here;
+                                                 changed the SAME day
+                                                 ("Mobile UI State Sync,
+                                                 Revert Actions, & Navigation
+                                                 Fixes" part 3) to a plain
+                                                 navigate("/mobile/issues") —
+                                                 see MobileIssuesPage.jsx
+                                                 below — since the full form +
+                                                 ticket list reads better as
+                                                 its own screen than squeezed
+                                                 into an accordion on a small
+                                                 viewport. Verified live: tap
+                                                 does a real client-side route
+                                                 change (not an expand), lands
+                                                 on the dedicated page.
+  MobileIssuesPage.jsx      /mobile/issues      NEW (2026-07-20) — dedicated
+                                                 Issues/Exceptions screen:
+                                                 a back-arrow header + Jayden's
+                                                 IssuesPanel.jsx, unmodified.
+                                                 IssuesPanel wants a `coach`
+                                                 prop shaped `{ delegates:
+                                                 [...] }` keyed `delegateId`
+                                                 (the shape GET /attendance/
+                                                 :tripId/coach/:coachId
+                                                 returns), but this page has
+                                                 no single "active coach" —
+                                                 fetches the FULL trip roster
+                                                 via exceptionsApi.js's
+                                                 existing getDelegates() (GET
+                                                 /trips/:id/delegates, keyed
+                                                 `id`) on mount and remaps
+                                                 `id`→`delegateId`, so the
+                                                 picker covers every delegate
+                                                 on the trip, not just one
+                                                 coach's — arguably more
+                                                 useful here anyway, since a
+                                                 staff member raising a ticket
+                                                 on the ground may not know
+                                                 which coach the delegate
+                                                 belongs to. Ungated route
+                                                 (same as the Home card that
+                                                 links here) — no new
+                                                 permission introduced.
+                                                 Verified live: real
+                                                 navigation from Home's Issues
+                                                 card, real form + a real 39-
+                                                 delegate picker + the real
+                                                 open-tickets list with
+                                                 working Resolve buttons and
+                                                 an "● Live" SSE badge, back
+                                                 arrow returns cleanly to
+                                                 Home. Zero console errors.
+  MobileScannerPage.jsx     /mobile/scanner     NEW (2026-07-21) — the mobile
+                                                 port of the desktop /scanner
+                                                 (UnifiedScannerPage.jsx),
+                                                 single-column with a portrait
+                                                 3:4 viewport. Same three real
+                                                 check-in modes (Face / QR /
+                                                 Manual) writing to the same
+                                                 endpoints; shares the face
+                                                 vectorizer/validator/tone with
+                                                 the desktop page via lib/
+                                                 faceScan.js (one copy, not
+                                                 three) and mounts Jayden's
+                                                 QRScannerPanel/ManualTracking
+                                                 Panel unmodified. Face camera
+                                                 requests the environment
+                                                 (rear) camera — a handheld
+                                                 phone points its back at the
+                                                 delegate (desktop uses the
+                                                 user-facing webcam). Auth-only
+                                                 route (NOT view-gated — any
+                                                 staff/admin can scan, matching
+                                                 the original ungated check-in
+                                                 philosophy). Reached from
+                                                 WITHIN the logged-in mobile
+                                                 app (not linked from the
+                                                 bottom-tab nav — kept at 4
+                                                 tabs to preserve the nav-
+                                                 consistency fix, see the
+                                                 mobile.css .mobile-shell
+                                                 note). NOT the Login page's
+                                                 "Quick Scanner Access" target
+                                                 (that changed 2026-07-21 to
+                                                 the passwordless
+                                                 KioskScannerPage.jsx below —
+                                                 this route still needs a real
+                                                 login). Verified live at
+                                                 375×812: real Manual check-in
+                                                 + Undo worked through it,
+                                                 zero console errors.
+  KioskScannerPage.jsx      /kiosk-scan         NEW (2026-07-21) — the
+                                                 PASSWORDLESS entrance-kiosk
+                                                 scanner (Face + QR only, no
+                                                 Manual — that stays a staff-
+                                                 only override behind a real
+                                                 login). Registered in App.jsx
+                                                 OUTSIDE both Layout and
+                                                 MobileLayout, and outside the
+                                                 `authed`-gated Routes tree
+                                                 entirely (the one route
+                                                 present in BOTH the logged-
+                                                 out and logged-in <Routes>),
+                                                 so it renders with ZERO nav
+                                                 chrome — no sidebar, no tab
+                                                 bar. The only way out is its
+                                                 own "Back to Login" button,
+                                                 which stops the camera stream
+                                                 and navigates to /login. On
+                                                 mount it POSTs /api/auth/
+                                                 kiosk (no credentials) and
+                                                 holds the returned token in a
+                                                 useRef — deliberately NEVER
+                                                 localStorage/sessionStorage
+                                                 and never touches lib/api.js's
+                                                 getToken(), so visiting this
+                                                 route can't affect or leak
+                                                 into a real logged-in session
+                                                 on the same device. Reuses
+                                                 lib/faceScan.js for the face
+                                                 vectorizer/validator/tone;
+                                                 QR-decodes with jsqr directly
+                                                 in a small self-contained loop
+                                                 (mirrors QRScannerPanel.jsx's
+                                                 pattern rather than importing
+                                                 it, since this page's camera/
+                                                 token/network plumbing is all
+                                                 its own — it can't use the
+                                                 shared lib/api.js fetch
+                                                 wrapper, which assumes a real
+                                                 session token). Reached from
+                                                 the Login page's "Quick
+                                                 Scanner Access" button — a
+                                                 PLAIN client-side navigate(),
+                                                 no form validation, no API
+                                                 call. Security model: the
+                                                 page itself needs no auth,
+                                                 but the token it mints is
+                                                 narrowly scoped server-side
+                                                 (see server.js's POST /api/
+                                                 auth/kiosk entry above) to
+                                                 grant ONLY the two camera
+                                                 check-in endpoints — so it's
+                                                 reachable with no password,
+                                                 yet can't read or touch
+                                                 anything else in the app.
   MobileAttendancePage.jsx  /mobile/attendance  Full delegate roster — search
                                                  + status filter chips (reads
                                                  an initial ?status= from the
@@ -2295,6 +2867,19 @@ Styles (src/styles/):
   mobile.css
       Mobile-only classes (.mobile-shell, .mobile-card, .mobile-tabbar,
       etc.), scoped so it can't clash with the desktop styles.
+      .mobile-shell owns the scroll (2026-07-21 fix): `height:100%;
+      overflow-y:auto; scrollbar-gutter:stable`. WHY — the fixed bottom
+      .mobile-tabbar is positioned against the viewport, so when the document
+      BODY gained a scrollbar on tall pages (the Attendance roster) but not
+      on short ones (Home), the bar's right edge moved by the scrollbar width
+      and its evenly-spaced tabs visibly shifted between pages. Making the
+      shell the scroll container means the body never scrolls (constant
+      viewport width) and the reserved gutter keeps content width identical
+      on every mobile view — so the tab bar is now pixel-static across Home /
+      Attendance / Trips / Profile / Issues / Scanner. Scoped to .mobile-
+      shell on purpose: mobile.css is imported app-wide via App.jsx's static
+      MobileLayout import, so a global html/body rule here would leak to
+      desktop.
 
 
 HOW TO TRACE A PAGE

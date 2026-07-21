@@ -7,7 +7,7 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search } from "lucide-react";
+import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../permissions.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -36,12 +36,29 @@ const EMPTY_FORM = {
 // check regardless of what's stored (accountPermissions() in data.js always
 // returns all-true for role="admin"), so the checkboxes are hidden entirely
 // once Admin is selected — see the form below. Staff's checkboxes are the
-// real, enforced access grant, defaulting to just "Manage delegates" (the
-// Delegate tab) — the usual staff-facing surface.
+// real, enforced access grant, defaulting to EMPTY_FORM's perms (each
+// permission's own `default` from permissions.js — action permissions
+// mostly closed, view permissions open; see that file's group doc).
+// Derived from PERMISSIONS rather than hardcoded so a new permission entry
+// there is automatically included here too — nothing to update by hand.
 const ROLE_PRESETS = {
-  staff: { manageDelegates: true, manageTrips: false, manageExceptions: false, exportData: false, manageAccounts: false },
-  admin: { manageDelegates: true, manageTrips: true, manageExceptions: true, exportData: true, manageAccounts: true },
+  staff: DEFAULT_PERMISSIONS,
+  admin: Object.fromEntries(PERMISSIONS.map((p) => [p.key, true])),
 };
+
+// The three labelled, collapsible sections the modal's checkboxes are
+// grouped into — order matches how an admin thinks about it: what can this
+// account DO, then what can it SEE on desktop, then what can it SEE on
+// mobile. `selectAll: true` adds a "Select all / Deselect all" toggle to
+// that section's header — only the two view groups get one (the request
+// that added this was specifically "select all for desktop and mobile");
+// Feature actions is short enough, and typically NOT all-or-nothing per
+// account, to not need one.
+const PERM_GROUPS = [
+  { key: "action", title: "Feature actions", desc: "What this account can create, edit or delete" },
+  { key: "desktopView", title: "Desktop web views", desc: "Which pages this account can see on the desktop dashboard", selectAll: true },
+  { key: "mobileView", title: "Mobile views", desc: "Which tabs this account can see in the mobile app", selectAll: true },
+];
 
 const ERR_TEXT = {
   USERNAME_TAKEN: "That username is already taken.",
@@ -74,6 +91,11 @@ export default function AccountControlPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formErr, setFormErr] = useState("");
   const [saving, setSaving] = useState(false);
+  // Which PERM_GROUPS sections are collapsed in the New/Edit modal — a Set
+  // of group keys, so state persists across re-renders but resets (all
+  // expanded) every time the modal is freshly opened, see openCreate/
+  // openEdit below.
+  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
 
   // Search / filter / sort for the accounts table.
   const [search, setSearch] = useState("");
@@ -198,6 +220,7 @@ export default function AccountControlPage() {
     setEditingId(null);
     setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms } });
     setFormErr("");
+    setCollapsedGroups(new Set(PERM_GROUPS.map((g) => g.key)));
     setModalOpen(true);
   }
 
@@ -212,6 +235,7 @@ export default function AccountControlPage() {
       role: a.role === "admin" ? "admin" : "staff",
     });
     setFormErr("");
+    setCollapsedGroups(new Set(PERM_GROUPS.map((g) => g.key)));
     setModalOpen(true);
   }
 
@@ -221,6 +245,25 @@ export default function AccountControlPage() {
 
   function selectRole(role) {
     setForm((f) => ({ ...f, role, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
+  }
+
+  function toggleGroupCollapsed(groupKey) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey);
+      return next;
+    });
+  }
+
+  // "Select all" toggles to "Deselect all" once every checkbox in the group
+  // is already ticked — same on/off convention as the accounts table's own
+  // header "select all" checkbox.
+  function setAllInGroup(groupKey, value) {
+    setForm((f) => {
+      const perms = { ...f.perms };
+      for (const p of PERMISSIONS) if (p.group === groupKey) perms[p.key] = value;
+      return { ...f, perms };
+    });
   }
 
   function mapError(e, fallbackCode) {
@@ -407,7 +450,12 @@ export default function AccountControlPage() {
               {visibleAccounts.map((a) => {
                 const isMe = a.username === me.username;
                 const isAdmin = a.role === "admin";
-                const granted = PERMISSIONS.filter((p) => a.permissions?.[p.key]);
+                // Table chips show only ACTION permissions — view permissions
+                // default to open for everyone (see permissions.js), so
+                // listing all of them here would be 8+ near-identical chips
+                // on almost every row. The modal is where per-page view
+                // access actually gets configured/audited.
+                const granted = PERMISSIONS.filter((p) => p.group === "action" && a.permissions?.[p.key]);
                 return (
                   <tr key={a.id}>
                     <td>
@@ -524,23 +572,62 @@ export default function AccountControlPage() {
 
             {form.role === "staff" && (
               <>
-                <label className="field-label" style={{ marginTop: 18 }}>{t("Access rights")}</label>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {PERMISSIONS.map((p) => (
-                    <label key={p.key} style={S.permRow}>
-                      <input
-                        type="checkbox"
-                        checked={!!form.perms[p.key]}
-                        onChange={() => togglePerm(p.key)}
-                        style={{ marginTop: 3 }}
-                      />
-                      <span>
-                        <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
-                        <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                {PERM_GROUPS.map((g) => {
+                  const perms = PERMISSIONS.filter((p) => p.group === g.key);
+                  if (perms.length === 0) return null;
+                  const collapsed = collapsedGroups.has(g.key);
+                  const allChecked = perms.every((p) => !!form.perms[p.key]);
+                  return (
+                    <div key={g.key} style={{ marginTop: 18 }}>
+                      <div className="row between" style={{ alignItems: "flex-start", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => toggleGroupCollapsed(g.key)}
+                          aria-expanded={!collapsed}
+                          style={{
+                            background: "none", border: "none", padding: 0, cursor: "pointer",
+                            display: "flex", alignItems: "flex-start", gap: 6, textAlign: "left", flex: 1,
+                          }}
+                        >
+                          {collapsed ? <ChevronRight size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />
+                                     : <ChevronDown size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />}
+                          <span>
+                            <span className="field-label" style={{ display: "block" }}>{t(g.title)}</span>
+                            <span className="muted" style={{ fontSize: 12 }}>{t(g.desc)}</span>
+                          </span>
+                        </button>
+                        {g.selectAll && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0 }}
+                            onClick={() => setAllInGroup(g.key, !allChecked)}
+                          >
+                            {allChecked ? t("Deselect all") : t("Select all")}
+                          </button>
+                        )}
+                      </div>
+                      {!collapsed && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                          {perms.map((p) => (
+                            <label key={p.key} style={S.permRow}>
+                              <input
+                                type="checkbox"
+                                checked={!!form.perms[p.key]}
+                                onChange={() => togglePerm(p.key)}
+                                style={{ marginTop: 3 }}
+                              />
+                              <span>
+                                <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
+                                <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </>
             )}
 

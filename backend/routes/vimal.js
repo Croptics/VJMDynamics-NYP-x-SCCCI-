@@ -27,7 +27,7 @@
  * ============================================================================= */
 
 import { Router } from "express";
-import { requireAuth } from "../auth.js";
+import { requireAuth, requireKioskOrAuth } from "../auth.js";
 import {
   listDelegates,
   getDelegateById,
@@ -71,8 +71,12 @@ function consentFor(delegateId) {
 }
 
 /* A biometric token is only matchable if it carries the versioned prefix the
- * client vectorizer emits — anything else is rejected before matching. */
-const VALID_TOKEN = /^(face|voice):v1:[0-9a-f]+:/i;
+ * client vectorizer emits — anything else is rejected before matching.
+ * Version-agnostic ("v\d+", not just "v1") — the client's face vectorizer
+ * emits "v2" tokens, so a hardcoded "v1" here silently rejected every real
+ * face scan server-side too (same fix as isValidBiometricToken in
+ * frontend/src/lib/faceScan.js). */
+const VALID_TOKEN = /^(face|voice):v\d+:[0-9a-f]+:/i;
 
 const checksum = (str) => {
   let h = 0;
@@ -129,7 +133,9 @@ router.get("/api/attendance/coaches", requireAuth(), wrap(async (_req, res) => {
  * 200 -> { delegateId, name, status: "PRESENT", method, processedInMs }
  * 404 -> { error: "SCAN_FAILED" }
  * ========================================================================== */
-router.post("/api/attendance/scan", requireAuth(), wrap(async (req, res) => {
+// requireKioskOrAuth: a normal signed-in user OR the passwordless kiosk token
+// (the /kiosk-scan entrance scanner's Face mode). See auth.js.
+router.post("/api/attendance/scan", requireKioskOrAuth(), wrap(async (req, res) => {
   const started = Date.now();
   const { tripId, scanData, timestamp, coachId } = req.body || {};
 
@@ -149,6 +155,38 @@ router.post("/api/attendance/scan", requireAuth(), wrap(async (req, res) => {
   //    demo flows continue to work even when no biometric enrollment exists.
   const all = await listDelegates();
   const tokenChecksum = checksum(token);
+
+  // Cross-coach guard (mirrors the same fix on the QR check-in path in
+  // vance.js): if this exact biometric token belongs to a delegate enrolled
+  // on a DIFFERENT coach than the one this scanner is scoped to, say so
+  // specifically instead of just falling through to a generic "no match" —
+  // that read as a scan failure rather than the real, actionable cause
+  // ("wrong coach"), and could otherwise mislead staff into rescanning
+  // pointlessly. Checked against the WHOLE roster, not the coach-scoped pool
+  // below, since the whole point is to catch a delegate who's excluded from
+  // that pool precisely because they're on a different coach.
+  if (coachId) {
+    const exactMatch = all.find((d) => {
+      const c = consentFor(d.id);
+      return c.biometricId !== null && c.biometricId === tokenChecksum;
+    });
+    if (exactMatch && exactMatch.coachId && exactMatch.coachId !== coachId) {
+      const dash = await liveDashboard();
+      const assignedCoach = (dash.coaches || []).find((c) => c.id === exactMatch.coachId);
+      const scannerCoach = (dash.coaches || []).find((c) => c.id === coachId);
+      const assignedLabel = assignedCoach ? assignedCoach.name : exactMatch.coachId;
+      const scannerLabel = scannerCoach ? scannerCoach.name : coachId;
+      return res.status(409).json({
+        error: "COACH_MISMATCH",
+        message: `${exactMatch.name} is assigned to ${assignedLabel}, not ${scannerLabel}.`,
+        delegateId: exactMatch.id,
+        delegateName: exactMatch.name,
+        assignedCoachId: exactMatch.coachId,
+        assignedCoachLabel: assignedLabel,
+        scannerCoachId: coachId,
+      });
+    }
+  }
 
   // Candidates must be still MISSING, have GRANTED consent and (if provided)
   // belong to the mustered coach.
@@ -236,7 +274,15 @@ router.get("/api/attendance/:trip_id/coach/:coach_id", requireAuth(), wrap(async
     location: coach.city || "On route",
     departure: trip.departsIn ? `departs in ${trip.departsIn}` : "on schedule",
     expected: payload.length,
-    boarded: payload.filter((d) => d.status === "PRESENT").length,
+    // "Boarded" = arrived on the coach. ARRIVED is the current 5-status
+    // value; PRESENT is the pre-migration legacy value some older rows/
+    // writes still carry (same isBoarded() pattern as data.js's
+    // getDashboard(), which /api/attendance/coaches above already uses —
+    // this endpoint's own boarded count had drifted to checking PRESENT
+    // only, so a delegate marked ARRIVED via manual/QR/face check-in showed
+    // up correctly everywhere EXCEPT this one coach-detail card's own
+    // Boarded tile).
+    boarded: payload.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
     missing: payload.filter((d) => d.status === "MISSING").length,
     delegates: payload,
   });
@@ -277,7 +323,8 @@ router.get("/api/attendance/headcount", requireAuth(), wrap(async (req, res) => 
     coachId: coachId || null,
     stats: {
       expected: scoped.length,
-      boarded: scoped.filter((d) => d.status === "PRESENT").length,
+      // Same ARRIVED/PRESENT fix as the coach-detail endpoint above.
+      boarded: scoped.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
       missing: missingDelegates.length,
       unassigned: dash.kpis ? dash.kpis.unassigned : 0,
     },

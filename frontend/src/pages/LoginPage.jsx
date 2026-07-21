@@ -7,7 +7,8 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useState } from "react";
-import { ClipboardCheck, Eye, EyeOff, Smartphone, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
@@ -39,11 +40,14 @@ try {
  * prefill the form — see the cleanup at the top of this file, which purges
  * that from any browser that still has it.)
  *
- * Which UI you land in (desktop or mobile) is now an explicit choice — "Sign
- * in" vs "Login for Mobile" — instead of guessed from screen width, so
- * onSignIn is called with "desktop" or "mobile" (see App.jsx's handleSignIn).
+ * Which UI you land in (desktop or mobile) is no longer chosen here — there's
+ * a single "Sign in" button. App.jsx's handleSignIn figures out desktop vs.
+ * mobile automatically from the account's own permissions (mobile-only perms
+ * -> mobile UI, desktop-only -> desktop UI, a single allowed page -> straight
+ * to that page, both -> current viewport width decides).
  */
 export default function LoginPage({ onSignIn }) {
+  const navigate = useNavigate();
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
   const [staffId, setStaffId] = useState("");
@@ -54,7 +58,7 @@ export default function LoginPage({ onSignIn }) {
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
 
-  async function submit(mode) {
+  async function submit() {
     setError("");
 
     if (!staffId.trim() || !password) {
@@ -93,7 +97,7 @@ export default function LoginPage({ onSignIn }) {
           } catch { /* not fatal — login already succeeded */ }
         }
       }
-      onSignIn?.(mode); // success -> enter the app
+      onSignIn?.(); // success -> enter the app; App.jsx picks desktop/mobile automatically
     } catch (e) {
       // e.status comes from lib/api.js's toError; message-text matching broke
       // once the backend started sending real messages instead of bare codes.
@@ -112,7 +116,7 @@ export default function LoginPage({ onSignIn }) {
   }
 
   function onKeyDown(e) {
-    if (e.key === "Enter") submit("desktop");
+    if (e.key === "Enter") submit();
   }
 
   return (
@@ -150,7 +154,7 @@ export default function LoginPage({ onSignIn }) {
         <form
           className="login-panel"
           style={S.form}
-          onSubmit={(e) => { e.preventDefault(); submit("desktop"); }}
+          onSubmit={(e) => { e.preventDefault(); submit(); }}
         >
           <h1 style={{ fontSize: 26 }}>{t("Sign in")}</h1>
           <p className="muted" style={{ marginTop: 4, marginBottom: 24, fontSize: 14 }}>
@@ -217,8 +221,21 @@ export default function LoginPage({ onSignIn }) {
           <button type="submit" className="btn btn-primary btn-block" disabled={submitting}>
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
-          <button type="button" className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={() => submit("mobile")} disabled={submitting}>
-            <Smartphone size={18} color="var(--scc-red)" /> {t("Login for Mobile")}
+
+          {/* Quick Scanner Access — DELIBERATELY passwordless, per the
+              user's explicit request ("Allow any user to open and load the
+              scanner interface... without entering a password"). Plain
+              client-side navigation to /kiosk-scan, NOT submit() — it never
+              touches the Staff ID/password fields or the login API at all.
+              Safe because the destination itself is a hard-locked sandbox
+              (KioskScannerPage.jsx: no nav chrome, no route out except
+              "Back to Login", and its own short-lived kiosk token grants
+              ONLY the two camera check-in endpoints server-side — see
+              auth.js's requireKioskOrAuth). This button does not set
+              `submitting` and isn't disabled by it, since it bypasses the
+              login flow entirely. */}
+          <button type="button" className="btn btn-dark btn-block" style={{ marginTop: 10 }} onClick={() => navigate("/kiosk-scan")}>
+            <ScanLine size={18} /> {t("Quick Scanner Access")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
