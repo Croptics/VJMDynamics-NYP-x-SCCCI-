@@ -945,6 +945,20 @@ async function buildSnapshot() {
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
 
+  /* 5-status-aware KPIs computed from the scoped roster. The team's integration
+   * added ARRIVED/ASSIGNED/LATE, but JQ's getDashboard on this branch still
+   * counts PRESENT only — computing here keeps ALL my surfaces (assistant, Trip
+   * Pulse widget, boarding passes) consistent: boarded = PRESENT + ARRIVED,
+   * unassigned = no coach, missing = everyone else (on a coach, not boarded). */
+  const boardedCount = roster.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
+  const unassignedCount = roster.filter((d) => !d.coach_id).length;
+  const kpis = {
+    total: roster.length,
+    present: boardedCount,
+    unassigned: unassignedCount,
+    missing: Math.max(0, roster.length - boardedCount - unassignedCount),
+  };
+
   /* Passport validity — delegates whose passport is expired or expires within
    * 6 months. Soonest-to-expire / most-overdue first. */
   const passportIssues = roster
@@ -989,7 +1003,7 @@ async function buildSnapshot() {
 
   return {
     asOf: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-    trip, kpis: dashboard.kpis,
+    trip, kpis,
     coaches: dashboard.coaches.length ? dashboard.coaches : COACHES,
     missing, exceptions, checkins, itinerary,
     roster, byIndustry, byCompany, vips, passportIssues,

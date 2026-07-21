@@ -173,8 +173,11 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
   check-in `alreadyBoarded` + counts, boarding-pass status labels + filter, and
   the assistant's person/VIP status lines), so a delegate a teammate's scanner
   marks `ARRIVED` still reads correctly here. My check-in still *writes* `PRESENT`
-  (which the team's app accepts as the legacy value) — kept so this branch's own
-  dashboard counts stay correct.
+  (which the team's app accepts as the legacy value). To keep every one of my own
+  surfaces consistent, `buildSnapshot()` computes its **own** 5-status KPIs from
+  the scoped roster (boarded = `PRESENT`+`ARRIVED`, unassigned = no coach, missing
+  = the rest) rather than JQ's `getDashboard` (which counts `PRESENT` only on this
+  branch) — so the assistant, Trip Pulse widget, and boarding-pass counts all agree.
 - **AI busy vs not configured:** the assistant distinguishes "busy, try again"
   (Ollama up but slow) from "not configured" (nothing installed).
 - **Ambiguous chatbot query:** the prompt asks ONE clarifying question rather than
