@@ -167,6 +167,14 @@ Created lazily on first use by `ensureReady()` in `vance.js`:
 - **Unknown / already-scanned QR:** check-in returns a clear message (404 unknown,
   "already boarded" otherwise), and resolves the trip from the delegate's own record
   so a mistyped `tripId` can't file a check-in against the wrong trip.
+- **5-status compatibility (read side):** the team's integration introduced
+  `ARRIVED`/`ASSIGNED`/`LATE` alongside the legacy `PRESENT`/`MISSING`. My read
+  paths treat **`PRESENT` and `ARRIVED` both as "boarded"** (badges present-count,
+  check-in `alreadyBoarded` + counts, boarding-pass status labels + filter, and
+  the assistant's person/VIP status lines), so a delegate a teammate's scanner
+  marks `ARRIVED` still reads correctly here. My check-in still *writes* `PRESENT`
+  (which the team's app accepts as the legacy value) — kept so this branch's own
+  dashboard counts stay correct.
 - **AI busy vs not configured:** the assistant distinguishes "busy, try again"
   (Ollama up but slow) from "not configured" (nothing installed).
 - **Ambiguous chatbot query:** the prompt asks ONE clarifying question rather than

@@ -834,7 +834,8 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
   const coaches = (await q(`SELECT id, label, name, city FROM coaches ORDER BY sort_order NULLS LAST, id`)).rows;
-  const present = r.rows.filter((d) => d.status === "PRESENT").length;
+  // PRESENT (legacy) and ARRIVED (the team's 5-status value) both mean "boarded".
+  const present = r.rows.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
 }));
 
@@ -863,7 +864,7 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
   const tripId = del.trip_str || requestedTripId;
-  const alreadyBoarded = del.status === "PRESENT";
+  const alreadyBoarded = del.status === "PRESENT" || del.status === "ARRIVED";
   const coachId = coachOverride || del.coach_id || null;
   const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -881,7 +882,7 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   invalidateSnapshot(); // a delegate just boarded — refresh the assistant's view
 
   const counts = await q(
-    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present
        FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
   res.json({
     ok: true,
@@ -1293,7 +1294,7 @@ function answerLocally(question, snapshot) {
   //    aggregate + breakdown intents so "what company is X from" isn't misread.
   const named = findDelegateInText(q, roster);
   if (named && /\b(who|what|which|where|whose|is|are|does|has|from|on|about|status|company|industry|role|coach|bus|here|present|missing|checked|arrived|boarded)\b/.test(q)) {
-    const statusText = named.status === "PRESENT" ? "checked in"
+    const statusText = (named.status === "PRESENT" || named.status === "ARRIVED") ? "checked in"
       : named.status === "MISSING" ? "missing" : "not on a coach yet";
     const facts = [];
     if (named.role) facts.push(named.role);
@@ -1368,7 +1369,7 @@ function answerLocally(question, snapshot) {
   if (has("vip", "important", "priority guest", "priority delegate")) {
     if (!vips.length) return "No delegates are flagged as VIPs.";
     const missingVips = vips.filter((v) => v.status === "MISSING");
-    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${v.status === "PRESENT" ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
+    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${(v.status === "PRESENT" || v.status === "ARRIVED") ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
     const head = `${bold(vips.length)} VIP${vips.length > 1 ? "s" : ""}${missingVips.length ? `, ${bold(missingVips.length)} still missing` : ""}:`;
     return `${head}\n${lines.join("\n")}`;
   }

@@ -16,8 +16,13 @@ import { useLang } from "../lib/i18n.jsx";
  * report" (counts folded into the header, no stat-card row), Jayden's filter
  * tabs, and Vimal's per-coach grouping.
  */
+// PRESENT (legacy) and ARRIVED (the team's 5-status value) both mean "boarded";
+// ASSIGNED/LATE are the newer "expected but not boarded yet" values.
 const STATUS_META = {
   PRESENT: { label: "Boarded", color: "var(--st-present)" },
+  ARRIVED: { label: "Boarded", color: "var(--st-present)" },
+  ASSIGNED: { label: "Not boarded", color: "var(--st-review)" },
+  LATE: { label: "Not boarded", color: "var(--st-review)" },
   MISSING: { label: "Not boarded", color: "var(--st-review)" },
   UNASSIGNED: { label: "No coach", color: "var(--ink-3)" },
 };
@@ -57,8 +62,9 @@ export default function BoardingPassesView({ tripId }) {
   const visible = useMemo(() => {
     const s = search.trim().toLowerCase();
     return data.delegates.filter((d) => {
-      if (filter === "boarded" && d.status !== "PRESENT") return false;
-      if (filter === "pending" && d.status === "PRESENT") return false;
+      const boarded = d.status === "PRESENT" || d.status === "ARRIVED";
+      if (filter === "boarded" && !boarded) return false;
+      if (filter === "pending" && boarded) return false;
       if (!s) return true;
       return [d.name, d.company, d.qr_code].some((v) => (v || "").toLowerCase().includes(s));
     });
