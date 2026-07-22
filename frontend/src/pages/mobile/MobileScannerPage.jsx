@@ -20,7 +20,14 @@ import {
   Mic, Moon, Sun, Zap, Turtle, Wifi, WifiOff, Undo2, Users, RotateCcw,
 } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api.js";
-import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../../lib/faceScan.js";
+import {
+  vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken, playErrorTone,
+  faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, FACE_CROP,
+} from "../../lib/faceScan.js";
+
+// Scans average this many vectorized frames, the same way enrollment does, so
+// a single blurred frame can't cause a false rejection.
+const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
@@ -101,6 +108,8 @@ export default function MobileScannerPage() {
   const [voiceStatus, setVoiceStatus] = useState("");
   const [voiceError, setVoiceError] = useState("");
   const [voiceFinal, setVoiceFinal] = useState(false);
+  const [micLevel, setMicLevel] = useState(0); // live input level while recording
+  const [scanAlign, setScanAlign] = useState({ ready: false, hint: "" }); // live circle feedback
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -330,6 +339,24 @@ export default function MobileScannerPage() {
     return () => { clearInterval(id); meter.width = 0; meter.height = 0; setLuxEstimate(null); };
   }, [scanMode, lowLight]);
 
+  /* Live alignment feedback while the face camera is up, so staff can see the
+   * circle go green before tapping Scan instead of guessing. Same gate the
+   * scan itself uses. */
+  useEffect(() => {
+    if (!(scanMode === "face" && !lowLight) || camError) { setScanAlign({ ready: false, hint: "" }); return undefined; }
+    const canvas = document.createElement("canvas");
+    canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const id = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || !video.videoWidth) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const a = faceAlignment(ctx.getImageData(0, 0, canvas.width, canvas.height));
+      setScanAlign({ ready: a.ready, hint: a.hint });
+    }, 350);
+    return () => { clearInterval(id); canvas.width = 0; canvas.height = 0; };
+  }, [scanMode, lowLight, camError, resetTick]);
+
   function resetScanner() {
     setScanError("");
     setScanResult(null);
@@ -440,62 +467,91 @@ export default function MobileScannerPage() {
     }
   }
 
-  function handleFaceScan() {
+  /* Gated scan: the delegate's face must be properly aligned in the circle —
+   * the same gate enrollment uses — before anything is sent. Then SCAN_SAMPLES
+   * frames are vectorized and averaged, matching how the enrolled template was
+   * built, so the two are directly comparable. */
+  async function handleFaceScan() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) {
       setScanError("Camera not ready yet — wait a moment and try again.");
       return;
     }
     const canvas = document.createElement("canvas");
-    canvas.width = 160;
-    canvas.height = 120;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const token = vectorizeFaceLandmarks(imageData);
+    canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const grab = () => { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); return ctx.getImageData(0, 0, canvas.width, canvas.height); };
+
+    // 1) Alignment gate — refuse with a specific reason instead of sending a
+    // badly framed face that would be rejected by the matcher anyway.
+    const a = faceAlignment(grab());
+    if (!a.ready) {
+      setScanError(a.hint);
+      canvas.width = 0; canvas.height = 0;
+      return;
+    }
+
+    // 2) Multi-sample vectorization
+    setScanning(true);
+    const samples = [];
+    for (let i = 0; i < SCAN_SAMPLES; i += 1) {
+      const vec = parseFaceVector(vectorizeFaceLandmarks(grab()));
+      if (vec) samples.push(vec);
+      if (i < SCAN_SAMPLES - 1) await new Promise((r) => setTimeout(r, 120));
+    }
     canvas.width = 0; canvas.height = 0;
-    if (!isValidBiometricToken(token)) {
+    setScanning(false);
+
+    const token = samples.length ? buildFaceToken(averageFaceVectors(samples)) : null;
+    if (!token || !isValidBiometricToken(token)) {
       setScanError("Camera captured an invalid or placeholder token — try again.");
       return;
     }
     submitScan(token);
   }
 
+  /* Acoustic voiceprint check-in: records ~2s of the delegate's voice through
+   * the Web Audio FFT and matches it against their ENROLLED voiceprint (the
+   * same 64-band spectrum captured at /enroll). No audio is recorded to a file
+   * — only frequency magnitudes. Falls back to the typed passphrase below for
+   * browsers with no Web Audio support. */
   async function startVoiceCapture() {
-    if (!recognitionRef.current) {
-      setVoiceError("Speech recognition is not available in this browser. Use the typed passphrase instead or open the app in Chrome/Edge.");
-      return;
-    }
-    if (voiceListening) {
-      recognitionRef.current.stop();
-      setVoiceListening(false);
-      setVoiceStatus("Stopped recording.");
-      return;
-    }
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      setVoiceError("Microphone access is required for spoken check-in. Allow the browser to use your mic.");
+    if (voiceListening) return;
+    if (!(window.AudioContext || window.webkitAudioContext) || !navigator.mediaDevices) {
+      setVoiceError("This browser can't record audio — type the passphrase instead.");
       return;
     }
     setScanError("");
     setVoiceError("");
-    setVoiceStatus("Listening…");
-    setVoiceFinal(false);
-    setPassphrase("");
-    recognitionRef.current.start();
+    setVoiceStatus("Listening… ask them to speak now");
+    setVoiceListening(true);
+    try {
+      const token = await captureVoiceEmbedding(2500, (lvl) => setMicLevel(lvl));
+      if (!token) {
+        setVoiceError("Too quiet to match — ask them to speak up and try again.");
+        setVoiceStatus("");
+        return;
+      }
+      setVoiceStatus("Matching voiceprint…");
+      await submitScan(token);
+      setVoiceStatus("");
+    } catch {
+      setVoiceError("Microphone access is required for spoken check-in. Allow the browser to use your mic.");
+      setVoiceStatus("");
+    } finally {
+      setVoiceListening(false);
+      setMicLevel(0);
+    }
   }
 
   function handleVoiceScan(overridePhrase) {
     const phrase = (overridePhrase ?? passphrase).trim();
     if (phrase.length < 4) {
-      setVoiceError("Passphrase too short — ask the delegate to speak the full passphrase.");
+      setVoiceError("Passphrase too short — ask the delegate for the full passphrase.");
       return;
     }
-    if (!voiceFinal && recognitionRef.current && !voiceListening) {
-      setVoiceError("No confirmed spoken passphrase was captured. Record again or type the phrase manually.");
-      return;
-    }
+    // No speech-recognition guard any more: the typed passphrase is now an
+    // explicit no-microphone fallback, not a transcript of a recording.
     setVoiceError("");
     submitScan(vectorizeVoiceprint(phrase));
     setPassphrase("");
@@ -585,6 +641,27 @@ export default function MobileScannerPage() {
             />
             <span className="mscan-corner tl" /><span className="mscan-corner tr" />
             <span className="mscan-corner bl" /><span className="mscan-corner br" />
+            {/* Alignment circle — marks the exact region the vectorizer reads.
+                The delegate's face must sit here for the scan to match the
+                sample they enrolled with. */}
+            {!camError && (
+              <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
+                <div style={{
+                  height: `${FACE_CROP * 100}%`, aspectRatio: "1", borderRadius: "50%",
+                  border: `2.5px ${scanAlign.ready ? "solid" : "dashed"} ${scanAlign.ready ? "#22c55e" : "rgba(255,255,255,0.8)"}`,
+                  transition: "border-color .2s",
+                }} />
+                {scanAlign.hint && (
+                  <div style={{
+                    position: "absolute", bottom: 14, left: "50%", transform: "translateX(-50%)",
+                    padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+                    background: scanAlign.ready ? "rgba(22,163,74,0.92)" : "rgba(16,24,40,0.72)", color: "#fff",
+                  }}>
+                    {scanAlign.ready ? "Aligned — ready to scan" : scanAlign.hint}
+                  </div>
+                )}
+              </div>
+            )}
             {scanning && <span className="mscan-line" />}
             {!camError && luxEstimate != null && (
               <div
@@ -623,18 +700,30 @@ export default function MobileScannerPage() {
                 : "Camera paused for fairness — face matching degrades unevenly in the dark. "}
               Ask the delegate to <strong>say their passphrase</strong> instead.
             </div>
-            <button className="btn btn-primary" onClick={startVoiceCapture} disabled={scanning}>
-              {voiceListening ? "Stop voice capture" : voiceSupported ? "Start voice capture" : "Use text fallback"}
+            <button className="btn btn-primary" onClick={startVoiceCapture} disabled={scanning || voiceListening}>
+              <Mic size={15} /> {voiceListening ? "Listening…" : "Scan voiceprint"}
             </button>
-            <input
-              className="input" placeholder="Or type the passphrase…" value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleVoiceScan(); }}
-              style={{ maxWidth: 220, textAlign: "center" }}
-            />
-            <button className="btn btn-primary" onClick={() => handleVoiceScan()} disabled={scanning || !passphrase.trim()}>
-              {scanning ? "Submitting passphrase…" : "Submit passphrase"}
-            </button>
+            {/* Live mic level so staff can see it's actually hearing them */}
+            {voiceListening && (
+              <div style={{ width: 200, height: 6, background: "rgba(255,255,255,0.25)", borderRadius: 3, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", borderRadius: 3, background: "var(--st-present)",
+                  width: `${Math.min(100, Math.round(micLevel * 260))}%`, transition: "width .08s linear",
+                }} />
+              </div>
+            )}
+            <details style={{ width: "100%", maxWidth: 240 }}>
+              <summary style={{ fontSize: 11.5, color: "var(--line)", cursor: "pointer" }}>No mic? Type the passphrase</summary>
+              <input
+                className="input" placeholder="Passphrase…" value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleVoiceScan(); }}
+                style={{ textAlign: "center", marginTop: 8 }}
+              />
+              <button className="btn btn-primary btn-block" style={{ marginTop: 8 }} onClick={() => handleVoiceScan()} disabled={scanning || !passphrase.trim()}>
+                {scanning ? "Submitting…" : "Submit passphrase"}
+              </button>
+            </details>
             {(voiceStatus || voiceError || scanError) && (
               <div style={{ fontSize: 12, color: voiceError ? "#f87171" : "#fff" }}>
                 {voiceError || voiceStatus || scanError}

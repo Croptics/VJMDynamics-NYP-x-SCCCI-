@@ -19,7 +19,23 @@ import {
   ScanFace, Mic, CheckCircle2, AlertTriangle, Search, Camera, ShieldCheck, RefreshCw, ArrowLeft,
 } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
-import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken } from "../lib/faceScan.js";
+import {
+  vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken,
+  faceAlignment, parseFaceVector, averageFaceVectors, sampleConsistency, buildFaceToken, FACE_CROP,
+} from "../lib/faceScan.js";
+
+const TICK_MS = 220;
+// Face must stay correctly aligned for this many consecutive checks before
+// capture even begins (~1.1s) — stops a half-turned or passing face starting it.
+const HOLD_TICKS = 5;
+// Number of separate frames vectorized and averaged into the stored template.
+const SAMPLES = 5;
+// Every pair of samples must agree at least this much, otherwise the subject
+// moved (or changed) mid-capture and the whole attempt is thrown away.
+const MIN_CONSISTENCY = 0.9;
+// Show a manual override only after the gate has failed for a long while, so a
+// delegate can never be permanently locked out by a bad detection.
+const STUCK_TICKS = 45;
 
 export default function EnrollPage() {
   const [step, setStep] = useState("find"); // find | enroll | done
@@ -33,12 +49,20 @@ export default function EnrollPage() {
 
   const [faceToken, setFaceToken] = useState(null);
   const [camError, setCamError] = useState("");
+  // Live circle-guide feedback: how well framed the face is, and how far
+  // through the "hold still" countdown we are.
+  const [align, setAlign] = useState({ ready: false, hint: "Fit your face inside the circle", progress: 0, coverage: 0 });
+  const [capture, setCapture] = useState({ active: false, done: 0, total: SAMPLES });
+  const [captureMsg, setCaptureMsg] = useState("");
+  const [quality, setQuality] = useState(null);   // { samples, consistency }
+  const [showOverride, setShowOverride] = useState(false);
 
   const [passphrase, setPassphrase] = useState("");
   const [voiceToken, setVoiceToken] = useState(null);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState("");
+  const [micLevel, setMicLevel] = useState(0); // live input level while recording
 
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState("");
@@ -109,66 +133,162 @@ export default function EnrollPage() {
     if (videoRef.current) videoRef.current.srcObject = null;
   }
 
-  function captureFace() {
+  /* Two-phase gated capture, the way a passport/Singpass booth works.
+   *
+   *   ALIGNING  — every TICK_MS, check the live frame against the alignment
+   *               gate (face present, filling the circle, centred, in focus,
+   *               well exposed). The delegate gets a specific hint for
+   *               whatever is wrong. Only after HOLD_TICKS consecutive good
+   *               frames does capture begin.
+   *   CAPTURING — vectorize SAMPLES separate frames, re-checking alignment
+   *               before each one. If they drift out, the attempt is thrown
+   *               away and we go back to aligning. At the end the samples must
+   *               agree with each other (MIN_CONSISTENCY); only then are they
+   *               averaged into the stored template.
+   *
+   * This is why capture isn't instant: it is 5 real 128-float vectorizations
+   * plus pairwise agreement checks, over roughly two seconds. */
+  useEffect(() => {
+    if (step !== "enroll" || !consent || faceToken || camError) {
+      setAlign({ ready: false, hint: "Fit your face inside the circle", progress: 0, coverage: 0 });
+      setCapture({ active: false, done: 0, total: SAMPLES });
+      return undefined;
+    }
+    let cancelled = false;
+    let phase = "aligning";
+    let hold = 0;
+    let stuck = 0;
+    let samples = [];
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const grab = () => {
+      const video = videoRef.current;
+      if (!video || !video.videoWidth) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return ctx.getImageData(0, 0, canvas.width, canvas.height);
+    };
+
+    const restart = (msg) => {
+      phase = "aligning"; hold = 0; samples = [];
+      setCapture({ active: false, done: 0, total: SAMPLES });
+      if (msg) setCaptureMsg(msg);
+    };
+
+    const id = setInterval(() => {
+      if (cancelled) return;
+      const probe = grab();
+      if (!probe) return;
+      const a = faceAlignment(probe); // consumes + zeroes the probe frame
+
+      if (phase === "aligning") {
+        hold = a.ready ? hold + 1 : 0;
+        stuck = a.ready ? 0 : stuck + 1;
+        if (stuck >= STUCK_TICKS) setShowOverride(true);
+        setAlign({ ...a, progress: Math.min(1, hold / HOLD_TICKS) });
+        if (hold >= HOLD_TICKS) {
+          phase = "capturing";
+          samples = [];
+          setCaptureMsg("");
+          setCapture({ active: true, done: 0, total: SAMPLES });
+        }
+        return;
+      }
+
+      // --- capturing ---
+      if (!a.ready) { restart("Moved out of the circle — starting again."); setAlign({ ...a, progress: 0 }); return; }
+
+      const frame = grab();
+      if (!frame) return;
+      const vec = parseFaceVector(vectorizeFaceLandmarks(frame));
+      if (vec) samples.push(vec);
+      setCapture({ active: true, done: samples.length, total: SAMPLES });
+
+      if (samples.length >= SAMPLES) {
+        const worst = sampleConsistency(samples);
+        if (worst < MIN_CONSISTENCY) {
+          restart(`Samples didn't agree (${worst.toFixed(2)}) — hold still and we'll retry.`);
+          return;
+        }
+        const token = buildFaceToken(averageFaceVectors(samples));
+        if (!token || !isValidBiometricToken(token)) { restart("Capture failed — trying again."); return; }
+        cancelled = true;
+        setQuality({ samples: samples.length, consistency: worst });
+        setCaptureMsg("");
+        setFaceToken(token);
+        setCapture({ active: false, done: SAMPLES, total: SAMPLES });
+      }
+    }, TICK_MS);
+
+    return () => { cancelled = true; clearInterval(id); canvas.width = 0; canvas.height = 0; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, consent, faceToken, camError]);
+
+  /* Manual override (only offered after the gate has struggled for a while).
+   * Still takes multiple samples and averages them — it skips the alignment
+   * checks, not the vectorization. */
+  async function captureFace() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) { setCamError("Camera not ready yet — wait a moment and try again."); return; }
     const canvas = document.createElement("canvas");
-    canvas.width = 160;
-    canvas.height = 120;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const token = vectorizeFaceLandmarks(imageData); // zeroes the pixels in place
+    canvas.width = 160; canvas.height = 120;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const samples = [];
+    setCapture({ active: true, done: 0, total: SAMPLES });
+    for (let i = 0; i < SAMPLES; i += 1) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const vec = parseFaceVector(vectorizeFaceLandmarks(ctx.getImageData(0, 0, canvas.width, canvas.height)));
+      if (vec) samples.push(vec);
+      setCapture({ active: true, done: samples.length, total: SAMPLES });
+      await new Promise((r) => setTimeout(r, TICK_MS));
+    }
     canvas.width = 0; canvas.height = 0;
-    if (!isValidBiometricToken(token)) { setCamError("Capture failed — try again in better light."); return; }
+    setCapture({ active: false, done: 0, total: SAMPLES });
+    const token = samples.length ? buildFaceToken(averageFaceVectors(samples)) : null;
+    if (!token || !isValidBiometricToken(token)) { setCamError("Capture failed — try again in better light."); return; }
+    setQuality({ samples: samples.length, consistency: sampleConsistency(samples) });
     setFaceToken(token);
     setCamError("");
   }
 
-  /* ---- Voice passphrase (optional) ------------------------------------- */
+  /* ---- Voiceprint: real FFT frequency-spectrum capture ------------------ */
   useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setVoiceSupported(false); return undefined; }
-    const rec = new SR();
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.lang = "en-SG";
-    rec.onresult = (event) => {
-      const transcript = Array.from(event.results).map((r) => r[0].transcript).join(" ").trim();
-      setPassphrase(transcript);
-      if (event.results[event.results.length - 1]?.isFinal) {
-        setVoiceListening(false);
-        setVoiceStatus(transcript ? `Heard: ${transcript}` : "No speech detected — try again or type it.");
-      } else {
-        setVoiceStatus("Listening…");
-      }
-    };
-    rec.onerror = () => { setVoiceListening(false); setVoiceStatus("Couldn't capture speech — type the passphrase instead."); };
-    rec.onend = () => setVoiceListening(false);
-    recognitionRef.current = rec;
-    setVoiceSupported(true);
-    return () => { try { rec.stop(); } catch { /* ignore */ } recognitionRef.current = null; };
+    const hasWebAudio = !!(window.AudioContext || window.webkitAudioContext) && !!navigator.mediaDevices;
+    setVoiceSupported(hasWebAudio);
   }, []);
 
-  async function recordVoice() {
-    if (!recognitionRef.current) return;
-    if (voiceListening) { recognitionRef.current.stop(); return; }
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      setVoiceStatus("Microphone blocked — allow mic access, or type the passphrase.");
-      return;
-    }
-    setPassphrase("");
-    setVoiceStatus("Listening…");
+  async function recordVoiceprint() {
+    if (voiceListening) return;
     setVoiceListening(true);
-    recognitionRef.current.start();
+    setVoiceToken(null);
+    setVoiceStatus("Recording… keep speaking");
+    try {
+      // Reads the mic as frequency magnitudes only — no audio is ever recorded
+      // to a Blob or file (see captureVoiceEmbedding's own notes).
+      const token = await captureVoiceEmbedding(2500, (lvl) => setMicLevel(lvl));
+      if (!token) {
+        setVoiceStatus("Too quiet — speak clearly and try again.");
+        setVoiceToken(null);
+      } else {
+        setVoiceToken(token);
+        setVoiceStatus("Voiceprint captured ✓");
+      }
+    } catch {
+      setVoiceStatus("Microphone unavailable — allow mic access, or use the passphrase fallback below.");
+    } finally {
+      setVoiceListening(false);
+      setMicLevel(0);
+    }
   }
 
-  // Turn the current passphrase into a voice token as the delegate edits it.
+  // No-microphone fallback only: hashes the typed WORDS (a shared secret, not
+  // a biometric). Used solely when nothing was recorded acoustically.
   useEffect(() => {
+    if (voiceToken && voiceToken.startsWith("voice:v2:")) return; // real voiceprint wins
     const p = passphrase.trim();
     setVoiceToken(p.length >= 4 ? vectorizeVoiceprint(p) : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [passphrase]);
 
   /* ---- Submit ---------------------------------------------------------- */
@@ -206,6 +326,10 @@ export default function EnrollPage() {
     setResult(null);
     setSubmitErr("");
     setFindErr("");
+    setQuality(null);
+    setCaptureMsg("");
+    setShowOverride(false);
+    setCapture({ active: false, done: 0, total: SAMPLES });
   }
 
   const canSubmit = consent && (faceToken || voiceToken) && !submitting;
@@ -267,6 +391,16 @@ export default function EnrollPage() {
             <h1 style={S.h1}>{delegate.name}</h1>
             <p style={S.sub}>{delegate.coachLabel || "No coach yet"}</p>
 
+            {/* One sample per person: the record is keyed by delegate, so a new
+                capture REPLACES the old one rather than adding a second. */}
+            {(delegate.enrolled?.face || delegate.enrolled?.voice) && (
+              <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                {delegate.enrolled.face && <span className="badge badge-present">Face already saved</span>}
+                {delegate.enrolled.voice && <span className="badge badge-present">Voice already saved</span>}
+                <span className="muted" style={{ fontSize: 12 }}>Re-enrolling replaces it.</span>
+              </div>
+            )}
+
             {/* Consent gate */}
             <label style={S.consent}>
               <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} style={{ marginTop: 3 }} />
@@ -288,14 +422,25 @@ export default function EnrollPage() {
                       <div style={S.captured}>
                         <CheckCircle2 size={40} style={{ color: "var(--st-present)" }} />
                         <div style={{ fontWeight: 700, marginTop: 6 }}>Face captured</div>
-                        <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={() => setFaceToken(null)}>
-                          <RefreshCw size={14} /> Retake
+                        {quality && (
+                          <div className="muted" style={{ fontSize: 11.5, marginTop: 4, textAlign: "center" }}>
+                            {quality.samples} samples averaged · agreement {quality.consistency.toFixed(2)}
+                            <br />128-value template
+                          </div>
+                        )}
+                        <button className="btn btn-ghost" style={{ marginTop: 10 }}
+                          onClick={() => { setFaceToken(null); setQuality(null); setShowOverride(false); setCaptureMsg(""); }}>
+                          <RefreshCw size={14} /> Redo face scan
                         </button>
                       </div>
                     ) : (
                       <>
                         <video ref={videoRef} autoPlay playsInline muted
                           style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} />
+                        {/* Circle guide — its diameter matches FACE_CROP, the
+                            exact region the vectorizer reads, so lining your
+                            face up here is what makes enrol and scan match. */}
+                        {!camError && <FaceGuide align={align} />}
                         {camError && (
                           <div style={S.camErr}><Camera size={24} color="#fff" /><div style={{ fontSize: 13, maxWidth: 240 }}>{camError}</div></div>
                         )}
@@ -303,28 +448,94 @@ export default function EnrollPage() {
                     )}
                   </div>
                   {!faceToken && !camError && (
-                    <button className="btn btn-primary btn-block" style={{ marginTop: 10 }} onClick={captureFace}>
-                      <ScanFace size={16} /> Capture my face
-                    </button>
+                    <>
+                      {/* Specific, actionable feedback from the alignment gate */}
+                      <p style={{
+                        fontSize: 13, fontWeight: 600, textAlign: "center", marginTop: 10,
+                        color: capture.active ? "var(--st-present)" : align.ready ? "var(--st-present)" : "var(--ink-2)",
+                      }}>
+                        {capture.active
+                          ? `Analysing your face… sample ${capture.done}/${capture.total}`
+                          : (align.hint || "Fit your face inside the circle")}
+                      </p>
+
+                      {/* Per-sample progress dots — visible proof that several
+                          separate frames are being vectorized, not one snapshot */}
+                      {capture.active && (
+                        <div className="row" style={{ gap: 6, justifyContent: "center", marginTop: 8 }}>
+                          {Array.from({ length: capture.total }).map((_, i) => (
+                            <span key={i} style={{
+                              width: 9, height: 9, borderRadius: 999,
+                              background: i < capture.done ? "var(--st-present)" : "var(--line)",
+                              transition: "background .2s",
+                            }} />
+                          ))}
+                        </div>
+                      )}
+
+                      {captureMsg && (
+                        <p style={{ fontSize: 12, textAlign: "center", marginTop: 8, color: "var(--st-review, #b45309)" }}>{captureMsg}</p>
+                      )}
+
+                      {showOverride && !capture.active && (
+                        <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={captureFace}>
+                          <ScanFace size={16} /> Trouble detecting? Capture anyway
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
 
                 {/* VOICE */}
                 <div style={S.section}>
-                  <div style={S.sectionHead}><Mic size={16} style={{ color: "var(--scc-red)" }} /> Voice passphrase <span className="muted" style={{ fontWeight: 500 }}>(optional)</span></div>
+                  <div style={S.sectionHead}><Mic size={16} style={{ color: "var(--scc-red)" }} /> Voiceprint <span className="muted" style={{ fontWeight: 500 }}>(optional)</span></div>
                   <p className="muted" style={{ fontSize: 12.5, margin: "2px 0 8px" }}>
-                    Say or type a short phrase (e.g. “MusterGo check in”). Use the same words at the coach.
+                    Used when it's too dark for the camera. Say a phrase like <em>“MusterGo check in”</em> for
+                    ~2 seconds — we capture the <strong>frequency profile of your voice</strong>, never the audio.
                   </p>
-                  <input className="input" placeholder="Your passphrase…" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
-                  <div className="row" style={{ gap: 8, marginTop: 8 }}>
-                    {voiceSupported && (
-                      <button className="btn btn-ghost" style={{ flex: 1 }} onClick={recordVoice}>
-                        <Mic size={14} /> {voiceListening ? "Stop" : "Record"}
+
+                  {voiceSupported ? (
+                    <>
+                      <button
+                        className={voiceToken?.startsWith("voice:v2:") ? "btn btn-ghost btn-block" : "btn btn-primary btn-block"}
+                        onClick={recordVoiceprint} disabled={voiceListening}
+                      >
+                        <Mic size={15} />
+                        {voiceListening ? "Recording…" : voiceToken?.startsWith("voice:v2:") ? "Re-record voiceprint" : "Record my voiceprint"}
                       </button>
-                    )}
-                    {voiceToken && <span className="badge badge-present" style={{ alignSelf: "center" }}>Ready ✓</span>}
-                  </div>
-                  {voiceStatus && <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{voiceStatus}</div>}
+                      {/* Live input level so the delegate knows the mic hears them */}
+                      {voiceListening && (
+                        <div style={{ height: 6, background: "var(--line)", borderRadius: 3, marginTop: 8, overflow: "hidden" }}>
+                          <div style={{
+                            height: "100%", borderRadius: 3, background: "var(--st-present)",
+                            width: `${Math.min(100, Math.round(micLevel * 260))}%`, transition: "width .08s linear",
+                          }} />
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="muted" style={{ fontSize: 12.5 }}>
+                      This browser has no Web Audio support — use the passphrase fallback below.
+                    </p>
+                  )}
+
+                  {voiceStatus && (
+                    <div style={{ fontSize: 12, marginTop: 8, color: voiceToken ? "var(--st-present)" : "var(--ink-3)" }}>
+                      {voiceStatus}
+                    </div>
+                  )}
+
+                  {/* No-microphone fallback — hashes the typed words (a shared
+                      secret), only used if no acoustic voiceprint was captured. */}
+                  {!voiceToken?.startsWith("voice:v2:") && (
+                    <details style={{ marginTop: 10 }}>
+                      <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>No microphone? Use a typed passphrase instead</summary>
+                      <input
+                        className="input" style={{ marginTop: 8 }} placeholder="Type a passphrase…"
+                        value={passphrase} onChange={(e) => setPassphrase(e.target.value)}
+                      />
+                    </details>
+                  )}
                 </div>
 
                 {submitErr && <div style={S.err}><AlertTriangle size={14} /> {submitErr}</div>}
@@ -353,6 +564,38 @@ export default function EnrollPage() {
             <button className="btn btn-ghost" style={{ marginTop: 22 }} onClick={reset}>Enrol another delegate</button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Passport-booth style alignment circle. The dashed ring marks the exact
+ *  region the vectorizer reads (FACE_CROP of the short edge); it turns green
+ *  when the framing is good, and the solid ring sweeps round as the "hold
+ *  still" countdown completes, at which point the face auto-saves. */
+function FaceGuide({ align }) {
+  const R = 46;
+  const C = 2 * Math.PI * R;
+  const ok = align.ready;
+  return (
+    <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
+      <div style={{ height: `${FACE_CROP * 100}%`, aspectRatio: "1", position: "relative" }}>
+        <svg viewBox="0 0 100 100" style={{ width: "100%", height: "100%", display: "block" }}>
+          <circle
+            cx="50" cy="50" r={R} fill="none"
+            stroke={ok ? "#22c55e" : "rgba(255,255,255,0.8)"}
+            strokeWidth="2.5" strokeDasharray="6 6"
+            opacity={ok ? 0.4 : 0.85}
+          />
+          {align.progress > 0 && (
+            <circle
+              cx="50" cy="50" r={R} fill="none" stroke="#22c55e" strokeWidth="4.5" strokeLinecap="round"
+              strokeDasharray={C} strokeDashoffset={C * (1 - align.progress)}
+              transform="rotate(-90 50 50)"
+              style={{ transition: "stroke-dashoffset .18s linear" }}
+            />
+          )}
+        </svg>
       </div>
     </div>
   );

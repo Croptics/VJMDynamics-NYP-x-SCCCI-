@@ -36,8 +36,90 @@ import {
   getTrip,
   getDashboard,
 } from "../data.js";
+// Shared connection helpers (JQ's db layer) — this module owns its OWN table
+// and never edits db/schema.js, same arrangement as Jayden's exceptions module.
+// Aliased: several handlers below use a local `all` for the delegate list.
+import { all as dbAll, get as dbGet, run as dbRun } from "../db/connection.js";
 
 const router = Router();
+
+/* ---------------------------------------------------------------------------
+ * PERSISTENT biometric enrollment storage.
+ *
+ * WHY THIS TABLE EXISTS: enrollments used to live in a JS Map, which meant
+ * every backend restart silently wiped every delegate's face/voice sample —
+ * a delegate would enroll, the server would restart, and the scanner would
+ * then report "not recognised" for someone who HAD enrolled. Vectors now live
+ * in Postgres so they survive restarts and are shared across processes.
+ *
+ * Still PDPA-safe: the columns hold only the anonymous numeric embedding —
+ * never an image, never audio.
+ * ------------------------------------------------------------------------- */
+let biometricsReady = null;
+function ensureBiometrics() {
+  if (!biometricsReady) {
+    biometricsReady = dbRun(`CREATE TABLE IF NOT EXISTS delegate_biometrics (
+      delegate_id  VARCHAR(64) PRIMARY KEY REFERENCES delegates(id) ON DELETE CASCADE,
+      consent      VARCHAR(16) NOT NULL DEFAULT 'GRANTED',
+      face_vector  JSONB,
+      voice_vector JSONB,
+      voice_hash   BIGINT,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`).catch((e) => { biometricsReady = null; throw e; });
+  }
+  return biometricsReady;
+}
+
+/** Every enrolled/consent row, keyed by delegate id. */
+async function bioMap() {
+  await ensureBiometrics();
+  const rows = await dbAll(`SELECT * FROM delegate_biometrics`);
+  const m = new Map();
+  for (const r of rows) m.set(r.delegate_id, r);
+  return m;
+}
+
+async function bioFor(delegateId) {
+  await ensureBiometrics();
+  return dbGet(`SELECT * FROM delegate_biometrics WHERE delegate_id = $1`, [delegateId]);
+}
+
+/** A delegate with no row has consented at onboarding but is NOT enrolled. */
+const consentOf = (row) => (row && row.consent ? row.consent : "GRANTED");
+const asVector = (v) => (Array.isArray(v) ? v : null);
+
+async function saveBiometrics(delegateId, { faceVector, voiceVector, voiceHash, consent }) {
+  await ensureBiometrics();
+  await dbRun(
+    `INSERT INTO delegate_biometrics (delegate_id, consent, face_vector, voice_vector, voice_hash, updated_at)
+     VALUES ($1, COALESCE($2,'GRANTED'), $3, $4, $5, now())
+     ON CONFLICT (delegate_id) DO UPDATE SET
+       consent      = COALESCE(EXCLUDED.consent, delegate_biometrics.consent),
+       face_vector  = COALESCE(EXCLUDED.face_vector,  delegate_biometrics.face_vector),
+       voice_vector = COALESCE(EXCLUDED.voice_vector, delegate_biometrics.voice_vector),
+       voice_hash   = COALESCE(EXCLUDED.voice_hash,   delegate_biometrics.voice_hash),
+       updated_at   = now()`,
+    [
+      delegateId,
+      consent || null,
+      faceVector ? JSON.stringify(faceVector) : null,
+      voiceVector ? JSON.stringify(voiceVector) : null,
+      Number.isFinite(voiceHash) ? voiceHash : null,
+    ]
+  );
+}
+
+/** Consent revocation purges the stored vectors outright (PDPA erasure). */
+async function revokeBiometrics(delegateId) {
+  await ensureBiometrics();
+  await dbRun(
+    `INSERT INTO delegate_biometrics (delegate_id, consent, face_vector, voice_vector, voice_hash, updated_at)
+     VALUES ($1,'REVOKED',NULL,NULL,NULL,now())
+     ON CONFLICT (delegate_id) DO UPDATE SET
+       consent='REVOKED', face_vector=NULL, voice_vector=NULL, voice_hash=NULL, updated_at=now()`,
+    [delegateId]
+  );
+}
 
 /* Small async wrapper so any thrown error reaches JQ's global error handler
  * in server.js (clean JSON 500s, never a hung request). */
@@ -45,11 +127,12 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 const fail = (res, code, error, message) => res.status(code).json({ error, message });
 
 /* ---------------------------------------------------------------------------
- * Vimal-owned state (in-memory): consent lifecycles + per-delegate check-in
- * history. Delegates themselves live in the SHARED database — only the
- * biometric-consent bookkeeping is private to this feature.
+ * Vimal-owned state. The BIOMETRIC VECTORS and the authoritative consent flag
+ * live in the `delegate_biometrics` table above — they must survive a restart.
+ * What stays in memory is only the non-critical audit trail: the sequence of
+ * consent events, and per-delegate check-in records.
  * ------------------------------------------------------------------------- */
-const consents = new Map(); // delegateId -> { status, method, biometricTokenStored, biometricId?, updatedAt, history[] }
+const consents = new Map();       // delegateId -> { status, method, updatedAt, history[] }
 const checkinHistory = new Map(); // delegateId -> [{ venue, tripId, method, matchedIn, timestamp }]
 
 function consentFor(delegateId) {
@@ -59,21 +142,11 @@ function consentFor(delegateId) {
       delegateId,
       status: "GRANTED", // delegates consent at onboarding by default
       method: "onboarding-form",
-      // A delegate is CONSENTED by default, but not yet ENROLLED: with no
-      // face/voice sample on file they simply can't be matched by the scanner
-      // until they self-enroll (see /api/enroll below). This is what stops the
-      // scanner "recognising" people who never gave a biometric sample.
+      // Consented ≠ enrolled. With no face/voice sample in delegate_biometrics
+      // a delegate simply can't be matched by the scanner until they enroll —
+      // this is what stops the scanner "recognising" someone who never gave a
+      // biometric sample.
       biometricTokenStored: false,
-      // `biometricId` is a small, irreversible numeric fingerprint of the
-      // client's anonymous token (checksum). We never store images/audio.
-      biometricId: null,
-      // faceVector: the enrolled 32-dim luminance vector, compared to a live
-      // scan by cosine/correlation. voiceId: an irreversible checksum of the
-      // enrolled voice passphrase token (voice is a deterministic transcript
-      // hash, so an exact match is the right test there). Both null until the
-      // delegate enrolls.
-      faceVector: null,
-      voiceId: null,
       updatedAt: at,
       history: [{ status: "GRANTED", method: "onboarding-form", at }],
     });
@@ -103,30 +176,47 @@ const checksum = (str) => {
  * face recognition, so it trades some strictness for working under the varied
  * light of a real coach bay. Raise it to reduce false matches, lower it if a
  * genuinely-enrolled delegate is being rejected. */
-const FACE_MATCH_THRESHOLD = 0.8;
+// Cosine-similarity thresholds. Face uses the 0.85 figure from the design
+// brief; voice is a shade looser because the same speaker's spectrum varies
+// more between utterances than a face does between frames.
+const FACE_MATCH_THRESHOLD = 0.85;
+const VOICE_MATCH_THRESHOLD = 0.8;
 
-function parseFaceVector(token) {
+/** Pull the numeric embedding out of a `<kind>:v<n>:<hash>:<v0,v1,…>` token.
+ *  v3 face / v2 voice tokens are comma-separated floats; the older v2 face
+ *  form used dot-separated integers, so both separators are accepted. */
+function parseVectorToken(token, kind) {
   if (typeof token !== "string") return null;
   const parts = token.split(":");
-  if (parts.length < 4 || !/^face$/i.test(parts[0])) return null;
-  const nums = parts[3].split(".").map(Number).filter((x) => Number.isFinite(x));
-  return nums.length ? nums : null;
+  if (parts.length < 4 || parts[0].toLowerCase() !== kind) return null;
+  const payload = parts[3];
+  const nums = (payload.includes(",") ? payload.split(",") : payload.split("."))
+    .map(Number)
+    .filter((x) => Number.isFinite(x));
+  return nums.length >= 8 ? nums : null;
 }
+const parseFaceVector = (t) => parseVectorToken(t, "face");
+const parseVoiceVector = (t) => parseVectorToken(t, "voice");
 
-function faceSimilarity(a, b) {
+/* Cosine similarity of the MEAN-CENTRED vectors — identical maths to
+ * cosineSimilarity() in frontend/src/lib/faceScan.js. Centring is what makes
+ * a 0.85 threshold meaningful: every face descriptor shares a large common
+ * "bright in the middle" component that pins raw cosine near 0.99 for
+ * everybody, so without centring nothing would ever be rejected. */
+function cosineSimilarity(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return -1;
   const n = Math.min(a.length, b.length);
-  if (n < 4) return -1;
+  if (n < 8) return -1;
   let ma = 0, mb = 0;
   for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
   ma /= n; mb /= n;
-  let num = 0, da = 0, db = 0;
+  let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < n; i++) {
     const x = a[i] - ma, y = b[i] - mb;
-    num += x * y; da += x * x; db += y * y;
+    dot += x * y; na += x * x; nb += y * y;
   }
-  if (da === 0 || db === 0) return -1;
-  return num / Math.sqrt(da * db);
+  if (na === 0 || nb === 0) return -1;
+  return dot / Math.sqrt(na * nb);
 }
 
 const timeNow = () =>
@@ -195,34 +285,49 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
     return fail(res, 404, "SCAN_FAILED", "Delegate not recognized in system.");
   }
 
-  // REAL biometric match over the shared delegate list (no random fallback):
-  //   FACE  -> cosine/Pearson correlation of the enrolled 32-dim vector vs the
-  //            live scan vector, best above FACE_MATCH_THRESHOLD wins.
-  //   VOICE -> exact checksum of the transcript-derived token.
-  // A face/voice with no enrolled match is genuinely "not recognised" — this
-  // is what fixes the old behaviour where ANY face got assigned to a random
+  // REAL biometric match against the PERSISTED enrollments (no random
+  // fallback, and no in-memory state that a restart could wipe):
+  //   FACE     -> cosine similarity of the enrolled 128-float embedding vs the
+  //               live scan embedding; best above FACE_MATCH_THRESHOLD wins.
+  //   VOICE v2 -> cosine similarity of the FFT frequency-spectrum embedding.
+  //   VOICE v1 -> exact hash of the typed passphrase (the legacy no-mic
+  //               fallback: a shared secret, not a biometric).
+  // Anything with no enrolled match is genuinely "not recognised" — this is
+  // what fixes the old behaviour where ANY face got assigned to a random
   // missing delegate. Delegates enroll their sample via POST /api/enroll.
   const all = await listDelegates();
+  const bios = await bioMap();
   const method = token.toLowerCase().startsWith("voice:") ? "VOICE" : "FACE";
-  const scanVec = method === "FACE" ? parseFaceVector(token) : null;
+  const scanVec = method === "FACE" ? parseFaceVector(token) : parseVoiceVector(token);
   const tokenChecksum = checksum(token);
 
-  if (method === "FACE" && (!scanVec || scanVec.length < 4)) {
+  if (method === "FACE" && !scanVec) {
     return fail(res, 400, "INVALID_SCAN", "Face scan carried no usable data — try again in better light.");
   }
+
+  const threshold = method === "FACE" ? FACE_MATCH_THRESHOLD : VOICE_MATCH_THRESHOLD;
 
   // Score every CONSENTED, ENROLLED delegate across the WHOLE roster (not just
   // the coach-scoped pool) so we can both reject a truly unknown face AND still
   // catch a recognised delegate who belongs to a different coach.
   const scored = all
     .map((d) => {
-      const c = consentFor(d.id);
-      if (c.status !== "GRANTED") return { d, score: -1 };
-      if (method === "VOICE") return { d, score: c.voiceId !== null && c.voiceId === tokenChecksum ? 1 : -1 };
-      if (!c.faceVector) return { d, score: -1 };
-      return { d, score: faceSimilarity(scanVec, c.faceVector) };
+      const row = bios.get(d.id);
+      if (!row || consentOf(row) !== "GRANTED") return { d, score: -1 };
+      if (method === "FACE") {
+        const enrolled = asVector(row.face_vector);
+        return { d, score: enrolled ? cosineSimilarity(scanVec, enrolled) : -1 };
+      }
+      // VOICE — prefer the acoustic embedding; fall back to the typed-
+      // passphrase hash for v1 tokens / delegates enrolled without a mic.
+      const enrolledVoice = asVector(row.voice_vector);
+      if (scanVec && enrolledVoice) return { d, score: cosineSimilarity(scanVec, enrolledVoice) };
+      if (row.voice_hash !== null && row.voice_hash !== undefined) {
+        return { d, score: Number(row.voice_hash) === tokenChecksum ? 1 : -1 };
+      }
+      return { d, score: -1 };
     })
-    .filter((s) => s.score >= (method === "VOICE" ? 1 : FACE_MATCH_THRESHOLD))
+    .filter((s) => s.score >= threshold)
     .sort((a, b) => b.score - a.score);
 
   const best = scored[0];
@@ -230,8 +335,8 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
     return fail(
       res, 404, "SCAN_FAILED",
       method === "VOICE"
-        ? "Voice passphrase not recognised — has this delegate enrolled?"
-        : "Face not recognised — has this delegate enrolled?"
+        ? "Voice not recognised — has this delegate enrolled a voiceprint?"
+        : "Face not recognised — has this delegate enrolled at /enroll?"
     );
   }
   const matched = best.d;
@@ -309,16 +414,22 @@ router.get("/api/attendance/:trip_id/coach/:coach_id", requireAuth(), wrap(async
   if (!coach) return fail(res, 404, "NOT_FOUND", "Unknown coach.");
 
   const all = await listDelegates();
+  const bios = await bioMap();
   const onCoach = all.filter((d) => d.coachId === coach_id);
-  const payload = onCoach.map((d) => ({
-    delegateId: d.id,
-    name: d.name,
-    initials: d.initials,
-    vip: !!d.vip,
-    status: d.status,
-    lastSeen: d.lastSeen || "No status",
-    consent: consentFor(d.id).status,
-  }));
+  const payload = onCoach.map((d) => {
+    const row = bios.get(d.id);
+    return {
+      delegateId: d.id,
+      name: d.name,
+      initials: d.initials,
+      vip: !!d.vip,
+      status: d.status,
+      lastSeen: d.lastSeen || "No status",
+      consent: consentOf(row),
+      // Lets the scanner UI show who can actually be face/voice matched.
+      enrolled: !!(row && (asVector(row.face_vector) || asVector(row.voice_vector) || row.voice_hash !== null)),
+    };
+  });
 
   const trip = dash.trip || (await getTrip());
   res.json({
@@ -365,6 +476,7 @@ router.get("/api/attendance/headcount", requireAuth(), wrap(async (req, res) => 
   }
 
   const all = await listDelegates();
+  const bios = await bioMap();
   const scoped = coachId ? all.filter((d) => d.coachId === coachId) : all.filter((d) => d.status !== "UNASSIGNED");
   const missingDelegates = scoped
     .filter((d) => d.status === "MISSING")
@@ -375,7 +487,7 @@ router.get("/api/attendance/headcount", requireAuth(), wrap(async (req, res) => 
       vip: !!d.vip,
       coachId: d.coachId,
       lastSeen: d.lastSeen || "No status",
-      consent: consentFor(d.id).status,
+      consent: consentOf(bios.get(d.id)),
     }));
 
   const trip = dash.trip || (await getTrip());
@@ -423,20 +535,24 @@ router.post("/api/attendance/consent", requireAuth(), wrap(async (req, res) => {
     }
   }
 
-  // If a biometric token is provided while granting consent, store only a
-  // small irreversible numeric fingerprint (checksum). We never persist
-  // the original token or any image/audio. We also only mark biometric
-  // storage as present when a valid token accompanied the grant.
-  const biometricId = (consent === "GRANTED" && biometricToken && VALID_TOKEN.test(biometricToken))
-    ? checksum(biometricToken)
-    : existing.biometricId || null;
+  // Persist the consent decision. REVOKING purges the stored vectors outright
+  // (PDPA erasure) so the delegate can no longer be matched at all; granting
+  // with a valid token enrolls that sample the same way /api/enroll does.
+  if (consent === "REVOKED") {
+    await revokeBiometrics(delegateId);
+  } else {
+    const faceVector = biometricToken && /^face:/i.test(biometricToken) ? parseFaceVector(biometricToken) : null;
+    const voiceVector = biometricToken && /^voice:/i.test(biometricToken) ? parseVoiceVector(biometricToken) : null;
+    const voiceHash = biometricToken && /^voice:/i.test(biometricToken) && !voiceVector ? checksum(biometricToken) : null;
+    await saveBiometrics(delegateId, { faceVector, voiceVector, voiceHash, consent: "GRANTED" });
+  }
 
+  const row = await bioFor(delegateId);
   const updated = {
     ...existing,
     status: consent,
     method,
-    biometricTokenStored: consent === "GRANTED" && !!biometricToken && VALID_TOKEN.test(biometricToken),
-    biometricId,
+    biometricTokenStored: !!(row && (asVector(row.face_vector) || asVector(row.voice_vector) || row.voice_hash !== null)),
     updatedAt: entry.at,
     history: [...existing.history, entry],
   };
@@ -608,6 +724,7 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
   }
   const all = await listDelegates();
   const dash = await liveDashboard();
+  const bios = await bioMap();
   const coachName = (id) => {
     const c = (dash.coaches || []).find((x) => x.id === id);
     return c ? c.name : null;
@@ -616,12 +733,15 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
     .filter((d) => (d.name || "").toLowerCase().includes(q))
     .slice(0, 8)
     .map((d) => {
-      const c = consentFor(d.id);
+      const row = bios.get(d.id);
       return {
         delegateId: d.id,
         name: d.name,
         coachLabel: coachName(d.coachId),
-        enrolled: { face: Array.isArray(c.faceVector), voice: c.voiceId !== null },
+        enrolled: {
+          face: !!(row && asVector(row.face_vector)),
+          voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
+        },
       };
     });
   res.json({ matches });
@@ -643,37 +763,52 @@ router.post("/api/enroll", wrap(async (req, res) => {
     return fail(res, 400, "NOTHING_TO_ENROLL", "Capture a face and/or record a voice passphrase first.");
   }
 
-  const existing = consentFor(delegateId);
   const at = new Date().toISOString();
-  const updated = { ...existing, status: "GRANTED", method: "self-enroll", updatedAt: at };
+  let faceVector = null;
+  let voiceVector = null;
+  let voiceHash = null;
 
   if (faceToken) {
     if (!VALID_TOKEN.test(faceToken) || !/^face:/i.test(faceToken) || /deadbeef/i.test(faceToken)) {
       return fail(res, 400, "INVALID_FACE_TOKEN", "That face sample was invalid — please retake it.");
     }
-    const vec = parseFaceVector(faceToken);
-    if (!vec || vec.length < 8) {
+    faceVector = parseFaceVector(faceToken);
+    if (!faceVector) {
       return fail(res, 400, "INVALID_FACE_TOKEN", "Face sample had too little detail — retake it in better light.");
     }
-    updated.faceVector = vec;
-    updated.biometricId = checksum(faceToken);
-    updated.biometricTokenStored = true;
   }
   if (voiceToken) {
     if (!VALID_TOKEN.test(voiceToken) || !/^voice:/i.test(voiceToken) || /deadbeef/i.test(voiceToken)) {
       return fail(res, 400, "INVALID_VOICE_TOKEN", "That voice sample was invalid — please record it again.");
     }
-    updated.voiceId = checksum(voiceToken);
-    updated.biometricTokenStored = true;
+    // v2 = FFT spectrum embedding (a real voiceprint); v1 = typed-passphrase
+    // hash, kept as the no-microphone fallback.
+    voiceVector = parseVoiceVector(voiceToken);
+    if (!voiceVector) voiceHash = checksum(voiceToken);
   }
 
-  updated.history = [...existing.history, { status: "GRANTED", method: "self-enroll", at }];
-  consents.set(delegateId, updated);
+  // PERSISTED — survives a backend restart, unlike the old in-memory Map.
+  await saveBiometrics(delegateId, { faceVector, voiceVector, voiceHash, consent: "GRANTED" });
+
+  // Keep the in-memory audit trail of consent events alongside it.
+  const existing = consentFor(delegateId);
+  consents.set(delegateId, {
+    ...existing,
+    status: "GRANTED",
+    method: "self-enroll",
+    biometricTokenStored: true,
+    updatedAt: at,
+    history: [...existing.history, { status: "GRANTED", method: "self-enroll", at }],
+  });
 
   res.status(200).json({
     delegateId,
     name: delegate.name,
-    enrolled: { face: Array.isArray(updated.faceVector), voice: updated.voiceId !== null },
+    enrolled: {
+      face: !!faceVector,
+      voice: !!(voiceVector || voiceHash !== null),
+      voiceType: voiceVector ? "acoustic" : voiceHash !== null ? "passphrase" : null,
+    },
   });
 }));
 
