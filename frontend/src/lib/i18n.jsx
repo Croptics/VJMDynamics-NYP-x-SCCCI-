@@ -564,6 +564,9 @@ const DICT = {
   // Trips grid (TripsListPage) — additional strings
   "No trips have been added yet. Please check back later.": "暂无行程，请稍后再查看。",
   "No trips yet": "暂无行程",
+  "No trip currently in progress": "目前没有进行中的行程",
+  "All trip statuses": "所有行程状态",
+  "See Planning and Completed trips too, not just the current In progress one": "同时查看「计划中」与「已完成」的行程，而不仅是目前「进行中」的行程",
   "Search trips…": "搜索行程…",
 
   // Onboarding (Vance) — additional strings

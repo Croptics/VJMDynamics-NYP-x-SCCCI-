@@ -333,10 +333,19 @@ export default function MobileTripsPage() {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
 
+  // Staff (without viewMobileAllTrips) only see the trip that's actually
+  // happening right now — Planning/Completed trips are filtered out client-
+  // side rather than requested differently, since /all-trips is a shared
+  // read-only endpoint with no reason for a second, narrower backend route.
+  // Admin bypasses every permission check, so this is a no-op filter for them.
+  const canSeeAllTrips = getPermissions().viewMobileAllTrips;
+
   function load() {
     apiGet("/all-trips").then((d) => { setTrips(d.trips); setError(null); }).catch((e) => setError(e.message));
   }
   useEffect(() => { load(); }, []);
+
+  const visibleTrips = canSeeAllTrips ? trips : (trips || []).filter((trip) => trip.status === "In progress");
 
   if (selected) return <TripDetail tripId={selected} onBack={() => { setSelected(null); load(); }} />;
 
@@ -347,10 +356,10 @@ export default function MobileTripsPage() {
 
       {error && <div className="mobile-card" style={{ color: "var(--st-missing)", borderColor: "var(--st-missing)" }}>{t("Couldn't reach the backend")} — {error}</div>}
       {!trips && !error && <div className="muted">{t("Loading…")}</div>}
-      {trips && trips.length === 0 && <div className="muted">{t("No trips yet")}</div>}
+      {trips && visibleTrips.length === 0 && <div className="muted">{t(canSeeAllTrips ? "No trips yet" : "No trip currently in progress")}</div>}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {(trips || []).map((trip) => (
+        {(visibleTrips || []).map((trip) => (
           <button
             key={trip.id}
             className="mobile-card"

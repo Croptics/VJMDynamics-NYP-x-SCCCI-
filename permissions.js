@@ -259,6 +259,20 @@ export const PERMISSIONS = [
     group: "mobileView",
   },
   {
+    key: "viewMobileAllTrips",
+    label: "All trip statuses",
+    desc: "See Planning and Completed trips too, not just the current In progress one",
+    chip: "All trips",
+    // Staff only need the trip that's actually happening right now — seeing
+    // every Planning/Completed trip on a phone is clutter, not useful in the
+    // field. Default OFF for Staff (they still always see In progress).
+    // Admin bypasses every permission check regardless, so this is
+    // effectively always-on for Admin without needing its own special case.
+    default: false,
+    group: "mobileView",
+    parent: "viewMobileTrips",
+  },
+  {
     key: "viewMobileChatbot",
     label: "Chatbot",
     desc: "See the floating Trip Assistant chat bubble on mobile",
