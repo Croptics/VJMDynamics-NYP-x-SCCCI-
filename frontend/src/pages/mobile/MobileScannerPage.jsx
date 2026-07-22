@@ -17,7 +17,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   ScanFace, QrCode, PencilLine, AlertTriangle, CheckCircle2, RefreshCw, Camera, SwitchCamera,
-  Mic, Moon, Sun, Zap, Turtle,
+  Mic, Moon, Sun, Zap, Turtle, Wifi, WifiOff, Undo2, Users, RotateCcw,
 } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api.js";
 import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../../lib/faceScan.js";
@@ -26,6 +26,25 @@ import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
 
 const TRIP_ID = "t-1";
+
+// Offline queue — check-ins captured while the phone has no signal (on a
+// highway between venues) are stashed in localStorage and replayed to the
+// server the moment connectivity returns, so a dead zone never loses a scan.
+const QUEUE_KEY = "musterGo.offlineScans";
+function loadQueue() {
+  try { return JSON.parse(localStorage.getItem(QUEUE_KEY)) || []; } catch { return []; }
+}
+function saveQueue(q) {
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch { /* storage full/blocked — queue stays in memory */ }
+}
+// A network drop (fetch rejects with a TypeError, or the browser reports
+// offline) is distinct from a server rejection (which carries .status/.code):
+// only the former should queue for retry, the latter is a real "no match".
+const isNetworkDown = (e) => !navigator.onLine || (e && e.name === "TypeError" && e.status === undefined);
+
+// Haptic feedback (native-app touch) — a double-tick on a confirmed match, a
+// single longer buzz on failure. No-op where the Vibration API is unsupported.
+const haptic = (pattern) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch { /* unsupported */ } };
 
 const SCAN_CSS = `
 @keyframes mscan-line { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
@@ -64,6 +83,17 @@ export default function MobileScannerPage() {
   // original QRCheckInPage.jsx "Me tab" scanner, brought to this page too.
   const [lowLight, setLowLight] = useState(false);
   const [autoLowLight, setAutoLowLight] = useState(false); // true when the ambient sensor tripped it, not the demo button
+  const [luxEstimate, setLuxEstimate] = useState(null); // live ambient reading shown in the viewfinder banner
+
+  // Live-sync + offline queue (Live Sync Badge feature).
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
+  const [pending, setPending] = useState(loadQueue);
+
+  const [queuedNotice, setQueuedNotice] = useState(""); // brief "saved offline" toast
+
+  // Individual + group reset (multi-leg headcount).
+  const [resetBusy, setResetBusy] = useState(false);
+  const [confirmCoachReset, setConfirmCoachReset] = useState(false);
   const [simulateSlow, setSimulateSlow] = useState(false); // demo the >1s SLA breach on demand
   const [passphrase, setPassphrase] = useState("");
   const [voiceListening, setVoiceListening] = useState(false);
@@ -103,6 +133,44 @@ export default function MobileScannerPage() {
 
   useEffect(() => { fetchCoaches(); }, [fetchCoaches]);
   useEffect(() => { fetchCoach(coachId); }, [coachId, fetchCoach]);
+
+  /* Drain the offline queue: replay each stashed scan in order. A server
+   * rejection (has .status/.code — e.g. that delegate is already boarded)
+   * drops the item since a retry won't change it; a still-down network stops
+   * the drain and leaves the remainder queued for the next reconnect. */
+  const flushQueue = useCallback(async () => {
+    if (!navigator.onLine || loadQueue().length === 0) return;
+    let remaining = loadQueue();
+    for (const item of [...remaining]) {
+      try {
+        await apiPost("/attendance/scan", {
+          tripId: item.tripId, scanData: item.token, timestamp: item.timestamp, coachId: item.coachId,
+        });
+      } catch (e) {
+        if (isNetworkDown(e)) break; // still offline — keep the rest queued
+        // else: server rejected it — fall through and drop it
+      }
+      remaining = remaining.slice(1);
+      saveQueue(remaining);
+      setPending(remaining);
+    }
+    fetchCoaches();
+    fetchCoach(coachId);
+  }, [coachId, fetchCoaches, fetchCoach]);
+
+  /* Reflect real connectivity and auto-sync the queue on reconnect. Also
+   * attempt one flush on mount in case scans were left queued last session. */
+  useEffect(() => {
+    const goOnline = () => { setOnline(true); flushQueue(); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    if (navigator.onLine) flushQueue();
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, [flushQueue]);
 
   /* Speech recognition setup for the low-light voice fallback — mirrors
    * QRCheckInPage.jsx's own setup verbatim (browser API, not shareable via
@@ -245,7 +313,13 @@ export default function MobileScannerPage() {
       const avgLuma = sum / (px.length / 4);
       px.fill(0); // PDPA purge — the light-meter frame never outlives this tick
 
-      darkStreak = avgLuma < 30 ? darkStreak + 1 : 0;
+      // Map 0–255 luminance onto an approximate Lux scale so the viewfinder
+      // banner can show a real number and the "< 10 Lux" threshold from the
+      // spec lines up with a visibly dark frame (luma ~30 ≈ 10 Lux).
+      const lux = Math.max(0, Math.round(avgLuma / 3));
+      setLuxEstimate(lux);
+
+      darkStreak = lux < 10 ? darkStreak + 1 : 0;
       if (darkStreak >= 2) {
         setAutoLowLight(true);
         setLowLight(true);
@@ -253,7 +327,7 @@ export default function MobileScannerPage() {
       }
     }, 1200);
 
-    return () => { clearInterval(id); meter.width = 0; meter.height = 0; };
+    return () => { clearInterval(id); meter.width = 0; meter.height = 0; setLuxEstimate(null); };
   }, [scanMode, lowLight]);
 
   function resetScanner() {
@@ -265,11 +339,33 @@ export default function MobileScannerPage() {
     fetchCoach(coachId);
   }
 
+  // Stash a scan for later replay and surface a brief confirmation. Used both
+  // when the phone is offline at capture time and when a live send fails on a
+  // dropped connection.
+  function enqueueScan(token) {
+    const item = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      token, tripId: TRIP_ID, coachId: coachId || undefined,
+      timestamp: new Date().toISOString(),
+    };
+    const next = [...loadQueue(), item];
+    saveQueue(next);
+    setPending(next);
+    setQueuedNotice("No signal — saved offline. It'll sync automatically.");
+    setTimeout(() => setQueuedNotice(""), 3500);
+  }
+
   async function submitScan(token) {
+    // Captured with no signal: queue immediately rather than failing the scan.
+    if (!navigator.onLine) {
+      enqueueScan(token);
+      return;
+    }
     const started = performance.now();
     setScanning(true);
     setScanError("");
     setScanResult(null);
+    setQueuedNotice("");
     try {
       // Demo hook: proves the ">1s -> error tone" SLA path on command.
       if (simulateSlow) await new Promise((r) => setTimeout(r, 1300));
@@ -282,23 +378,65 @@ export default function MobileScannerPage() {
       const elapsed = performance.now() - started;
       if (elapsed > 1000) {
         playErrorTone();
+        haptic(140); // single long buzz on failure
         setScanError(`Took ${(elapsed / 1000).toFixed(1)}s (> 1s limit). Retry.`);
         return;
       }
+      haptic([18, 40, 18]); // confirmed-match double-tick
       setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s` });
       fetchCoaches();
       fetchCoach(coachId);
       setTimeout(() => setScanResult(null), 3500);
     } catch (e) {
+      // Connection dropped mid-send: queue it instead of reporting a failure.
+      if (isNetworkDown(e)) {
+        enqueueScan(token);
+        return;
+      }
       playErrorTone();
+      haptic(140); // single long buzz on failure
       setScanError(
         e.code === "COACH_MISMATCH" ? `Coach mismatch — ${e.message}`
+        : e.code === "ALREADY_BOARDED" ? e.message
         : e.code === "SCAN_FAILED" || e.status === 404
-          ? "No missing delegate matched on this coach."
+          ? (e.message || "Not recognised — has this delegate enrolled at /enroll?")
           : e.message || "Scan failed — check the backend connection."
       );
     } finally {
       setScanning(false);
+    }
+  }
+
+  async function resetDelegate(delegateId) {
+    setResetBusy(true);
+    setScanError("");
+    try {
+      await apiPost("/attendance/reset", { delegateId });
+      fetchCoaches();
+      fetchCoach(coachId);
+    } catch (e) {
+      setScanError(e.message || "Could not reset that delegate.");
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  async function resetCoach() {
+    if (!coachId) return;
+    setResetBusy(true);
+    setScanError("");
+    try {
+      await apiPost("/attendance/reset-coach", { coachId });
+      setConfirmCoachReset(false);
+      fetchCoaches();
+      fetchCoach(coachId);
+    } catch (e) {
+      setConfirmCoachReset(false);
+      setScanError(
+        e.code === "NOTHING_TO_RESET" ? e.message : e.message || "Could not reset this coach."
+      );
+    } finally {
+      setResetBusy(false);
     }
   }
 
@@ -366,6 +504,9 @@ export default function MobileScannerPage() {
   }
 
   const boardedPct = coach && coach.expected > 0 ? Math.round((coach.boarded / coach.expected) * 100) : 0;
+  // Delegates already on this coach — the reset targets. Both ARRIVED (current)
+  // and PRESENT (legacy) count as boarded, matching the backend.
+  const boardedList = (coach?.delegates || []).filter((d) => d.status === "PRESENT" || d.status === "ARRIVED");
 
   const S = {
     viewport: {
@@ -394,6 +535,7 @@ export default function MobileScannerPage() {
             {t("Entrance scanner")}
           </div>
           <h1 style={{ fontSize: 22, margin: "4px 0 0" }}>{t("Face + QR scan")}</h1>
+          <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
         </div>
         <div className="row" style={{ gap: 6 }}>
           {(scanMode === "face" || scanMode === "qr") && !lowLight && (
@@ -444,6 +586,21 @@ export default function MobileScannerPage() {
             <span className="mscan-corner tl" /><span className="mscan-corner tr" />
             <span className="mscan-corner bl" /><span className="mscan-corner br" />
             {scanning && <span className="mscan-line" />}
+            {!camError && luxEstimate != null && (
+              <div
+                style={{
+                  position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                  display: "flex", alignItems: "center", gap: 6, padding: "5px 11px",
+                  borderRadius: 999, fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+                  background: luxEstimate < 20 ? "rgba(180,83,9,0.92)" : "rgba(16,24,40,0.6)",
+                  color: "#fff", backdropFilter: "blur(4px)",
+                }}
+              >
+                {luxEstimate < 20 ? <Moon size={13} /> : <Sun size={13} />}
+                {luxEstimate} {t("Lux")}
+                {luxEstimate < 20 && <span style={{ fontWeight: 600, opacity: 0.9 }}>· {t("voice fallback ready")}</span>}
+              </div>
+            )}
             {camError && (
               <div style={S.overlay}>
                 <Camera size={26} color="#fff" />
@@ -556,6 +713,17 @@ export default function MobileScannerPage() {
         </div>
       )}
 
+      {queuedNotice && (
+        <div style={{
+          marginTop: 12, borderRadius: "var(--r-sm)", padding: 12, fontSize: 13.5,
+          background: "var(--st-review-bg, rgba(180,83,9,0.1))", color: "var(--st-review, #b45309)",
+          border: "1px solid var(--st-review, #b45309)",
+        }}>
+          <WifiOff size={14} style={{ marginRight: 6, verticalAlign: -2 }} />
+          {t(queuedNotice)}
+        </div>
+      )}
+
       {/* Simulated sensors — for demoing the fairness fallback + the 1s SLA.
           Shown regardless of scanMode (matches UnifiedScannerPage.jsx) —
           switching to QR/Manual no longer hides these controls. */}
@@ -576,7 +744,7 @@ export default function MobileScannerPage() {
           </button>
       </div>
 
-      {/* Compact live count for the selected coach */}
+      {/* Live count + boarded roster for the selected coach, with reset controls */}
       {coach && (
         <div className="mobile-card" style={{ marginTop: 14, padding: 14 }}>
           <div className="row between" style={{ alignItems: "baseline" }}>
@@ -588,6 +756,86 @@ export default function MobileScannerPage() {
           <div style={{ height: 7, background: "var(--line)", borderRadius: 4, marginTop: 10, overflow: "hidden" }}>
             <div style={{ height: "100%", borderRadius: 4, background: "var(--st-present)", width: `${boardedPct}%`, transition: "width .4s ease" }} />
           </div>
+
+          {/* Boarded roster — each row can be individually reset to Missing
+              (e.g. a delegate who got off at a rest stop). */}
+          <div className="row between" style={{ marginTop: 14, alignItems: "center" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+              {t("Boarded")} · {boardedList.length}
+            </span>
+            {boardedList.length > 0 && (
+              <button
+                className="btn btn-ghost"
+                style={{ padding: "6px 10px", fontSize: 12, color: "var(--scc-red)" }}
+                onClick={() => setConfirmCoachReset(true)}
+                disabled={resetBusy}
+              >
+                <RotateCcw size={13} /> {t("Reset coach")}
+              </button>
+            )}
+          </div>
+
+          {boardedList.length === 0 ? (
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+              {t("No one boarded yet — scan a face or QR to start the headcount.")}
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              {boardedList.map((d) => (
+                <div
+                  key={d.delegateId}
+                  className="row between"
+                  style={{ padding: "8px 10px", borderRadius: "var(--r-sm)", background: "var(--st-present-bg, rgba(16,185,129,0.08))" }}
+                >
+                  <div className="row" style={{ gap: 8, minWidth: 0 }}>
+                    <CheckCircle2 size={15} style={{ color: "var(--st-present)", flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {d.name}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => resetDelegate(d.delegateId)}
+                    disabled={resetBusy}
+                    aria-label={`${t("Reset")} ${d.name}`}
+                    title={`${t("Reset to missing")} — ${d.name}`}
+                    style={{ background: "none", border: "none", padding: 5, display: "flex", flexShrink: 0, color: "var(--ink-3)" }}
+                  >
+                    <Undo2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Group reset confirmation */}
+      {confirmCoachReset && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
+          onClick={() => !resetBusy && setConfirmCoachReset(false)}
+        >
+          <div
+            className="card"
+            style={{ width: "100%", borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row" style={{ gap: 10, marginBottom: 6 }}>
+              <Users size={20} style={{ color: "var(--scc-red)" }} />
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Reset entire coach headcount?")}</div>
+            </div>
+            <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+              {t("This flips all")} {boardedList.length} {t("boarded delegates on")} {coach?.coachLabel} {t("back to Missing, for a fresh headcount at the next venue.")}
+            </p>
+            <div className="row" style={{ gap: 10, marginTop: 18 }}>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setConfirmCoachReset(false)} disabled={resetBusy}>
+                {t("Cancel")}
+              </button>
+              <button className="btn btn-primary" style={{ flex: 1 }} onClick={resetCoach} disabled={resetBusy}>
+                <RotateCcw size={15} /> {resetBusy ? t("Resetting…") : t("Reset all")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -596,5 +844,39 @@ export default function MobileScannerPage() {
         token is derived. No images stored or transmitted — PDPA compliant.
       </div>
     </div>
+  );
+}
+
+/** Live-sync status pill under the page title. Green when everything's synced,
+ *  amber when scans are queued offline (tap to force a sync once back online),
+ *  red when the phone reports no connection at all. */
+function SyncBadge({ online, pending, onFlush, t }) {
+  const hasPending = pending > 0;
+  let bg, color, Icon, label;
+  if (!online) {
+    bg = "var(--st-missing-bg)"; color = "var(--st-missing)"; Icon = WifiOff;
+    label = hasPending ? `${t("Offline")} · ${pending} ${t("pending")}` : t("Offline");
+  } else if (hasPending) {
+    bg = "var(--st-review-bg, rgba(180,83,9,0.1))"; color = "var(--st-review, #b45309)"; Icon = WifiOff;
+    label = `${pending} ${t("pending offline")}`;
+  } else {
+    bg = "var(--st-present-bg, rgba(16,185,129,0.1))"; color = "var(--st-present)"; Icon = Wifi;
+    label = t("Live synced");
+  }
+  const tappable = hasPending && online;
+  return (
+    <button
+      onClick={tappable ? onFlush : undefined}
+      disabled={!tappable}
+      title={tappable ? t("Tap to sync now") : undefined}
+      style={{
+        marginTop: 6, display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+        background: bg, color, border: "none",
+        cursor: tappable ? "pointer" : "default",
+      }}
+    >
+      <Icon size={13} /> {label}
+    </button>
   );
 }

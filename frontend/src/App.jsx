@@ -27,6 +27,8 @@ import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
+// Vimal — public delegate self-enrollment app (face/voice capture)
+import EnrollPage from "./pages/EnrollPage.jsx";
 
 // Which UI (desktop or mobile) to land in — derived automatically at login
 // time from the account's own permissions (see pickModeFromPermissions
@@ -179,6 +181,8 @@ export default function App() {
             in-memory (never touches getToken()/localStorage, so `authed`
             here is completely unaffected by visiting this route). */}
         <Route path="/kiosk-scan" element={<KioskScannerPage />} />
+        {/* Public delegate self-enrollment (Vimal) — no login, like the kiosk. */}
+        <Route path="/enroll" element={<EnrollPage />} />
         <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname }} />} />
       </Routes>
     );
@@ -192,6 +196,8 @@ export default function App() {
           Layout/MobileLayout wrapper, so no sidebar/tab bar leaks in either
           way. */}
       <Route path="/kiosk-scan" element={<KioskScannerPage />} />
+      {/* Public delegate self-enrollment — reachable while authed too, no chrome. */}
+      <Route path="/enroll" element={<EnrollPage />} />
 
       <Route element={<Layout onLogout={handleLogout} />}>
         <Route index element={<Navigate to={pickHomeRoute()} replace />} />

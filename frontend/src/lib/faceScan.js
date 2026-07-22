@@ -71,11 +71,49 @@ export function vectorizeFaceLandmarks(imageData) {
   for (let i = 0; i < featureString.length; i += 1) {
     h = ((h ^ featureString.charCodeAt(i)) * 16777619) >>> 0;
   }
-  const token = `face:v2:${h.toString(16)}:${vector.slice(0, 8).join(".")}`;
+  // Embed the full 32-dim block-luminance vector (not just the first 8) so the
+  // server can do a real cosine/correlation match between an enrolled face and
+  // a live scan, instead of exact-hash equality (which never survives a second
+  // capture under different light). The 4 edge features are left out of the
+  // similarity vector on purpose — they're on a different scale from the 0–255
+  // block averages and would dominate the correlation. See parseFaceVector()
+  // + faceSimilarity() in routes/vimal.js for the matching side.
+  const token = `face:v2:${h.toString(16)}:${vector.slice(0, 32).join(".")}`;
 
   gray.fill(0);
   px.fill(0);
   return token;
+}
+
+// Cosine similarity on the mean-centred vectors (a.k.a. Pearson correlation):
+// mean-centring removes the overall-brightness component that otherwise makes
+// any two face crops look ~0.99 similar, so different people actually separate.
+// Shared so the enrollment page and any client-side preview score the same way
+// the server does. Returns a value in [-1, 1]; ~1 is the same face.
+export function faceSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return -1;
+  const n = Math.min(a.length, b.length);
+  if (n < 4) return -1;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i += 1) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i += 1) {
+    const x = a[i] - ma, y = b[i] - mb;
+    num += x * y; da += x * x; db += y * y;
+  }
+  if (da === 0 || db === 0) return -1;
+  return num / Math.sqrt(da * db);
+}
+
+// Parse the numeric similarity vector back out of a `face:v2:<hash>:<v0.v1…>`
+// token. Returns null for a non-face token or one with no vector payload.
+export function parseFaceVector(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(":");
+  if (parts.length < 4 || !/^face$/i.test(parts[0])) return null;
+  const nums = parts[3].split(".").map(Number).filter((x) => Number.isFinite(x));
+  return nums.length ? nums : null;
 }
 
 // Version-agnostic on purpose: vectorizeFaceLandmarks() above emits "v2"

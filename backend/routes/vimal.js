@@ -59,10 +59,21 @@ function consentFor(delegateId) {
       delegateId,
       status: "GRANTED", // delegates consent at onboarding by default
       method: "onboarding-form",
-      biometricTokenStored: true,
+      // A delegate is CONSENTED by default, but not yet ENROLLED: with no
+      // face/voice sample on file they simply can't be matched by the scanner
+      // until they self-enroll (see /api/enroll below). This is what stops the
+      // scanner "recognising" people who never gave a biometric sample.
+      biometricTokenStored: false,
       // `biometricId` is a small, irreversible numeric fingerprint of the
       // client's anonymous token (checksum). We never store images/audio.
       biometricId: null,
+      // faceVector: the enrolled 32-dim luminance vector, compared to a live
+      // scan by cosine/correlation. voiceId: an irreversible checksum of the
+      // enrolled voice passphrase token (voice is a deterministic transcript
+      // hash, so an exact match is the right test there). Both null until the
+      // delegate enrolls.
+      faceVector: null,
+      voiceId: null,
       updatedAt: at,
       history: [{ status: "GRANTED", method: "onboarding-form", at }],
     });
@@ -83,6 +94,40 @@ const checksum = (str) => {
   for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
   return h;
 };
+
+/* Real biometric matching (replaces the old random-pick fallback). A face is
+ * recognised by cosine similarity of the mean-centred (Pearson) 32-dim
+ * luminance vector carried in the token; a voice by exact checksum of its
+ * transcript-derived token. FACE_MATCH_THRESHOLD is deliberately a named,
+ * tunable constant — this is a lightweight demo vectorizer, not production
+ * face recognition, so it trades some strictness for working under the varied
+ * light of a real coach bay. Raise it to reduce false matches, lower it if a
+ * genuinely-enrolled delegate is being rejected. */
+const FACE_MATCH_THRESHOLD = 0.8;
+
+function parseFaceVector(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(":");
+  if (parts.length < 4 || !/^face$/i.test(parts[0])) return null;
+  const nums = parts[3].split(".").map(Number).filter((x) => Number.isFinite(x));
+  return nums.length ? nums : null;
+}
+
+function faceSimilarity(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return -1;
+  const n = Math.min(a.length, b.length);
+  if (n < 4) return -1;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i] - ma, y = b[i] - mb;
+    num += x * y; da += x * x; db += y * y;
+  }
+  if (da === 0 || db === 0) return -1;
+  return num / Math.sqrt(da * db);
+}
 
 const timeNow = () =>
   new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -148,62 +193,77 @@ router.post("/api/attendance/scan", requireKioskOrAuth(), wrap(async (req, res) 
     return fail(res, 404, "SCAN_FAILED", "Delegate not recognized in system.");
   }
 
-  // Simulated matcher over the REAL shared delegate list. Matching strategy:
-  // 1) If any enrolled delegate has a stored biometricId that equals the
-  //    checksum(token) we treat that as a direct match (preferred).
-  // 2) Otherwise fall back to a stable pseudo-random pick from the pool so
-  //    demo flows continue to work even when no biometric enrollment exists.
+  // REAL biometric match over the shared delegate list (no random fallback):
+  //   FACE  -> cosine/Pearson correlation of the enrolled 32-dim vector vs the
+  //            live scan vector, best above FACE_MATCH_THRESHOLD wins.
+  //   VOICE -> exact checksum of the transcript-derived token.
+  // A face/voice with no enrolled match is genuinely "not recognised" — this
+  // is what fixes the old behaviour where ANY face got assigned to a random
+  // missing delegate. Delegates enroll their sample via POST /api/enroll.
   const all = await listDelegates();
+  const method = token.toLowerCase().startsWith("voice:") ? "VOICE" : "FACE";
+  const scanVec = method === "FACE" ? parseFaceVector(token) : null;
   const tokenChecksum = checksum(token);
 
-  // Cross-coach guard (mirrors the same fix on the QR check-in path in
-  // vance.js): if this exact biometric token belongs to a delegate enrolled
-  // on a DIFFERENT coach than the one this scanner is scoped to, say so
-  // specifically instead of just falling through to a generic "no match" —
-  // that read as a scan failure rather than the real, actionable cause
-  // ("wrong coach"), and could otherwise mislead staff into rescanning
-  // pointlessly. Checked against the WHOLE roster, not the coach-scoped pool
-  // below, since the whole point is to catch a delegate who's excluded from
-  // that pool precisely because they're on a different coach.
-  if (coachId) {
-    const exactMatch = all.find((d) => {
+  if (method === "FACE" && (!scanVec || scanVec.length < 4)) {
+    return fail(res, 400, "INVALID_SCAN", "Face scan carried no usable data — try again in better light.");
+  }
+
+  // Score every CONSENTED, ENROLLED delegate across the WHOLE roster (not just
+  // the coach-scoped pool) so we can both reject a truly unknown face AND still
+  // catch a recognised delegate who belongs to a different coach.
+  const scored = all
+    .map((d) => {
       const c = consentFor(d.id);
-      return c.biometricId !== null && c.biometricId === tokenChecksum;
+      if (c.status !== "GRANTED") return { d, score: -1 };
+      if (method === "VOICE") return { d, score: c.voiceId !== null && c.voiceId === tokenChecksum ? 1 : -1 };
+      if (!c.faceVector) return { d, score: -1 };
+      return { d, score: faceSimilarity(scanVec, c.faceVector) };
+    })
+    .filter((s) => s.score >= (method === "VOICE" ? 1 : FACE_MATCH_THRESHOLD))
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best) {
+    return fail(
+      res, 404, "SCAN_FAILED",
+      method === "VOICE"
+        ? "Voice passphrase not recognised — has this delegate enrolled?"
+        : "Face not recognised — has this delegate enrolled?"
+    );
+  }
+  const matched = best.d;
+
+  // Recognised, but assigned to a DIFFERENT coach than this scanner is scoped
+  // to: say so specifically (mirrors the QR path in vance.js) so staff don't
+  // rescan pointlessly.
+  if (coachId && matched.coachId && matched.coachId !== coachId) {
+    const dash0 = await liveDashboard();
+    const assignedCoach = (dash0.coaches || []).find((c) => c.id === matched.coachId);
+    const scannerCoach = (dash0.coaches || []).find((c) => c.id === coachId);
+    const assignedLabel = assignedCoach ? assignedCoach.name : matched.coachId;
+    const scannerLabel = scannerCoach ? scannerCoach.name : coachId;
+    return res.status(409).json({
+      error: "COACH_MISMATCH",
+      message: `${matched.name} is assigned to ${assignedLabel}, not ${scannerLabel}.`,
+      delegateId: matched.id,
+      delegateName: matched.name,
+      assignedCoachId: matched.coachId,
+      assignedCoachLabel: assignedLabel,
+      scannerCoachId: coachId,
     });
-    if (exactMatch && exactMatch.coachId && exactMatch.coachId !== coachId) {
-      const dash = await liveDashboard();
-      const assignedCoach = (dash.coaches || []).find((c) => c.id === exactMatch.coachId);
-      const scannerCoach = (dash.coaches || []).find((c) => c.id === coachId);
-      const assignedLabel = assignedCoach ? assignedCoach.name : exactMatch.coachId;
-      const scannerLabel = scannerCoach ? scannerCoach.name : coachId;
-      return res.status(409).json({
-        error: "COACH_MISMATCH",
-        message: `${exactMatch.name} is assigned to ${assignedLabel}, not ${scannerLabel}.`,
-        delegateId: exactMatch.id,
-        delegateName: exactMatch.name,
-        assignedCoachId: exactMatch.coachId,
-        assignedCoachLabel: assignedLabel,
-        scannerCoachId: coachId,
-      });
-    }
   }
 
-  // Candidates must be still MISSING, have GRANTED consent and (if provided)
-  // belong to the mustered coach.
-  const pool = all.filter((d) => d.status === "MISSING" && consentFor(d.id).status === "GRANTED" && (!coachId || d.coachId === coachId));
-  if (pool.length === 0) {
-    return fail(res, 404, "SCAN_FAILED", "No matching enrolled delegate is still missing.");
+  // Recognised and on the right coach, but already boarded — nothing to do.
+  if (matched.status !== "MISSING") {
+    return res.status(409).json({
+      error: "ALREADY_BOARDED",
+      message: `${matched.name} is already ${matched.status === "PRESENT" ? "boarded" : matched.status.toLowerCase()}.`,
+      delegateId: matched.id,
+      delegateName: matched.name,
+    });
   }
 
-  // 1) Exact biometricId match (if any)
-  let matched = pool.find((d) => {
-    const c = consentFor(d.id);
-    return c.biometricId !== null && c.biometricId === tokenChecksum;
-  });
-
-  // 2) Fallback deterministic selection so demos still behave when no
-  // biometric enrollment exists for this pool.
-  if (!matched) matched = pool[tokenChecksum % pool.length];
   const dash = await liveDashboard();
   const coach = (dash.coaches || []).find((c) => c.id === matched.coachId);
   const seenAt = `${coach ? coach.name : "On site"} · ${timeNow()}`;
@@ -212,7 +272,6 @@ router.post("/api/attendance/scan", requireKioskOrAuth(), wrap(async (req, res) 
   // dashboard activity feed, so every screen stays in sync.
   await updateDelegate(matched.id, { status: "PRESENT", lastSeen: seenAt });
 
-  const method = token.toLowerCase().startsWith("voice:") ? "VOICE" : "FACE";
   const processedInMs = Date.now() - started;
   const when = timestamp && !Number.isNaN(Date.parse(timestamp)) ? new Date(timestamp) : new Date();
   checkinHistory.set(matched.id, [
@@ -455,6 +514,52 @@ const DEMO_ROSTER = [
   { name: "Phua Yi Ming",  vip: false, status: "PRESENT", lastSeen: "Coach · 14:15" },
 ];
 
+/* ============================================================================
+ * POST /api/attendance/reset            (individual undo — multi-leg trips)
+ * Body: { delegateId }
+ * Flips ONE boarded delegate back to MISSING — e.g. a delegate who stepped
+ * off the coach at a rest stop, so the next leg's headcount correctly counts
+ * them as "expected, not yet re-boarded" again. Writes through JQ's
+ * updateDelegate() helper so every screen (dashboard, Missing page, coach
+ * boards) reflects the reset live. The auditable check-in history is kept —
+ * a reset is an operational status flip, not a data purge.
+ * ========================================================================== */
+router.post("/api/attendance/reset", requireAuth(), wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  if (typeof delegateId !== "string" || !(await getDelegateById(delegateId))) {
+    return fail(res, 404, "NOT_FOUND", "Delegate does not exist.");
+  }
+  await updateDelegate(delegateId, { status: "MISSING", lastSeen: `Reset · ${timeNow()}` });
+  res.status(200).json({ delegateId, status: "MISSING" });
+}));
+
+/* ============================================================================
+ * POST /api/attendance/reset-coach      (group / whole-coach undo)
+ * Body: { coachId }
+ * Flips EVERY boarded delegate on one coach back to MISSING in a single tap,
+ * for starting a fresh headcount when moving from Venue A to Venue B. Counts
+ * both ARRIVED (current) and PRESENT (legacy) as boarded — same isBoarded()
+ * pairing used everywhere else in this router.
+ * ========================================================================== */
+router.post("/api/attendance/reset-coach", requireAuth(), wrap(async (req, res) => {
+  const { coachId } = req.body || {};
+  const dash = await liveDashboard();
+  const coach = (dash.coaches || []).find((c) => c.id === coachId);
+  if (!coach) return fail(res, 404, "NOT_FOUND", "Unknown coach.");
+
+  const all = await listDelegates();
+  const boarded = all.filter(
+    (d) => d.coachId === coachId && (d.status === "PRESENT" || d.status === "ARRIVED")
+  );
+  if (boarded.length === 0) {
+    return fail(res, 409, "NOTHING_TO_RESET", `No one is boarded on ${coach.name} yet.`);
+  }
+  for (const d of boarded) {
+    await updateDelegate(d.id, { status: "MISSING", lastSeen: `Reset · ${timeNow()}` });
+  }
+  res.status(200).json({ reset: boarded.length, coachId });
+}));
+
 router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) => {
   const coachId = (req.body && req.body.coachId) || "c2";
   const dash = await liveDashboard();
@@ -473,6 +578,101 @@ router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) =>
     created.push(await createDelegate({ ...d, coachId }));
   }
   res.status(201).json({ seeded: created.length, coachId });
+}));
+
+/* ============================================================================
+ * DELEGATE SELF-ENROLLMENT (public — no staff login)
+ *
+ * The standalone /enroll web app (frontend/src/pages/EnrollPage.jsx) that a
+ * delegate opens themselves before the trip. They find their own record by
+ * name, give PDPA consent, capture a face sample and/or record a voice
+ * passphrase, and submit. Only the irreversible vector/checksum is stored —
+ * never an image or audio clip (same Zero-Image guarantee as the scanner).
+ *
+ * These two routes are intentionally UNAUTHENTICATED (like the passwordless
+ * /kiosk-scan surface): a delegate enrolling before the event has no staff
+ * account. This is demo-grade self-service — it proves identity only by the
+ * name the delegate selects, not by a secret. In production you'd gate this
+ * behind the per-delegate magic link from their confirmation email.
+ * ========================================================================== */
+
+/* GET /api/enroll/lookup?name=...  — find your own delegate record to enroll
+ * against. Returns minimal fields only (id, name, coach, what's already
+ * enrolled), capped, and requires a real query so it isn't a roster dump. */
+router.get("/api/enroll/lookup", wrap(async (req, res) => {
+  const q = String((req.query && req.query.name) || "").trim().toLowerCase();
+  if (q.length < 2) {
+    return fail(res, 400, "QUERY_TOO_SHORT", "Type at least 2 letters of your name.");
+  }
+  const all = await listDelegates();
+  const dash = await liveDashboard();
+  const coachName = (id) => {
+    const c = (dash.coaches || []).find((x) => x.id === id);
+    return c ? c.name : null;
+  };
+  const matches = all
+    .filter((d) => (d.name || "").toLowerCase().includes(q))
+    .slice(0, 8)
+    .map((d) => {
+      const c = consentFor(d.id);
+      return {
+        delegateId: d.id,
+        name: d.name,
+        coachLabel: coachName(d.coachId),
+        enrolled: { face: Array.isArray(c.faceVector), voice: c.voiceId !== null },
+      };
+    });
+  res.json({ matches });
+}));
+
+/* POST /api/enroll  — store a delegate's own face and/or voice sample.
+ * Body: { delegateId, faceToken?, voiceToken? }  (at least one required)
+ * Stores only the parsed similarity vector (face) and an irreversible
+ * checksum (voice), flips consent to GRANTED, and records the enrollment in
+ * the delegate's consent history. */
+router.post("/api/enroll", wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  const faceToken = req.body && req.body.faceToken ? String(req.body.faceToken).trim() : null;
+  const voiceToken = req.body && req.body.voiceToken ? String(req.body.voiceToken).trim() : null;
+
+  const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+  if (!faceToken && !voiceToken) {
+    return fail(res, 400, "NOTHING_TO_ENROLL", "Capture a face and/or record a voice passphrase first.");
+  }
+
+  const existing = consentFor(delegateId);
+  const at = new Date().toISOString();
+  const updated = { ...existing, status: "GRANTED", method: "self-enroll", updatedAt: at };
+
+  if (faceToken) {
+    if (!VALID_TOKEN.test(faceToken) || !/^face:/i.test(faceToken) || /deadbeef/i.test(faceToken)) {
+      return fail(res, 400, "INVALID_FACE_TOKEN", "That face sample was invalid — please retake it.");
+    }
+    const vec = parseFaceVector(faceToken);
+    if (!vec || vec.length < 8) {
+      return fail(res, 400, "INVALID_FACE_TOKEN", "Face sample had too little detail — retake it in better light.");
+    }
+    updated.faceVector = vec;
+    updated.biometricId = checksum(faceToken);
+    updated.biometricTokenStored = true;
+  }
+  if (voiceToken) {
+    if (!VALID_TOKEN.test(voiceToken) || !/^voice:/i.test(voiceToken) || /deadbeef/i.test(voiceToken)) {
+      return fail(res, 400, "INVALID_VOICE_TOKEN", "That voice sample was invalid — please record it again.");
+    }
+    updated.voiceId = checksum(voiceToken);
+    updated.biometricTokenStored = true;
+  }
+
+  updated.history = [...existing.history, { status: "GRANTED", method: "self-enroll", at }];
+  consents.set(delegateId, updated);
+
+  res.status(200).json({
+    delegateId,
+    name: delegate.name,
+    enrolled: { face: Array.isArray(updated.faceVector), voice: updated.voiceId !== null },
+  });
 }));
 
 export default router;
