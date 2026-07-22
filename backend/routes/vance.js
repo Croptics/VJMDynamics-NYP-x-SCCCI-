@@ -40,7 +40,7 @@ import {
   getMissing,
   COACHES,
 } from "../data.js";
-import { requireAuth, requirePermission, requireKioskOrAuth } from "../auth.js";
+import { requireAuth, requirePermission, requireKioskOrPermission } from "../auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -610,7 +610,7 @@ async function runParseJob(job, buf, mediaType, isPdf) {
 
 router.post(
   "/api/documents/parse-async",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.raw({ type: () => true, limit: "25mb" }),
   wrap(async (req, res) => {
     await ensureReady();
@@ -664,7 +664,7 @@ router.get("/api/onboarding/context", requireAuth(), wrap(async (req, res) => {
 
 router.post(
   "/api/documents/parse",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.raw({ type: () => true, limit: "25mb" }),
   wrap(async (req, res) => {
     await ensureReady();
@@ -755,7 +755,7 @@ function isPlausibleDelegate(r) {
 
 router.post(
   "/api/trips/:id/onboarding/confirm",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.json(),
   wrap(async (req, res) => {
     await ensureReady();
@@ -840,9 +840,11 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
 
 // Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
 // the scan. This is what the on-site scanner calls.
-// requireKioskOrAuth: a normal signed-in user OR the passwordless kiosk token
-// (the /kiosk-scan entrance scanner's QR mode). See auth.js.
-router.post("/api/onboarding/checkin", requireKioskOrAuth(), express.json(), wrap(async (req, res) => {
+// requireKioskOrPermission("manageScanner"): a signed-in user with the
+// "Manage scanner" permission, OR the passwordless kiosk token (the
+// /kiosk-scan entrance scanner's QR mode — unaffected by the permission,
+// by design). See auth.js.
+router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner"), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const code = (req.body?.code || "").toString().trim();
   const requestedTripId = (req.body?.tripId || "t-1").toString();

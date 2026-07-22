@@ -14,6 +14,7 @@
 
 import jwt from "jsonwebtoken";
 import { getAccountByUsername, accountPermissions } from "./data.js";
+import { wrap } from "./lib/wrap.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "mustergo-dev-insecure-default-change-me";
 if (!process.env.JWT_SECRET) {
@@ -22,8 +23,6 @@ if (!process.env.JWT_SECRET) {
     "  Set JWT_SECRET to a long random string before deploying anywhere public.\n"
   );
 }
-
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 /** Issue a signed session token for a username at a given token version. */
 export function makeToken(username, tokenVersion = 0) {
@@ -122,5 +121,31 @@ export function requirePermission(perm) {
     }
     req.account = acc;
     next();
+  });
+}
+
+/**
+ * Like requireKioskOrAuth(), but the SIGNED-IN-SESSION path additionally
+ * requires `perm` (the passwordless kiosk token path is unaffected either
+ * way — it never carried per-permission checks and still doesn't; the kiosk
+ * exists specifically so a device with no login can still scan). Used on
+ * the two camera check-in endpoints now that scanning is gated on
+ * "manageScanner" for a real session.
+ */
+export function requireKioskOrPermission(perm) {
+  return wrap(async (req, res, next) => {
+    const acc = await accountFromReq(req);
+    if (acc) {
+      if (!accountPermissions(acc)[perm]) {
+        return res.status(403).json({ error: "FORBIDDEN", message: "You don't have permission for that action." });
+      }
+      req.account = acc;
+      return next();
+    }
+    if (kioskTokenValid(req)) {
+      const kiosk = await getAccountByUsername("__kiosk__");
+      if (kiosk) { req.account = { ...kiosk, isKiosk: true }; return next(); }
+    }
+    return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please sign in again." });
   });
 }

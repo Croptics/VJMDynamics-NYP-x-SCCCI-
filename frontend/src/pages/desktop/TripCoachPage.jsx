@@ -1,4 +1,4 @@
-// frontend/src/pages/TripCoachPage.jsx
+// frontend/src/pages/desktop/TripCoachPage.jsx
 // Owner: Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
 //
 // v2 — "Live Travel Operations Dashboard" redesign. Still lives entirely
@@ -66,8 +66,8 @@ import {
   Search, Activity, MapPin, Building2, Landmark, UtensilsCrossed,
   Factory, Plane, Accessibility, Clock, Navigation, Gauge, Settings,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../lib/api.js";
-import { useLang } from "../lib/i18n.jsx";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+import { useLang } from "../../lib/i18n.jsx";
 import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
 import "./TripCoachPage.css";
 

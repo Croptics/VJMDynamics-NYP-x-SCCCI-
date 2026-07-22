@@ -14,50 +14,19 @@
  *   npm run dev        # http://localhost:4000  (needs DATABASE_URL in .env — PostgreSQL)
  *
  * The data layer (data.js) talks to PostgreSQL and is asynchronous, so the route
- * handlers below are async and `await` it. The server only starts listening
- * AFTER the database connection + schema are ready (see the bottom of the file).
+ * handlers are async and `await` it. The server only starts listening AFTER the
+ * database connection + schema are ready (see the bottom of the file).
+ *
+ * This file is deliberately just Express bootstrap + middleware + mounting
+ * (2026-07-21 split, mirroring the earlier data.js -> db/*.js split). JQ's own
+ * base routes now live in backend/routes/{auth,accounts,dashboard,delegates,
+ * history}.js — see the TEAMMATE ZONE below for where feature routers mount.
  */
 
 import "dotenv/config"; // loads backend/.env into process.env — MUST be first
 import express from "express";
 import cors from "cors";
-import multer from "multer";
-import {
-  initDb,
-  getTrip,
-  getDashboard,
-  getMissing,
-  getDelegates,
-  listDelegates,
-  getDelegateById,
-  createDelegate,
-  updateDelegate,
-  deleteDelegate,
-  deleteAllDelegates,
-  setDelegatePhoto,
-  clearDelegatePhoto,
-  getActivity,
-  deleteActivity,
-  deleteAllActivity,
-  rollbackActivity,
-  applyLateCutoff,
-  getAccountByUsername,
-  accountPermissions,
-  resetPassword,
-  listAccounts,
-  createAccount,
-  updateAccount,
-  deleteAccount,
-  verifyPassword,
-  upgradePasswordIfNeeded,
-  startNewSession,
-  resolveTripUuid,
-  touchLastSeen,
-  clearLastSeen,
-  listActiveAccounts,
-} from "./data.js";
-import { makeToken, accountFromReq, requireAuth, requirePermission, signKioskToken } from "./auth.js";
-import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "./cloudinary.js";
+import { initDb, applyLateCutoff } from "./data.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -76,397 +45,32 @@ if (!process.env.FRONTEND_URL) {
 app.use(cors({ origin: process.env.FRONTEND_URL || true, credentials: true }));
 app.use(express.json());
 
-/* ---- Rate limiting (in-memory) ------------------------------------------- *
- * A tiny fixed-window limiter for the auth routes, to blunt password brute-
- * forcing. No dependency and no shared store — fine for this single-instance
- * app; if this were ever scaled to multiple instances behind a load balancer
- * each would keep its own count, so a real deployment would move this to a
- * shared store (Redis) or a library like express-rate-limit. Keyed by client
- * IP; a successful login clears that IP's counter so normal use is unaffected.
- * ------------------------------------------------------------------------- */
-function rateLimit({ windowMs, max, message }) {
-  const hits = new Map(); // ip -> { count, resetAt }
-  // Opportunistic cleanup so the Map can't grow unbounded over a long uptime.
-  setInterval(() => {
-    const now = Date.now();
-    for (const [ip, rec] of hits) if (rec.resetAt <= now) hits.delete(ip);
-  }, windowMs).unref?.();
-
-  const mw = (req, res, next) => {
-    const ip = req.ip || req.socket?.remoteAddress || "unknown";
-    const now = Date.now();
-    const rec = hits.get(ip);
-    if (!rec || rec.resetAt <= now) {
-      hits.set(ip, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-    if (rec.count >= max) {
-      const retryAfter = Math.ceil((rec.resetAt - now) / 1000);
-      res.setHeader("Retry-After", String(retryAfter));
-      return res.status(429).json({ error: "RATE_LIMITED", message });
-    }
-    rec.count += 1;
-    next();
-  };
-  // Let a route clear an IP's counter on success (so a legit user who just
-  // signed in isn't penalised for their earlier typos).
-  mw.clear = (req) => hits.delete(req.ip || req.socket?.remoteAddress || "unknown");
-  return mw;
-}
-
-// 10 attempts per 10 minutes per IP on the credential endpoints.
-const authLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 10,
-  message: "Too many attempts. Please wait a few minutes and try again.",
-});
-
 app.use((req, _res, next) => {
   console.log(`${new Date().toLocaleTimeString()}  ${req.method} ${req.url}`);
   next();
 });
 
-// Wrap async handlers so a rejected promise becomes an Express error (500)
-// instead of crashing the process.
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
-// Delegate photo uploads — memory storage (never touches local disk; the
-// buffer goes straight to Cloudinary). 5MB cap and an image-only MIME
-// filter are the first layer of validation; Cloudinary's own image decode
-// (resource_type: "image" in cloudinary.js) is the second, real one — it
-// rejects anything that isn't actually a valid image regardless of what
-// the client claimed.
-const photoUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) return cb(new Error("UNSUPPORTED_TYPE"));
-    cb(null, true);
-  },
-});
-
 /* ---- Health ------------------------------------------------------------- */
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "mustergo-backend" }));
 
-/* ---- Auth --------------------------------------------------------------- *
- * Login validates against the `accounts` table (see data.js). Accounts are
- * managed by users with the "manageAccounts" permission on the Account control
- * page. The seeded first login is staff_194 / password123!.
- *
- * Passwords are bcrypt-hashed (see data.js) and the session token is a
- * signed JWT (see auth.js) — set JWT_SECRET in backend/.env for production.
+/* ---- JQ's base routes ----------------------------------------------------
+ * Auth, Account control, Trips/Dashboard reads, Delegate CRUD (+ photo),
+ * and the History tracker. See backend/routes/*.js for each domain.
  * ------------------------------------------------------------------------- */
+import authRouter from "./routes/auth.js";
+app.use(authRouter);
 
-app.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
-  const { staffId, password } = req.body || {};
+import accountsRouter from "./routes/accounts.js";
+app.use(accountsRouter);
 
-  if (!staffId || !password) {
-    return res.status(400).json({ error: "MISSING_FIELDS", message: "Staff ID and password are required." });
-  }
+import dashboardRouter from "./routes/dashboard.js";
+app.use(dashboardRouter);
 
-  const acc = await getAccountByUsername(staffId);
-  if (!acc || !(await verifyPassword(password, acc.password))) {
-    return res.status(401).json({ error: "INVALID_CREDENTIALS", message: "Incorrect Staff ID or password." });
-  }
-  await upgradePasswordIfNeeded(acc, password);
-  authLimiter.clear(req); // successful login — reset this IP's attempt counter
+import delegatesRouter from "./routes/delegates.js";
+app.use(delegatesRouter);
 
-  // Start a fresh session — invalidates any token held by an older browser.
-  const tokenVersion = await startNewSession(acc.id);
-
-  res.json({
-    token: makeToken(acc.username, tokenVersion),
-    role: acc.role,
-    name: acc.name,
-    username: acc.username,
-    permissions: accountPermissions(acc),
-  });
-}));
-
-// "Forgot password" self-service reset. Public (no token — you don't have a
-// valid session, that's the point), username + new password only. See the
-// comment on resetPassword() in data.js for why this is intentionally simple
-// and not safe as-is for a real public deployment.
-app.post("/api/auth/reset-password", authLimiter, wrap(async (req, res) => {
-  const { username, newPassword } = req.body || {};
-  if (!username || !newPassword) {
-    return res.status(400).json({ error: "MISSING_FIELDS", message: "Username and new password are required." });
-  }
-  const result = await resetPassword(username, newPassword);
-  if (result.error) {
-    const status = result.error === "WEAK_PASSWORD" ? 400 : 400;
-    return res.status(status).json({
-      error: result.error,
-      message: result.message || "Couldn't reset that account. Check the username and try again.",
-    });
-  }
-  res.json({ ok: true });
-}));
-
-/**
- * GET /api/auth/session — returns the CURRENT permissions/details for the
- * signed-in account, straight from the database (never cached). The frontend
- * polls this so that if someone with "manageAccounts" changes YOUR account
- * (permissions, username, or deletes it) while you're logged in elsewhere, you
- * get logged out automatically instead of carrying on with stale access shown
- * in the UI. Returns 401 if the account was renamed or deleted (the old token
- * no longer resolves to anyone).
- */
-app.get("/api/auth/session", wrap(async (req, res) => {
-  const acc = await accountFromReq(req);
-  if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Your session is no longer valid." });
-  await touchLastSeen(acc.id); // powers the Staff Operations "active now" list
-  res.json({
-    username: acc.username,
-    name: acc.name,
-    role: acc.role,
-    permissions: accountPermissions(acc),
-  });
-}));
-
-/**
- * POST /api/auth/logout — clears this account's last_seen_at immediately, so
- * the Staff Operations "active now" list reflects an explicit logout right
- * away instead of showing the account as still active until the 45s window
- * lapses. Best-effort from the frontend's side (the client clears its own
- * token regardless of whether this call succeeds).
- */
-app.post("/api/auth/logout", requireAuth(), wrap(async (req, res) => {
-  const acc = await accountFromReq(req);
-  if (acc) await clearLastSeen(acc.id);
-  res.json({ ok: true });
-}));
-
-/**
- * POST /api/auth/kiosk — mint a passwordless, scoped KIOSK token for the
- * entrance scanner. Public BY DESIGN (the passwordless kiosk fetches it with
- * no credentials); the token grants nothing beyond the two camera check-in
- * endpoints that opt into requireKioskOrAuth() — see auth.js's signKioskToken/
- * requireKioskOrAuth and KioskScannerPage.jsx. Cheap + stateless, so no rate
- * limiter needed (it authorises no reads and only the same check-ins a normal
- * scan would).
- */
-app.post("/api/auth/kiosk", (_req, res) => {
-  res.json({ token: signKioskToken() });
-});
-
-/**
- * GET /api/staff/active-sessions — Staff Operations dashboard. Requires
- * manageAccounts (staff-facing, not delegate data — most signed-in accounts
- * shouldn't see who else is logged in). "Active" = last_seen_at stamped
- * within the last 45s by the existing 15s session-poll every client already
- * makes (see touchLastSeen() in data.js) — no new client-side polling infra.
- */
-app.get("/api/staff/active-sessions", requirePermission("manageAccounts"), wrap(async (_req, res) => {
-  const [all, active] = await Promise.all([listAccounts(), listActiveAccounts()]);
-  // Role breakdown for the Staff operations "Total staff accounts" tile —
-  // role is "admin" or "staff" only (see cleanRole()/accountPublic() above).
-  const adminCount = all.filter((a) => a.role === "admin").length;
-  const staffCount = all.length - adminCount;
-  res.json({ totalStaff: all.length, adminCount, staffCount, activeCount: active.length, active });
-}));
-
-/* ---- Accounts (requires manageAccounts) --------------------------------- */
-app.get("/api/accounts", requirePermission("manageAccounts"), wrap(async (_req, res) => {
-  res.json({ accounts: await listAccounts() });
-}));
-
-app.post("/api/accounts", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await createAccount(req.body || {});
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  res.status(201).json(result.account);
-}));
-
-app.patch("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await updateAccount(req.params.id, req.body || {});
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  // If you edited your OWN account, hand back a fresh token for the (possibly
-  // new) username so the client can keep working without re-logging in. Reuse
-  // the current token_version (editing your account is not a new login, so it
-  // must not invalidate this very browser's session).
-  const isSelf = req.account && req.account.id === req.params.id;
-  res.json({
-    account: result.account,
-    self: !!isSelf,
-    token: isSelf ? makeToken(result.account.username, req.account.token_version ?? 0) : undefined,
-  });
-}));
-
-app.delete("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await deleteAccount(req.params.id);
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  res.json(result);
-}));
-
-function accountErrStatus(code) {
-  if (code === "NOT_FOUND") return 404;
-  if (code === "USERNAME_TAKEN") return 409;
-  if (code === "LAST_MAIN") return 409;
-  return 400; // USERNAME_REQUIRED / PASSWORD_REQUIRED / WEAK_PASSWORD
-}
-
-/* ---- Trips -------------------------------------------------------------- *
- * Read-only, but still requires a signed-in account (any account — no
- * specific permission) so attendance/delegate data can't be pulled by
- * anyone who merely finds the API URL.
- * ------------------------------------------------------------------------- */
-app.get("/api/trips", requireAuth(), wrap(async (_req, res) => res.json([await getTrip()])));
-app.get("/api/trips/:id", requireAuth(), wrap(async (_req, res) => res.json(await getTrip())));
-
-/* ---- Dashboard read views ------------------------------------------------
- * The :id is "t-1" for the default Beijing dashboard (unfiltered — every
- * delegate, exactly as before) or a real trip uuid to scope the whole
- * dashboard to that trip (the Dashboard's trip switcher). resolveTripUuid()
- * maps "t-1" -> null (no filter) and a uuid -> that uuid.
- * ------------------------------------------------------------------------- */
-app.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (req, res) => {
-  res.json(await getDashboard(await resolveTripUuid(req.params.id)));
-}));
-app.get("/api/trips/:id/missing", requireAuth(), wrap(async (req, res) => {
-  res.json({ missing: await getMissing(await resolveTripUuid(req.params.id)) });
-}));
-
-/* ---- Delegate CRUD ------------------------------------------------------ */
-app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
-  res.json({ delegates: await listDelegates(await resolveTripUuid(req.params.id)) });
-}));
-
-// DELETE all delegates (dashboard "Delete all" button) — scoped to whichever
-// trip is currently selected; the base t-1 view (resolveTripUuid -> null)
-// keeps the original "clear everything" behaviour.
-// Display name of the account performing a write, recorded on each activity_log
-// entry so the History tracker shows WHO made the change (not a generic "you").
-// requirePermission()/requireAuth() set req.account (see auth.js).
-const actorOf = (req) => req.account?.name || req.account?.username || null;
-
-app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const deleted = await deleteAllDelegates(await resolveTripUuid(req.params.id), actorOf(req));
-  res.json({ deleted });
-}));
-
-app.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const body = req.body || {};
-  if (!body.name || !body.name.trim()) {
-    return res.status(400).json({ error: "NAME_REQUIRED", message: "A name is required." });
-  }
-  // A coach is required unless the delegate is explicitly Unassigned.
-  if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
-    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
-  }
-  const delegate = await createDelegate(body, await resolveTripUuid(req.params.id), actorOf(req));
-  res.status(201).json(delegate);
-}));
-
-app.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const patch = req.body || {};
-  const existing = await getDelegateById(req.params.id);
-  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
-  // Validate against the RESULT of applying this patch, not just the patch
-  // alone — e.g. changing only the status on an already-unassigned delegate
-  // still needs a coach if the new status isn't Unassigned.
-  const nextStatus = patch.status !== undefined ? patch.status : existing.status;
-  const nextCoachId = patch.coachId !== undefined ? patch.coachId : existing.coachId;
-  if (nextStatus !== "UNASSIGNED" && !nextCoachId) {
-    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
-  }
-  const updated = await updateDelegate(req.params.id, patch, actorOf(req));
-  if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
-  res.json(updated);
-}));
-
-app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const existing = await getDelegateById(req.params.id);
-  const ok = await deleteDelegate(req.params.id, actorOf(req));
-  if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
-  if (existing?.photoPublicId) await destroyImage(existing.photoPublicId); // clean up Cloudinary too
-  res.json({ deleted: true });
-}));
-
-/* ---- Delegate profile photo (Cloudinary) ----------------------------------
- * Separate from the JSON PATCH route above on purpose — see the comment on
- * the "photoUrl" column in data.js's createSchema(). multer parses the
- * multipart body into req.file (memory buffer, never written to disk).
- * ------------------------------------------------------------------------- */
-app.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (req, res, next) => {
-  photoUpload.single("photo")(req, res, (err) => {
-    if (err) {
-      const code = err.message === "UNSUPPORTED_TYPE" ? "UNSUPPORTED_TYPE" : "UPLOAD_FAILED";
-      const message = code === "UNSUPPORTED_TYPE" ? "Please upload an image file." : "Upload too large (5MB max) or failed.";
-      return res.status(400).json({ error: code, message });
-    }
-    next();
-  });
-}, wrap(async (req, res) => {
-  if (!photoStorageConfigured()) {
-    return res.status(503).json({ error: "PHOTO_STORAGE_NOT_CONFIGURED", message: "Photo storage isn't set up on this server yet." });
-  }
-  if (!req.file) return res.status(400).json({ error: "FILE_REQUIRED", message: "Please choose an image." });
-  const existing = await getDelegateById(req.params.id);
-  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
-
-  const { url, publicId } = await uploadImage(req.file.buffer, "mustergo/delegates");
-  const oldPublicId = await setDelegatePhoto(req.params.id, url, publicId);
-  if (oldPublicId) await destroyImage(oldPublicId); // replacing a photo — clean up the old asset
-
-  res.json({ photoUrl: url });
-}));
-
-app.delete("/api/delegates/:id/photo", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const oldPublicId = await clearDelegatePhoto(req.params.id);
-  if (oldPublicId === null) return res.status(404).json({ error: "NOT_FOUND" });
-  if (oldPublicId) await destroyImage(oldPublicId);
-  res.json({ deleted: true });
-}));
-
-/* ---- Excel export --------------------------------------------------------
- * Moved to ./routes/export.js — a configurable, multi-sheet workbook with
- * status/coach/VIP/column filters and an optional natural-language (AI) filter
- * layer. Mounted with the other routers near the bottom of this file.
- * ------------------------------------------------------------------------- */
-
-/* ---- History tracker (persisted activity log) -----------------------------
- * Dashboard's "History tracker" card. Read for anyone signed in; deletes
- * (single or clear-all) reuse manageDelegates, same as the activity these
- * entries come from (delegate add/edit/delete).
- * ------------------------------------------------------------------------- */
-app.get("/api/activity", requireAuth(), wrap(async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 200, 1000);
-  res.json({ activity: await getActivity(limit) });
-}));
-
-app.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const ok = await deleteActivity(req.params.id);
-  if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
-  res.json({ deleted: true });
-}));
-
-app.delete("/api/activity", requirePermission("manageDelegates"), wrap(async (_req, res) => {
-  const deleted = await deleteAllActivity();
-  res.json({ deleted });
-}));
-
-// Field-level rollback for one History Log entry — see rollbackActivity()
-// in data.js for what "rollbackable" means (delegate-edit entries only,
-// not add/remove) and its documented limitations.
-app.post("/api/activity/:id/rollback", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const result = await rollbackActivity(req.params.id, actorOf(req));
-  if (result.error === "NOT_FOUND") return res.status(404).json({ error: "NOT_FOUND", message: "That history entry no longer exists." });
-  if (result.error === "NOT_ROLLBACKABLE") return res.status(400).json({ error: "NOT_ROLLBACKABLE", message: "This entry can't be rolled back." });
-  if (result.error === "DELEGATE_GONE") return res.status(404).json({ error: "DELEGATE_GONE", message: "That delegate no longer exists." });
-  res.json(result.delegate);
-}));
-
-// Manual trigger for the Late-status cutoff check (see applyLateCutoff() in
-// data.js + the background interval in this file that normally runs it
-// automatically every minute). Exists for two reasons: (1) so a manual
-// re-check is possible if the interval was ever down, and (2) so this can
-// actually be tested/demoed without waiting for real wall-clock 10:00 AM —
-// `force: true` bypasses the hour check entirely (still only ever touches
-// ASSIGNED delegates either way).
-app.post("/api/system/late-cutoff", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const result = await applyLateCutoff(req.body?.force ? new Date(2000, 0, 1, 23, 59) : undefined);
-  res.json(result);
-}));
+import historyRouter from "./routes/history.js";
+app.use(historyRouter);
 
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.

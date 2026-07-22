@@ -8,9 +8,9 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../lib/api.js";
-import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../permissions.js";
-import { useLang } from "../lib/i18n.jsx";
+import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../../lib/api.js";
+import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../../permissions.js";
+import { useLang } from "../../lib/i18n.jsx";
 
 /**
  * Account control (requires the "manage accounts" permission).
@@ -573,10 +573,18 @@ export default function AccountControlPage() {
             {form.role === "staff" && (
               <>
                 {PERM_GROUPS.map((g) => {
-                  const perms = PERMISSIONS.filter((p) => p.group === g.key);
-                  if (perms.length === 0) return null;
+                  // adminOnly permissions (e.g. manageAccounts) never render as a
+                  // Staff toggle — only a real Admin should ever grant/revoke
+                  // everyone else's access (see permissions.js's adminOnly doc).
+                  const allPerms = PERMISSIONS.filter((p) => p.group === g.key && !p.adminOnly);
+                  if (allPerms.length === 0) return null;
+                  // Top-level perms render in order; a perm with a `parent`
+                  // renders indented immediately under that parent instead of
+                  // in the main flow (see permissions.js's `parent` doc).
+                  const topLevel = allPerms.filter((p) => !p.parent || !allPerms.some((pp) => pp.key === p.parent));
+                  const childrenOf = (key) => allPerms.filter((p) => p.parent === key);
                   const collapsed = collapsedGroups.has(g.key);
-                  const allChecked = perms.every((p) => !!form.perms[p.key]);
+                  const allChecked = allPerms.every((p) => !!form.perms[p.key]);
                   return (
                     <div key={g.key} style={{ marginTop: 18 }}>
                       <div className="row between" style={{ alignItems: "flex-start", gap: 8 }}>
@@ -609,19 +617,15 @@ export default function AccountControlPage() {
                       </div>
                       {!collapsed && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                          {perms.map((p) => (
-                            <label key={p.key} style={S.permRow}>
-                              <input
-                                type="checkbox"
-                                checked={!!form.perms[p.key]}
-                                onChange={() => togglePerm(p.key)}
-                                style={{ marginTop: 3 }}
-                              />
-                              <span>
-                                <span style={{ fontWeight: 600, fontSize: 14 }}>{t(p.label)}</span>
-                                <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(p.desc)}</span>
-                              </span>
-                            </label>
+                          {topLevel.map((p) => (
+                            <PermRow
+                              key={p.key}
+                              perm={p}
+                              form={form}
+                              togglePerm={togglePerm}
+                              childrenOf={childrenOf}
+                              t={t}
+                            />
                           ))}
                         </div>
                       )}
@@ -642,6 +646,36 @@ export default function AccountControlPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Renders one permission checkbox, then recurses into its children indented
+// underneath — supports any nesting depth (currently 2 levels are used:
+// dashboard -> Delegate -> History logs), not just direct parent/child.
+function PermRow({ perm, form, togglePerm, childrenOf, t }) {
+  const kids = childrenOf(perm.key);
+  return (
+    <div>
+      <label style={S.permRow}>
+        <input
+          type="checkbox"
+          checked={!!form.perms[perm.key]}
+          onChange={() => togglePerm(perm.key)}
+          style={{ marginTop: 3 }}
+        />
+        <span>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t(perm.label)}</span>
+          <span className="muted" style={{ display: "block", fontSize: 12 }}>{t(perm.desc)}</span>
+        </span>
+      </label>
+      {kids.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, marginLeft: 26, borderLeft: "2px solid var(--line)", paddingLeft: 12 }}>
+          {kids.map((cp) => (
+            <PermRow key={cp.key} perm={cp} form={form} togglePerm={togglePerm} childrenOf={childrenOf} t={t} />
+          ))}
         </div>
       )}
     </div>

@@ -14,6 +14,7 @@ import ChatBubble from "./ChatBubble.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
+import { getPermissions } from "../lib/api.js";
 
 // How often (ms) to refresh the sidebar's critical-exception badge. Kept
 // separate from the session-guard's own interval since it's unrelated data.
@@ -87,7 +88,7 @@ export default function Layout({ onLogout }) {
       <main className="main">
         <Outlet />
       </main>
-      <ChatBubble />
+      {getPermissions().viewChatbot && <ChatBubble />}
     </div>
   );
 }

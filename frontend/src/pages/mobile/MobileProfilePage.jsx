@@ -62,7 +62,7 @@ export default function MobileProfilePage() {
       <button
         className="mobile-card row between"
         style={{ width: "100%", cursor: "pointer", border: "1px solid var(--line)" }}
-        onClick={() => navigate("/guide")}
+        onClick={() => navigate("/mobile-user-guide")}
       >
         <span className="row" style={{ gap: 10 }}>
           <HelpCircle size={18} color="var(--ink-3)" />

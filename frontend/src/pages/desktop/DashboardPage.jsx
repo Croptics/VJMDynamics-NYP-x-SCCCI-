@@ -27,13 +27,13 @@ import {
   Users,
   Radio,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../lib/api.js";
-import StatusBadge from "../components/StatusBadge.jsx";
-import AnalyticsPanel from "../components/AnalyticsPanel.jsx";
-import DelegateAvatar, { statusTone } from "../components/DelegateAvatar.jsx";
-import DelegateLocationMap from "../components/DelegateLocationMap.jsx";
-import ExportModal from "../components/ExportModal.jsx";
-import { useLang } from "../lib/i18n.jsx";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+import StatusBadge from "../../components/StatusBadge.jsx";
+import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
+import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
+import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
+import ExportModal from "../../components/ExportModal.jsx";
+import { useLang } from "../../lib/i18n.jsx";
 
 /**
  * Screen 2 — Admin Dashboard & Analytics (Jun Qi).
@@ -64,10 +64,14 @@ const EMPTY_FORM = {
 
 export default function DashboardPage() {
   const perms = getPermissions();
-  // Two-role RBAC: Admin sees every tab; Staff is limited to the Delegate
-  // tab (Analytics is admin-only) — Staff operations was already gated on
-  // manageAccounts, which perms.manageAccounts now only carries for admins.
-  const isAdmin = getUser()?.role === "admin";
+  // Two-role RBAC: Admin sees every tab (bypasses every permission check —
+  // accountPermissions() returns all-true for role="admin"). Staff sees the
+  // Analytics tab based on the viewAnalytics permission (2026-07-21 — was
+  // hardcoded role==="admin" only; now a real per-account toggle, defaulting
+  // closed since it's a genuinely new capability being unlocked, not one
+  // being narrowed). Staff operations stays gated on manageAccounts, which
+  // perms.manageAccounts only carries for admins now (see permissions.js's
+  // adminOnly doc — Staff can never be individually granted it).
   const { t, lang } = useLang();
   const navigate = useNavigate();
 
@@ -81,15 +85,15 @@ export default function DashboardPage() {
   }, []);
 
   // Default to the first tab this account can actually see — viewDelegates
-  // gates the Delegate tab the same way Analytics is already gated on
-  // isAdmin and Staff operations on manageAccounts (see the tab buttons
-  // below); an account with none of the three still needs SOME initial
-  // value, so it falls back to "delegate" (its content block is itself
-  // gated, so nothing renders — same "no visible tabs" edge case the
-  // desktop/mobile route fallbacks in App.jsx already accept).
+  // gates the Delegate tab the same way Analytics is gated on viewAnalytics
+  // and Staff operations on manageAccounts (see the tab buttons below); an
+  // account with none of the three still needs SOME initial value, so it
+  // falls back to "delegate" (its content block is itself gated, so nothing
+  // renders — same "no visible tabs" edge case the desktop/mobile route
+  // fallbacks in App.jsx already accept).
   const [tab, setTab] = useState(() => {
     if (perms.viewDelegates) return "delegate";
-    if (getUser()?.role === "admin") return "analytics";
+    if (perms.viewAnalytics) return "analytics";
     if (perms.manageAccounts) return "staffops";
     return "delegate";
   }); // "delegate" | "analytics" | "headcount" | "staffops"
@@ -560,7 +564,7 @@ export default function DashboardPage() {
             {t("Delegate")}
           </button>
         )}
-        {isAdmin && (
+        {perms.viewAnalytics && (
           <button
             className="btn"
             onClick={() => setTab("analytics")}
@@ -607,7 +611,7 @@ export default function DashboardPage() {
         <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
       )}
 
-      {tab === "analytics" && isAdmin && (
+      {tab === "analytics" && perms.viewAnalytics && (
         <div style={{ marginTop: 20 }}>
           <AnalyticsPanel data={data} missing={missing} delegates={delegates} />
         </div>
@@ -773,24 +777,24 @@ export default function DashboardPage() {
 
       {tab === "delegate" && perms.viewDelegates && (
       <>
-      {/* ---- KPI tiles ---------------------------------------------------- */}
+      {/* ---- KPI tiles ------------------------------------------------------
+       * Missing + Late keep the full attention-grabbing tile treatment — they're
+       * the two statuses that need someone to actually DO something. Arrived /
+       * Assigned / Unassigned are calmer "where is everyone" counts, so they're
+       * folded into one compact Roster breakdown card (a proportional bar +
+       * 3 small stats) instead of 3 more full-size tiles — 5 equal-weight
+       * cards in a row was reads as visual noise when only 2 of them are
+       * actually urgent (2026-07-22 redesign, was a flat 5-tile kpi-grid).
+       * ---------------------------------------------------------------------- */}
       {k && (
-        <div className="kpi-grid">
-          {/* Order: Missing, Late, Present, Unassigned — the two "needs
-              attention" statuses lead, grouped together, ahead of the two
-              calmer counts. */}
+        <div className="kpi-row">
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
             suffix={`${t("of")} ${k.total}`} foot={trip ? `${t("Departure in")} ${trip.departsIn}` : null} big
             onClick={() => showDelegatesFiltered("MISSING")} />
           <Kpi tone="late" icon={Clock} label={t("Late")} value={`${k.late ?? 0}`}
             foot={t("Past cut-off, not checked in")}
             onClick={() => showDelegatesFiltered("LATE")} />
-          <Kpi tone="present" icon={UserCheck} label={t("Present")} value={`${k.present}`}
-            foot={`+${k.presentDelta} ${t("in last 5 mins")}`}
-            onClick={() => showDelegatesFiltered("ARRIVED")} />
-          <Kpi tone="unassigned" icon={HelpCircle} label={t("Unassigned")} value={`${k.unassigned}`}
-            foot={t("No coach yet")}
-            onClick={() => showDelegatesFiltered("UNASSIGNED")} />
+          <RosterCard t={t} k={k} onFilter={showDelegatesFiltered} />
         </div>
       )}
 
@@ -1276,10 +1280,16 @@ export default function DashboardPage() {
            exactly how many columns fit, which is what read as "unaligned".
            Explicit breakpoints instead of a fluid track keep every card the
            same size as its row-mates at every width. */
-        .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:22px;align-items:stretch}
-        .kpi-grid > *{min-height:132px}
-        @media (max-width:960px){.kpi-grid{grid-template-columns:repeat(2,1fr)}}
-        @media (max-width:480px){.kpi-grid{grid-template-columns:1fr}}
+        .kpi-row{display:grid;grid-template-columns:1fr 1fr 2fr;gap:16px;margin-top:22px;align-items:stretch}
+        .kpi-row > *{min-height:132px}
+        @media (max-width:960px){.kpi-row{grid-template-columns:1fr 1fr;}.kpi-row > :last-child{grid-column:1 / -1}}
+        @media (max-width:560px){.kpi-row{grid-template-columns:1fr}.kpi-row > :last-child{grid-column:auto}}
+        .roster-bar{display:flex;height:8px;border-radius:999px;overflow:hidden;background:var(--surface-2)}
+        .roster-bar > span{height:100%}
+        .roster-stats{display:flex;gap:0;margin-top:14px;flex:1}
+        .roster-stat{flex:1;display:flex;flex-direction:column;gap:2px;padding:0 14px;border:none;background:none;cursor:pointer;text-align:left}
+        .roster-stat + .roster-stat{border-left:1px solid var(--line)}
+        .roster-stat:first-child{padding-left:0}
         .kpi-clickable{transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease}
         /* Hover/focus color now matches each card's OWN status tone (--kpi-tone,
            set inline per card) instead of a hardcoded var(--st-normal) — that
@@ -1321,6 +1331,47 @@ function Kpi({ tone, icon: Icon, label, value, suffix, foot, big, onClick }) {
       </div>
       {foot && <div className="muted" style={{ fontSize: 13 }}>{foot}</div>}
     </div>
+  );
+}
+
+/* ---- Roster breakdown card -----------------------------------------------
+ * Folds Arrived / Assigned / Unassigned into one card: a proportional stacked
+ * bar (share of the roster in each status) plus 3 compact clickable stats —
+ * the calmer counts don't need a full KPI tile each like Missing/Late do. */
+function RosterCard({ t, k, onFilter }) {
+  const segments = [
+    { tone: "present", value: k.present },
+    { tone: "assigned", value: k.assigned ?? 0 },
+    { tone: "unassigned", value: k.unassigned },
+  ];
+  const total = Math.max(k.total, 1); // guard div-by-zero on an empty roster
+
+  return (
+    <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column" }}>
+      <span className="page-eyebrow" style={{ color: "var(--ink-3)" }}>{t("Roster breakdown")}</span>
+      <div className="roster-bar" style={{ marginTop: 12 }}>
+        {segments.map((s) => s.value > 0 && (
+          <span key={s.tone} style={{ width: `${(s.value / total) * 100}%`, background: `var(--st-${s.tone})` }} />
+        ))}
+      </div>
+      <div className="roster-stats">
+        <RosterStat tone="present" icon={UserCheck} label={t("Arrived")} value={k.present} onClick={() => onFilter("ARRIVED")} />
+        <RosterStat tone="assigned" icon={Users} label={t("Assigned")} value={k.assigned ?? 0} onClick={() => onFilter("ASSIGNED")} />
+        <RosterStat tone="unassigned" icon={HelpCircle} label={t("Unassigned")} value={k.unassigned} onClick={() => onFilter("UNASSIGNED")} />
+      </div>
+    </div>
+  );
+}
+
+function RosterStat({ tone, icon: Icon, label, value, onClick }) {
+  return (
+    <button className="roster-stat" onClick={onClick}>
+      <span className="row" style={{ gap: 6, color: `var(--st-${tone})` }}>
+        <Icon size={14} />
+        <span className="muted" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{label}</span>
+      </span>
+      <span className="mono" style={{ fontSize: 24, fontWeight: 700, color: `var(--st-${tone})`, lineHeight: 1.2 }}>{value}</span>
+    </button>
   );
 }
 

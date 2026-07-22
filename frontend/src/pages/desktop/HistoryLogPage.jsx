@@ -5,8 +5,8 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw } from "lucide-react";
-import { apiGet, apiPost, apiDelete, getPermissions } from "../lib/api.js";
-import { useLang } from "../lib/i18n.jsx";
+import { apiGet, apiPost, apiDelete, getPermissions } from "../../lib/api.js";
+import { useLang } from "../../lib/i18n.jsx";
 
 // Human-readable labels for the field-level diff shown under a rollback-
 // eligible entry — matches the patch-shape keys updateDelegate() (backend)

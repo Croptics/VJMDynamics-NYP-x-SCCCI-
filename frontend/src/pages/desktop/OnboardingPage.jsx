@@ -17,7 +17,7 @@ import {
   Globe,
   Check,
 } from "lucide-react";
-import { ConfidenceBadge } from "../components/StatusBadge.jsx";
+import { ConfidenceBadge } from "../../components/StatusBadge.jsx";
 import {
   startParseJob,
   getParseJob,
@@ -25,10 +25,10 @@ import {
   getTrips,
   confirmDelegates,
   exportRowsCsv,
-} from "../lib/claudeParse.js";
-import { useLang } from "../lib/i18n.jsx";
+} from "../../lib/claudeParse.js";
+import { useLang } from "../../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
-import TripPulse from "../components/TripPulse.jsx";
+import TripPulse from "../../components/TripPulse.jsx";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).

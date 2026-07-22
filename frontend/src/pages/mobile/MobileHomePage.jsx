@@ -140,18 +140,19 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {/* Glanceable metrics — Missing / Late / Present, each a shortcut into
-          the Attendance page pre-filtered to that status. Total moved out of
-          this row (see the subheader under the page title above) so these 3
-          stay dedicated to actionable, at-risk statuses. Order: the two
-          "needs attention" statuses (Missing, Late) lead together, ahead of
-          the calmer Present count — mirrors desktop DashboardPage.jsx's KPI
-          tile order. */}
+      {/* Glanceable metrics — Missing / Late / Assigned / Present, each a
+          shortcut into the Attendance page pre-filtered to that status. Total
+          moved out of this row (see the subheader under the page title
+          above) so these stay dedicated to actionable, at-risk statuses.
+          Order: the two "needs attention" statuses (Missing, Late) lead
+          together, ahead of Assigned then the calmer Present count — mirrors
+          desktop DashboardPage.jsx's KPI tile order. */}
       {k && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
           <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
           <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
           <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
+          <Stat label={t("Assigned")} value={k.assigned ?? 0} tone="assigned" onClick={() => goToAttendance("ASSIGNED")} />
         </div>
       )}
 

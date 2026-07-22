@@ -1,4 +1,4 @@
-// frontend/src/pages/UnifiedScannerPage.jsx
+// frontend/src/pages/desktop/UnifiedScannerPage.jsx
 // "Face Scan + QR Code Scan" — a desktop-native entrance-kiosk page.
 // Route:   /scanner (registered in App.jsx — no permission gate, same as
 //          /checkin: any signed-in staff or admin can operate it).
@@ -25,10 +25,10 @@ import {
   ScanFace, QrCode, PencilLine, AlertTriangle, CheckCircle2, RefreshCw,
   Camera, Users, ShieldCheck, Mic, Moon, Sun, Zap, Turtle,
 } from "lucide-react";
-import { apiGet, apiPost } from "../lib/api.js";
-import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../lib/faceScan.js";
-import QRScannerPanel from "../components/QRScannerPanel.jsx";
-import ManualTrackingPanel from "../components/ManualTrackingPanel.jsx";
+import { apiGet, apiPost } from "../../lib/api.js";
+import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../../lib/faceScan.js";
+import QRScannerPanel from "../../components/QRScannerPanel.jsx";
+import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
 
 const TRIP_ID = "t-1";
 

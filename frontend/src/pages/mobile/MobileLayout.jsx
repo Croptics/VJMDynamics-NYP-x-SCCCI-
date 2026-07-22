@@ -147,7 +147,7 @@ export default function MobileLayout({ onLogout }) {
           </NavLink>
         ))}
       </nav>
-      <MobileChatBubble />
+      {perms.viewMobileChatbot && <MobileChatBubble />}
     </div>
   );
 }
