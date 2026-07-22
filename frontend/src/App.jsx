@@ -22,6 +22,8 @@ import MobileLayout from "./pages/mobile/MobileLayout.jsx";
 import MobileHomePage from "./pages/mobile/MobileHomePage.jsx";
 import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
 import MobileTripsPage from "./pages/mobile/MobileTripsPage.jsx";
+// Combined Trips + Attendance destination — composes the two pages above.
+import MobileOpsPage from "./pages/mobile/MobileOpsPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
@@ -63,6 +65,17 @@ const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile/scanner", perm: "viewMobileScanner" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
+
+/** Mobile Home is an admin-only overview. For anyone else this returns the
+ *  first mobile route they CAN see, deliberately excluding "/mobile" itself —
+ *  returning it would bounce straight back here and spin forever. Returns null
+ *  for admins, meaning "render Home normally". */
+function mobileHomeRedirect() {
+  const perms = getPermissions();
+  if (perms.manageAccounts) return null; // admin — Home is theirs
+  const hit = MOBILE_FALLBACK_ORDER.filter((r) => r.path !== "/mobile").find((r) => perms[r.perm]);
+  return hit ? hit.path : "/mobile/profile"; // profile is never gated
+}
 
 function firstAllowedRoute(perms, mode) {
   const order = mode === "mobile" ? MOBILE_FALLBACK_ORDER : DESKTOP_FALLBACK_ORDER;
@@ -225,6 +238,27 @@ export default function App() {
             (ChatBubble.jsx, rendered from Layout.jsx on every route)
             instead of a dedicated destination; no route needed. */}
 
+        {/* Biometric enrolment (Vimal) — the in-app counterpart to the public
+            /enroll link. Staff can enrol a delegate's face/voice at the desk;
+            delegates can still self-enrol from the public page. Gated on the
+            same viewScanner permission as the scanner it feeds. */}
+        <Route
+          path="/enrolment"
+          element={
+            <ViewGate perm="viewScanner">
+              <div className="page">
+                <div className="page-eyebrow">FaceCheck Pro</div>
+                <h1 className="page-title">Biometric enrolment</h1>
+                <p className="page-sub" style={{ marginBottom: 20 }}>
+                  Capture a delegate's face and voiceprint so the scanners can recognise them.
+                  Delegates can also self-enrol at <strong>/enroll</strong> before the trip.
+                </p>
+                <EnrollPage embedded />
+              </div>
+            </ViewGate>
+          }
+        />
+
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
             page hosting all three real check-in paths on one screen. */}
         <Route path="/scanner" element={<ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>} />
@@ -268,9 +302,22 @@ export default function App() {
           "mobileView" group) — /mobile/profile stays ungated, it's account
           settings, not a feature view. */}
       <Route element={<MobileLayout onLogout={handleLogout} />}>
-        <Route path="/mobile" element={<ViewGate perm="viewMobileHome" mode="mobile"><MobileHomePage /></ViewGate>} />
-        <Route path="/mobile/attendance" element={<ViewGate perm="viewMobileAttendance" mode="mobile"><MobileAttendancePage /></ViewGate>} />
-        <Route path="/mobile/trips" element={<ViewGate perm="viewMobileTrips" mode="mobile"><MobileTripsPage /></ViewGate>} />
+        {/* Home = admin overview. Staff are sent straight to Operations (or
+            the first view they do have) — see mobileHomeRedirect(). */}
+        <Route
+          path="/mobile"
+          element={
+            mobileHomeRedirect()
+              ? <Navigate to={mobileHomeRedirect()} replace />
+              : <ViewGate perm="viewMobileHome" mode="mobile"><MobileHomePage /></ViewGate>
+          }
+        />
+        {/* Trips and Attendance are one combined "Operations" destination.
+            Both paths are kept so existing deep links (e.g. Home's KPI tiles
+            linking to /mobile/attendance?status=MISSING) still work — they
+            just open the combined page with the matching view selected. */}
+        <Route path="/mobile/attendance" element={<ViewGate perm="viewMobileAttendance" mode="mobile"><MobileOpsPage defaultView="delegates" /></ViewGate>} />
+        <Route path="/mobile/trips" element={<ViewGate perm="viewMobileTrips" mode="mobile"><MobileOpsPage defaultView="trips" /></ViewGate>} />
         {/* Dedicated Issues page (2026-07-20) — was an inline accordion on
             Mobile Home. Gated behind viewMobileIssues (2026-07-21) so an
             admin can hide it per-account, same as every other mobile view. */}
@@ -285,6 +332,11 @@ export default function App() {
             Scanner Access" target and needs no session at all; this one is
             for someone already using the app who just wants the scanner. */}
         <Route path="/mobile/scanner" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage /></ViewGate>} />
+        {/* Face and QR are their own bottom-nav tabs. Same page, pinned to one
+            scanner via lockMode (which also hides the in-page mode switcher);
+            /mobile/scanner above keeps the original combined toggle. */}
+        <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
+        <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
         {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
             where MobileProfilePage's "User guide" button used to send you to

@@ -812,4 +812,93 @@ router.post("/api/enroll", wrap(async (req, res) => {
   });
 }));
 
+/* GET /api/enroll/stats — how much of the roster is enrolled. Powers the
+ * progress panel on the enrolment page so staff can see coverage at a glance
+ * ("34 of 42 enrolled") instead of checking delegates one by one. */
+router.get("/api/enroll/stats", wrap(async (_req, res) => {
+  const all = await listDelegates();
+  const bios = await bioMap();
+  let face = 0, voice = 0, either = 0;
+  for (const d of all) {
+    const row = bios.get(d.id);
+    if (!row || consentOf(row) !== "GRANTED") continue;
+    const f = !!asVector(row.face_vector);
+    const v = !!(asVector(row.voice_vector) || row.voice_hash !== null);
+    if (f) face += 1;
+    if (v) voice += 1;
+    if (f || v) either += 1;
+  }
+  res.json({ total: all.length, face, voice, enrolled: either });
+}));
+
+/* POST /api/enroll/verify — a SELF-TEST. Scores a freshly captured sample
+ * against what this delegate already has stored and reports the similarity,
+ * WITHOUT touching their attendance status or the stored template. Lets a
+ * delegate confirm "yes, the scanner will actually recognise me" at the moment
+ * they enrol, instead of finding out at the coach door.
+ * Body: { delegateId, faceToken? | voiceToken? } */
+router.post("/api/enroll/verify", wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  const faceToken = req.body && req.body.faceToken ? String(req.body.faceToken).trim() : null;
+  const voiceToken = req.body && req.body.voiceToken ? String(req.body.voiceToken).trim() : null;
+
+  const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+  const row = await bioFor(delegateId);
+  if (!row || consentOf(row) !== "GRANTED") {
+    return fail(res, 409, "NOT_ENROLLED", "Nothing enrolled yet for this delegate.");
+  }
+
+  if (faceToken) {
+    const vec = parseFaceVector(faceToken);
+    const enrolled = asVector(row.face_vector);
+    if (!vec) return fail(res, 400, "INVALID_FACE_TOKEN", "That sample had no usable data.");
+    if (!enrolled) return fail(res, 409, "NOT_ENROLLED", "No face is enrolled for this delegate.");
+    const similarity = cosineSimilarity(vec, enrolled);
+    return res.json({
+      modality: "FACE", similarity: +similarity.toFixed(4),
+      threshold: FACE_MATCH_THRESHOLD, match: similarity >= FACE_MATCH_THRESHOLD,
+    });
+  }
+  if (voiceToken) {
+    const vec = parseVoiceVector(voiceToken);
+    const enrolled = asVector(row.voice_vector);
+    if (vec && enrolled) {
+      const similarity = cosineSimilarity(vec, enrolled);
+      return res.json({
+        modality: "VOICE", similarity: +similarity.toFixed(4),
+        threshold: VOICE_MATCH_THRESHOLD, match: similarity >= VOICE_MATCH_THRESHOLD,
+      });
+    }
+    // Legacy typed-passphrase enrolment — exact hash, no similarity score.
+    const ok = row.voice_hash !== null && Number(row.voice_hash) === checksum(voiceToken);
+    return res.json({ modality: "VOICE", similarity: ok ? 1 : 0, threshold: 1, match: ok });
+  }
+  return fail(res, 400, "NOTHING_TO_VERIFY", "Capture a face or voice sample to test.");
+}));
+
+/* POST /api/enroll/revoke — PDPA right to erasure. Purges this delegate's
+ * stored face/voice vectors outright and marks consent REVOKED, so they can no
+ * longer be biometrically matched (staff can still check them in manually or
+ * by QR). Same public trust model as enrolment itself — see the section header.
+ * Body: { delegateId } */
+router.post("/api/enroll/revoke", wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+
+  await revokeBiometrics(delegateId);
+  const at = new Date().toISOString();
+  const existing = consentFor(delegateId);
+  consents.set(delegateId, {
+    ...existing,
+    status: "REVOKED",
+    method: "self-service",
+    biometricTokenStored: false,
+    updatedAt: at,
+    history: [...existing.history, { status: "REVOKED", method: "self-service", at }],
+  });
+  res.json({ delegateId, name: delegate.name, consent: "REVOKED", erased: true });
+}));
+
 export default router;

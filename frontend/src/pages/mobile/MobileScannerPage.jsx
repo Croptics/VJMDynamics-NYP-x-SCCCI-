@@ -71,14 +71,22 @@ const SCAN_CSS = `
 @media (prefers-reduced-motion: reduce) { .mscan-line { animation: none; top: 48%; } .mscan-pop { animation: none; } }
 `;
 
-export default function MobileScannerPage() {
+/**
+ * `lockMode` ("face" | "qr") pins this page to a single scanner and hides the
+ * mode switcher — that's what lets Face and QR live as their own bottom-nav
+ * tabs instead of being two states of one screen. Left undefined (the legacy
+ * /mobile/scanner route) the page keeps its original Face/QR/Manual toggle.
+ */
+export default function MobileScannerPage({ lockMode }) {
   const { t } = useLang();
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);
   const [loadErr, setLoadErr] = useState("");
 
-  const [scanMode, setScanMode] = useState("face"); // face | qr | manual
+  const [scanMode, setScanMode] = useState(lockMode || "face"); // face | qr | manual
+  // Keep the mode pinned if the route changes between the Face and QR tabs.
+  useEffect(() => { if (lockMode) setScanMode(lockMode); }, [lockMode]);
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null); // { name, time }
   const [scanError, setScanError] = useState("");
@@ -590,7 +598,9 @@ export default function MobileScannerPage() {
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
             {t("Entrance scanner")}
           </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 0" }}>{t("Face + QR scan")}</h1>
+          <h1 style={{ fontSize: 22, margin: "4px 0 0" }}>
+            {lockMode === "face" ? t("Face scan") : lockMode === "qr" ? t("QR scan") : t("Face + QR scan")}
+          </h1>
           <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
         </div>
         <div className="row" style={{ gap: 6 }}>
@@ -769,18 +779,21 @@ export default function MobileScannerPage() {
         )}
       </div>
 
-      {/* Mode toggle */}
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        {[
-          { key: "face", label: "Face", Icon: ScanFace },
-          { key: "qr", label: "QR", Icon: QrCode },
-          { key: "manual", label: "Manual", Icon: PencilLine },
-        ].map(({ key, label, Icon }) => (
-          <button key={key} style={S.modeBtn(scanMode === key)} onClick={() => { setScanMode(key); setScanError(""); }}>
-            <Icon size={16} /> {t(label)}
-          </button>
-        ))}
-      </div>
+      {/* Mode toggle — hidden when the route pins this page to one scanner
+          (the separate Face / QR bottom-nav tabs). */}
+      {!lockMode && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          {[
+            { key: "face", label: "Face", Icon: ScanFace },
+            { key: "qr", label: "QR", Icon: QrCode },
+            { key: "manual", label: "Manual", Icon: PencilLine },
+          ].map(({ key, label, Icon }) => (
+            <button key={key} style={S.modeBtn(scanMode === key)} onClick={() => { setScanMode(key); setScanError(""); }}>
+              <Icon size={16} /> {t(label)}
+            </button>
+          ))}
+        </div>
+      )}
 
       {scanMode === "face" && !lowLight && !camError && (
         <button

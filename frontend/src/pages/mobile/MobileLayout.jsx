@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { Home, ClipboardList, MapPin, User, Languages, Moon, Sun, Bus } from "lucide-react";
+import { Home, ClipboardList, User, Languages, Moon, Sun, Bus, ScanFace, QrCode } from "lucide-react";
 import { getPermissions, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
@@ -73,11 +73,25 @@ export default function MobileLayout({ onLogout }) {
   // Same "mobileView" permission group as the /mobile/* route gates in
   // App.jsx — an account with a view unchecked doesn't see the tab either.
   // Profile stays ungated (account settings, not a feature view).
+  // Home is the admin overview dashboard. On-ground staff don't need it —
+  // their job starts at Operations (who's missing) and the scanners — so it's
+  // gated on the admin capability as well as its own view permission.
+  const isAdmin = !!perms.manageAccounts;
+
   const tabs = [
-    ...(perms.viewMobileHome ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
-    ...(perms.viewMobileAttendance ? [{ to: "/mobile/attendance", label: "Attendance", icon: ClipboardList, badge: missing }] : []),
-    ...(perms.viewMobileTrips ? [{ to: "/mobile/trips", label: "Trips", icon: MapPin }] : []),
-    { to: "/mobile/profile", label: "Profile", icon: User },
+    ...(isAdmin && perms.viewMobileHome
+      ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
+    // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
+    ...(perms.viewMobileAttendance || perms.viewMobileTrips
+      ? [{ to: "/mobile/attendance", label: "Ops", icon: ClipboardList, badge: missing }] : []),
+    // Face and QR are separate tabs rather than modes of one scanner screen.
+    ...(perms.viewMobileScanner
+      ? [
+          { to: "/mobile/scan/face", label: "Face", icon: ScanFace },
+          { to: "/mobile/scan/qr", label: "QR", icon: QrCode },
+        ]
+      : []),
+    { to: "/mobile/profile", label: "Me", icon: User },
   ];
 
   const tripContext = trip
