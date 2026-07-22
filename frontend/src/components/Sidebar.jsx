@@ -10,7 +10,6 @@ import {
   Languages,
   Sun,
   Moon,
-  QrCode,
   ScanFace,
   HelpCircle,
 } from "lucide-react";
@@ -39,9 +38,6 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     ...(perms.viewDashboard ? [{ to: "/dashboard", label: "Dashboard", icon: LayoutGrid }] : []),
     ...(perms.viewTrips ? [{ to: "/trips", label: "Trips", icon: MapPin }] : []),
     ...(perms.viewDocuments ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
-    // Vimal's phone-frame check-in app — restored 2026-07-20 after a same-
-    // day removal, now kept-but-hideable via viewCheckin instead of deleted.
-    ...(perms.viewCheckin ? [{ to: "/checkin", label: "Check-in", icon: QrCode }] : []),
     // Desktop entrance-kiosk scanner (Face + QR + Manual).
     ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
     ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),

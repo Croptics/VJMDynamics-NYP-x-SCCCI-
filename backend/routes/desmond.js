@@ -104,6 +104,34 @@ async function all(sql, params = []) { return (await pool.query(sql, params)).ro
 async function get(sql, params = []) { return (await all(sql, params))[0] || null; }
 async function run(sql, params = []) { await pool.query(sql, params); }
 
+/* ---- Additive schema: live operational-status fields -----------------------
+ * Columns this feature added AFTER the base schema was frozen in data.js
+ * (JQ's, off-limits). Added idempotently at startup — the same additive
+ * `ADD COLUMN IF NOT EXISTS` pattern vance.js uses — so data.js is untouched.
+ * Best-effort: a failure here (DB briefly unreachable) is logged, not fatal;
+ * the SELECTs below use COALESCE so they still work if a column isn't there
+ * yet on the very first boot.
+ *   itinerary_items.status         scheduled | delayed | moved | cancelled
+ *   itinerary_items.delay_minutes  minutes behind schedule (for "delayed")
+ *   itinerary_items.completed      staff manually ticked this stop as done
+ *   coaches.arrival_status         not_arrived | en_route | arrived
+ * -------------------------------------------------------------------------- */
+const ITINERARY_STATUSES = ["scheduled", "delayed", "moved", "cancelled"];
+const COACH_ARRIVALS = ["not_arrived", "en_route", "arrived"];
+(async function ensureOpsSchema() {
+  try {
+    await run(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'scheduled'`);
+    await run(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS delay_minutes INTEGER NOT NULL DEFAULT 0`);
+    await run(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT false`);
+    await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS arrival_status TEXT NOT NULL DEFAULT 'not_arrived'`);
+    // Auto-generated planning coaches start without a staff member (assigned
+    // later), so the column must allow NULL. No-op if it already does.
+    await run(`ALTER TABLE coaches ALTER COLUMN staff_user_id DROP NOT NULL`).catch(() => {});
+  } catch (e) {
+    console.error("desmond.js ensureOpsSchema (non-fatal):", e.message);
+  }
+})();
+
 /* ---- Error handling --------------------------------------------------- */
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -293,6 +321,81 @@ router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
   res.status(201).json({ created: toInsert.length, skipped: DEMO_TRIPS.length - toInsert.length, total: DEMO_TRIPS.length });
 }));
 
+/* ---- Trip CRUD ---------------------------------------------------------------
+ * Create / edit / delete a single real trip (not demo seeding). The base app
+ * owns GET /api/trips (its one hardcoded Beijing trip) but has no create/edit/
+ * delete for the trip catalogue, so these are new ground. All gated on
+ * manageTrips (writeAccess). id/uuid_id are generated the same way the seed
+ * route does: a random text id + a real UUID that the rest of this feature
+ * keys off.
+ * ---------------------------------------------------------------------------- */
+const TRIP_STATUSES = ["Planning", "In progress", "Completed", "Cancelled"];
+
+router.post("/api/trips", writeAccess, wrap(async (req, res) => {
+  const { name, dateRange, status, lead, dayOf, totalDays } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "A trip name is required." });
+  const st = TRIP_STATUSES.includes(status) ? status : "Planning";
+  const total = Math.max(1, Number(totalDays) || 5);
+  const day = Math.min(total, Math.max(1, Number(dayOf) || 1));
+  const trip = await get(
+    `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead")
+     VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6)
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays"`,
+    [name.trim(), (dateRange || "").trim() || null, day, total, st, (lead || "").trim() || null]
+  );
+  logActivity(trip.id, `Trip "${trip.name}" was created.`, "system");
+  res.status(201).json(trip);
+}));
+
+router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
+  const b = req.body || {};
+  const sets = [];
+  const params = [];
+  let i = 1;
+  if (b.name !== undefined) {
+    if (!String(b.name).trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "Name can't be empty." });
+    sets.push(`name = $${i++}`); params.push(String(b.name).trim());
+  }
+  if (b.dateRange !== undefined) { sets.push(`"dateRange" = $${i++}`); params.push(String(b.dateRange).trim() || null); }
+  if (b.lead !== undefined) { sets.push(`"lead" = $${i++}`); params.push(String(b.lead).trim() || null); }
+  if (b.status !== undefined) {
+    if (!TRIP_STATUSES.includes(b.status)) return res.status(400).json({ error: "BAD_STATUS", message: "Invalid trip status." });
+    sets.push(`status = $${i++}`); params.push(b.status);
+  }
+  if (b.totalDays !== undefined) { sets.push(`"totalDays" = $${i++}`); params.push(Math.max(1, Number(b.totalDays) || 1)); }
+  if (b.dayOf !== undefined) { sets.push(`"dayOf" = $${i++}`); params.push(Math.max(1, Number(b.dayOf) || 1)); }
+  if (sets.length === 0) return res.status(400).json({ error: "NO_FIELDS", message: "Nothing to update." });
+  params.push(req.params.tripId);
+  const trip = await get(
+    `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays"`,
+    params
+  );
+  if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+  logActivity(req.params.tripId, `Trip details for "${trip.name}" were updated.`, "system");
+  res.json(trip);
+}));
+
+router.delete("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
+  const trip = await get(`SELECT id, uuid_id, name FROM trips WHERE uuid_id = $1`, [req.params.tripId]);
+  if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+  // Guard the base app's primary trip (id "t-1"): JQ's Dashboard hard-depends
+  // on it, so it must never be deletable from here.
+  if (trip.id === "t-1") return res.status(400).json({ error: "PROTECTED", message: "The primary trip can't be deleted." });
+  // Refuse to delete a non-empty trip rather than cascade-deleting delegates/
+  // coaches — those rows are referenced by other features (check-in logs,
+  // exceptions), so removing them here could orphan or break their data. The
+  // coordinator clears the board first, then deletes the empty trip.
+  const dCount = await get(`SELECT COUNT(*) AS c FROM delegates WHERE trip_id = $1`, [trip.uuid_id]);
+  const cCount = await get(`SELECT COUNT(*) AS c FROM coaches WHERE trip_id = $1`, [trip.uuid_id]);
+  if (Number(dCount.c) > 0 || Number(cCount.c) > 0) {
+    return res.status(409).json({ error: "NOT_EMPTY", message: "Remove this trip's coaches and delegates before deleting it." });
+  }
+  await run(`DELETE FROM itinerary_items WHERE trip_id = $1`, [trip.uuid_id]);
+  await run(`DELETE FROM trips WHERE uuid_id = $1`, [trip.uuid_id]);
+  res.json({ ok: true, id: trip.uuid_id, name: trip.name });
+}));
+
 /* =============================================================================
  *  Coaches
  * ========================================================================== */
@@ -301,20 +404,71 @@ router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
     SELECT
       c.id, c.label, c.capacity, c.sort_order AS "sortOrder",
       c.staff_user_id AS "staffUserId", u.name AS "staffName", c.driver_name AS "driverName",
-      COUNT(d.id) FILTER (WHERE d.status = 'PRESENT') AS boarded,
+      COALESCE(c.arrival_status, 'not_arrived') AS "arrivalStatus",
+      COUNT(d.id) FILTER (WHERE d.status IN ('PRESENT', 'ARRIVED')) AS boarded,
       COUNT(d.id) FILTER (WHERE d.status = 'MISSING') AS missing,
       COUNT(d.id) AS total
     FROM coaches c
     LEFT JOIN users u ON u.id = c.staff_user_id
     LEFT JOIN delegates d ON d."coachId" = c.id
     WHERE c.trip_id = $1
-    GROUP BY c.id, c.label, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name
+    GROUP BY c.id, c.label, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name, c.arrival_status
     ORDER BY c.sort_order
   `, [req.params.tripId]);
 
   res.json({
     coaches: coaches.map((c) => ({ ...c, boarded: Number(c.boarded), missing: Number(c.missing), total: Number(c.total) })),
   });
+}));
+
+// Live bus-arrival status for one coach: not_arrived → en_route → arrived.
+// Toggled straight from the coach card so staff can see at a glance which
+// buses have actually turned up.
+router.patch("/api/coaches/:id/arrival", writeAccess, wrap(async (req, res) => {
+  const { arrivalStatus } = req.body || {};
+  if (!COACH_ARRIVALS.includes(arrivalStatus)) {
+    return res.status(400).json({ error: "BAD_STATUS", message: "Unknown arrival status." });
+  }
+  const updated = await get(
+    `UPDATE coaches SET arrival_status = $1 WHERE id = $2
+     RETURNING id, label, trip_id, arrival_status AS "arrivalStatus"`,
+    [arrivalStatus, req.params.id]
+  );
+  if (!updated) return res.status(404).json({ error: "NOT_FOUND", message: "Coach not found." });
+  const nice = { not_arrived: "not arrived", en_route: "en route", arrived: "arrived" }[arrivalStatus];
+  logActivity(updated.trip_id, `${updated.label} bus is ${nice}.`, "coach");
+  res.json(updated);
+}));
+
+// Capacity planning: given how many delegates are coming, generate the right
+// number of coaches to seat them (called from the Planning board). Coaches are
+// created without a staff member (assigned later) and auto-named "Coach N",
+// continuing from the highest existing number so numbering stays consistent.
+router.post("/api/coaches/generate", writeAccess, wrap(async (req, res) => {
+  const { tripId, count, capacity } = req.body || {};
+  if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
+  const n = Math.min(50, Math.max(1, Math.floor(Number(count) || 0)));
+  const cap = Math.min(200, Math.max(1, Math.floor(Number(capacity) || 40)));
+  const rows = await all(`SELECT label, sort_order AS "sortOrder" FROM coaches WHERE trip_id = $1`, [tripId]);
+  let maxNum = 0, maxSort = -1;
+  for (const r of rows) {
+    const m = /coach\s*(\d+)/i.exec(r.label || "");
+    if (m) maxNum = Math.max(maxNum, Number(m[1]));
+    maxSort = Math.max(maxSort, Number(r.sortOrder ?? -1));
+  }
+  const created = [];
+  for (let i = 1; i <= n; i++) {
+    const label = `Coach ${maxNum + i}`;
+    const c = await get(
+      `INSERT INTO coaches (id, trip_id, label, name, capacity, staff_user_id, sort_order, driver_name)
+       VALUES (gen_random_uuid()::text, $1, $2, $2, $3, NULL, $4, NULL)
+       RETURNING id, label, capacity, sort_order AS "sortOrder"`,
+      [tripId, label, cap, maxSort + i]
+    );
+    created.push(c);
+  }
+  logActivity(tripId, `${n} coach${n !== 1 ? "es" : ""} generated (${cap} seats each).`, "coach");
+  res.status(201).json({ created });
 }));
 
 // Every staff member currently holding a coach, across ALL trips — powers the
@@ -398,7 +552,10 @@ router.delete("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
 router.get("/api/trips/:tripId/itinerary", readAccess, wrap(async (req, res) => {
   const items = await all(
     `SELECT id, day_number AS "dayNumber", TO_CHAR(start_time, 'HH24:MI') AS "startTime",
-            title, location, sort_order AS "sortOrder", category
+            title, location, sort_order AS "sortOrder", category,
+            COALESCE(status, 'scheduled') AS status,
+            COALESCE(delay_minutes, 0) AS "delayMinutes",
+            COALESCE(completed, false) AS completed
        FROM itinerary_items WHERE trip_id = $1 ORDER BY day_number, sort_order`,
     [req.params.tripId]
   );
@@ -406,33 +563,73 @@ router.get("/api/trips/:tripId/itinerary", readAccess, wrap(async (req, res) => 
 }));
 
 router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) => {
-  const { dayNumber, startTime, title, location, sortOrder, category } = req.body || {};
+  const { dayNumber, startTime, title, location, sortOrder, category, status, delayMinutes } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
   }
+  const st = ITINERARY_STATUSES.includes(status) ? status : "scheduled";
+  const delay = st === "delayed" ? Math.max(0, Number(delayMinutes) || 0) : 0;
   const item = await get(
-    `INSERT INTO itinerary_items (trip_id, day_number, start_time, title, location, sort_order, category)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
-     RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category`,
-    [req.params.tripId, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category)]
+    `INSERT INTO itinerary_items (trip_id, day_number, start_time, title, location, sort_order, category, status, delay_minutes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
+    [req.params.tripId, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category), st, delay]
   );
   logActivity(req.params.tripId, `Itinerary: "${item.title}" added to Day ${item.dayNumber}.`, "itinerary");
   res.status(201).json(item);
 }));
 
 router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (req, res) => {
-  const { dayNumber, startTime, title, location, category } = req.body || {};
+  const { dayNumber, startTime, title, location, category, status, delayMinutes } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
   }
+  const st = ITINERARY_STATUSES.includes(status) ? status : "scheduled";
+  const delay = st === "delayed" ? Math.max(0, Number(delayMinutes) || 0) : 0;
   const item = await get(
-    `UPDATE itinerary_items SET day_number = $1, start_time = $2, title = $3, location = $4, category = $5
-      WHERE id = $6 AND trip_id = $7
-      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category`,
-    [Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, normalizeCategory(category), req.params.itemId, req.params.tripId]
+    `UPDATE itinerary_items SET day_number = $1, start_time = $2, title = $3, location = $4, category = $5, status = $6, delay_minutes = $7
+      WHERE id = $8 AND trip_id = $9
+      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
+    [Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, normalizeCategory(category), st, delay, req.params.itemId, req.params.tripId]
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
   logActivity(req.params.tripId, `Itinerary: "${item.title}" updated.`, "itinerary");
+  res.json(item);
+}));
+
+// Lightweight live-status update for one stop — lets a coordinator flag a stop
+// as delayed / moved / cancelled (or back to on-time) from the board itself,
+// without re-entering its whole form. delayMinutes only applies to "delayed".
+router.patch("/api/trips/:tripId/itinerary/:itemId/status", writeAccess, wrap(async (req, res) => {
+  const { status, delayMinutes } = req.body || {};
+  if (!ITINERARY_STATUSES.includes(status)) {
+    return res.status(400).json({ error: "BAD_STATUS", message: "Unknown itinerary status." });
+  }
+  const delay = status === "delayed" ? Math.max(0, Number(delayMinutes) || 0) : 0;
+  const item = await get(
+    `UPDATE itinerary_items SET status = $1, delay_minutes = $2
+      WHERE id = $3 AND trip_id = $4
+      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
+    [status, delay, req.params.itemId, req.params.tripId]
+  );
+  if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
+  const label = status === "delayed" ? `delayed ${delay} min` : status;
+  logActivity(req.params.tripId, `Itinerary: "${item.title}" marked ${label}.`, "itinerary");
+  res.json(item);
+}));
+
+// Tick / untick a stop as completed (crossed out on the board). Orthogonal to
+// status — a stop can be, say, "delayed" and then completed.
+router.patch("/api/trips/:tripId/itinerary/:itemId/complete", writeAccess, wrap(async (req, res) => {
+  const completed = !!(req.body && req.body.completed);
+  const item = await get(
+    `UPDATE itinerary_items SET completed = $1
+      WHERE id = $2 AND trip_id = $3
+      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
+    [completed, req.params.itemId, req.params.tripId]
+  );
+  if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
+  logActivity(req.params.tripId, `Itinerary: "${item.title}" ${completed ? "completed" : "reopened"}.`, "itinerary");
   res.json(item);
 }));
 

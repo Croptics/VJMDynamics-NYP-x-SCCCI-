@@ -176,14 +176,6 @@ export const PERMISSIONS = [
     group: "desktopView",
   },
   {
-    key: "viewCheckin",
-    label: "Check-in",
-    desc: "See the mobile-style Face/QR/Manual check-in screen",
-    chip: "Check-in",
-    default: true,
-    group: "desktopView",
-  },
-  {
     key: "viewScanner",
     label: "Face + QR scan",
     desc: "See the desktop entrance-kiosk Face + QR scanner",

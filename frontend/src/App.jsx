@@ -10,7 +10,6 @@ import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
 // Scaffolds — owned by teammates
 import DashboardPage from "./pages/desktop/DashboardPage.jsx";
 import TripCoachPage from "./pages/desktop/TripCoachPage.jsx";
-import QRCheckInPage from "./pages/desktop/QRCheckInPage.jsx";
 import UnifiedScannerPage from "./pages/desktop/UnifiedScannerPage.jsx";
 import ExceptionInboxPage from "./pages/desktop/ExceptionInboxPage.jsx";
 import AccountControlPage from "./pages/desktop/AccountControlPage.jsx";
@@ -53,7 +52,6 @@ const DESKTOP_FALLBACK_ORDER = [
   { path: "/dashboard", perm: "viewDashboard" },
   { path: "/trips", perm: "viewTrips" },
   { path: "/onboarding", perm: "viewDocuments" },
-  { path: "/checkin", perm: "viewCheckin" },
   { path: "/scanner", perm: "viewScanner" },
   { path: "/exceptions", perm: "viewExceptions" },
   { path: "/history", perm: "viewHistory" },
@@ -226,17 +224,6 @@ export default function App() {
         {/* Vance — AI Trip Assistant (Screen 6) — now a floating bubble
             (ChatBubble.jsx, rendered from Layout.jsx on every route)
             instead of a dedicated destination; no route needed. */}
-
-        {/* Vimal's /checkin phone-frame page — briefly removed 2026-07-20
-            as a redundant duplicate of /trips + /settings + /mobile/profile
-            (its Scan tab is superseded by /scanner below), then RESTORED
-            the same day at the user's request as a kept-but-hideable page:
-            "have a backup of the checkin page and put a permission to hide
-            the page." Gated on viewCheckin — an admin can hide it per
-            account via Account control without deleting it again; the git
-            history from the original removal is the literal backup if it
-            ever needs restoring a second time. */}
-        <Route path="/checkin" element={<ViewGate perm="viewCheckin"><QRCheckInPage /></ViewGate>} />
 
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
             page hosting all three real check-in paths on one screen. */}

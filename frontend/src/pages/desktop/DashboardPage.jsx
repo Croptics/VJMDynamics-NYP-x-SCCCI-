@@ -1344,7 +1344,11 @@ function RosterCard({ t, k, onFilter }) {
     { tone: "assigned", value: k.assigned ?? 0 },
     { tone: "unassigned", value: k.unassigned },
   ];
-  const total = Math.max(k.total, 1); // guard div-by-zero on an empty roster
+  // Percentages are relative to the sum of the 3 segments actually drawn
+  // here (not k.total) — Missing/Late already have their own tiles and
+  // aren't represented in this bar, so using k.total left an unexplained
+  // blank gap at the end instead of the bar reading as "the whole thing".
+  const total = Math.max(segments.reduce((sum, s) => sum + s.value, 0), 1);
 
   return (
     <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column" }}>

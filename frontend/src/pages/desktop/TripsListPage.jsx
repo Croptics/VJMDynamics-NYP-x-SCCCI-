@@ -1,4 +1,4 @@
-// frontend/src/pages/desktop/TripsListPage.jsx
+// frontend/src/pages/TripsListPage.jsx
 // Owner: Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
 //
 // Grid of every trip. Clicking a card navigates to /trips?tripId=<uuid> —
@@ -24,8 +24,8 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin } from "lucide-react";
-import { apiGet, apiPost, getPermissions } from "../../lib/api.js";
+import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin, Plus, Pencil, Trash2, X } from "lucide-react";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import "./TripCoachPage.css";
@@ -123,6 +123,126 @@ function EmptyIllustration() {
   );
 }
 
+const TRIP_STATUSES = ["Planning", "In progress", "Completed", "Cancelled"];
+
+/** Create / edit a trip. `trip` with an id = edit; anything else = create.
+ *  Self-contained (calls the API itself). Reuses the .tf-modal-* / .tf-input
+ *  classes already in TripCoachPage.css, so no new styles are needed. */
+function TripFormModal({ trip, onClose, onSaved }) {
+  const { t } = useLang();
+  const editing = !!(trip && trip.id);
+  const [form, setForm] = useState({
+    name: trip?.name || "",
+    dateRange: trip?.dateRange || "",
+    status: trip?.status || "Planning",
+    lead: trip?.lead || "",
+    totalDays: trip?.totalDays || 5,
+    dayOf: trip?.dayOf || 1,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function handleSubmit() {
+    if (!form.name.trim()) { setError(t("A trip name is required.")); return; }
+    setSaving(true); setError(null);
+    try {
+      const payload = {
+        name: form.name.trim(), dateRange: form.dateRange.trim(), status: form.status,
+        lead: form.lead.trim(), totalDays: Number(form.totalDays) || 1, dayOf: Number(form.dayOf) || 1,
+      };
+      const saved = editing ? await apiPatch(`/trips/${trip.id}`, payload) : await apiPost(`/trips`, payload);
+      onSaved(saved, editing);
+      onClose();
+    } catch (e) { setError(e.message); setSaving(false); }
+  }
+
+  return (
+    <div className="tf-modal-overlay" onClick={saving ? undefined : onClose}>
+      <div className="tf-modal-card" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
+        <div className="tf-modal-header">
+          <h3 style={{ fontSize: 17, fontWeight: 800 }}>{editing ? t("Edit trip") : t("New trip")}</h3>
+          <button className="tf-btn tf-btn-ghost tf-btn-icon-only" onClick={onClose} title={t("Close")}><X size={18} /></button>
+        </div>
+        <div className="tf-modal-body">
+          <label className="tf-field-label">{t("Trip name")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+          <input className="tf-input" style={{ marginBottom: 14 }} value={form.name} autoFocus
+            placeholder={t("e.g. Shanghai Innovation Mission")}
+            onChange={(e) => set("name", e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
+
+          <label className="tf-field-label">{t("Dates")}</label>
+          <input className="tf-input" style={{ marginBottom: 14 }} value={form.dateRange}
+            placeholder={t("e.g. 3–7 Sep 2026")} onChange={(e) => set("dateRange", e.target.value)} />
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 14 }}>
+            <div>
+              <label className="tf-field-label">{t("Status")}</label>
+              <select className="tf-input" value={form.status} onChange={(e) => set("status", e.target.value)}>
+                {TRIP_STATUSES.map((s) => <option key={s} value={s}>{t(s)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="tf-field-label">{t("Trip lead")}</label>
+              <input className="tf-input" value={form.lead} placeholder={t("Optional")} onChange={(e) => set("lead", e.target.value)} />
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+            <div>
+              <label className="tf-field-label">{t("Current day")}</label>
+              <input type="number" min={1} className="tf-input" value={form.dayOf} onChange={(e) => set("dayOf", e.target.value)} />
+            </div>
+            <div>
+              <label className="tf-field-label">{t("Total days")}</label>
+              <input type="number" min={1} className="tf-input" value={form.totalDays} onChange={(e) => set("totalDays", e.target.value)} />
+            </div>
+          </div>
+
+          {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 12 }}>{error}</p>}
+        </div>
+        <div className="tf-modal-footer">
+          <button className="tf-btn tf-btn-ghost" onClick={onClose} disabled={saving}>{t("Cancel")}</button>
+          <button className="tf-btn tf-btn-primary" onClick={handleSubmit} disabled={saving}>
+            {saving ? <Loader2 size={14} className="spin" /> : null} {editing ? t("Save changes") : t("Create trip")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Delete-trip confirmation. Self-contained; surfaces the backend's "can't
+ *  delete a non-empty / primary trip" messages inline instead of failing
+ *  silently. */
+function DeleteTripDialog({ trip, onClose, onDeleted }) {
+  const { t } = useLang();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  async function handleDelete() {
+    setBusy(true); setError(null);
+    try { await apiDelete(`/trips/${trip.id}`); onDeleted(); onClose(); }
+    catch (e) { setError(e.message); setBusy(false); }
+  }
+  return (
+    <div className="tf-modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="tf-modal-card" style={{ maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>
+        <div className="tf-modal-header"><h3 style={{ fontSize: 16, fontWeight: 800 }}>{t("Delete trip?")}</h3></div>
+        <div className="tf-modal-body">
+          <p style={{ fontSize: 13.5, color: "var(--tf-text-2)" }}>{t("Delete")} “{trip.name}”? {t("This can't be undone.")}</p>
+          <p className="tf-muted" style={{ fontSize: 12, marginTop: 8 }}>{t("A trip that still has coaches or delegates can't be deleted — clear its board first.")}</p>
+          {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 10 }}>{error}</p>}
+        </div>
+        <div className="tf-modal-footer">
+          <button className="tf-btn tf-btn-ghost" onClick={onClose} disabled={busy}>{t("Cancel")}</button>
+          <button className="tf-btn tf-btn-primary" style={{ background: "var(--tf-red)", color: "#fff" }} onClick={handleDelete} disabled={busy}>
+            {busy ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />} {t("Delete")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TripsListPage() {
   const navigate = useNavigate();
   const { t } = useLang();
@@ -132,6 +252,8 @@ export default function TripsListPage() {
   const [seeding, setSeeding] = useState(false);
   const [seedMessage, setSeedMessage] = useState(null);
   const [query, setQuery] = useState("");
+  const [formTrip, setFormTrip] = useState(null);   // null = closed · {} = new · {…trip} = edit
+  const [deleteTripState, setDeleteTripState] = useState(null);
   const canEdit = getPermissions().manageTrips; // gate edit controls (see permissions.js)
 
   const fetchTrips = useCallback(async () => {
@@ -192,6 +314,9 @@ export default function TripsListPage() {
                 <button className="tf-btn tf-btn-solid tf-btn-sm" onClick={handleSeed} disabled={seeding}>
                   {seeding ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} {t("Seed more trips")}
                 </button>
+                <button className="tf-btn tf-btn-primary tf-btn-sm" onClick={() => setFormTrip({})}>
+                  <Plus size={14} /> {t("New trip")}
+                </button>
               </>
             )}
           </div>
@@ -219,9 +344,14 @@ export default function TripsListPage() {
             <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>{t("No trips yet")}</h2>
             <p className="tf-muted" style={{ fontSize: 13.5, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
               {canEdit
-                ? t("Use “Seed more trips” above to explore the board, or wait for the admin team to add one.")
+                ? t("Create your first trip, or use “Seed more trips” above to explore with demo data.")
                 : t("No trips have been added yet. Please check back later.")}
             </p>
+            {canEdit && (
+              <button className="tf-btn tf-btn-primary" style={{ marginTop: 16 }} onClick={() => setFormTrip({})}>
+                <Plus size={14} /> {t("New trip")}
+              </button>
+            )}
           </div>
         )}
 
@@ -239,9 +369,12 @@ export default function TripsListPage() {
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
               {filteredTrips.map((trip) => (
-                <button
+                <div
                   key={trip.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => navigate(`/trips?tripId=${trip.id}`)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(`/trips?tripId=${trip.id}`); } }}
                   className="tf-card"
                   style={{
                     margin: 0, textAlign: "left", cursor: "pointer", display: "flex", flexDirection: "column", gap: 10,
@@ -251,9 +384,28 @@ export default function TripsListPage() {
                   onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "var(--tf-shadow-md)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.transform = "none"; e.currentTarget.style.boxShadow = "var(--tf-shadow-sm)"; }}
                 >
-                  <div className="tf-between" style={{ alignItems: "flex-start" }}>
-                    <h3 style={{ fontSize: 16.5, fontWeight: 800 }}>{trip.name}</h3>
-                    <StatusChip status={trip.status} />
+                  <div className="tf-between" style={{ alignItems: "flex-start", gap: 8 }}>
+                    <h3 style={{ fontSize: 16.5, fontWeight: 800, minWidth: 0 }}>{trip.name}</h3>
+                    <div className="tf-flex tf-gap-6" style={{ alignItems: "center", flexShrink: 0 }}>
+                      <StatusChip status={trip.status} />
+                      {canEdit && (
+                        <>
+                          <button
+                            className="tf-btn tf-btn-ghost tf-btn-icon-only"
+                            title={t("Edit trip")}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); setFormTrip(trip); }}
+                          ><Pencil size={13} /></button>
+                          <button
+                            className="tf-btn tf-btn-ghost tf-btn-icon-only"
+                            title={t("Delete trip")}
+                            style={{ color: "var(--tf-red)" }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); setDeleteTripState(trip); }}
+                          ><Trash2 size={13} /></button>
+                        </>
+                      )}
+                    </div>
                   </div>
 
                   {trip.dateRange && <div className="tf-muted" style={{ fontSize: 13 }}>{trip.dateRange}</div>}
@@ -273,7 +425,7 @@ export default function TripsListPage() {
                   <span className="tf-flex tf-gap-6" style={{ alignItems: "center", fontSize: 12.5, fontWeight: 700, color: "var(--tf-blue)", marginTop: 2 }}>
                     {t("Open board")} →
                   </span>
-                </button>
+                </div>
               ))}
               {filteredTrips.length === 0 && (
                 <p className="tf-muted" style={{ fontSize: 13.5, gridColumn: "1 / -1" }}>{t("No trips match your search.")}</p>
@@ -282,6 +434,21 @@ export default function TripsListPage() {
           </>
         )}
       </div>
+
+      {formTrip && (
+        <TripFormModal
+          trip={formTrip}
+          onClose={() => setFormTrip(null)}
+          onSaved={() => { setFormTrip(null); fetchTrips(); }}
+        />
+      )}
+      {deleteTripState && (
+        <DeleteTripDialog
+          trip={deleteTripState}
+          onClose={() => setDeleteTripState(null)}
+          onDeleted={fetchTrips}
+        />
+      )}
     </div>
   );
 }
