@@ -27,7 +27,7 @@
  * ============================================================================= */
 
 import { Router } from "express";
-import { requireAuth, requireKioskOrPermission } from "../auth.js";
+import { requireAuth, requireKioskOrPermission } from "../lib/auth.js";
 import {
   listDelegates,
   getDelegateById,
@@ -35,6 +35,7 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
+  resolveTripUuid,
 } from "../data.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
@@ -224,18 +225,24 @@ const timeNow = () =>
 
 /* Live coach list (id/label/name/city/capacity/boarded/missing/total) —
  * sourced from JQ's own getDashboard() so dynamically added coaches are
- * always included. */
-async function liveDashboard() {
-  return getDashboard();
+ * always included. Optional tripUuid scopes it to one trip (2026-07-23,
+ * additive — omitting it keeps the original single-trip default behavior)
+ * so the scanner's trip switcher can test check-in against any trip, not
+ * just the base one. */
+async function liveDashboard(tripUuid = null) {
+  return getDashboard(tripUuid);
 }
 
 /* ============================================================================
  * GET /api/attendance/coaches
  * Mobile-dashboard source: trip meta + every coach with live counts + the
  * unassigned pool size, so the staff app can pick which coach to muster.
+ * Optional ?tripId= (a "t-1"/uuid, resolved the same way the dashboard does)
+ * scopes the coach list to that trip instead of the default base trip.
  * ========================================================================== */
-router.get("/api/attendance/coaches", requireAuth(), wrap(async (_req, res) => {
-  const dash = await liveDashboard();
+router.get("/api/attendance/coaches", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  const dash = await liveDashboard(tripUuid);
   const trip = dash.trip || (await getTrip());
   res.json({
     trip: {
@@ -405,15 +412,19 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
  * GET /api/attendance/:trip_id/coach/:coach_id
  * Reverse-Headcount source: live statuses + consent flags for ONE coach,
  * plus trip meta. Coach lookup is dynamic (works for c5/c6/…).
- * (The base app is single-trip — "t-1" — so trip_id is accepted verbatim.)
+ * trip_id is now resolved and used to scope the coach/delegate lookup
+ * (2026-07-23, additive — "t-1" still resolves to the same base trip as
+ * before, so single-trip callers are unaffected) instead of being accepted
+ * but ignored, so the scanner's trip switcher shows the right roster.
  * ========================================================================== */
 router.get("/api/attendance/:trip_id/coach/:coach_id", requireAuth(), wrap(async (req, res) => {
   const { trip_id, coach_id } = req.params;
-  const dash = await liveDashboard();
+  const tripUuid = await resolveTripUuid(trip_id);
+  const dash = await liveDashboard(tripUuid);
   const coach = (dash.coaches || []).find((c) => c.id === coach_id);
   if (!coach) return fail(res, 404, "NOT_FOUND", "Unknown coach.");
 
-  const all = await listDelegates();
+  const all = await listDelegates(tripUuid);
   const bios = await bioMap();
   const onCoach = all.filter((d) => d.coachId === coach_id);
   const payload = onCoach.map((d) => {

@@ -23,6 +23,7 @@
 import { all, get, run } from "./connection.js";
 import { TRIP, COACHES } from "./constants.js";
 import { hashPassword, defaultPermsForRole } from "./accounts.js";
+import { PERM_KEYS } from "../../permissions.js";
 
 export async function createSchema() {
   /* ---- JQ base tables (Dashboard / Auth / Accounts) --------------------- */
@@ -82,6 +83,19 @@ export async function createSchema() {
   // ~45s, comfortably wider than the 15s poll interval).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`);
 
+  // Named, admin-managed access-role templates (2026-07-24) — Account
+  // control's "Apply template" quick-fill + "Access role" filter used to be
+  // 2 templates hardcoded in the frontend; now real, persisted rows any
+  // admin can create/edit/delete, so the role list isn't a code change.
+  // Deliberately just a convenience PRESET, not a stored tag on the account
+  // itself — an account's real, enforced permissions live only in
+  // accounts.permissions; matching against a template is always computed
+  // fresh (see matchRoleTemplate() in db/accounts.js), so deleting or editing
+  // a template can never silently change what an existing account can do.
+  await run(`CREATE TABLE IF NOT EXISTS role_templates (
+    id VARCHAR(64) PRIMARY KEY, label VARCHAR(191) NOT NULL, permissions TEXT NOT NULL, "createdAt" VARCHAR(64)
+  )`);
+
   /* ---- Desmond "TransitFlow" schema (Trip Booking & Coach Management) ----
    * Folded in from what originally shipped as database/003_*.sql + 004_*.sql.
    * ALL ADDITIVE: new tables + `ADD COLUMN IF NOT EXISTS` on the base tables
@@ -102,6 +116,36 @@ export async function createSchema() {
   // every existing trip row to the same value this used to be hardcoded to,
   // so nothing's behavior silently changes for a trip nobody has touched.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "lateCutoffTime" VARCHAR(8) DEFAULT '10:00'`);
+
+  // Per-trip checkpoint reset window (minutes before the next itinerary stop
+  // that an ARRIVED delegate gets reset to ASSIGNED so they can be re-scanned
+  // — see resetArrivedBeforeNextCheckpoint() in routes/checkpoints.js).
+  // Started hardcoded at 30; DEFAULT 5 here so it's short enough to actually
+  // test without a long wait, adjustable per trip via PATCH
+  // /api/trips/:id/checkpoint-reset-window.
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "checkpointResetMinutes" INT DEFAULT 5`);
+
+  // Per-trip itinerary buffer (minimum minutes required between two stops on
+  // the same day when adding/editing an itinerary item — see
+  // EditItineraryModal's handleSave() in TripCoachPage.jsx). DECOUPLED from
+  // checkpointResetMinutes above (2026-07-23) — they used to share one value,
+  // but the user wanted them independently adjustable (tightening the reset
+  // window for testing shouldn't force the itinerary gap to shrink too).
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "itineraryBufferMinutes" INT DEFAULT 30`);
+
+  // Real trip start date (plain "YYYY-MM-DD" text, not a Postgres DATE column
+  // — pg's default DATE parser returns a JS Date object at UTC midnight,
+  // which shifts a day depending on the reader's timezone; a plain string
+  // sidesteps that entirely, and every arithmetic use casts it to ::date
+  // inline). Lets "dayOf" be computed from the real calendar date instead of
+  // staying wherever it was last set — see syncTripDayOf() in db/dashboard.js
+  // and its 60s scheduler tick in server.js. "dayOfIsManual" opts a trip OUT
+  // of that auto-sync (set whenever staff hand-edit "Current day" in Edit
+  // trip) so a deliberate override (e.g. a delayed departure) isn't silently
+  // overwritten by the next tick; cleared via "Use automatic day" to resume
+  // auto-sync (see PATCH /api/trips/:tripId's resetDayOfAuto).
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "startDate" VARCHAR(10)`);
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "dayOfIsManual" BOOLEAN DEFAULT false`);
 
   // users: a lightweight staff directory for coach assignment ONLY (a "guide"
   // per coach). Separate from `accounts` — these rows never sign in anywhere.
@@ -160,6 +204,70 @@ export async function createSchema() {
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS delegate_id VARCHAR(64)`);
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS changes JSONB`);
   await run(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log("createdAt" DESC)`);
+  // trip_id: the History tracker was completely global — every trip's
+  // add/edit/remove activity mixed into one feed, which became unreadable
+  // once more than one trip had real activity happening (2026-07-24). NULL
+  // for older rows and any write with no known trip (kept visible under
+  // "All trips" rather than silently dropped).
+  await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS trip_id UUID`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_activity_trip ON activity_log(trip_id, "createdAt" DESC)`);
+
+  /* ---- Multi-checkpoint attendance (JQ, 2026-07-22/23) --------------------
+   * A delegate's single `delegates.status` column stays the authoritative
+   * "current live status" used everywhere else in the app (Dashboard KPIs,
+   * Trips board, mobile) — completely untouched by this. checkpoint_checkins
+   * is a PARALLEL, additive history log: one independent record per delegate
+   * per checkpoint, so a delegate can be ARRIVED at 10am and MISSING at 4pm
+   * without either overwriting the other or the global status.
+   *
+   * 2026-07-23 revision: originally this had its OWN `trip_days`/
+   * `checkpoints` tables (admin manually creates "Day 1 · Bus Boarding"
+   * entries, disconnected from anything else). Replaced that with reading
+   * Desmond's EXISTING `itinerary_items` table instead (day_number,
+   * start_time, title, status, delay_minutes — already exactly "a scheduled
+   * checkpoint on a given day", already maintained by the real Trip board) —
+   * so the scanner's Checkpoint Selector shows the SAME itinerary a staff
+   * member already sees on /trips ("Forbidden City tour, 12:45, Delayed
+   * +20m"), not a disconnected parallel list. This needed no changes to
+   * Desmond's schema/routes/pages — itinerary_items is read directly here,
+   * same read-only-shared-table pattern Vimal's vimal.js already uses for
+   * the `delegates` table. The old trip_days/checkpoints tables are dropped
+   * (created only hours earlier this session, zero real dependents).
+   * See backend/routes/checkpoints.js for the endpoints.
+   *
+   * The one-time migration below is GUARDED — it only drops the old table
+   * shape if checkpoint_checkins still has the old `checkpoint_id` column
+   * (meaning it's still on the pre-migration schema). Once migrated, this
+   * whole block is a no-op on every future boot — it must NEVER
+   * unconditionally DROP a table that createSchema() re-runs on every
+   * server start, or real check-in data would be destroyed on every
+   * restart, not just once.
+   * ------------------------------------------------------------------- */
+  const stillOldShape = await get(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_name = 'checkpoint_checkins' AND column_name = 'checkpoint_id'`
+  );
+  if (stillOldShape) {
+    await run(`DROP TABLE IF EXISTS checkpoint_checkins`);
+    await run(`DROP TABLE IF EXISTS checkpoints`);
+    await run(`DROP TABLE IF EXISTS trip_days`);
+  }
+  // One row per (itinerary_item, delegate) — re-scanning the same delegate at
+  // the same checkpoint UPDATES this row (see checkpoints.js's upsert)
+  // rather than creating a duplicate.
+  await run(`CREATE TABLE IF NOT EXISTS checkpoint_checkins (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    itinerary_item_id UUID NOT NULL REFERENCES itinerary_items(id) ON DELETE CASCADE,
+    delegate_id VARCHAR(64) NOT NULL REFERENCES delegates(id) ON DELETE CASCADE,
+    status VARCHAR(32) NOT NULL,
+    method VARCHAR(32),
+    scanned_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(itinerary_item_id, delegate_id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_checkin_item ON checkpoint_checkins(itinerary_item_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_checkin_delegate ON checkpoint_checkins(delegate_id, created_at DESC)`);
 }
 
 export async function seed() {
@@ -191,6 +299,40 @@ export async function seed() {
       "u-kiosk", "__kiosk__", "Entrance Kiosk", await hashPassword(throwaway), "staff", JSON.stringify(defaultPermsForRole("staff")), new Date().toISOString(),
     ]);
   }
+  // Default role templates — the 2 starting points every deployment gets;
+  // admins can rename/edit/delete these or add more from Account control's
+  // "Manage roles" screen afterward, same as any other row here. Each row is
+  // its own idempotent "insert if this SPECIFIC id is missing" (not one
+  // "insert both if the table is empty" gate) — the latter raced with
+  // `node --watch` restarting mid-seed while these lines were being edited,
+  // leaving only the first of the two ever inserted before the "any row
+  // exists" check started skipping both on every later boot.
+  const DEFAULT_ROLE_TEMPLATES = [
+    {
+      id: "onsite", label: "Onsite Headcount Staff",
+      permissions: {
+        manageDelegates: true, manageScanner: true,
+        manageDocuments: false, exportData: false, manageTrips: false, manageExceptions: false,
+        viewDashboard: true, viewDelegates: true, viewTrips: true, viewScanner: true, viewChatbot: true, viewHistory: true,
+        viewAnalytics: false, viewDocuments: false, viewExceptions: false,
+        viewMobileHome: true, viewMobileScanner: true, viewMobileIssues: true,
+        viewMobileAttendance: true, viewMobileTrips: true, viewMobileChatbot: true,
+        viewMobileAllTrips: false,
+      },
+    },
+    {
+      id: "admin-staff", label: "Admin Staff (Web)",
+      permissions: Object.fromEntries(PERM_KEYS.filter((k) => k !== "manageAccounts").map((k) => [k, true])),
+    },
+  ];
+  for (const tpl of DEFAULT_ROLE_TEMPLATES) {
+    if (!(await get("SELECT id FROM role_templates WHERE id = $1", [tpl.id]))) {
+      await run(`INSERT INTO role_templates (id, label, permissions, "createdAt") VALUES ($1,$2,$3,$4)`, [
+        tpl.id, tpl.label, JSON.stringify(tpl.permissions), new Date().toISOString(),
+      ]);
+    }
+  }
+
   // Trip (once).
   if (!(await get("SELECT id FROM trips LIMIT 1"))) {
     await run(

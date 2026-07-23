@@ -15,9 +15,9 @@
  */
 
 import { Router } from "express";
-import { isConfigured, listImages, destroyImages, purgeAllImages, DELEGATE_PHOTO_FOLDER } from "../cloudinary.js";
+import { isConfigured, listImages, destroyImages, purgeAllImages, DELEGATE_PHOTO_FOLDER } from "../lib/cloudinary.js";
 import { listDelegatesWithPhoto, clearPhotoByPublicId } from "../data.js";
-import { requirePermission } from "../auth.js";
+import { requirePermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);

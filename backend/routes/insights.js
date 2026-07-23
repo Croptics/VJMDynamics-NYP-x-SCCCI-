@@ -15,8 +15,8 @@
  */
 
 import { Router } from "express";
-import { getTrip, getDashboard, getMissing, COACHES } from "../data.js";
-import { requireAuth } from "../auth.js";
+import { getTrip, getDashboard, getMissing, resolveTripUuid, COACHES } from "../data.js";
+import { requireAuth } from "../lib/auth.js";
 
 const router = Router();
 
@@ -109,11 +109,84 @@ async function callAnthropic(prompt) {
     .trim();
 }
 
+// Pull the first {...} out of a model reply (handles chatty models that wrap
+// JSON in prose despite instructions) — same approach as export.js's own
+// extractJson(), duplicated rather than imported since these are two
+// separate small AI-prompt features with no other shared code.
+function extractJson(text) {
+  if (!text) return null;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try { return JSON.parse(text.slice(start, end + 1)); } catch { return null; }
+}
+
+const CHART_TYPES = ["bar", "pie", "donut", "line"];
+const CHART_GROUP_BY = ["status", "coach", "company", "industry", "vip"];
+
+function buildChartPrompt(request) {
+  return `You pick a chart configuration for a delegate-attendance analytics dashboard. Output ONLY a JSON object, no prose, no markdown.
+
+Available chart types: ${CHART_TYPES.map((c) => `"${c}"`).join(", ")}.
+Available group-by fields:
+- "status" — Arrived/Assigned/Late/Missing/Unassigned counts
+- "coach" — which coach/bus each delegate is on
+- "company" — delegate's company
+- "industry" — delegate's industry
+- "vip" — VIP vs non-VIP
+
+Pick whichever chart type and group-by field best match the request. A time/comparison request ("over time", "trend") should prefer "line"; a part-of-whole request ("breakdown", "proportion", "%") should prefer "pie" or "donut"; a per-category comparison ("by coach", "by company") should prefer "bar". If genuinely unclear, default to {"chartType": "bar", "groupBy": "status"}.
+
+Return EXACTLY this shape:
+{"chartType": "bar", "groupBy": "status"}
+
+Staff request: "${String(request).slice(0, 300)}"
+
+JSON:`;
+}
+
+function sanitizeChartChoice(raw) {
+  return {
+    chartType: CHART_TYPES.includes(raw?.chartType) ? raw.chartType : "bar",
+    groupBy: CHART_GROUP_BY.includes(raw?.groupBy) ? raw.groupBy : "status",
+  };
+}
+
+// Natural-language → chart config, for the Analytics tab's custom chart
+// builder (2026-07-24). Bounded the same way export.js's ai-filter is: the
+// model only ever picks from a fixed enum of chart types/fields, never sees
+// or writes actual delegate data, and the UI shows the result in the SAME
+// editable dropdowns the manual builder uses — this is a starting point, not
+// a black box.
+router.post("/api/trips/:id/analytics/ai-chart", requireAuth(), wrap(async (req, res) => {
+  const request = (req.body?.prompt || "").toString().trim();
+  if (!request) return res.status(400).json({ error: "NO_PROMPT", message: "Describe what you want to see." });
+
+  const prompt = buildChartPrompt(request);
+  let parsed = extractJson(await tryOllama(prompt));
+  if (!parsed) {
+    try { parsed = extractJson(await callAnthropic(prompt)); }
+    catch (err) { console.error("Analytics AI-chart call failed:", err.message || err); }
+  }
+  if (!parsed) {
+    return res.status(503).json({
+      error: "AI_NOT_CONFIGURED",
+      message: "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env.",
+    });
+  }
+  res.json(sanitizeChartChoice(parsed));
+}));
+
 router.post(
   "/api/trips/:id/insights",
   requireAuth(),
   wrap(async (req, res) => {
-    const [trip, dashboard, missing] = await Promise.all([getTrip(), getDashboard(), getMissing()]);
+    // 2026-07-24 fix: this used to call getTrip()/getDashboard()/getMissing()
+    // with NO arguments, i.e. always the base/default trip regardless of
+    // req.params.id — "Generate Insights" silently described the base trip
+    // no matter which trip's Analytics tab you were actually on.
+    const tripUuid = await resolveTripUuid(req.params.id);
+    const [trip, dashboard, missing] = await Promise.all([getTrip(tripUuid), getDashboard(tripUuid), getMissing(tripUuid)]);
     const snapshot = {
       asOf: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
       trip,

@@ -27,7 +27,7 @@
 import { Router } from "express";
 import ExcelJS from "exceljs";
 import { getTrip, getDashboard, getDelegates, resolveTripUuid } from "../data.js";
-import { requireAuth, requirePermission } from "../auth.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);

@@ -14,7 +14,7 @@
  * depends back on this file.
  */
 
-import { all, get } from "./connection.js";
+import { all, get, run } from "./connection.js";
 import { TRIP } from "./constants.js";
 import { listDelegates } from "./delegates.js";
 import { getActivity } from "./history.js";
@@ -25,6 +25,30 @@ export async function getTrip(tripUuid = null) {
     if (t) return t;
   }
   return (await get("SELECT * FROM trips LIMIT 1")) || TRIP;
+}
+
+/** Recomputes "dayOf" from the real calendar date for every trip that has a
+ *  "startDate" set and hasn't been manually overridden (see schema.js's
+ *  comment on both columns). Called on the same 60s tick as the checkpoint
+ *  scheduler (server.js) so "Day X of Y" stays correct across midnight
+ *  without anyone editing it by hand — and also called once immediately
+ *  after a trip's startDate changes or its override is cleared (see
+ *  routes/desmond.js), so the UI doesn't have to wait for the next tick.
+ *  Pass a tripUuid to scope to one trip; omit to sync every trip.
+ *
+ *  Uses Asia/Singapore, NOT the database session's default timezone (Neon
+ *  defaults to UTC) — every delegation is Singapore-organised and travelling
+ *  within China, both UTC+8. Rolling this over at CURRENT_DATE (UTC
+ *  midnight) would have flipped the day 8 hours late, at 8am local time, not
+ *  actual local midnight. */
+export async function syncTripDayOf(tripUuid = null) {
+  await run(
+    `UPDATE trips
+        SET "dayOf" = LEAST("totalDays", GREATEST(1, ((NOW() AT TIME ZONE 'Asia/Singapore')::date - "startDate"::date) + 1))
+      WHERE "startDate" IS NOT NULL AND COALESCE("dayOfIsManual", false) = false
+        ${tripUuid ? `AND uuid_id = $1` : ""}`,
+    tripUuid ? [tripUuid] : []
+  );
 }
 
 /** Resolve a dashboard :id param to the trip uuid to scope every read/write by.

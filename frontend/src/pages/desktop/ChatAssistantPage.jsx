@@ -141,6 +141,8 @@ export default function ChatAssistantPage({ embedded = false }) {
   const [copiedIdx, setCopiedIdx] = useState(null);
   const [roster, setRoster] = useState([]);
   const [card, setCard] = useState(null);      // delegate shown in the info card
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
   const [renaming, setRenaming] = useState(null); // { id, value }
   const messagesRef = useRef(null); // the scrollable message-list div itself
   const taRef = useRef(null);       // auto-growing composer
@@ -530,7 +532,10 @@ export default function ChatAssistantPage({ embedded = false }) {
 
       {/* Delegate info card */}
       {card && (
-        <div onClick={() => setCard(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
+        <div
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setCard(null); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ padding: 0, width: 340, maxWidth: "92%", overflow: "hidden" }}>
             <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 12 }}>
               <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}>{initialsOf(card.name)}</span>

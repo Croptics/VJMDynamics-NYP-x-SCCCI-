@@ -16,7 +16,7 @@
 import "dotenv/config";
 import { randomUUID } from "crypto";
 import pg from "pg";
-import { initDb, listDelegates, createDelegate } from "./data.js";
+import { initDb, listDelegates, createDelegate } from "../data.js";
 
 const { Pool } = pg;
 

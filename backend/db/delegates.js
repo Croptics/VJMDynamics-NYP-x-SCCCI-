@@ -91,7 +91,7 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
     ]
   );
-  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor);
+  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor, { tripUuid });
   return {
     ...d, createdBy: actor,
     company: profile.company, role: profile.role, industry: profile.industry,
@@ -167,7 +167,7 @@ export async function updateDelegate(id, patch, actor = null) {
   for (const key of Object.keys(before)) {
     if (String(before[key] ?? "") !== String(after[key] ?? "")) changes[key] = { from: before[key], to: after[key] };
   }
-  await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes });
+  await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
   return {
     ...merged,
     company: profile.company, role: profile.role, industry: profile.industry,
@@ -246,7 +246,7 @@ export async function deleteDelegate(id, actor = null) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return false;
   await run("DELETE FROM delegates WHERE id = $1", [id]);
-  await logActivity(`${existing.name} removed`, "exception", actor);
+  await logActivity(`${existing.name} removed`, "exception", actor, { tripUuid: existing.trip_id });
   return true;
 }
 
@@ -254,7 +254,7 @@ export async function deleteDelegate(id, actor = null) {
  * Deliberately separate from updateDelegate/normalize — see the comment on
  * the "photoUrl" column in db/schema.js for why the plain JSON PATCH route
  * must never be able to set these fields. The actual Cloudinary upload/
- * destroy calls live in backend/cloudinary.js and are made by the route
+ * destroy calls live in backend/lib/cloudinary.js and are made by the route
  * handler in server.js; these two just persist the resulting URL/id (or
  * clear them) and return the old publicId so the caller can clean it up. */
 export async function setDelegatePhoto(id, url, publicId) {
@@ -302,6 +302,6 @@ export async function deleteAllDelegates(tripUuid = null, actor = null) {
   const params = tripUuid ? [tripUuid] : [];
   const count = Number((await get(`SELECT COUNT(*) AS c FROM delegates ${where}`, params))?.c || 0);
   await run(`DELETE FROM delegates ${where}`, params);
-  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor);
+  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor, { tripUuid });
   return count;
 }

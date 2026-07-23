@@ -134,20 +134,33 @@ export async function deleteException(id) {
   return apiDelete(`/exceptions/${id}`);
 }
 
-/** Manual attendance override — count a delegate present without a scan. */
-export async function manualOverride(delegateId) {
+/** Manual attendance override — count a delegate present without a scan.
+ *  `tripId` (the body field written into check_in_logs.trip_id) stays the
+ *  historical TRIP_ID/"t-1" default always — that column has a foreign key
+ *  to trips' LEGACY id, which only the original Beijing trip has populated;
+ *  any other trip's real uuid there 500s. `checkpointTripId` (2026-07-23) is
+ *  a SEPARATE, optional override for a caller scoped to a different trip
+ *  (e.g. the scanner page's own trip switcher) — the backend resolves it via
+ *  uuid_id (which every trip has) purely to sync the checkpoint-scoped view,
+ *  never for the check_in_logs write. */
+export async function manualOverride(delegateId, checkpointTripId) {
   return apiPost(`/checkins/manual`, {
     tripId: TRIP_ID,
+    checkpointTripId,
     delegateId,
     clientEventId: crypto.randomUUID(),
     clientTs: new Date().toISOString(),
   });
 }
 
-/** Undo a manual attendance override — reverts the delegate to ASSIGNED and
- *  removes the check-in log row manualOverride() just created. */
-export async function undoManualOverride(delegateId) {
-  return apiPost(`/checkins/manual/undo`, { delegateId });
+/** Undo a manual attendance override — reverts the delegate to whatever
+ *  status they actually had before the override (the backend restores it
+ *  from check_in_logs.prev_status; ASSIGNED only if there's none to restore)
+ *  and removes the check-in log row manualOverride() just created.
+ *  checkpointTripId (2026-07-23, optional) mirrors manualOverride()'s own —
+ *  see its comment for why it's separate from tripId. */
+export async function undoManualOverride(delegateId, checkpointTripId) {
+  return apiPost(`/checkins/manual/undo`, { delegateId, checkpointTripId });
 }
 
 /**

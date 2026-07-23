@@ -263,3 +263,74 @@ export async function deleteAccount(id) {
   await run("DELETE FROM accounts WHERE id = $1", [id]);
   return { deleted: true };
 }
+
+/* ---- Role templates (2026-07-24) -----------------------------------------
+ * Admin-managed named permission presets — Account control's "Apply
+ * template" quick-fill + "Access role" filter. Deliberately just a
+ * convenience preset, never a stored tag on an account: matchRoleTemplate()
+ * below always compares an account's CURRENT stored permissions fresh
+ * against whatever templates exist right now, so editing/deleting a
+ * template can never retroactively change what an existing account can do —
+ * it only changes what shows up as a quick-fill option / which "bucket" that
+ * account's permissions currently fall into.
+ * -------------------------------------------------------------------------- */
+function roleTemplatePublic(row) {
+  if (!row) return null;
+  let permissions = {};
+  try { permissions = JSON.parse(row.permissions || "{}"); } catch { /* corrupt row — treat as empty */ }
+  return { id: row.id, label: row.label, permissions: cleanPermissions(permissions), createdAt: row.createdAt };
+}
+
+export async function listRoleTemplates() {
+  return (await all(`SELECT * FROM role_templates ORDER BY "createdAt"`)).map(roleTemplatePublic);
+}
+
+async function nextRoleTemplateId() {
+  const base = "role";
+  const existing = new Set((await all(`SELECT id FROM role_templates`)).map((r) => r.id));
+  let n = 1;
+  while (existing.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+export async function createRoleTemplate(input) {
+  const label = String(input?.label || "").trim();
+  if (!label) return { error: "LABEL_REQUIRED" };
+  const id = await nextRoleTemplateId();
+  const permissions = cleanPermissions(input?.permissions);
+  await run(`INSERT INTO role_templates (id, label, permissions, "createdAt") VALUES ($1,$2,$3,$4)`, [
+    id, label, JSON.stringify(permissions), new Date().toISOString(),
+  ]);
+  return { template: roleTemplatePublic(await get(`SELECT * FROM role_templates WHERE id = $1`, [id])) };
+}
+
+export async function updateRoleTemplate(id, patch) {
+  const existing = await get(`SELECT * FROM role_templates WHERE id = $1`, [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  const label = patch?.label !== undefined ? String(patch.label).trim() : existing.label;
+  if (!label) return { error: "LABEL_REQUIRED" };
+  const permissions = patch?.permissions !== undefined
+    ? cleanPermissions(patch.permissions)
+    : JSON.parse(existing.permissions || "{}");
+  await run(`UPDATE role_templates SET label = $1, permissions = $2 WHERE id = $3`, [label, JSON.stringify(permissions), id]);
+  return { template: roleTemplatePublic(await get(`SELECT * FROM role_templates WHERE id = $1`, [id])) };
+}
+
+export async function deleteRoleTemplate(id) {
+  const existing = await get(`SELECT id FROM role_templates WHERE id = $1`, [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  await run(`DELETE FROM role_templates WHERE id = $1`, [id]);
+  return { deleted: true };
+}
+
+/** Which template (if any) a STAFF account's CURRENT permissions exactly
+ *  match — powers Account control's "Access role" filter/badge. Returns null
+ *  ("Custom") if none match. Only meaningful for role="staff" — an admin
+ *  account bypasses permissions entirely, a separate concept from these
+ *  staff-only templates (callers should skip admin accounts themselves). */
+export function matchRoleTemplate(permissions, templates) {
+  for (const tpl of templates) {
+    if (Object.entries(tpl.permissions).every(([k, v]) => !!permissions?.[k] === v)) return tpl.id;
+  }
+  return null;
+}

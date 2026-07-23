@@ -74,17 +74,23 @@
   font-family: inherit;
 }
 
-/* Kept only for TripsListPage.jsx's own dark-mode toggle (mirrors the
- * app-wide theme — see useTfTheme in that file). CoachBoardView below never
- * applies .tf-dark, so the board itself is always the flat light palette. */
+/* Used by BOTH TripsListPage.jsx's and CoachBoardView's dark-mode toggle
+ * (mirrors the app-wide theme — see useTfTheme in TripsListPage.jsx; the
+ * board applies this class too as of 2026-07-23, previously never did — see
+ * TripCoachPage.jsx's header). Colors REFERENCE the same app-wide tokens.css
+ * variables (--bg/--surface/--ink/--line, flipped by :root[data-theme="dark"]
+ * in tokens.css) instead of a separately hand-picked palette, so this page's
+ * dark mode is guaranteed pixel-identical to the Dashboard/every other page's
+ * — no risk of the two drifting apart or looking like a slightly different
+ * shade of dark. */
 .tf-root.tf-dark {
-  --tf-bg: #0a0f1c;
-  --tf-surface: #121a2b;
-  --tf-surface-2: #182238;
-  --tf-border: #253049;
-  --tf-text: #eaeef7;
-  --tf-text-2: #a7b1c7;
-  --tf-text-3: #6c7893;
+  --tf-bg: var(--bg);
+  --tf-surface: var(--surface);
+  --tf-surface-2: var(--surface-2);
+  --tf-border: var(--line);
+  --tf-text: var(--ink);
+  --tf-text-2: var(--ink-2);
+  --tf-text-3: var(--ink-3);
   --tf-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
   --tf-shadow-md: 0 6px 24px rgba(0, 0, 0, 0.45);
   --tf-shadow-lg: 0 24px 56px rgba(0, 0, 0, 0.55);
@@ -399,6 +405,12 @@
   position: fixed; inset: 0; background: rgba(17, 24, 39, 0.4);
   display: flex; align-items: center; justify-content: center; z-index: 3000; padding: 20px;
 }
+/* ConfirmDialog reuses .tf-modal-overlay but must always render ABOVE any
+   other modal it's opened on top of (e.g. the delete confirm inside Edit
+   itinerary) — same z-index on both meant whichever modal came LATER in the
+   JSX painted on top by default DOM stacking order, hiding the confirm
+   dialog behind it instead of over it. 2026-07-23 fix. */
+.tf-modal-overlay--confirm { z-index: 3100; }
 .tf-modal-card {
   background: var(--tf-surface); color: var(--tf-text); border-radius: var(--tf-radius-md); box-shadow: var(--tf-shadow-lg);
   width: 100%; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;

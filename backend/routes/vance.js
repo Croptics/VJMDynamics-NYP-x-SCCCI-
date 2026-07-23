@@ -40,7 +40,7 @@ import {
   getMissing,
   COACHES,
 } from "../data.js";
-import { requireAuth, requirePermission, requireKioskOrPermission } from "../auth.js";
+import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -779,12 +779,19 @@ router.post(
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
       const coachId = r.coachId || null;
+      // tripUuid passed directly now (2026-07-24) — this used to call
+      // createDelegate() with none, then patch trip_id on with a separate
+      // UPDATE below, which meant logActivity() (fired inside createDelegate)
+      // always recorded trip_id NULL for every onboarded delegate, so the
+      // Dashboard's per-trip History tracker never showed onboarding activity
+      // at all. The UPDATE below still runs but is now a harmless no-op on
+      // trip_id (COALESCE keeps whatever's already there).
       const delegate = await createDelegate({
         name,
         status: coachId ? "MISSING" : "UNASSIGNED",
         vip: !!r.vip,
         coachId,
-      });
+      }, tripUuid);
       await q(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,

@@ -56,7 +56,8 @@
 import "dotenv/config";
 import { Router } from "express";
 import pg from "pg";
-import { requireAuth, requirePermission } from "../auth.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
+import { syncTripDayOf } from "../db/dashboard.js";
 
 const { Pool } = pg;
 
@@ -219,17 +220,21 @@ router.get("/api/users/staff", readAccess, wrap(async (_req, res) => {
 router.get("/api/all-trips", readAccess, wrap(async (_req, res) => {
   // v3: also selects dayOf/totalDays so the trip list cards can show a real
   // per-trip progress indicator instead of just name/status/counts.
+  // startDate/dayOfIsManual added later (2026-07-24, JQ's auto-day feature) —
+  // without them here, the Edit trip modal (which reuses these same trip
+  // objects) always saw startDate as undefined and showed the date picker
+  // blank even for a trip that already had one saved.
   const trips = await all(`
     SELECT
       t.uuid_id AS id, t.name, t."dateRange", t.status, t."lead",
-      t."dayOf", t."totalDays",
+      t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual",
       COUNT(DISTINCT c.id) AS "coachCount",
       COUNT(DISTINCT d.id) AS "delegateCount"
     FROM trips t
     LEFT JOIN coaches   c ON c.trip_id = t.uuid_id
     LEFT JOIN delegates d ON d.trip_id = t.uuid_id
     WHERE t.uuid_id IS NOT NULL
-    GROUP BY t.uuid_id, t.name, t."dateRange", t.status, t."lead", t."dayOf", t."totalDays"
+    GROUP BY t.uuid_id, t.name, t."dateRange", t.status, t."lead", t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual"
     ORDER BY t.name
   `);
   res.json({
@@ -332,17 +337,28 @@ router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
 const TRIP_STATUSES = ["Planning", "In progress", "Completed", "Cancelled"];
 
 router.post("/api/trips", writeAccess, wrap(async (req, res) => {
-  const { name, dateRange, status, lead, dayOf, totalDays } = req.body || {};
+  const { name, dateRange, status, lead, dayOf, totalDays, startDate } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "A trip name is required." });
   const st = TRIP_STATUSES.includes(status) ? status : "Planning";
   const total = Math.max(1, Number(totalDays) || 5);
   const day = Math.min(total, Math.max(1, Number(dayOf) || 1));
-  const trip = await get(
-    `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead")
-     VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6)
-     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays"`,
-    [name.trim(), (dateRange || "").trim() || null, day, total, st, (lead || "").trim() || null]
+  const sd = startDate ? String(startDate).trim() || null : null;
+  let trip = await get(
+    `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead", "startDate")
+     VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual"`,
+    [name.trim(), (dateRange || "").trim() || null, day, total, st, (lead || "").trim() || null, sd]
   );
+  // A startDate was given — compute the real "Day X of Y" immediately instead
+  // of leaving whatever was typed (or the "1" default) until the next 60s
+  // scheduler tick (see syncTripDayOf(), db/dashboard.js, JQ's).
+  if (sd) {
+    await syncTripDayOf(trip.id);
+    trip = await get(
+      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual" FROM trips WHERE uuid_id = $1`,
+      [trip.id]
+    );
+  }
   logActivity(trip.id, `Trip "${trip.name}" was created.`, "system");
   res.status(201).json(trip);
 }));
@@ -363,15 +379,33 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
     sets.push(`status = $${i++}`); params.push(b.status);
   }
   if (b.totalDays !== undefined) { sets.push(`"totalDays" = $${i++}`); params.push(Math.max(1, Number(b.totalDays) || 1)); }
-  if (b.dayOf !== undefined) { sets.push(`"dayOf" = $${i++}`); params.push(Math.max(1, Number(b.dayOf) || 1)); }
+  if (b.startDate !== undefined) { sets.push(`"startDate" = $${i++}`); params.push(String(b.startDate).trim() || null); }
+  // Hand-typing a specific "Current day" is a deliberate override — flip
+  // dayOfIsManual on so the next auto-sync tick doesn't immediately stomp it.
+  // "resetDayOfAuto: true" is the opposite action ("Use automatic day" in
+  // Edit trip) — clears the override so auto-sync resumes.
+  if (b.dayOf !== undefined) {
+    sets.push(`"dayOf" = $${i++}`); params.push(Math.max(1, Number(b.dayOf) || 1));
+    sets.push(`"dayOfIsManual" = true`);
+  }
+  if (b.resetDayOfAuto === true) { sets.push(`"dayOfIsManual" = false`); }
   if (sets.length === 0) return res.status(400).json({ error: "NO_FIELDS", message: "Nothing to update." });
   params.push(req.params.tripId);
-  const trip = await get(
+  let trip = await get(
     `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
-     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays"`,
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual"`,
     params
   );
   if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+  // A new startDate, or clearing the manual override, means "dayOf" may now
+  // be stale — recompute immediately rather than waiting for the next tick.
+  if (b.startDate !== undefined || b.resetDayOfAuto === true) {
+    await syncTripDayOf(req.params.tripId);
+    trip = await get(
+      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual" FROM trips WHERE uuid_id = $1`,
+      [req.params.tripId]
+    );
+  }
   logActivity(req.params.tripId, `Trip details for "${trip.name}" were updated.`, "system");
   res.json(trip);
 }));
@@ -419,6 +453,22 @@ router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
   res.json({
     coaches: coaches.map((c) => ({ ...c, boarded: Number(c.boarded), missing: Number(c.missing), total: Number(c.total) })),
   });
+}));
+
+// Bulk capacity — sets EVERY existing coach on a trip to the same seat count
+// in one shot (2026-07-24, Edit trip's "Max delegates per coach" field).
+// Deliberately separate from the per-coach PATCH /api/coaches/:id below —
+// that one already exists for adjusting a single coach; this is for "make
+// them all X" instead of editing each one individually.
+router.patch("/api/trips/:tripId/coaches/capacity", writeAccess, wrap(async (req, res) => {
+  const capacity = Math.min(200, Math.max(1, Math.floor(Number(req.body?.capacity) || 0)));
+  if (!capacity) return res.status(400).json({ error: "BAD_CAPACITY", message: "capacity must be a positive number." });
+  const updated = await all(
+    `UPDATE coaches SET capacity = $1 WHERE trip_id = $2 RETURNING id`,
+    [capacity, req.params.tripId]
+  );
+  if (updated.length) logActivity(req.params.tripId, `All coaches set to ${capacity} seats.`, "coach");
+  res.json({ updated: updated.length, capacity });
 }));
 
 // Live bus-arrival status for one coach: not_arrived → en_route → arrived.

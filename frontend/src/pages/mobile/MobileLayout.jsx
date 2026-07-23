@@ -6,9 +6,9 @@ import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "./MobileChatBubble.jsx";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 import "../../styles/mobile.css";
 
-const TRIP_ID = "t-1";
 // Light haptic tick on tab taps / actions — a native-app touch. No-op on
 // desktop and iOS Safari (which don't implement the Vibration API).
 const buzz = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } catch { /* unsupported */ } };
@@ -52,7 +52,11 @@ export default function MobileLayout({ onLogout }) {
     let alive = true;
     async function load() {
       try {
-        const dash = await apiGet(`/trips/${TRIP_ID}/dashboard`);
+        // Re-read on every tick (not once at mount) so switching trips on
+        // Home's trip switcher (lib/mobileTrip.js) updates this shell's
+        // badges/header within one 5s cycle, without needing the whole
+        // persistent Layout to remount.
+        const dash = await apiGet(`/trips/${getMobileTripId()}/dashboard`);
         if (!alive) return;
         setMissing(dash.kpis ? dash.kpis.missing || 0 : 0);
         setTrip(dash.trip || null);

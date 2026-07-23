@@ -18,7 +18,7 @@
  */
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
-import { requireAuth } from "../auth.js";
+import { requireAuth } from "../lib/auth.js";
 import { getTrip, getDashboard, getMissing, resolveTripUuid } from "../data.js";
 
 const router = Router();

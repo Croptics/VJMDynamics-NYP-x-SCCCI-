@@ -48,7 +48,7 @@ const STATUS_TONE = {
   UNASSIGNED: "var(--st-unassigned)",
 };
 
-export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) {
+export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn, tripId }) {
   const canEdit = getPermissions().manageExceptions;
   const [query, setQuery] = useState("");
   const [justMarked, setJustMarked] = useState(() => new Set()); // optimistic PRESENT
@@ -90,7 +90,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
     // optimistic
     setJustMarked((prev) => new Set(prev).add(d.delegateId));
     try {
-      await manualOverride(d.delegateId);
+      await manualOverride(d.delegateId, tripId);
       flash(`${d.name} marked present`);
       onCheckedIn?.();
     } catch (e) {
@@ -108,13 +108,15 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
 
   // Only offered right next to a delegate THIS panel just marked present —
   // the accidental-click case, not a general "un-arrive anyone" control.
-  // Reverts to ASSIGNED and removes the log row markPresent() just wrote.
+  // Reverts to whatever status they actually had before (e.g. Late), not a
+  // blanket ASSIGNED — see undoManualOverride()'s own comment. Removes the
+  // log row markPresent() just wrote.
   async function undoPresent(d) {
     if (!canEdit) return;
     setBusyId(d.delegateId);
     setError("");
     try {
-      await undoManualOverride(d.delegateId);
+      await undoManualOverride(d.delegateId, tripId);
       setJustMarked((prev) => { const n = new Set(prev); n.delete(d.delegateId); return n; });
       flash(`${d.name} reverted`);
       onCheckedIn?.();

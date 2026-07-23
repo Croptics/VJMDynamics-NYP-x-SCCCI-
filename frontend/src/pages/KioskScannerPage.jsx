@@ -108,6 +108,41 @@ export default function KioskScannerPage() {
     return data;
   }, []);
 
+  const kioskGet = useCallback(async (path) => {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: kioskTokenRef.current ? { Authorization: `Bearer ${kioskTokenRef.current}` } : {},
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || "Request failed");
+    return data;
+  }, []);
+
+  // Multi-day / multi-checkpoint attendance (2026-07-22) — optional second
+  // write after a successful scan. The kiosk token only reaches TWO
+  // checkpoint endpoints (GET the list, POST a check-in) — see auth.js's
+  // requireKioskOrAuth/requireKioskOrPermission; stats and admin CRUD stay
+  // off-limits to a passwordless device by design.
+  const [checkpoints, setCheckpoints] = useState([]);
+  const [activeCheckpointId, setActiveCheckpointId] = useState("");
+
+  useEffect(() => {
+    if (!tokenReady) return;
+    kioskGet(`/trips/${TRIP_ID}/checkpoints`).then((data) => {
+      const flat = [];
+      for (const day of data.days || []) {
+        for (const cp of day.checkpoints || []) flat.push({ ...cp, dayNumber: day.dayNumber });
+      }
+      setCheckpoints(flat);
+      // Auto-focus on whatever checkpoint is relevant right now.
+      setActiveCheckpointId((prev) => prev || flat.find((c) => c.timeState === "current")?.id || "");
+    }).catch(() => {}); // Checkpoint Selector just stays empty
+  }, [tokenReady, kioskGet]);
+
+  function recordCheckpointCheckin(delegateId, method) {
+    if (!activeCheckpointId || !delegateId) return;
+    kioskPost(`/checkpoints/${activeCheckpointId}/checkins`, { delegateId, status: "ARRIVED", method }).catch(() => {});
+  }
+
   /* ---- speech recognition setup for the low-light voice fallback --------- */
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -253,6 +288,7 @@ export default function KioskScannerPage() {
       if (simulateSlow) await new Promise((r) => setTimeout(r, 1300));
       const res = await kioskPost("/attendance/scan", { tripId: TRIP_ID, scanData: token, timestamp: new Date().toISOString() });
       setResult({ name: res.name, sub: "checked in" });
+      recordCheckpointCheckin(res.delegateId, res.method);
       setTimeout(() => setResult(null), 3000);
     } catch (e) {
       playErrorTone();
@@ -325,6 +361,7 @@ export default function KioskScannerPage() {
     try {
       const res = await kioskPost("/onboarding/checkin", { code, tripId: TRIP_ID });
       setResult({ name: res.delegate?.name || code, sub: res.alreadyBoarded ? "already checked in" : "checked in" });
+      recordCheckpointCheckin(res.delegate?.id, "QR");
       setTimeout(() => setResult(null), 3000);
     } catch (e) {
       playErrorTone();
@@ -415,6 +452,29 @@ export default function KioskScannerPage() {
         <div className="muted" style={{ fontSize: 12.5, marginTop: -4 }}>
           Passwordless entrance kiosk · Face &amp; QR check-in only
         </div>
+
+        {/* Checkpoint Selector (2026-07-22) — optional, scanning works fine
+            with none picked. Kept deliberately minimal (no stats shown) —
+            the kiosk token can only list checkpoints and record a check-in,
+            not read back live counts; see auth.js's requireKioskOrAuth. */}
+        {checkpoints.length > 0 && (
+          <select
+            className="select"
+            value={activeCheckpointId}
+            onChange={(e) => setActiveCheckpointId(e.target.value)}
+            style={{ width: "100%", marginTop: 8 }}
+          >
+            <option value="">Not scanning for a checkpoint</option>
+            {checkpoints.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.timeState === "current" ? "→ " : ""}
+                Day {c.dayNumber} · {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{c.label}
+                {c.status === "delayed" && c.delayMinutes > 0 ? ` (Delayed +${c.delayMinutes}m)` : ""}
+                {c.timeState === "past" ? " (Done)" : c.timeState === "current" ? " (Now)" : ""}
+              </option>
+            ))}
+          </select>
+        )}
 
         <div style={S.viewport}>
           {!(scanMode === "face" && lowLight) && (

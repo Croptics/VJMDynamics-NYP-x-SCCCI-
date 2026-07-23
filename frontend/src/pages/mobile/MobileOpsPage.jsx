@@ -26,11 +26,13 @@ import { apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import MobileAttendancePage from "./MobileAttendancePage.jsx";
 import MobileTripsPage from "./MobileTripsPage.jsx";
-
-const TRIP_ID = "t-1";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 export default function MobileOpsPage({ defaultView = "delegates" }) {
   const { t } = useLang();
+  // Read fresh on every mount — reflects whichever trip is currently picked
+  // on Home's trip switcher (lib/mobileTrip.js), not a stale snapshot.
+  const TRIP_ID = getMobileTripId();
   const [searchParams] = useSearchParams();
   // A ?status= deep link is always about the roster, so honour it over the
   // route's own default view.

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2 } from "lucide-react";
+import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock } from "lucide-react";
 import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import DelegateAvatar from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
+import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 
-const TRIP_ID = "t-1";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 // UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
 // staff on the desktop admin pages BEFORE the event; mobile's job during the
 // event is tracking who's arrived/late/missing, not doing the assignment
@@ -51,6 +52,10 @@ export default function MobileAttendancePage() {
   const { t } = useLang();
   const [searchParams] = useSearchParams();
   const canEdit = getPermissions().manageDelegates;
+  // Read fresh on every mount (not module-load time) so navigating here
+  // after switching trips on Home picks up the CURRENT selection, not
+  // whatever was in localStorage when this module first loaded.
+  const TRIP_ID = getMobileTripId();
   const [delegates, setDelegates] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -66,7 +71,11 @@ export default function MobileAttendancePage() {
   const [rowError, setRowError] = useState(null); // { id, message }
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
+  const [timelineDelegate, setTimelineDelegate] = useState(null);
   const [statusSheetFor, setStatusSheetFor] = useState(null); // the delegate being re-statused, or null
+  // Shared by the map/timeline modals below — only dismiss if the WHOLE
+  // click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
 
   // Guards a poll tick against (a) overlapping with a still-in-flight
   // previous poll, and (b) landing while a row's status edit is mid-save —
@@ -299,18 +308,28 @@ export default function MobileAttendancePage() {
                   <Phone size={18} />
                 </button>
               )}
+              {/* Hidden entirely for Assigned/Arrived/Late (2026-07-23) — a
+                  location only ever gets recorded for a Missing delegate, so
+                  a disabled-but-visible pin for every other status was just
+                  clutter, not a real affordance. */}
+              {d.status === "MISSING" && (
+                <button
+                  onClick={() => setMapDelegate(d)}
+                  aria-label={`${t("View location")} — ${d.name}`}
+                  style={{
+                    background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0,
+                    color: "var(--st-missing)", cursor: "pointer",
+                  }}
+                >
+                  <MapPin size={18} />
+                </button>
+              )}
               <button
-                onClick={() => d.status === "MISSING" && setMapDelegate(d)}
-                disabled={d.status !== "MISSING"}
-                aria-label={`${t("View location")} — ${d.name}`}
-                style={{
-                  background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0,
-                  color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
-                  opacity: d.status === "MISSING" ? 1 : 0.35,
-                  cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
-                }}
+                onClick={() => setTimelineDelegate(d)}
+                aria-label={`${t("View timeline")} — ${d.name}`}
+                style={{ background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0, color: "var(--ink-3)" }}
               >
-                <MapPin size={18} />
+                <Clock size={18} />
               </button>
             </div>
 
@@ -338,7 +357,9 @@ export default function MobileAttendancePage() {
       })}
 
       {mapDelegate && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }} onClick={() => setMapDelegate(null)}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setMapDelegate(null); }}>
           <div className="card" style={{ width: "min(420px, 100%)", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 12 }}>
               <div>
@@ -356,6 +377,25 @@ export default function MobileAttendancePage() {
                 {t("No location has been recorded for this delegate yet.")}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {timelineDelegate && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setTimelineDelegate(null); }}>
+          <div className="card" style={{ width: "min(420px, 100%)", maxHeight: "75vh", overflowY: "auto", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 12 }}>
+              <div>
+                <h2 style={{ fontSize: 15 }}>{timelineDelegate.name}</h2>
+                <p className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("Checkpoint timeline")}</p>
+              </div>
+              <button onClick={() => setTimelineDelegate(null)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+                <X size={18} />
+              </button>
+            </div>
+            <DelegateTimeline delegateId={timelineDelegate.id} />
           </div>
         </div>
       )}
@@ -389,6 +429,10 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
   // before.
   const [askingLocation, setAskingLocation] = useState(false);
   const [location, setLocation] = useState(delegate.lastLocation || "");
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select text in the
+  // "Last known location" field.
+  const downOnBackdrop = useRef(false);
 
   function pick(status) {
     if (status === "MISSING") { setAskingLocation(true); return; }
@@ -400,7 +444,8 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
     return (
       <div
         style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-        onClick={onClose}
+        onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+        onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
       >
         <div
           className="card"
@@ -453,7 +498,8 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
   return (
     <div
       style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-      onClick={onClose}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
     >
       <div
         className="card"

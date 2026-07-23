@@ -4,8 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import IssuesPanel from "../../components/IssuesPanel.jsx";
 import { getDelegates } from "../../lib/exceptionsApi.js";
-
-const TRIP_ID = "t-1";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 /**
  * Dedicated mobile Issues/Exceptions page (/mobile/issues).
@@ -28,6 +27,12 @@ const TRIP_ID = "t-1";
 export default function MobileIssuesPage() {
   const { t } = useLang();
   const navigate = useNavigate();
+  // Read fresh on every mount — reflects whichever trip is currently picked
+  // on Home's trip switcher (lib/mobileTrip.js). NOTE: getDelegates() below
+  // (lib/exceptionsApi.js) still always reads its own hardcoded default trip
+  // internally — this page's own TRIP_ID only scopes the IssuesPanel prop,
+  // not the roster fetch. Not fixed here — see the AI log.
+  const TRIP_ID = getMobileTripId();
   const [delegates, setDelegates] = useState([]);
 
   const loadDelegates = useCallback(async () => {

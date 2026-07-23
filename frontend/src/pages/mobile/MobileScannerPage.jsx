@@ -32,7 +32,7 @@ import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
 
-const TRIP_ID = "t-1";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 // Offline queue — check-ins captured while the phone has no signal (on a
 // highway between venues) are stashed in localStorage and replayed to the
@@ -79,6 +79,9 @@ const SCAN_CSS = `
  */
 export default function MobileScannerPage({ lockMode }) {
   const { t } = useLang();
+  // Read fresh on every mount so this reflects whichever trip is currently
+  // picked on Home's trip switcher, not a stale module-load-time snapshot.
+  const TRIP_ID = getMobileTripId();
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);
@@ -109,6 +112,8 @@ export default function MobileScannerPage({ lockMode }) {
   // Individual + group reset (multi-leg headcount).
   const [resetBusy, setResetBusy] = useState(false);
   const [confirmCoachReset, setConfirmCoachReset] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
   const [simulateSlow, setSimulateSlow] = useState(false); // demo the >1s SLA breach on demand
   const [passphrase, setPassphrase] = useState("");
   const [voiceListening, setVoiceListening] = useState(false);
@@ -150,6 +155,36 @@ export default function MobileScannerPage({ lockMode }) {
 
   useEffect(() => { fetchCoaches(); }, [fetchCoaches]);
   useEffect(() => { fetchCoach(coachId); }, [coachId, fetchCoach]);
+
+  // Multi-day / multi-checkpoint attendance (2026-07-22) — same optional
+  // second write as the desktop scanner (UnifiedScannerPage.jsx). Face/Voice
+  // only for now — QR and Manual go through shared components that don't
+  // report back which delegate matched.
+  const [checkpoints, setCheckpoints] = useState([]);
+  const [activeCheckpointId, setActiveCheckpointId] = useState("");
+  const [checkpointStats, setCheckpointStats] = useState(null);
+
+  const fetchCheckpoints = useCallback(async () => {
+    try {
+      const data = await apiGet(`/trips/${TRIP_ID}/checkpoints`);
+      const flat = [];
+      for (const day of data.days || []) {
+        for (const cp of day.checkpoints || []) flat.push({ ...cp, dayNumber: day.dayNumber });
+      }
+      setCheckpoints(flat);
+      // Auto-focus on whatever checkpoint is relevant right now — first
+      // load only, never overrides a staff member's own manual choice.
+      setActiveCheckpointId((prev) => prev || flat.find((c) => c.timeState === "current")?.id || "");
+    } catch { /* selector just stays empty */ }
+  }, []);
+  useEffect(() => { fetchCheckpoints(); }, [fetchCheckpoints]);
+
+  const fetchCheckpointStats = useCallback(async (checkpointId) => {
+    if (!checkpointId) { setCheckpointStats(null); return; }
+    try { setCheckpointStats((await apiGet(`/checkpoints/${checkpointId}/checkins`)).stats); }
+    catch { setCheckpointStats(null); }
+  }, []);
+  useEffect(() => { fetchCheckpointStats(activeCheckpointId); }, [activeCheckpointId, fetchCheckpointStats]);
 
   /* Drain the offline queue: replay each stashed scan in order. A server
    * rejection (has .status/.code — e.g. that delegate is already boarded)
@@ -421,6 +456,13 @@ export default function MobileScannerPage({ lockMode }) {
       setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s` });
       fetchCoaches();
       fetchCoach(coachId);
+      // Second, separate write — only when a checkpoint is actively selected.
+      // Never blocks the actual check-in above; failures here are silent.
+      if (activeCheckpointId) {
+        apiPost(`/checkpoints/${activeCheckpointId}/checkins`, {
+          delegateId: res.delegateId, status: "ARRIVED", method: res.method,
+        }).then(() => fetchCheckpointStats(activeCheckpointId)).catch(() => {});
+      }
       setTimeout(() => setScanResult(null), 3500);
     } catch (e) {
       // Connection dropped mid-send: queue it instead of reporting a failure.
@@ -640,6 +682,38 @@ export default function MobileScannerPage({ lockMode }) {
           </option>
         ))}
       </select>
+
+      {/* Checkpoint Selector (2026-07-22) — optional, scanning works fine
+          with none picked; this just adds a checkpoint-scoped attendance
+          record per scan. See submitScan() for the second write. */}
+      {checkpoints.length > 0 && (
+        <>
+          <select
+            className="select"
+            value={activeCheckpointId}
+            onChange={(e) => setActiveCheckpointId(e.target.value)}
+            style={{ width: "100%", marginBottom: 8 }}
+          >
+            <option value="">{t("Not scanning for a checkpoint")}</option>
+            {checkpoints.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.timeState === "current" ? "→ " : ""}
+                {t("Day")} {c.dayNumber} · {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{c.label}
+                {c.status === "delayed" && c.delayMinutes > 0 ? ` (+${c.delayMinutes}m)` : ""}
+                {c.status === "moved" ? ` (${t("Moved")})` : ""}
+                {c.timeState === "past" ? ` (${t("Done")})` : c.timeState === "current" ? ` (${t("Now")})` : ""}
+              </option>
+            ))}
+          </select>
+          {activeCheckpointId && checkpointStats && (
+            <div className="row" style={{ gap: 8, marginBottom: 12, fontSize: 12 }}>
+              <span className="badge badge-present">{checkpointStats.arrived} {t("arrived")}</span>
+              <span className="badge badge-late">{checkpointStats.late} {t("late")}</span>
+              <span className="badge badge-missing">{checkpointStats.missing} {t("missing")}</span>
+            </div>
+          )}
+        </>
+      )}
 
       {/* Scanner viewport */}
       <div style={S.viewport}>
@@ -915,7 +989,8 @@ export default function MobileScannerPage({ lockMode }) {
       {confirmCoachReset && (
         <div
           style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-          onClick={() => !resetBusy && setConfirmCoachReset(false)}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (!resetBusy && downOnBackdrop.current && e.target === e.currentTarget) setConfirmCoachReset(false); }}
         >
           <div
             className="card"

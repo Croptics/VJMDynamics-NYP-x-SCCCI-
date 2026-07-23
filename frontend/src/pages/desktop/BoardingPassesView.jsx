@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
 import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode } from "lucide-react";
-import { getBadges } from "../../lib/claudeParse.js";
+import { getBadges, getTrips } from "../../lib/claudeParse.js";
 import { useLang } from "../../lib/i18n.jsx";
 
 /**
@@ -23,7 +23,7 @@ const STATUS_META = {
 };
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
-export default function BoardingPassesView({ tripId }) {
+export default function BoardingPassesView({ tripId, onKpiChange }) {
   const { t } = useLang();
   const [data, setData] = useState({ delegates: [], coaches: [], total: 0, present: 0 });
   const [qr, setQr] = useState({});           // delegateId -> QR data URL
@@ -31,20 +31,30 @@ export default function BoardingPassesView({ tripId }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
   const [open, setOpen] = useState(null);      // delegate shown in the pass modal
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
   const [copied, setCopied] = useState(false);
   const [printOne, setPrintOne] = useState(null);
+
+  // ---- Trip switcher (view/print another trip's passes without leaving
+  // this screen) — local to this view, doesn't touch the parent's own trip
+  // selection used by the document-parsing tab.
+  const [trips, setTrips] = useState([]);
+  const [selectedTrip, setSelectedTrip] = useState(tripId || "t-1");
+  useEffect(() => { getTrips().then(setTrips).catch(() => {}); }, []);
+  useEffect(() => { setSelectedTrip(tripId || "t-1"); }, [tripId]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getBadges(tripId || "t-1");
+      const res = await getBadges(selectedTrip || "t-1");
       setData(res);
       const entries = await Promise.all(
         res.delegates.map(async (d) => [d.id, d.qr_code ? await QRCode.toDataURL(d.qr_code, { width: 260, margin: 1 }) : null])
       );
       setQr(Object.fromEntries(entries));
     } catch { /* ignore */ } finally { setLoading(false); }
-  }, [tripId]);
+  }, [selectedTrip]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -100,6 +110,16 @@ export default function BoardingPassesView({ tripId }) {
     ["boarded", t("Boarded"), data.present],
   ];
 
+  const currentTrip = trips.find((tr) => tr.id === selectedTrip);
+  // Report the trip-scoped numbers up so the page header's TripPulse card
+  // (rendered by the parent, in its original spot) can show THIS trip's
+  // figures instead of the global assistant snapshot's. Additive only — a
+  // parent that doesn't pass onKpiChange behaves exactly as before.
+  useEffect(() => {
+    onKpiChange?.({ trip: { name: currentTrip?.name, dayOf: currentTrip?.dayOf }, kpis: { total: data.total, present: data.present } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrip, data.total, data.present]);
+
   return (
     <div>
       {/* Header — counts folded into context, no stat-card row */}
@@ -115,7 +135,15 @@ export default function BoardingPassesView({ tripId }) {
                 </>}
           </p>
         </div>
-        <div className="row" style={{ gap: 10 }}>
+        <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <select className="select" style={{ width: 160, maxWidth: "40vw", textOverflow: "ellipsis" }} value={selectedTrip}
+            onChange={(e) => setSelectedTrip(e.target.value)}>
+            {trips.map((trip) => (
+              <option key={trip.id} value={trip.id}>
+                {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
+              </option>
+            ))}
+          </select>
           <button className="btn btn-ghost" onClick={load}><RefreshCw size={15} /> {t("Refresh")}</button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
             <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
@@ -185,7 +213,10 @@ export default function BoardingPassesView({ tripId }) {
 
       {/* One-delegate pass modal */}
       {open && (
-        <div onClick={() => setOpen(null)} className="mg-screen-only"
+        <div
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setOpen(null); }}
+          className="mg-screen-only"
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.25)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ padding: 0, width: 360, maxWidth: "92%", overflow: "hidden" }}>
             <div className="row between" style={{ padding: "14px 18px", borderBottom: "1px solid var(--line)" }}>

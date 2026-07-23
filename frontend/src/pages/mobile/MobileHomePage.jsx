@@ -4,8 +4,7 @@ import { RefreshCw, AlertTriangle, ChevronRight, ScanFace } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
-
-const TRIP_ID = "t-1";
+import { getMobileTripId, setMobileTripId } from "../../lib/mobileTrip.js";
 
 /** "Good morning" / "Good afternoon" / "Good evening", by local hour. */
 function greeting() {
@@ -42,6 +41,28 @@ export default function MobileHomePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Trip switcher — restricted to "In progress" trips only (a Planning or
+  // Completed trip has no live attendance to track on a phone, so switching
+  // to one would just show an empty/stale board). Persists across every
+  // mobile page via lib/mobileTrip.js, not just this one.
+  const [tripId, setTripIdState] = useState(getMobileTripId);
+  const [inProgressTrips, setInProgressTrips] = useState([]);
+  function pickTrip(id) {
+    setTripIdState(id);
+    setMobileTripId(id);
+  }
+  useEffect(() => {
+    apiGet("/all-trips").then((r) => {
+      const list = (r.trips || []).filter((tr) => tr.status === "In progress");
+      setInProgressTrips(list);
+      // The previously-picked trip is no longer in progress (wrapped up, or
+      // never was) — fall back to the first in-progress one instead of
+      // silently showing an empty/stale board for a trip that isn't live.
+      if (list.length > 0 && !list.some((tr) => tr.id === tripId)) pickTrip(list[0].id);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Issues card badge — open-critical count only; the form/list themselves
   // live on the dedicated /mobile/issues page now.
   const [openIssueCount, setOpenIssueCount] = useState(0);
@@ -62,7 +83,8 @@ export default function MobileHomePage() {
     // shows up here without needing to tap the manual Refresh button.
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId]);
 
   async function load() {
     if (loadingRef.current) return;
@@ -70,7 +92,7 @@ export default function MobileHomePage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/trips/${TRIP_ID}/dashboard`));
+      setData(await apiGet(`/trips/${tripId}/dashboard`));
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -113,6 +135,22 @@ export default function MobileHomePage() {
 
       {loading && !data && <div className="muted" style={{ marginTop: 14 }}>{t("Loading…")}</div>}
 
+      {/* Trip switcher (2026-07-23) — restricted to "In progress" trips only,
+          since a Planning/Completed trip has no live attendance worth
+          tracking from a phone. Only shown when there's an actual choice. */}
+      {inProgressTrips.length > 1 && (
+        <select
+          className="input"
+          style={{ width: "100%", marginTop: 14 }}
+          value={tripId}
+          onChange={(e) => pickTrip(e.target.value)}
+        >
+          {inProgressTrips.map((tr) => (
+            <option key={tr.id} value={tr.id}>{tr.name}</option>
+          ))}
+        </select>
+      )}
+
       {/* Active trip — live tracking panel, same visual language as the
           Check-in screen's own trip card. */}
       {trip && (
@@ -129,8 +167,8 @@ export default function MobileHomePage() {
           <div style={{ fontWeight: 700, fontSize: 17, marginTop: 4 }}>{trip.name}</div>
           <div style={{ opacity: 0.9, fontSize: 13, marginTop: 2 }}>
             {lang === "zh"
-              ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
-              : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime} local`}
+              ? `第 ${trip.dayOf}/${trip.totalDays} 天${trip.localTime ? ` · 当地时间 ${trip.localTime}` : ""}`
+              : `Day ${trip.dayOf} of ${trip.totalDays}${trip.localTime ? ` · ${trip.localTime} local` : ""}`}
           </div>
           {trip.departsIn && (
             <span className="badge" style={{ background: "rgba(255,255,255,.22)", color: "#fff", marginTop: 10, display: "inline-block" }}>

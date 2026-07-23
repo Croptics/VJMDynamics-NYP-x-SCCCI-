@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { X, Download, Sparkles, Loader2 } from "lucide-react";
 import { apiGet, apiPost, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -38,6 +38,10 @@ export default function ExportModal({ tripId, onClose }) {
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  // Only dismiss if the WHOLE click gesture started on the backdrop, not
+  // wherever the mouse was released after a drag-select that began in the
+  // AI prompt field (native "click" fires on the mouseup target).
+  const downOnBackdrop = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -121,7 +125,8 @@ export default function ExportModal({ tripId, onClose }) {
 
   return (
     <div
-      onClick={onClose}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
       style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 20 }}
     >
       <div

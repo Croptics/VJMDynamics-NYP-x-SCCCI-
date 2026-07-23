@@ -6,7 +6,7 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
@@ -37,6 +37,9 @@ export default function Layout({ onLogout }) {
   const [openExceptions, setOpenExceptions] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
+  // Same drag-to-select-text guard used across every modal in the app —
+  // only dismiss if the WHOLE click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
 
   useSessionGuard(onLogout);
 
@@ -82,7 +85,12 @@ export default function Layout({ onLogout }) {
         </span>
       </div>
 
-      {sidebarOpen && <div className="app-sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && (
+        <div className="app-sidebar-backdrop"
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setSidebarOpen(false); }}
+        />
+      )}
 
       <Sidebar exceptionCount={openExceptions} onLogout={onLogout} open={sidebarOpen} />
       <main className="main">

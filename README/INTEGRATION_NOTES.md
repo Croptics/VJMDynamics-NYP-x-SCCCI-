@@ -676,6 +676,80 @@ above wholesale:
   it actually was — selecting "Assigned" visually read as "Arrived". Each
   status now keeps its own color (`badge-assigned`/`badge-late`/etc.) when
   selected.
+- **Unified delegate profile panel (2026-07-23, branch `InsightMetrics-(JQ)`).**
+  `DashboardPage.jsx`'s three separate delegate popups (the edit modal's
+  read-only info block, the checkpoint-timeline modal, and the location-map
+  modal) merged into one scrollable profile panel opened by clicking a
+  delegate. Adds a photo lightbox (click to enlarge) and a pre-upload
+  crop/zoom step, `PhotoCropModal` — plain canvas, no new dependency.
+- **Pagination/search/filter retrofitted onto 3 previously-unbounded lists
+  (2026-07-23).** Account Control's Accounts table (full pagination + a
+  per-page "select all" scoped to the visible page), the History Log page
+  (search + trip/coach filters), and Staff Operations' Active-sessions list
+  (search/role filter + a responsive card grid). The History Log filters
+  needed a backend join in `backend/db/history.js` —
+  `activity_log.trip_id` joins to `trips.uuid_id`, **not** `trips.id` — worth
+  flagging since that's an easy mistake for anyone else querying this table.
+  The Active-sessions card grid uses `auto-fill`, not `auto-fit`, for
+  `grid-template-columns`: `auto-fit` stretches a lone result to fill the
+  whole row, which read as a layout bug. Both the Accounts table and the
+  All-delegates table now default to 10 rows/page.
+- **Analytics panel rework (2026-07-23).** `AnalyticsPanel.jsx` split into
+  Overview / Custom-chart tabs. The custom chart builder lets a user pick a
+  chart type + group-by field directly, or describe the chart in natural
+  language via a new bounded AI endpoint, `POST
+  /api/trips/:id/analytics/ai-chart` (`backend/routes/insights.js`),
+  Ollama-then-Anthropic fallback matching the existing AI Insights pattern —
+  the model only ever picks from a fixed enum of chart types/fields, it never
+  touches raw data directly. The Filter/Sort/Customize control panels were
+  also restyled (dashed border, tinted background, a matching icon per
+  panel) and laid out in one row instead of stacked, after feedback that they
+  were visually indistinguishable from the actual chart/data cards.
+- **Full Role Template system (2026-07-23).** Account Control's "Manage
+  roles" screen is now persisted CRUD — `role_templates` table
+  (`backend/db/schema.js`), CRUD in `backend/db/accounts.js`, 4 routes in
+  `backend/routes/accounts.js`, all gated on `manageAccounts` — replacing an
+  earlier hardcoded 2-template version. **A real seeding race condition was
+  caught and fixed here:** the original seed check was "does any
+  `role_templates` row exist at all", wrapping two sequential inserts, so a
+  `node --watch` restart landing mid-seed left one row permanently missing
+  (the gate was already "satisfied" by the partial insert). Fixed to a
+  per-row idempotent check. `AccountControlPage.jsx` now extracts a shared
+  `PermissionCheckboxGroups` component used by both the account modal and the
+  role editor, so the two checkbox UIs structurally cannot drift apart.
+  Follow-up UX pass: the "Manage roles" button moved from inside the
+  New/Edit account modal onto the main Accounts page, and the Access column
+  now shows the matched role template's name as one badge instead of a
+  wrapped row of permission chips.
+- **Chinese translation completeness sweep (2026-07-23).** Every `t("...")`
+  call in the entire frontend — every teammate's pages included, since they
+  all import this one shared `i18n.jsx` dictionary — was diffed against the
+  dictionary; 157 missing keys were added. Verified 0 missing / 0 duplicate
+  afterward. **For teammates:** if you add a new `t("some new string")` call
+  in your own files going forward, it needs a matching entry in `i18n.jsx`'s
+  `DICT` object or it silently renders in English regardless of the language
+  toggle. `i18n.jsx` is JQ-owned but shared by everyone — it's just a flat
+  key→string dictionary with low collision risk, so add your own new-string
+  entries there directly rather than asking JQ to do it.
+- **Housekeeping (2026-07-23).** Deleted two untracked stray files that
+  weren't part of the real app: `README/_dates_tmp.txt` (a leftover
+  grep-output scratch file) and `frontend/out.tmp.css` (a leftover
+  build-check artifact). Renamed `README/AI Log for claude.md` →
+  `README/Jun Qi - AI Log.md`, and deleted the stale, superseded
+  `README/AI Log for claude - backup.md` (an older narrative log that
+  stopped at 2026-07-14 with no update since, while the renamed condensed log
+  already covers that period plus everything since).
+- **No cross-teammate impact this batch.** Everything above (branch
+  `InsightMetrics-(JQ)`) touched only JQ-owned files —
+  `DashboardPage.jsx`, `AccountControlPage.jsx`, `AnalyticsPanel.jsx`,
+  `HistoryLogPage.jsx`, `i18n.jsx`, `backend/db/schema.js`,
+  `backend/db/accounts.js`, `backend/db/history.js`,
+  `backend/routes/accounts.js`, `backend/routes/insights.js` — no
+  teammate's file was edited. The one item worth a teammate's attention
+  going forward is the `i18n.jsx` convention note above. Verified with an
+  `esbuild` bundle-check + a full `vite build` after every change (clean,
+  only the pre-existing chunk-size warning) plus a live `curl` test against
+  the running dev backend for the History Log join.
 
 ---
 

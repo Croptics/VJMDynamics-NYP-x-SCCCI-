@@ -17,7 +17,7 @@
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
 import { rateLimit } from "../lib/rateLimit.js";
-import { makeToken, accountFromReq, requireAuth, signKioskToken } from "../auth.js";
+import { makeToken, accountFromReq, requireAuth, signKioskToken } from "../lib/auth.js";
 import {
   getAccountByUsername,
   verifyPassword,

@@ -76,6 +76,10 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [err, setErr] = useState(null);
   const tone = DELEGATE_TONE[delegate.status] || "";
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select text in
+  // e.g. the Notes field.
+  const downOnBackdrop = useRef(false);
 
   async function move() {
     const toCoachId = moveTo || null;
@@ -100,7 +104,9 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="mobile-card" onClick={(e) => e.stopPropagation()} style={{ width: "100%", margin: 0, borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28, maxHeight: "88vh", overflowY: "auto" }}>
         <div className="row between" style={{ marginBottom: 14 }}>
           <div className="row" style={{ gap: 10 }}>

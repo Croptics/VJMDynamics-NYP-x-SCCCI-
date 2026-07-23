@@ -30,6 +30,9 @@ const CORNERS = {
 export default function MobileChatBubble() {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select chat text.
+  const downOnBackdrop = useRef(false);
   const [recentlyActive, setRecentlyActive] = useState(false);
   const [corner, setCorner] = useState(() => {
     try { return localStorage.getItem(CORNER_KEY) || "br"; } catch { return "br"; }
@@ -88,7 +91,9 @@ export default function MobileChatBubble() {
   return (
     <>
       {open && (
-        <div className="mg-mobile-chat-overlay" onClick={() => setOpen(false)}>
+        <div className="mg-mobile-chat-overlay"
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setOpen(false); }}>
           <div className="mg-mobile-chat-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Trip assistant")}</div>

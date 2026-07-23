@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Image as ImageIcon, RefreshCw, Trash2, AlertTriangle, Loader2, CheckSquare, Square } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -35,6 +35,11 @@ export default function MediaManager() {
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [purgeText, setPurgeText] = useState("");
   const [purgeBusy, setPurgeBusy] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop, not
+  // wherever the mouse was released after dragging to select text in the
+  // confirmation-phrase input — extra important here since this is a
+  // destructive, no-undo action guarded by that exact typed phrase.
+  const downOnPurgeBackdrop = useRef(false);
 
   const load = async () => {
     setLoading(true);
@@ -208,7 +213,8 @@ export default function MediaManager() {
           exact phrase, not just a click-through confirm(). */}
       {purgeOpen && (
         <div
-          onClick={() => { setPurgeOpen(false); setPurgeText(""); }}
+          onMouseDown={(e) => { downOnPurgeBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnPurgeBackdrop.current && e.target === e.currentTarget) { setPurgeOpen(false); setPurgeText(""); } }}
           style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 80, padding: 20 }}
         >
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: "min(420px, 100%)", padding: 22 }}>

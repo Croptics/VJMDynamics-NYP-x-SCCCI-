@@ -9,8 +9,11 @@
  * (2026-07-21). Everything here requires the "manageAccounts" permission. */
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
-import { makeToken, requirePermission } from "../auth.js";
-import { listAccounts, createAccount, updateAccount, deleteAccount, listActiveAccounts } from "../data.js";
+import { makeToken, requirePermission } from "../lib/auth.js";
+import {
+  listAccounts, createAccount, updateAccount, deleteAccount, listActiveAccounts,
+  listRoleTemplates, createRoleTemplate, updateRoleTemplate, deleteRoleTemplate,
+} from "../data.js";
 
 const router = Router();
 
@@ -57,6 +60,31 @@ router.patch("/api/accounts/:id", requirePermission("manageAccounts"), wrap(asyn
 router.delete("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
   const result = await deleteAccount(req.params.id);
   if (result.error) return res.status(accountErrStatus(result.error)).json(result);
+  res.json(result);
+}));
+
+// Role templates — "Manage roles" screen. Same manageAccounts gate as the
+// rest of Account control (creating/editing a role is itself an account-
+// administration action).
+router.get("/api/role-templates", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+  res.json({ templates: await listRoleTemplates() });
+}));
+
+router.post("/api/role-templates", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const result = await createRoleTemplate(req.body || {});
+  if (result.error) return res.status(result.error === "LABEL_REQUIRED" ? 400 : 400).json(result);
+  res.status(201).json(result.template);
+}));
+
+router.patch("/api/role-templates/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const result = await updateRoleTemplate(req.params.id, req.body || {});
+  if (result.error) return res.status(result.error === "NOT_FOUND" ? 404 : 400).json(result);
+  res.json(result.template);
+}));
+
+router.delete("/api/role-templates/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const result = await deleteRoleTemplate(req.params.id);
+  if (result.error) return res.status(404).json(result);
   res.json(result);
 }));
 

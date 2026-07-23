@@ -10,8 +10,8 @@ import { Router } from "express";
 import multer from "multer";
 import { wrap } from "../lib/wrap.js";
 import { actorOf } from "../lib/actor.js";
-import { requireAuth, requirePermission } from "../auth.js";
-import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../cloudinary.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
+import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../lib/cloudinary.js";
 import {
   resolveTripUuid,
   listDelegates,
@@ -23,6 +23,7 @@ import {
   setDelegatePhoto,
   clearDelegatePhoto,
 } from "../data.js";
+import { syncCurrentCheckpointStatus } from "./checkpoints.js";
 
 const router = Router();
 
@@ -80,6 +81,12 @@ router.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(as
   }
   const updated = await updateDelegate(req.params.id, patch, actorOf(req));
   if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
+  // Keep the checkpoint-scoped view (checkpoint_checkins) honest when staff
+  // manually correct a delegate's status by hand — see
+  // syncCurrentCheckpointStatus() in routes/checkpoints.js for why.
+  if (patch.status !== undefined) {
+    syncCurrentCheckpointStatus(req.params.id, existing.trip_id, updated.status, actorOf(req));
+  }
   res.json(updated);
 }));
 

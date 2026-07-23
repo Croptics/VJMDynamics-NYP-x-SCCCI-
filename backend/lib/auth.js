@@ -13,8 +13,8 @@
  */
 
 import jwt from "jsonwebtoken";
-import { getAccountByUsername, accountPermissions } from "./data.js";
-import { wrap } from "./lib/wrap.js";
+import { getAccountByUsername, accountPermissions } from "../data.js";
+import { wrap } from "./wrap.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "mustergo-dev-insecure-default-change-me";
 if (!process.env.JWT_SECRET) {
@@ -91,13 +91,16 @@ export function requireAuth() {
 }
 
 /**
- * Gate ONLY for the passwordless kiosk's camera check-in endpoints
- * (POST /attendance/scan, POST /onboarding/checkin). Accepts either a normal
- * signed-in account OR a valid kiosk token — and for a kiosk token, maps the
- * caller to the dedicated `__kiosk__` account (seeded in data.js) so DB writes
- * that foreign-key onto accounts.id (e.g. check_in_logs.checked_in_by) still
- * work. Nothing else in the app uses this middleware, so a kiosk token is
- * powerless beyond these two endpoints.
+ * Gate for the passwordless kiosk's camera check-in endpoints (POST
+ * /attendance/scan, POST /onboarding/checkin) and its checkpoint-list read
+ * (GET /trips/:id/checkpoints — checkpoint labels/times aren't sensitive
+ * delegate data, so the kiosk can populate its Checkpoint Selector). Accepts
+ * either a normal signed-in account OR a valid kiosk token — and for a
+ * kiosk token, maps the caller to the dedicated `__kiosk__` account (seeded
+ * in data.js) so DB writes that foreign-key onto accounts.id (e.g.
+ * check_in_logs.checked_in_by) still work. The kiosk token stays powerless
+ * everywhere else — checkpoint stats/admin CRUD stay on requireAuth/
+ * requirePermission (see checkpoints.js).
  */
 export function requireKioskOrAuth() {
   return wrap(async (req, res, next) => {

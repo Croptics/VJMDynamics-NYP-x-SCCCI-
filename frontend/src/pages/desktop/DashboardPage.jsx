@@ -26,12 +26,22 @@ import {
   MapPin,
   Users,
   Radio,
+  Search,
+  ChevronLeft,
+  ChevronDown,
+  Phone,
+  Eye,
+  Briefcase,
+  Globe2,
+  BadgeCheck,
+  StickyNote,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
 import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
+import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 import ExportModal from "../../components/ExportModal.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -55,6 +65,18 @@ import { useLang } from "../../lib/i18n.jsx";
  */
 
 const TRIP_ID = "t-1";
+// Persists the trip switcher's choice across navigating away and back —
+// DashboardPage fully unmounts on route change (it's not kept alive), so a
+// plain useState(TRIP_ID) silently reset to Beijing every time you left the
+// page and returned. localStorage survives the unmount; falls back to
+// TRIP_ID if nothing's stored yet, or storage is unavailable.
+const DASHBOARD_TRIP_KEY = "mg_dashboard_trip";
+function loadSelectedTripId() {
+  try { return localStorage.getItem(DASHBOARD_TRIP_KEY) || TRIP_ID; } catch { return TRIP_ID; }
+}
+function saveSelectedTripId(id) {
+  try { localStorage.setItem(DASHBOARD_TRIP_KEY, id); } catch { /* ignore */ }
+}
 
 const EMPTY_FORM = {
   name: "", coachId: "", status: "ARRIVED", vip: false, lastSeen: "", lastLocation: "",
@@ -74,6 +96,11 @@ export default function DashboardPage() {
   // adminOnly doc — Staff can never be individually granted it).
   const { t, lang } = useLang();
   const navigate = useNavigate();
+  // Shared by every modal overlay below (only one is ever open at a time) —
+  // only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after a drag-select that began in a
+  // field inside the modal.
+  const downOnBackdrop = useRef(false);
 
   // The page is tall (KPIs, coach status, history, the full delegate table),
   // and browsers restore the previous scroll position on SPA route re-entry
@@ -105,16 +132,20 @@ export default function DashboardPage() {
 
   // Trip switcher — the whole dashboard re-points to the selected trip.
   // "t-1" = the default Beijing trip (unfiltered); anything else is a trip uuid.
-  const [selectedTripId, setSelectedTripId] = useState(TRIP_ID);
+  const [selectedTripId, setSelectedTripId] = useState(loadSelectedTripId);
   const [trips, setTrips] = useState([]);            // all trips (for the dropdown)
   const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
+  const [currentCheckpoint, setCurrentCheckpoint] = useState(null); // the itinerary stop that's "current" right now, or null
 
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId> | UNASSIGNED
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
-  const [showAllDelegates, setShowAllDelegates] = useState(false);
+  // Pagination (2026-07-24 — replaced a "Show all" toggle that dumped every
+  // matching delegate into the DOM at once; unusable once a trip had 100+).
+  const [delegatePage, setDelegatePage] = useState(0);
+  const [delegatePageSize, setDelegatePageSize] = useState(10);
   const [showAllCoaches, setShowAllCoaches] = useState(false);
 
   // Batch selection for "All delegates" — replaces the old blanket "Delete
@@ -128,11 +159,38 @@ export default function DashboardPage() {
   // Dashboard to see who's currently signed in.
   const [staffOps, setStaffOps] = useState(null); // { totalStaff, activeCount, active }
   const [staffOpsError, setStaffOpsError] = useState(null);
+  // Search/filter for the Active sessions list — with 40+ people signed in
+  // at once (a real SCCCI event) the plain unbroken list read as messy
+  // (2026-07-24). Options are derived from whatever's actually in the
+  // response, same "no separate lookup" approach used by other filters here.
+  const [staffOpsSearch, setStaffOpsSearch] = useState("");
+  const [staffOpsRoleFilter, setStaffOpsRoleFilter] = useState("ALL"); // ALL | admin | staff
 
   // Reverse headcount — opened on demand from a button on the "Coach status"
   // card, not a persistent tab (was one; the user liked the content but not
   // that UX, so it moved to an on-demand modal instead).
   const [headcountOpen, setHeadcountOpen] = useState(false);
+  // Search/filter/sort for the Reverse headcount modal — with a large
+  // roster, each coach's "still missing" list can run long enough to need
+  // narrowing down instead of scanning the whole thing (2026-07-24).
+  const [hcSearch, setHcSearch] = useState("");
+  const [hcFilter, setHcFilter] = useState("all"); // all | missing | late | vip
+  const [hcSort, setHcSort] = useState("name"); // name | status
+  // Which coach cards are expanded (showing their missing-delegate list) —
+  // with 20 coaches, showing every list open at once is exactly the "messy"
+  // problem reported; collapse-by-default once there are more than a
+  // handful, click a card's header to reveal just that one.
+  const [expandedCoaches, setExpandedCoaches] = useState(new Set());
+  const toggleCoachExpanded = (id) => setExpandedCoaches((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  // History tracker scope — "trip" (default) shows only the currently
+  // selected trip's own activity; "all" is the old global mixed feed
+  // (2026-07-24 — multiple trips' add/edit/remove events were piling into
+  // one unreadable list together).
+  const [historyScope, setHistoryScope] = useState("trip");
   const [exportOpen, setExportOpen] = useState(false);
   const delegateTableRef = useRef(null);
 
@@ -147,7 +205,16 @@ export default function DashboardPage() {
   const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoErr, setPhotoErr] = useState("");
-  const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null
+  const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null (Reverse headcount's quick popup)
+  // Delegate profile view — combines what used to be 3 separate popups
+  // (edit modal's read-only fields, checkpoint timeline modal, location map
+  // modal) into one scrollable panel opened by clicking a delegate row in
+  // the main table (2026-07-24). Editing still opens the existing Create/
+  // Edit modal via the profile's own "Edit" button.
+  const [profileDelegate, setProfileDelegate] = useState(null);
+  // Full-size photo lightbox — the profile panel's thumbnail is too small to
+  // make out a face clearly; click it to view full-size (2026-07-24).
+  const [enlargedPhoto, setEnlargedPhoto] = useState(null);
 
   // Guards against overlapping polls (e.g. a slow response still in flight
   // when the next 2s tick fires) — same pattern as useSessionGuard's
@@ -159,16 +226,26 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [dash, miss, dels, hist] = await Promise.all([
+      const [dash, miss, dels, hist, checkpoints] = await Promise.all([
         apiGet(`/trips/${selectedTripId}/dashboard`),
         apiGet(`/trips/${selectedTripId}/missing`),
         apiGet(`/trips/${selectedTripId}/delegates`),
-        apiGet(`/activity?limit=200`),
+        apiGet(`/activity?limit=200${historyScope === "trip" ? `&tripId=${selectedTripId}` : ""}`),
+        apiGet(`/trips/${selectedTripId}/checkpoints`).catch(() => null), // never blocks the rest of the dashboard
       ]);
       setData(dash);
       setMissing(miss.missing || []);
       setDelegates(dels.delegates || []);
       setHistory(hist.activity || []);
+      // "Which checkpoint matters right now" — you didn't have any way to see
+      // this from the Dashboard before (only the Trip page's day tabs did).
+      // Same "current"/"past"/"upcoming" tagging as the scanner pages.
+      if (checkpoints) {
+        const all = (checkpoints.days || []).flatMap((day) => day.checkpoints);
+        setCurrentCheckpoint(all.find((c) => c.timeState === "current") || null);
+      } else {
+        setCurrentCheckpoint(null);
+      }
       // Remember the base trip's uuid the first time we load it, so the trip
       // dropdown can list the OTHER trips without duplicating it.
       if (selectedTripId === TRIP_ID && dash.trip?.uuid_id) {
@@ -180,7 +257,7 @@ export default function DashboardPage() {
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [selectedTripId]);
+  }, [selectedTripId, historyScope]);
 
   // Auto-refresh every 2s so a change made by another signed-in staff member
   // (a status edit, a new upload, a coach reassignment, etc.) shows up here
@@ -194,9 +271,21 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [load]);
 
-  // Trip list for the switcher (Desmond's all-trips), fetched once.
+  // Trip list for the switcher (Desmond's all-trips), fetched once. If the
+  // persisted selectedTripId (see loadSelectedTripId above) no longer exists
+  // — the trip was deleted since it was last picked — fall back to the
+  // default Beijing view instead of leaving the dashboard stuck fetching a
+  // trip that 404s forever.
   useEffect(() => {
-    apiGet("/all-trips").then((r) => setTrips(r.trips || [])).catch(() => {});
+    apiGet("/all-trips").then((r) => {
+      const list = r.trips || [];
+      setTrips(list);
+      if (selectedTripId !== TRIP_ID && !list.some((tr) => tr.id === selectedTripId)) {
+        setSelectedTripId(TRIP_ID);
+        saveSelectedTripId(TRIP_ID);
+      }
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // "Staff operations" tab data — only polled while that tab is open (no
@@ -273,13 +362,17 @@ export default function DashboardPage() {
     setModalOpen(true);
   }
 
+  // `file` is either the original File (unused now — always goes through the
+  // crop modal first) or the cropped JPEG Blob it produces; FormData accepts
+  // either. Renamed the param mentally but kept the signature so nothing
+  // else calling this needs to change.
   async function handlePhotoChange(file) {
     if (!file || !editingId) return;
     setPhotoErr("");
     setPhotoBusy(true);
     try {
       const fd = new FormData();
-      fd.append("photo", file);
+      fd.append("photo", file, "photo.jpg");
       const { photoUrl } = await apiPost(`/delegates/${editingId}/photo`, fd, true);
       setEditingPhotoUrl(photoUrl);
       await load();
@@ -288,6 +381,19 @@ export default function DashboardPage() {
     } finally {
       setPhotoBusy(false);
     }
+  }
+
+  // Raw file the user just picked, before cropping — opens the crop modal;
+  // set to null once cropping is confirmed/cancelled (2026-07-24, "let me
+  // resize and choose how my pic gonna be like — common stuff in other
+  // websites"). Kept as the File itself (not yet an object URL) so the crop
+  // modal can create/revoke its own URL and this component doesn't have to
+  // track that lifecycle.
+  const [cropFile, setCropFile] = useState(null);
+
+  async function handleCropSave(blob) {
+    setCropFile(null);
+    await handlePhotoChange(blob);
   }
 
   async function handleRemovePhoto() {
@@ -307,6 +413,12 @@ export default function DashboardPage() {
 
   async function saveForm() {
     if (!form.name.trim()) return;
+    // Phone is required (2026-07-24) — the Reverse headcount's Call button
+    // is only useful if every delegate actually has one on file.
+    if (!form.phone.trim()) {
+      setFormErr("Please enter a phone number.");
+      return;
+    }
     // A coach is required unless the delegate is explicitly Unassigned.
     if (form.status !== "UNASSIGNED" && !form.coachId) {
       setFormErr("Please select a coach, or set status to Unassigned.");
@@ -418,12 +530,15 @@ export default function DashboardPage() {
   }
 
   async function clearHistory() {
-    const msg = lang === "zh"
-      ? `确定清空全部 ${history.length} 条历史记录？此操作无法撤销。`
-      : `Clear ALL ${history.length} history entries? This cannot be undone.`;
-    if (!window.confirm(msg)) return;
+    const scopedMsg = lang === "zh"
+      ? `确定清空当前行程的全部 ${history.length} 条历史记录？此操作无法撤销。`
+      : `Clear ALL ${history.length} history entries for this trip? This cannot be undone.`;
+    const allMsg = lang === "zh"
+      ? `确定清空全部行程共 ${history.length} 条历史记录？此操作无法撤销。`
+      : `Clear ALL ${history.length} history entries across every trip? This cannot be undone.`;
+    if (!window.confirm(historyScope === "trip" ? scopedMsg : allMsg)) return;
     try {
-      await apiDelete(`/activity`);
+      await apiDelete(`/activity${historyScope === "trip" ? `?tripId=${selectedTripId}` : ""}`);
       setHistory([]);
     } catch (e) {
       setError(e.message || "Delete all failed.");
@@ -475,24 +590,67 @@ export default function DashboardPage() {
   /* ---- Trip switcher derived state -------------------------------------- */
   // The uuid of the trip currently shown (for the "open in Trips board" links).
   const currentTripUuid = selectedTripId === TRIP_ID ? (trip?.uuid_id || mainTrip?.uuid) : selectedTripId;
-  // Dropdown: the base trip (as "t-1", unfiltered) + every other trip by uuid.
+  // Dropdown: the base trip (as "t-1", unfiltered) + every other trip by uuid
+  // — restricted to trips actually "In progress" (2026-07-24): a
+  // Planning/Completed trip has nothing live to switch to and view here,
+  // same restriction MobileHomePage.jsx already applies to its own picker.
+  // The currently-selected trip is always kept in the list even if its own
+  // status isn't "In progress", so switching away from it never disappears
+  // the option you're already on mid-selection.
   const tripOptions = useMemo(() => {
-    const opts = [{ id: TRIP_ID, name: mainTrip?.name || trip?.name || "Beijing study mission" }];
+    const opts = [];
+    if (selectedTripId === TRIP_ID || trip?.status === "In progress") {
+      opts.push({ id: TRIP_ID, name: mainTrip?.name || trip?.name || "Beijing study mission" });
+    }
     for (const tr of trips) {
       if (mainTrip && tr.id === mainTrip.uuid) continue; // skip the base (it's the t-1 option)
+      if (tr.status !== "In progress" && tr.id !== selectedTripId) continue;
       opts.push({ id: tr.id, name: tr.name });
     }
     return opts;
-  }, [trips, mainTrip, trip]);
+  }, [trips, mainTrip, trip, selectedTripId]);
 
-  const TOP_N = 10;
   const COACH_TOP_N = 4;
   const openCoachBoard = () => { if (currentTripUuid) navigate(`/trips?tripId=${currentTripUuid}`); };
 
-  // The delegate rows actually rendered in the table right now (respects the
-  // "Show all" toggle) — the "select all" checkbox scopes to exactly this
-  // set, matching the same convention as the Trips/Onboarding pages.
-  const rowsShown = showAllDelegates ? visibleDelegates : visibleDelegates.slice(0, TOP_N);
+  const pageCount = Math.max(1, Math.ceil(visibleDelegates.length / delegatePageSize));
+  // Filters/search/sort changing can leave delegatePage pointing past the
+  // new (shorter) result set — clamp it back into range rather than showing
+  // an empty page.
+  const clampedPage = Math.min(delegatePage, pageCount - 1);
+  useEffect(() => { if (clampedPage !== delegatePage) setDelegatePage(clampedPage); }, [clampedPage, delegatePage]);
+  // Jump back to page 1 whenever the result set changes shape, rather than
+  // silently staying on whatever page number happened to be selected before.
+  useEffect(() => { setDelegatePage(0); }, [delegateQuery, statusFilter, coachFilter, sortMode, delegatePageSize]);
+
+  const clearDelegateFilters = () => { setDelegateQuery(""); setStatusFilter("ALL"); setCoachFilter("ALL"); };
+  const delegateFiltersActive = delegateQuery.trim() !== "" || statusFilter !== "ALL" || coachFilter !== "ALL";
+
+  // The delegate rows actually rendered in the table right now (respects
+  // pagination) — the "select all" checkbox scopes to exactly this set,
+  // matching the same convention as the Trips/Onboarding pages.
+  const rowsShown = visibleDelegates.slice(clampedPage * delegatePageSize, (clampedPage + 1) * delegatePageSize);
+  // Auto-hide columns that are empty across every row on THIS page — Last
+  // seen/Created by are almost always "—" once a trip has real volume.
+  const showLastSeenCol = rowsShown.some((d) => d.status === "MISSING" && d.lastSeen);
+  const showCreatedByCol = rowsShown.some((d) => d.createdBy);
+
+  // Staff operations' Active sessions list — search + role filter, applied
+  // on top of whatever the backend already sorted (most-recently-active
+  // first, see accounts.js's listActiveAccounts).
+  const visibleActiveStaff = useMemo(() => {
+    if (!staffOps) return [];
+    const q = staffOpsSearch.trim().toLowerCase();
+    return staffOps.active.filter((acc) => {
+      if (staffOpsRoleFilter !== "ALL" && (acc.role === "admin" ? "admin" : "staff") !== staffOpsRoleFilter) return false;
+      if (q) {
+        const hay = `${acc.username || ""} ${acc.name || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [staffOps, staffOpsSearch, staffOpsRoleFilter]);
+  const staffOpsFiltersActive = staffOpsSearch.trim() !== "" || staffOpsRoleFilter !== "ALL";
 
   return (
     <div className="page">
@@ -509,6 +667,14 @@ export default function DashboardPage() {
             </p>
           ) : (
             <p className="page-sub">{t("Live present / missing / unassigned visibility.")}</p>
+          )}
+          {/* Which checkpoint matters right now — same "current" tag the
+              scanner pages auto-focus on, so the Dashboard doesn't leave you
+              guessing which event is live without switching to /trips. */}
+          {currentCheckpoint && (
+            <span className="badge badge-assigned" style={{ marginTop: 6, display: "inline-flex" }}>
+              <Clock size={12} /> {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${currentCheckpoint.scheduledTime}` : ""}
+            </span>
           )}
         </div>
 
@@ -539,7 +705,7 @@ export default function DashboardPage() {
             className="select"
             style={{ maxWidth: 260 }}
             value={selectedTripId}
-            onChange={(e) => { setSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
+            onChange={(e) => { setSelectedTripId(e.target.value); saveSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
             title={t("Switch trip")}
           >
             {tripOptions.map((tr) => (
@@ -613,14 +779,16 @@ export default function DashboardPage() {
 
       {tab === "analytics" && perms.viewAnalytics && (
         <div style={{ marginTop: 20 }}>
-          <AnalyticsPanel data={data} missing={missing} delegates={delegates} />
+          <AnalyticsPanel data={data} missing={missing} delegates={delegates} tripId={selectedTripId} />
         </div>
       )}
 
       {exportOpen && <ExportModal tripId={selectedTripId} onClose={() => setExportOpen(false)} />}
 
       {headcountOpen && (
-        <div style={S.overlay} onClick={() => setHeadcountOpen(false)}>
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setHeadcountOpen(false); }}>
           <div className="card" style={{ ...S.modal, width: "min(1000px, 100%)" }} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 4 }}>
               <h2 style={{ fontSize: 17 }}>{t("Reverse headcount")}</h2>
@@ -631,36 +799,113 @@ export default function DashboardPage() {
             <p className="page-sub" style={{ margin: 0 }}>
               {t("Who's still missing, per coach — the same view staff see on the Check-in screen.")}
             </p>
+
+            {/* Search / filter / sort — a long "still missing" list per coach
+                gets hard to scan once the roster is large (2026-07-24). */}
+            <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ position: "relative", flex: 1, minWidth: 200 }}>
+                <Search size={15} style={{ position: "absolute", left: 10, top: 10, color: "var(--ink-3)" }} />
+                <input className="input" placeholder={t("Search name…")} value={hcSearch}
+                  onChange={(e) => setHcSearch(e.target.value)} style={{ paddingLeft: 32 }} />
+              </div>
+              <select className="select" style={{ width: 150 }} value={hcFilter} onChange={(e) => setHcFilter(e.target.value)}>
+                <option value="all">{t("All statuses")}</option>
+                <option value="missing">{t("Missing only")}</option>
+                <option value="late">{t("Late only")}</option>
+                <option value="vip">{t("VIP only")}</option>
+              </select>
+              <select className="select" style={{ width: 150 }} value={hcSort} onChange={(e) => setHcSort(e.target.value)}>
+                <option value="name">{t("Sort: Name")}</option>
+                <option value="status">{t("Sort: Status")}</option>
+              </select>
+            </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 16 }}>
             {coaches.map((c) => {
               // "Missing" folds in LATE too (per the simplified status logic),
               // so this list shows everyone not yet accounted for — pulled from
               // the full delegate list since the `missing` array is MISSING-only.
-              const coachMissing = delegates.filter((d) => d.coachId === c.id && (d.status === "MISSING" || d.status === "LATE"));
-              const boardedPct = c.capacity ? Math.round((c.boarded / c.capacity) * 100) : 0;
+              // Search/filter/sort applied on top (all client-side — the list
+              // per coach is small enough not to need a server round-trip).
+              const search = hcSearch.trim().toLowerCase();
+              const coachMissing = delegates
+                .filter((d) => d.coachId === c.id && (d.status === "MISSING" || d.status === "LATE"))
+                .filter((d) => {
+                  if (hcFilter === "missing") return d.status === "MISSING";
+                  if (hcFilter === "late") return d.status === "LATE";
+                  if (hcFilter === "vip") return !!d.vip;
+                  return true;
+                })
+                .filter((d) => !search || d.name.toLowerCase().includes(search))
+                .sort((a, b) => {
+                  if (hcSort === "status") {
+                    if (a.status !== b.status) return a.status === "MISSING" ? -1 : 1; // Missing before Late
+                    return a.name.localeCompare(b.name);
+                  }
+                  return a.name.localeCompare(b.name);
+                });
+              const segs = coachBarSegments(c, { includeBoarded: false });
+              // Collapsed by default once there are more than a handful of
+              // coaches (2026-07-24) — with e.g. 20 coaches, every list open
+              // at once is exactly the reported "messy" problem. A coach
+              // with nothing missing has nothing to expand anyway.
+              const collapsible = coaches.length > 4 && coachMissing.length > 0;
+              const expanded = !collapsible || expandedCoaches.has(c.id);
               return (
                 <div key={c.id} className="card" style={{ padding: 20 }}>
-                  <div className="row between" style={{ alignItems: "flex-start" }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 15 }}>{coachDisplayName(c)}</div>
-                      <div className="muted" style={{ fontSize: 12 }}>{c.boarded}/{c.capacity} {t("boarded")}</div>
+                  <div className="row between" style={{ alignItems: "flex-start", cursor: collapsible ? "pointer" : undefined }}
+                    onClick={collapsible ? () => toggleCoachExpanded(c.id) : undefined}
+                    role={collapsible ? "button" : undefined}>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      {collapsible && <ChevronDown size={15} className="muted" style={{ transform: expanded ? "none" : "rotate(-90deg)", transition: "transform 0.15s", flexShrink: 0 }} />}
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 15 }}>{coachDisplayName(c)}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>{c.boarded}/{c.capacity} {t("boarded")}</div>
+                      </div>
                     </div>
-                    {coachMissing.length === 0 ? (
+                    {c.total === 0 ? (
+                      // "Arrived" means the whole bar is green — every
+                      // delegate assigned to this coach has boarded. A coach
+                      // with NO delegates at all yet isn't "arrived", it's
+                      // just empty — those are two different states (bug
+                      // report: 0/40 with nobody assigned was showing green
+                      // "Arrived" as if the coach were fully checked in).
+                      <span className="badge badge-neutral">{t("No delegates yet")}</span>
+                    ) : coachMissing.length === 0 ? (
                       <span className="badge badge-present">{t("Arrived")}</span>
                     ) : (
-                      <span className="badge badge-missing">{coachMissing.length} {t("missing")}</span>
+                      <span className="badge badge-missing">{coachMissing.length} {t("not boarded")}</span>
                     )}
                   </div>
-                  <div style={S.track}>
-                    <div style={{ ...S.fill, width: `${boardedPct}%`, background: coachMissing.length > 0 ? "var(--st-missing)" : "var(--st-present)" }} />
-                  </div>
+                  <div style={{ height: 8, borderRadius: 999, overflow: "hidden", backgroundClip: "padding-box", border: "1px solid var(--line)", boxSizing: "border-box", background: coachBarGradient(segs) }} />
 
-                  {coachMissing.length === 0 ? (
+                  {c.total === 0 ? (
+                    <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("No delegates assigned to this coach yet.")}</div>
+                  ) : coachMissing.length === 0 ? (
                     <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("Everyone on this coach is accounted for.")}</div>
+                  ) : !expanded ? (
+                    <button className="btn btn-ghost" style={{ marginTop: 14, width: "100%", justifyContent: "center" }} onClick={() => toggleCoachExpanded(c.id)}>
+                      {t("Show")} {coachMissing.length} {t("missing/late")}
+                    </button>
                   ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+                    // Fixed-height scroll area (2026-07-24) — with a large
+                    // roster, one coach's "still missing" list could run to
+                    // 15+ names, ballooning that card far taller than its
+                    // neighbours and making the whole grid look messy. A
+                    // capped, independently-scrollable list keeps every
+                    // coach card the same height regardless of count.
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14, maxHeight: 340, overflowY: "auto", paddingRight: 4 }}>
                       {coachMissing.map((m) => (
-                        <div key={m.id} className="row between" style={{ gap: 10 }}>
+                        <div
+                          key={m.id}
+                          className="row between"
+                          style={{ gap: 10, cursor: "pointer" }}
+                          onClick={() => setProfileDelegate(m)}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`${t("View profile")} — ${m.name}`}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setProfileDelegate(m); }}
+                        >
                           <div className="row" style={{ gap: 10, minWidth: 0 }}>
                             <DelegateAvatar delegate={m} style={{ flexShrink: 0 }} />
                             <div style={{ minWidth: 0 }}>
@@ -673,16 +918,29 @@ export default function DashboardPage() {
                               <div className="muted" style={{ fontSize: 12 }}>{m.lastLocation || t("Last known location")}</div>
                             </div>
                           </div>
-                          {m.lastLocation && (
-                            <button
-                              onClick={() => setMapDelegate(m)}
-                              aria-label={`${t("View location")} — ${m.name}`}
-                              title={t("View location")}
-                              style={{ ...S.iconBtn, color: "var(--st-missing)", flexShrink: 0 }}
-                            >
-                              <MapPin size={16} />
-                            </button>
-                          )}
+                          <div className="row" style={{ gap: 4, flexShrink: 0 }}>
+                            {m.phone && (
+                              <a
+                                href={`tel:${m.phone}`}
+                                onClick={(e) => e.stopPropagation()}
+                                aria-label={`${t("Call")} — ${m.name}`}
+                                title={`${t("Call")} ${m.phone}`}
+                                style={{ ...S.iconBtn, color: "var(--st-present)", textDecoration: "none" }}
+                              >
+                                <Phone size={16} />
+                              </a>
+                            )}
+                            {m.lastLocation && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setMapDelegate(m); }}
+                                aria-label={`${t("View location")} — ${m.name}`}
+                                title={t("View location")}
+                                style={{ ...S.iconBtn, color: "var(--st-missing)", flexShrink: 0 }}
+                              >
+                                <MapPin size={16} />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -743,31 +1001,75 @@ export default function DashboardPage() {
               </div>
 
               <div className="card" style={{ marginTop: 16, padding: 20 }}>
-                <h2 style={{ fontSize: 15, marginBottom: 14 }}>{t("Active sessions")}</h2>
+                <div className="row between" style={{ flexWrap: "wrap", gap: 10 }}>
+                  <h2 style={{ fontSize: 15, margin: 0 }}>{t("Active sessions")}</h2>
+                  {staffOps.active.length > 0 && (
+                    <span className="muted" style={{ fontSize: 12.5 }}>
+                      {visibleActiveStaff.length} {t("of")} {staffOps.active.length}
+                    </span>
+                  )}
+                </div>
+
                 {staffOps.active.length === 0 ? (
-                  <div className="muted" style={{ fontSize: 13 }}>{t("No one is currently active.")}</div>
+                  <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("No one is currently active.")}</div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {staffOps.active.map((acc) => (
-                      <div key={acc.id} className="row between">
-                        <div className="row" style={{ gap: 10 }}>
-                          <span className="avatar" style={{ background: "var(--st-present-bg)", color: "var(--st-present)" }}>
+                  <>
+                    {/* Search + role filter — 40+ people signed in at once
+                        made this an unbroken wall of names (2026-07-24). */}
+                    <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+                      <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
+                        <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+                        <input
+                          className="input"
+                          style={{ paddingLeft: 32 }}
+                          placeholder={t("Search name…")}
+                          value={staffOpsSearch}
+                          onChange={(e) => setStaffOpsSearch(e.target.value)}
+                        />
+                      </div>
+                      <select className="select" style={{ maxWidth: 160 }} value={staffOpsRoleFilter} onChange={(e) => setStaffOpsRoleFilter(e.target.value)}>
+                        <option value="ALL">{t("All roles")}</option>
+                        <option value="admin">{t("Admin")}</option>
+                        <option value="staff">{t("Staff")}</option>
+                      </select>
+                      {staffOpsFiltersActive && (
+                        <button className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12.5 }} onClick={() => { setStaffOpsSearch(""); setStaffOpsRoleFilter("ALL"); }}>
+                          {t("Clear filters")}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Fixed-height scroll area, 4-up grid instead of one
+                        name per row (2026-07-24) — a single column left a
+                        lot of empty horizontal space once there were 40+
+                        people signed in at once. auto-fill (not auto-fit) —
+                        auto-fit COLLAPSES unused tracks and lets the real
+                        ones stretch to fill the row, so with just 1 result
+                        that one card stretched across the entire width;
+                        auto-fill keeps the empty tracks in place instead, so
+                        a card never grows past its own column. */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10, marginTop: 16, maxHeight: 420, overflowY: "auto", alignContent: "start", paddingRight: 4 }}>
+                      {visibleActiveStaff.length === 0 && (
+                        <div className="muted" style={{ fontSize: 13, textAlign: "center", padding: "16px 0", gridColumn: "1 / -1" }}>
+                          {t("No one matches your filters.")}
+                        </div>
+                      )}
+                      {visibleActiveStaff.map((acc) => (
+                        <div key={acc.id} className="row" style={{ gap: 10, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", minWidth: 0 }}>
+                          <span className="avatar" style={{ background: "var(--st-present-bg)", color: "var(--st-present)", flexShrink: 0 }}>
                             {(acc.name || acc.username).trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
                           </span>
-                          <div>
-                            <div style={{ fontSize: 14, fontWeight: 500 }}>{acc.name || acc.username}</div>
-                            <div className="muted" style={{ fontSize: 12 }}>
-                              {t(acc.role ? acc.role.charAt(0).toUpperCase() + acc.role.slice(1) : "Staff")}
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{acc.name || acc.username}</div>
+                            <div className="row" style={{ gap: 5, marginTop: 1 }}>
+                              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--st-present)", flexShrink: 0 }} />
+                              <span className="muted" style={{ fontSize: 11.5 }}>{staffOpsTimeAgo(acc.last_seen_at, t)}</span>
                             </div>
                           </div>
                         </div>
-                        <div className="row" style={{ gap: 6 }}>
-                          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--st-present)", flexShrink: 0 }} />
-                          <span className="muted" style={{ fontSize: 12 }}>{staffOpsTimeAgo(acc.last_seen_at, t)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  </>
                 )}
               </div>
             </>
@@ -789,10 +1091,12 @@ export default function DashboardPage() {
       {k && (
         <div className="kpi-row">
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
-            suffix={`${t("of")} ${k.total}`} foot={trip ? `${t("Departure in")} ${trip.departsIn}` : null} big
+            suffix={`${t("of")} ${k.total}`} foot={trip?.departsIn ? `${t("Departure in")} ${trip.departsIn}` : null} big
+            ringValue={k.missing} ringTotal={k.total}
             onClick={() => showDelegatesFiltered("MISSING")} />
           <Kpi tone="late" icon={Clock} label={t("Late")} value={`${k.late ?? 0}`}
             foot={t("Past cut-off, not checked in")}
+            ringValue={k.late ?? 0} ringTotal={k.total}
             onClick={() => showDelegatesFiltered("LATE")} />
           <RosterCard t={t} k={k} onFilter={showDelegatesFiltered} />
         </div>
@@ -835,7 +1139,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="card" style={{ padding: 22, display: "flex", flexDirection: "column" }}>
-            <div className="row between" style={{ marginBottom: 16 }}>
+            <div className="row between" style={{ marginBottom: 10 }}>
               <div className="row" style={{ gap: 8 }}>
                 <Activity size={18} color="var(--ink-3)" />
                 <h2 style={{ fontSize: 16 }}>{t("History tracker")}</h2>
@@ -855,6 +1159,18 @@ export default function DashboardPage() {
                   </button>
                 )}
               </div>
+            </div>
+            <div className="row" style={{ gap: 2, background: "var(--surface-2)", borderRadius: 999, padding: 2, width: "fit-content", marginBottom: 14 }}>
+              {[["trip", t("This trip")], ["all", t("All trips")]].map(([k, label]) => (
+                <button key={k} onClick={() => setHistoryScope(k)}
+                  style={{
+                    fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 999, border: "none", cursor: "pointer",
+                    background: historyScope === k ? "var(--surface)" : "transparent",
+                    color: historyScope === k ? "var(--ink)" : "var(--ink-3)",
+                  }}>
+                  {label}
+                </button>
+              ))}
             </div>
             {history.length === 0 ? (
               <div className="muted" style={{ fontSize: 13 }}>
@@ -951,6 +1267,14 @@ export default function DashboardPage() {
                 <option value="status">{t("Sort: Status")}</option>
                 <option value="coach">{t("Sort: Coach")}</option>
               </select>
+              <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>
+                {visibleDelegates.length} {t("delegates match")}
+              </span>
+              {delegateFiltersActive && (
+                <button className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12.5 }} onClick={clearDelegateFilters}>
+                  {t("Clear filters")}
+                </button>
+              )}
             </div>
           )}
 
@@ -959,8 +1283,9 @@ export default function DashboardPage() {
               {t("No delegates yet. Click")} <strong>{t("Add delegate")}</strong> {t("to create your first record.")}
             </div>
           ) : (
+            <div style={{ maxHeight: 640, overflowY: "auto" }}>
             <table className="table">
-              <thead>
+              <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--surface)" }}>
                 <tr>
                   {perms.manageDelegates && (
                     <th style={{ width: 36 }}>
@@ -976,7 +1301,10 @@ export default function DashboardPage() {
                       />
                     </th>
                   )}
-                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th><th>{t("Last seen")}</th><th>{t("Uploaded")}</th><th>{t("Created by")}</th>
+                  <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th>
+                  {showLastSeenCol && <th>{t("Last seen")}</th>}
+                  <th>{t("Uploaded")}</th>
+                  {showCreatedByCol && <th>{t("Created by")}</th>}
                   <th style={{ width: 90 }} />
                 </tr>
               </thead>
@@ -994,35 +1322,34 @@ export default function DashboardPage() {
                       </td>
                     )}
                     <td>
-                      <div className="row" style={{ gap: 10 }}>
+                      <button
+                        onClick={() => setProfileDelegate(d)}
+                        className="row"
+                        style={{ gap: 10, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
+                        aria-label={`${t("View profile")} — ${d.name}`}
+                      >
                         <DelegateAvatar delegate={d} />
-                        <span style={{ fontWeight: 500 }}>{d.name}</span>
+                        <span style={{ fontWeight: 500, color: "var(--ink-1)" }}>{d.name}</span>
                         {d.vip && (
                           <span className="badge badge-review" style={{ padding: "2px 8px" }}>
                             <Crown size={12} /> {t("VIP")}
                           </span>
                         )}
-                      </div>
+                      </button>
                     </td>
                     <td>{coachName(d.coachId)}</td>
                     <td><StatusBadge state={d.status} /></td>
-                    <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>
+                    {showLastSeenCol && <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>}
                     <td className="muted">{fmtUploadDate(d.createdAt)}</td>
-                    <td className="muted">{d.createdBy || "—"}</td>
+                    {showCreatedByCol && <td className="muted">{d.createdBy || "—"}</td>}
                     <td>
                       <div className="row" style={{ gap: 6 }}>
                         <button
-                          onClick={() => d.status === "MISSING" && setMapDelegate(d)}
-                          disabled={d.status !== "MISSING"}
-                          aria-label={`${t("View location")} — ${d.name}`}
-                          title={d.status === "MISSING" ? t("View location") : t("Only available while a delegate is Missing")}
-                          style={{
-                            ...S.iconBtn,
-                            color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
-                            opacity: d.status === "MISSING" ? 1 : 0.35,
-                            cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
-                          }}>
-                          <MapPin size={16} />
+                          onClick={() => setProfileDelegate(d)}
+                          aria-label={`${t("View profile")} — ${d.name}`}
+                          title={t("View profile")}
+                          style={S.iconBtn}>
+                          <Eye size={16} />
                         </button>
                         {perms.manageDelegates && (
                           <>
@@ -1042,19 +1369,38 @@ export default function DashboardPage() {
                 ))}
                 {visibleDelegates.length === 0 && (
                   <tr>
-                    <td colSpan={perms.manageDelegates ? 8 : 7} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                    <td colSpan={(perms.manageDelegates ? 1 : 0) + 4 + (showLastSeenCol ? 1 : 0) + (showCreatedByCol ? 1 : 0) + 1} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
                       {t("No delegates match your filters.")}
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+            </div>
           )}
-          {visibleDelegates.length > TOP_N && (
-            <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", textAlign: "center" }}>
-              <button className="btn btn-ghost" onClick={() => setShowAllDelegates((v) => !v)}>
-                {showAllDelegates ? t("Show less") : `${t("Show all")} ${visibleDelegates.length}`}
-              </button>
+          {visibleDelegates.length > 0 && (
+            <div className="row between" style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", flexWrap: "wrap", gap: 10 }}>
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                {t("Showing")} {clampedPage * delegatePageSize + 1}–{Math.min((clampedPage + 1) * delegatePageSize, visibleDelegates.length)} {t("of")} {visibleDelegates.length}
+              </span>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Rows per page")}</span>
+                <select className="select" style={{ width: 76, padding: "4px 8px" }} value={delegatePageSize}
+                  onChange={(e) => setDelegatePageSize(Number(e.target.value))}>
+                  {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPage === 0}
+                  onClick={() => setDelegatePage((p) => Math.max(0, p - 1))}>
+                  <ChevronLeft size={14} /> {t("Prev")}
+                </button>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Page")} {clampedPage + 1} {t("of")} {pageCount}</span>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPage >= pageCount - 1}
+                  onClick={() => setDelegatePage((p) => Math.min(pageCount - 1, p + 1))}>
+                  {t("Next")} <ChevronRight size={14} />
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1062,7 +1408,9 @@ export default function DashboardPage() {
 
       {/* ---- Create / Edit modal ----------------------------------------- */}
       {modalOpen && (
-        <div style={S.overlay} onClick={() => !saving && setModalOpen(false)}>
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (!saving && downOnBackdrop.current && e.target === e.currentTarget) setModalOpen(false); }}>
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
               <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit delegate") : t("Add delegate")}</h2>
@@ -1100,7 +1448,7 @@ export default function DashboardPage() {
                       accept="image/*"
                       disabled={photoBusy}
                       style={{ display: "none" }}
-                      onChange={(e) => { handlePhotoChange(e.target.files?.[0]); e.target.value = ""; }}
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) setCropFile(f); e.target.value = ""; }}
                     />
                   </label>
                   {editingPhotoUrl && (
@@ -1117,6 +1465,11 @@ export default function DashboardPage() {
             <input className="input" autoFocus value={form.name}
               placeholder={t("e.g. Lim Wei Jie")}
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
+
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Phone")} <span style={{ color: "var(--st-missing)" }}>*</span></label>
+            <input className="input" type="tel" value={form.phone}
+              placeholder={t("e.g. +65 9123 4567")}
+              onChange={(e) => setForm({ ...form, phone: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>{t("Status")}</label>
             <select className="select" value={form.status}
@@ -1200,10 +1553,6 @@ export default function DashboardPage() {
                   <input className="input" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
                 </div>
                 <div>
-                  <label className="field-label">{t("Phone")}</label>
-                  <input className="input" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-                </div>
-                <div>
                   <label className="field-label">{t("Website")}</label>
                   <input className="input" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
                 </div>
@@ -1241,7 +1590,7 @@ export default function DashboardPage() {
               <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>
                 {t("Cancel")}
               </button>
-              <button className="btn btn-primary" onClick={saveForm} disabled={saving || !form.name.trim()}>
+              <button className="btn btn-primary" onClick={saveForm} disabled={saving || !form.name.trim() || !form.phone.trim()}>
                 {saving ? t("Saving…") : editingId ? t("Save changes") : t("Add delegate")}
               </button>
             </div>
@@ -1251,8 +1600,181 @@ export default function DashboardPage() {
       </>
       )}
 
+      {/* ---- Delegate profile view --------------------------------------
+          Combines what used to be 3 separate popups (edit modal's
+          read-only info, checkpoint timeline modal, location map modal)
+          into one scrollable panel (2026-07-24). Read-only — the "Edit"
+          button switches to the existing Create/Edit modal for changes. */}
+      {profileDelegate && (
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setProfileDelegate(null); }}>
+          <div className="card" style={{ ...S.modal, width: "min(640px, 100%)", maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 18, alignItems: "flex-start" }}>
+              <div className="row" style={{ gap: 14 }}>
+                {profileDelegate.photoUrl ? (
+                  <button
+                    type="button"
+                    onClick={() => setEnlargedPhoto(profileDelegate.photoUrl)}
+                    aria-label={t("Enlarge photo")}
+                    title={t("Enlarge photo")}
+                    style={{ padding: 0, border: "none", background: "none", cursor: "zoom-in", flexShrink: 0, borderRadius: "50%" }}
+                  >
+                    <img src={profileDelegate.photoUrl} alt="" style={{ width: 84, height: 84, borderRadius: "50%", objectFit: "cover", boxShadow: `0 0 0 2px ${statusTone(profileDelegate.status).fg}` }} />
+                  </button>
+                ) : (
+                  <span
+                    className="avatar"
+                    style={{
+                      width: 84, height: 84, fontSize: 26, flexShrink: 0,
+                      background: statusTone(profileDelegate.status).bg,
+                      color: statusTone(profileDelegate.status).fg,
+                      boxShadow: `inset 0 0 0 1.5px ${statusTone(profileDelegate.status).fg}`,
+                    }}
+                  >
+                    {profileDelegate.name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?"}
+                  </span>
+                )}
+                <div>
+                  <h2 style={{ fontSize: 18 }}>{profileDelegate.name}</h2>
+                  <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+                    <StatusBadge state={profileDelegate.status} />
+                    {profileDelegate.vip && (
+                      <span className="badge badge-review" style={{ padding: "2px 8px" }}>
+                        <Crown size={12} /> {t("VIP")}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                {perms.manageDelegates && (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 13, padding: "6px 12px" }}
+                    onClick={() => { const d = profileDelegate; setProfileDelegate(null); openEdit(d); }}
+                  >
+                    <Pencil size={14} /> {t("Edit")}
+                  </button>
+                )}
+                <button onClick={() => setProfileDelegate(null)} style={S.iconBtn} aria-label={t("Close")}>
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <ProfileField
+                icon={Phone}
+                label={t("Phone")}
+                value={profileDelegate.phone}
+                action={profileDelegate.phone && (
+                  <a href={`tel:${profileDelegate.phone}`} aria-label={`${t("Call")} ${profileDelegate.phone}`} title={t("Call")}
+                    style={{ ...S.iconBtn, color: "var(--st-present)", textDecoration: "none" }}>
+                    <Phone size={14} />
+                  </a>
+                )}
+              />
+              <ProfileField
+                icon={Globe2}
+                label={t("Email")}
+                value={profileDelegate.email}
+                action={profileDelegate.email && (
+                  <a href={`mailto:${profileDelegate.email}`} aria-label={`${t("Email")} ${profileDelegate.email}`} title={t("Email")}
+                    style={{ ...S.iconBtn, color: "var(--ink-2)", textDecoration: "none" }}>
+                    <Globe2 size={14} />
+                  </a>
+                )}
+              />
+              <ProfileField label={t("Coach")} value={coachName(profileDelegate.coachId)} />
+              <ProfileField icon={Briefcase} label={t("Company")} value={[profileDelegate.role, profileDelegate.company].filter(Boolean).join(" · ")} />
+              <ProfileField label={t("Industry")} value={profileDelegate.industry} />
+              <ProfileField label={t("Nationality")} value={profileDelegate.nationality} />
+              <ProfileField icon={BadgeCheck} label={t("Passport number")} value={profileDelegate.passport_no} mono />
+              <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
+            </div>
+
+            {(profileDelegate.notes || profileDelegate.accessibility_notes) && (
+              <div style={{ marginTop: 18 }}>
+                {profileDelegate.accessibility_notes && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <AlertTriangle size={13} /> {t("Accessibility notes")}
+                    </div>
+                    <p style={{ fontSize: 13.5, marginTop: 4 }}>{profileDelegate.accessibility_notes}</p>
+                  </div>
+                )}
+                {profileDelegate.notes && (
+                  <div>
+                    <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <StickyNote size={13} /> {t("Notes")}
+                    </div>
+                    <p style={{ fontSize: 13.5, marginTop: 4, whiteSpace: "pre-wrap" }}>{profileDelegate.notes}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(profileDelegate.lastSeen || profileDelegate.lastLocation) && (
+              <div style={{ marginTop: 18 }}>
+                <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <MapPin size={13} /> {t("Last known location")}
+                </div>
+                <p style={{ fontSize: 13.5, marginTop: 4 }}>
+                  {[profileDelegate.lastLocation, profileDelegate.lastSeen].filter(Boolean).join(" · ") || "—"}
+                </p>
+                {profileDelegate.lastLocation && (
+                  <div style={{ marginTop: 8 }}>
+                    <DelegateLocationMap location={profileDelegate.lastLocation} height={200} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ marginTop: 20 }}>
+              <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Clock size={13} /> {t("Checkpoint timeline")}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <DelegateTimeline delegateId={profileDelegate.id} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full-size photo lightbox — a separate, higher-stacked overlay so it
+          layers on top of the profile panel rather than replacing it
+          (2026-07-24). Click anywhere, or X, to close. */}
+      {cropFile && (
+        <PhotoCropModal file={cropFile} onCancel={() => setCropFile(null)} onSave={handleCropSave} t={t} />
+      )}
+
+      {enlargedPhoto && (
+        <div
+          style={{ ...S.overlay, zIndex: 60, background: "rgba(0,0,0,0.75)" }}
+          onClick={() => setEnlargedPhoto(null)}
+        >
+          <button
+            onClick={() => setEnlargedPhoto(null)}
+            aria-label={t("Close")}
+            style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.1)", border: "none", borderRadius: "50%", padding: 8, color: "#fff", cursor: "pointer", display: "flex" }}
+          >
+            <X size={22} />
+          </button>
+          <img
+            src={enlargedPhoto}
+            alt=""
+            style={{ maxWidth: "min(90vw, 640px)", maxHeight: "85vh", borderRadius: 12, objectFit: "contain", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+
       {mapDelegate && (
-        <div style={S.overlay} onClick={() => setMapDelegate(null)}>
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setMapDelegate(null); }}>
           <div className="card" style={{ ...S.modal, width: "min(480px, 100%)" }} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 14 }}>
               <div>
@@ -1284,12 +1806,12 @@ export default function DashboardPage() {
         .kpi-row > *{min-height:132px}
         @media (max-width:960px){.kpi-row{grid-template-columns:1fr 1fr;}.kpi-row > :last-child{grid-column:1 / -1}}
         @media (max-width:560px){.kpi-row{grid-template-columns:1fr}.kpi-row > :last-child{grid-column:auto}}
-        .roster-bar{display:flex;height:8px;border-radius:999px;overflow:hidden;background:var(--surface-2)}
+        .roster-bar{display:flex;height:8px;border-radius:999px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line);box-sizing:border-box}
         .roster-bar > span{height:100%}
-        .roster-stats{display:flex;gap:0;margin-top:14px;flex:1}
-        .roster-stat{flex:1;display:flex;flex-direction:column;gap:2px;padding:0 14px;border:none;background:none;cursor:pointer;text-align:left}
-        .roster-stat + .roster-stat{border-left:1px solid var(--line)}
-        .roster-stat:first-child{padding-left:0}
+        .roster-stats{display:flex;gap:8px;margin-top:14px;flex:1}
+        .roster-stat{flex:1;display:flex;flex-direction:column;gap:2px;padding:10px 14px;border:1px solid var(--line);border-radius:var(--r-sm);background:none;cursor:pointer;text-align:left;transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease}
+        .roster-stat:hover{box-shadow:var(--shadow-md);border-color:var(--roster-tone);transform:translateY(-1px)}
+        .roster-stat:focus-visible{outline:2px solid var(--roster-tone);outline-offset:2px}
         .kpi-clickable{transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease}
         /* Hover/focus color now matches each card's OWN status tone (--kpi-tone,
            set inline per card) instead of a hardcoded var(--st-normal) — that
@@ -1303,9 +1825,32 @@ export default function DashboardPage() {
   );
 }
 
+/* ---- Small progress ring — the KPI tiles' only visual data accent beyond
+ * plain numbers (2026-07-24, "the Overview tab feels plain" feedback). Pure
+ * SVG, no charting library — this is small enough not to warrant pulling
+ * AnalyticsPanel's recharts dependency into every page load. */
+function ProgressRing({ value, total, tone, size = 34, strokeWidth = 4 }) {
+  const pct = total > 0 ? Math.min(1, value / total) : 0;
+  const r = (size - strokeWidth) / 2;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--line)" strokeWidth={strokeWidth} />
+      {pct > 0 && (
+        <circle
+          cx={size / 2} cy={size / 2} r={r} fill="none" stroke={`var(--st-${tone})`} strokeWidth={strokeWidth}
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} strokeLinecap="round"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      )}
+    </svg>
+  );
+}
+
 /* ---- KPI tile ----------------------------------------------------------- */
-function Kpi({ tone, icon: Icon, label, value, suffix, foot, big, onClick }) {
+function Kpi({ tone, icon: Icon, label, value, suffix, foot, big, onClick, ringValue, ringTotal }) {
   const clickable = !!onClick;
+  const showRing = ringValue != null && ringTotal > 0;
   return (
     <div
       className={"card" + (clickable ? " kpi-clickable" : "")}
@@ -1320,7 +1865,14 @@ function Kpi({ tone, icon: Icon, label, value, suffix, foot, big, onClick }) {
     >
       <div className="row between">
         <span className="page-eyebrow" style={{ color: `var(--st-${tone})` }}>{label}</span>
-        <Icon size={18} color={`var(--st-${tone})`} />
+        {showRing ? (
+          <div style={{ position: "relative", width: 34, height: 34 }}>
+            <ProgressRing value={ringValue} total={ringTotal} tone={tone} />
+            <Icon size={14} color={`var(--st-${tone})`} style={{ position: "absolute", inset: 0, margin: "auto" }} />
+          </div>
+        ) : (
+          <Icon size={18} color={`var(--st-${tone})`} />
+        )}
       </div>
       <div className="row" style={{ alignItems: "baseline", gap: 8 }}>
         <span className="mono"
@@ -1369,7 +1921,7 @@ function RosterCard({ t, k, onFilter }) {
 
 function RosterStat({ tone, icon: Icon, label, value, onClick }) {
   return (
-    <button className="roster-stat" onClick={onClick}>
+    <button className="roster-stat" onClick={onClick} style={{ "--roster-tone": `var(--st-${tone})` }}>
       <span className="row" style={{ gap: 6, color: `var(--st-${tone})` }}>
         <Icon size={14} />
         <span className="muted" style={{ fontSize: 12.5, color: "var(--ink-2)" }}>{label}</span>
@@ -1416,16 +1968,54 @@ function staffOpsTimeAgo(iso, t) {
  * When onOpen is provided the whole row is clickable and navigates to that
  * trip's board on the Trips (Desmond) page.
  * ------------------------------------------------------------------------- */
+// Composition bar (boarded/late/missing against capacity) — a SINGLE div
+// painted with a hard-stop CSS gradient, not multiple flex children. One box
+// means one height, guaranteed identical every time (no cross-browser flex-
+// child-height edge cases), and the track's own border-radius/overflow:hidden
+// naturally rounds both ends with no per-segment corner logic needed. Used by
+// both the Coach status card (CoachBar below) and the Reverse headcount
+// modal, so both show the same composition the same way (2026-07-24 —
+// previously a single flat red-or-green fill in both places, so two coaches
+// both "in trouble" looked identical whether one was mostly Late or mostly
+// Missing).
+function coachBarSegments(coach, { includeBoarded = true } = {}) {
+  const cap = coach.capacity || Math.max(coach.total || 0, 1);
+  const segs = [
+    ...(includeBoarded ? [{ n: coach.boarded || 0, color: "var(--st-present)" }] : []),
+    { n: coach.late || 0, color: "var(--st-late)" },
+    { n: coach.missing || 0, color: "var(--st-missing)" },
+  ]
+    .map((s) => ({ ...s, pct: Math.max(0, Math.round((s.n / cap) * 100)) }))
+    .filter((s) => s.pct > 0);
+  // Rounding each % independently can sum to just over 100 (e.g. 34+33+34) —
+  // shave the excess off the last segment so the gradient's remainder stop
+  // (which fills everything past the real segments with the track color)
+  // never goes negative.
+  const totalPct = segs.reduce((sum, s) => sum + s.pct, 0);
+  if (totalPct > 100) segs[segs.length - 1].pct = Math.max(0, segs[segs.length - 1].pct - (totalPct - 100));
+  return segs;
+}
+function coachBarGradient(segs, trackColor = "var(--line)") {
+  let acc = 0;
+  const stops = [];
+  for (const s of segs) {
+    stops.push(`${s.color} ${acc}%`, `${s.color} ${acc + s.pct}%`);
+    acc += s.pct;
+  }
+  stops.push(`${trackColor} ${acc}%`, `${trackColor} 100%`);
+  return `linear-gradient(to right, ${stops.join(", ")})`;
+}
+
 function CoachBar({ coach, onOpen }) {
   const { t } = useLang();
-  const pct = coach.capacity ? Math.round((coach.boarded / coach.capacity) * 100) : 0;
   // Simplified two-state headline (per request): a coach is "Missing" if it
   // holds ANYONE not yet accounted for — LATE is folded in with MISSING, no
   // separate Late badge — and "Arrived" only when everyone assigned has
   // actually boarded. `attention` is that combined not-here count.
   const attention = (coach.missing || 0) + (coach.late || 0);
   const allArrived = coach.total > 0 && attention === 0 && coach.boarded === coach.total;
-  const barColor = attention > 0 ? "var(--st-missing)" : "var(--st-present)";
+  const BAR_H = 8;
+  const segs = coachBarSegments(coach);
   const clickable = !!onOpen;
   return (
     <div
@@ -1444,7 +2034,7 @@ function CoachBar({ coach, onOpen }) {
         </div>
         <div className="row" style={{ gap: 6 }}>
           {attention > 0 ? (
-            <span className="badge badge-missing">{attention} {t("missing")}</span>
+            <span className="badge badge-missing">{attention} {t("not boarded")}</span>
           ) : allArrived ? (
             <span className="badge badge-present">{t("Arrived")}</span>
           ) : coach.total > 0 ? (
@@ -1455,11 +2045,11 @@ function CoachBar({ coach, onOpen }) {
           {clickable && <ChevronRight size={16} className="muted" />}
         </div>
       </div>
-      <div style={S.track}>
-        <div style={{ ...S.fill, width: `${pct}%`, background: barColor }} />
-      </div>
+      <div style={{ height: BAR_H, borderRadius: 999, overflow: "hidden", backgroundClip: "padding-box", border: "1px solid var(--line)", boxSizing: "border-box", background: coachBarGradient(segs) }} />
       <div className="muted mono" style={{ fontSize: 12, marginTop: 4 }}>
         {coach.boarded}/{coach.capacity} {t("boarded")}
+        {coach.late > 0 && <> · <span style={{ color: "var(--st-late)" }}>{coach.late} {t("late")}</span></>}
+        {coach.missing > 0 && <> · <span style={{ color: "var(--st-missing)" }}>{coach.missing} {t("missing")}</span></>}
       </div>
     </div>
   );
@@ -1480,6 +2070,166 @@ function activityColor(kind) {
   if (kind === "exception") return "var(--st-missing)";
   if (kind === "reassign") return "var(--st-unassigned)";
   return "var(--st-present)";
+}
+
+// One labelled value in the delegate profile panel — skips rendering
+// entirely when there's nothing to show, so an incomplete profile doesn't
+// leave a grid of empty "—" rows (2026-07-24). `action` renders a small
+// icon button (e.g. Call) beside the value instead of making the value
+// itself a clickable link — a plain phone number that's secretly a tel:
+// link reads as an odd, unlabeled focus outline (2026-07-24 feedback).
+function ProfileField({ icon: Icon, label, value, action, mono }) {
+  if (!value) return null;
+  return (
+    <div>
+      <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, marginBottom: 2 }}>
+        {Icon && <Icon size={12} />} {label}
+      </div>
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <span className={mono ? "mono" : undefined} style={{ fontSize: 14, fontWeight: 500 }}>{value}</span>
+        {action}
+      </div>
+    </div>
+  );
+}
+
+// Photo crop/zoom modal shown right after picking a file, before it's
+// uploaded — drag to pan, slider to zoom, circular preview matches the
+// final avatar shape (2026-07-24, "let me resize and choose how my pic
+// gonna be like — common stuff in other websites"). Pure canvas — no
+// cropper library dependency.
+const CROP_VIEWPORT = 280; // on-screen circular preview size (px)
+const CROP_OUTPUT = 480;   // exported square image size (px)
+
+function PhotoCropModal({ file, onCancel, onSave, t }) {
+  const [src, setSrc] = useState(null);
+  const [naturalSize, setNaturalSize] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [saving, setSaving] = useState(false);
+  const imgElRef = useRef(null);
+  const dragRef = useRef(null);
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const baseScale = naturalSize ? Math.max(CROP_VIEWPORT / naturalSize.w, CROP_VIEWPORT / naturalSize.h) : 1;
+  const scale = baseScale * zoom;
+
+  // Keeps the image covering the whole circular viewport no matter how far
+  // it's panned — the image can never be dragged in far enough to reveal
+  // empty space at an edge.
+  function clampOffset(off, s) {
+    if (!naturalSize) return off;
+    const dispW = naturalSize.w * s, dispH = naturalSize.h * s;
+    const maxX = Math.max(0, (dispW - CROP_VIEWPORT) / 2);
+    const maxY = Math.max(0, (dispH - CROP_VIEWPORT) / 2);
+    return { x: Math.min(maxX, Math.max(-maxX, off.x)), y: Math.min(maxY, Math.max(-maxY, off.y)) };
+  }
+
+  useEffect(() => { setOffset((o) => clampOffset(o, scale)); }, [zoom, naturalSize]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function onImgLoad(e) {
+    setNaturalSize({ w: e.target.naturalWidth, h: e.target.naturalHeight });
+    setOffset({ x: 0, y: 0 });
+  }
+
+  function onPointerDown(e) {
+    dragRef.current = { startX: e.clientX, startY: e.clientY, ox: offset.x, oy: offset.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    setOffset(clampOffset({ x: dragRef.current.ox + dx, y: dragRef.current.oy + dy }, scale));
+  }
+  function onPointerUp() { dragRef.current = null; }
+
+  async function handleSave() {
+    if (!naturalSize) return;
+    setSaving(true);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = CROP_OUTPUT;
+      canvas.height = CROP_OUTPUT;
+      const ctx = canvas.getContext("2d");
+      const outScale = CROP_OUTPUT / CROP_VIEWPORT;
+      const dispW = naturalSize.w * scale * outScale;
+      const dispH = naturalSize.h * scale * outScale;
+      const cx = CROP_OUTPUT / 2 + offset.x * outScale;
+      const cy = CROP_OUTPUT / 2 + offset.y * outScale;
+      // Square output (not circle-clipped) — the circular LOOK comes from
+      // the avatar's own border-radius wherever it's displayed, same as
+      // every other delegate photo already stored; clipping here would bake
+      // a permanent circle into the file with no way to re-crop later.
+      ctx.drawImage(imgElRef.current, cx - dispW / 2, cy - dispH / 2, dispW, dispH);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
+      onSave(blob);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ ...S.overlay, zIndex: 60 }}>
+      <div className="card" style={{ ...S.modal, width: "min(380px, 100%)", textAlign: "center" }}>
+        <div className="row between" style={{ marginBottom: 14 }}>
+          <h2 style={{ fontSize: 16 }}>{t("Adjust photo")}</h2>
+          <button onClick={onCancel} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+        </div>
+
+        <div
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerUp}
+          style={{
+            width: CROP_VIEWPORT, height: CROP_VIEWPORT, margin: "0 auto", borderRadius: "50%",
+            overflow: "hidden", position: "relative", background: "#000", cursor: dragRef.current ? "grabbing" : "grab",
+            touchAction: "none", boxShadow: "0 0 0 2px var(--line)",
+          }}
+        >
+          {src && (
+            <img
+              ref={imgElRef}
+              src={src}
+              alt=""
+              draggable={false}
+              onLoad={onImgLoad}
+              style={{
+                position: "absolute", left: "50%", top: "50%",
+                width: naturalSize ? naturalSize.w * scale : "auto",
+                height: naturalSize ? naturalSize.h * scale : "auto",
+                transform: `translate(-50%, -50%) translate(${offset.x}px, ${offset.y}px)`,
+                userSelect: "none", pointerEvents: "none",
+              }}
+            />
+          )}
+        </div>
+
+        <div className="row" style={{ gap: 10, marginTop: 16, alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 12 }}>{t("Zoom")}</span>
+          <input
+            type="range" min={1} max={3} step={0.01} value={zoom}
+            onChange={(e) => setZoom(Number(e.target.value))}
+            style={{ flex: 1 }}
+          />
+        </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("Drag to reposition, then Save.")}</p>
+
+        <div className="row" style={{ gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+          <button className="btn btn-ghost" onClick={onCancel} disabled={saving}>{t("Cancel")}</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !naturalSize}>
+            {saving ? t("Saving…") : t("Save")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ---- Local styles ------------------------------------------------------- */

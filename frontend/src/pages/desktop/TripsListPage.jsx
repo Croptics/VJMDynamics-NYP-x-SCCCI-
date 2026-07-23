@@ -22,7 +22,7 @@
 // GET /all-trips added in v3 — see desmond.js) and the empty state got a
 // small illustration, per the "operational workspace" redesign brief.
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin, Plus, Pencil, Trash2, X } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
@@ -125,40 +125,95 @@ function EmptyIllustration() {
 
 const TRIP_STATUSES = ["Planning", "In progress", "Completed", "Cancelled"];
 
+// Trip cards show a "24 Jul 2026 – 29 Jul 2026" style range computed FROM
+// startDate + totalDays, instead of a separately-typed free-text field that
+// could drift out of sync with the real dates. Date math done on UTC-midnight
+// Date objects (not `new Date("YYYY-MM-DD")` directly) to avoid the classic
+// local-timezone-shift-by-a-day footgun.
+function formatDayMonthYear(y, m, d) {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(y, m - 1, d)));
+}
+function computeDateRange(startDateStr, totalDays) {
+  if (!startDateStr) return "";
+  const [y, m, d] = startDateStr.split("-").map(Number);
+  const n = Math.max(1, Number(totalDays) || 1);
+  const startFmt = formatDayMonthYear(y, m, d);
+  if (n <= 1) return startFmt;
+  const end = new Date(Date.UTC(y, m - 1, d));
+  end.setUTCDate(end.getUTCDate() + (n - 1));
+  const endFmt = formatDayMonthYear(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate());
+  return `${startFmt} – ${endFmt}`;
+}
+
 /** Create / edit a trip. `trip` with an id = edit; anything else = create.
  *  Self-contained (calls the API itself). Reuses the .tf-modal-* / .tf-input
  *  classes already in TripCoachPage.css, so no new styles are needed. */
 function TripFormModal({ trip, onClose, onSaved }) {
   const { t } = useLang();
   const editing = !!(trip && trip.id);
+  // Same drag-to-select fix as TripCoachPage.jsx's Modal — only dismiss if
+  // the WHOLE click gesture started on the backdrop, not wherever the mouse
+  // was released after a drag that began in one of this form's fields.
+  const downOnBackdrop = useRef(false);
   const [form, setForm] = useState({
     name: trip?.name || "",
-    dateRange: trip?.dateRange || "",
     status: trip?.status || "Planning",
     lead: trip?.lead || "",
     totalDays: trip?.totalDays || 5,
     dayOf: trip?.dayOf || 1,
+    startDate: trip?.startDate || "",
+    coachCapacity: "",
   });
+  // Whether "Current day" is a deliberate manual override vs. auto-computed
+  // from startDate (see syncTripDayOf(), backend/db/dashboard.js). Editing
+  // the number below sets this true; "Use automatic day" clears it.
+  const [dayOfManual, setDayOfManual] = useState(!!trip?.dayOfIsManual);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Staff normally set the real start date 2–3 days BEFORE the trip actually
+  // begins, so a start date already in the past is unusual enough to be
+  // worth a second look (e.g. picked the wrong month) rather than saving
+  // silently — shows an inline "are you sure" instead of a hard block.
+  const [pastDateWarningShown, setPastDateWarningShown] = useState(false);
+  const set = (k, v) => { setForm((f) => ({ ...f, [k]: v })); setPastDateWarningShown(false); };
 
-  async function handleSubmit() {
+  // Matches the backend's own "today" for the auto-day feature (syncTripDayOf
+  // computes in Asia/Singapore, not the browser's local zone or UTC — see
+  // backend/db/dashboard.js) so this warning agrees with what the backend
+  // will actually compute once saved, regardless of the device's own timezone.
+  const todaySGT = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Singapore" }).format(new Date());
+  const isPastStartDate = !!form.startDate && form.startDate < todaySGT();
+
+  async function handleSubmit(confirmedPastDate = false) {
     if (!form.name.trim()) { setError(t("A trip name is required.")); return; }
-    setSaving(true); setError(null);
+    if (!form.startDate) { setError(t("Actual start date is required.")); return; }
+    if (isPastStartDate && !confirmedPastDate) { setPastDateWarningShown(true); return; }
+    setSaving(true); setError(null); setPastDateWarningShown(false);
     try {
       const payload = {
-        name: form.name.trim(), dateRange: form.dateRange.trim(), status: form.status,
-        lead: form.lead.trim(), totalDays: Number(form.totalDays) || 1, dayOf: Number(form.dayOf) || 1,
+        name: form.name.trim(), dateRange: computeDateRange(form.startDate, form.totalDays), status: form.status,
+        lead: form.lead.trim(), totalDays: Number(form.totalDays) || 1,
+        startDate: form.startDate || null,
       };
+      if (!editing || dayOfManual) payload.dayOf = Number(form.dayOf) || 1;
+      else payload.resetDayOfAuto = true; // editing + not manual: let the backend recompute from startDate
       const saved = editing ? await apiPatch(`/trips/${trip.id}`, payload) : await apiPost(`/trips`, payload);
+      // Bulk coach capacity — separate call, only sent if the admin actually
+      // typed a value (left blank = leave each coach's own capacity alone).
+      const capacityValue = Number(form.coachCapacity);
+      if (editing && form.coachCapacity.trim() && capacityValue > 0) {
+        await apiPatch(`/trips/${trip.id}/coaches/capacity`, { capacity: capacityValue });
+      }
       onSaved(saved, editing);
       onClose();
     } catch (e) { setError(e.message); setSaving(false); }
   }
 
   return (
-    <div className="tf-modal-overlay" onClick={saving ? undefined : onClose}>
+    <div className="tf-modal-overlay"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (!saving && downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="tf-modal-card" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
         <div className="tf-modal-header">
           <h3 style={{ fontSize: 17, fontWeight: 800 }}>{editing ? t("Edit trip") : t("New trip")}</h3>
@@ -169,10 +224,6 @@ function TripFormModal({ trip, onClose, onSaved }) {
           <input className="tf-input" style={{ marginBottom: 14 }} value={form.name} autoFocus
             placeholder={t("e.g. Shanghai Innovation Mission")}
             onChange={(e) => set("name", e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
-
-          <label className="tf-field-label">{t("Dates")}</label>
-          <input className="tf-input" style={{ marginBottom: 14 }} value={form.dateRange}
-            placeholder={t("e.g. 3–7 Sep 2026")} onChange={(e) => set("dateRange", e.target.value)} />
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 14 }}>
             <div>
@@ -187,10 +238,46 @@ function TripFormModal({ trip, onClose, onSaved }) {
             </div>
           </div>
 
+          <label className="tf-field-label">{t("Actual start date (for auto day tracking)")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+          <input type="date" className="tf-input" style={{ marginBottom: 4 }} value={form.startDate}
+            onChange={(e) => set("startDate", e.target.value)} />
+          <p className="tf-muted" style={{ fontSize: 12, marginTop: 0, marginBottom: form.startDate ? 4 : 14 }}>
+            {t("Set 2–3 days before the trip actually begins. \"Current day\" below auto-advances every midnight from this date.")}
+          </p>
+          {form.startDate && (
+            <p className="tf-muted" style={{ fontSize: 12, marginTop: 0, marginBottom: 14 }}>
+              {t("Shown on trip cards as")}: <b>{computeDateRange(form.startDate, form.totalDays)}</b>
+            </p>
+          )}
+          {pastDateWarningShown && (
+            <div style={{ background: "rgba(220,38,38,0.08)", border: "1px solid var(--tf-red)", borderRadius: 8, padding: 10, marginBottom: 14 }}>
+              <p style={{ fontSize: 13, color: "var(--tf-red)", margin: 0 }}>
+                {t("This start date is already in the past. Trips are usually set up 2–3 days BEFORE they begin — double check this is the date you meant.")}
+              </p>
+              <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                <button type="button" className="tf-btn tf-btn-ghost" onClick={() => setPastDateWarningShown(false)}>{t("Go back")}</button>
+                <button type="button" className="tf-btn tf-btn-primary" onClick={() => handleSubmit(true)}>{t("Save anyway")}</button>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
             <div>
               <label className="tf-field-label">{t("Current day")}</label>
-              <input type="number" min={1} className="tf-input" value={form.dayOf} onChange={(e) => set("dayOf", e.target.value)} />
+              <input type="number" min={1} className="tf-input" value={form.dayOf}
+                onChange={(e) => { set("dayOf", e.target.value); setDayOfManual(true); }} />
+              {form.startDate && (
+                dayOfManual ? (
+                  <button type="button" className="tf-btn tf-btn-ghost" style={{ padding: "2px 0", fontSize: 12, height: "auto", marginTop: 4 }}
+                    onClick={() => setDayOfManual(false)}>
+                    {t("↺ Use automatic day")}
+                  </button>
+                ) : (
+                  <p className="tf-muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 0 }}>
+                    {t("Auto-calculated from start date")}
+                  </p>
+                )
+              )}
             </div>
             <div>
               <label className="tf-field-label">{t("Total days")}</label>
@@ -198,11 +285,24 @@ function TripFormModal({ trip, onClose, onSaved }) {
             </div>
           </div>
 
+          {editing && (
+            <>
+              <label className="tf-field-label" style={{ marginTop: 14 }}>{t("Max delegates per coach")}</label>
+              <input type="number" min={1} max={200} className="tf-input" style={{ marginBottom: 4 }} value={form.coachCapacity}
+                placeholder={t("e.g. 50 — leave blank to leave unchanged")} onChange={(e) => set("coachCapacity", e.target.value)} />
+              <p className="tf-muted" style={{ fontSize: 12, marginTop: 0, marginBottom: 14 }}>
+                {trip?.coachCount
+                  ? `${t("Sets EVERY coach on this trip (Coach 1–")}${trip.coachCount}${t(") to this capacity — leave blank to leave each coach's capacity as-is.")}`
+                  : t("Sets every coach on this trip to this capacity — leave blank to leave each coach's capacity as-is.")}
+              </p>
+            </>
+          )}
+
           {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 12 }}>{error}</p>}
         </div>
         <div className="tf-modal-footer">
           <button className="tf-btn tf-btn-ghost" onClick={onClose} disabled={saving}>{t("Cancel")}</button>
-          <button className="tf-btn tf-btn-primary" onClick={handleSubmit} disabled={saving}>
+          <button className="tf-btn tf-btn-primary" onClick={() => handleSubmit()} disabled={saving}>
             {saving ? <Loader2 size={14} className="spin" /> : null} {editing ? t("Save changes") : t("Create trip")}
           </button>
         </div>
@@ -218,13 +318,16 @@ function DeleteTripDialog({ trip, onClose, onDeleted }) {
   const { t } = useLang();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const downOnBackdrop = useRef(false);
   async function handleDelete() {
     setBusy(true); setError(null);
     try { await apiDelete(`/trips/${trip.id}`); onDeleted(); onClose(); }
     catch (e) { setError(e.message); setBusy(false); }
   }
   return (
-    <div className="tf-modal-overlay" onClick={busy ? undefined : onClose}>
+    <div className="tf-modal-overlay"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (!busy && downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="tf-modal-card" style={{ maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>
         <div className="tf-modal-header"><h3 style={{ fontSize: 16, fontWeight: 800 }}>{t("Delete trip?")}</h3></div>
         <div className="tf-modal-body">

@@ -71,11 +71,11 @@ import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
   Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare, MapPin,
-  Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Settings, Clock, Circle,
+  Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Clock, Circle,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
-import TripsListPage from "./TripsListPage.jsx";
+import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
 import "./TripCoachPage.css";
 
 const UNASSIGNED_COL = "__unassigned__";
@@ -164,8 +164,20 @@ function ToastStack({ toasts, onDismiss }) {
  * ========================================================================== */
 function ConfirmDialog({ title, message, tone, onCancel, onConfirm }) {
   const { t } = useLang();
+  // Only dismiss if the ENTIRE click gesture started on the backdrop itself
+  // — not just where the mouse happened to be released. Without this, a
+  // drag-to-select-text gesture that starts inside the message (or, more
+  // commonly, in a field on the modal underneath this one) and ends over the
+  // backdrop fires a native "click" there (click fires on the mouseup
+  // target, regardless of where mousedown was), closing the dialog
+  // unintentionally. 2026-07-23 fix.
+  const downOnBackdrop = useRef(false);
   return (
-    <div className="tf-modal-overlay" onClick={onCancel}>
+    <div
+      className="tf-modal-overlay tf-modal-overlay--confirm"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onCancel(); }}
+    >
       <div className="tf-modal-card" style={{ maxWidth: 380 }} onClick={(e) => e.stopPropagation()}>
         <div className="tf-modal-header"><h3 style={{ fontSize: 16, fontWeight: 800 }}>{title}</h3></div>
         <div className="tf-modal-body"><p style={{ fontSize: 13.5, color: "var(--tf-text-2)" }}>{message}</p></div>
@@ -187,8 +199,17 @@ function ConfirmDialog({ title, message, tone, onCancel, onConfirm }) {
 /* ---- Modal shell ------------------------------------------------------------ */
 function Modal({ title, onClose, maxWidth = 480, children, footer }) {
   const { t } = useLang();
+  // Same drag-to-select fix as ConfirmDialog above — only dismiss if the
+  // WHOLE click gesture (mousedown AND click) started on the backdrop
+  // itself, not just wherever the mouse was released after a drag that
+  // began inside a field (e.g. selecting text in the Activity title input).
+  const downOnBackdrop = useRef(false);
   return (
-    <div className="tf-modal-overlay" onClick={onClose}>
+    <div
+      className="tf-modal-overlay"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
+    >
       <div className="tf-modal-card" style={{ maxWidth }} onClick={(e) => e.stopPropagation()}>
         <div className="tf-modal-header">
           <h3 style={{ fontSize: 17, fontWeight: 800 }}>{title}</h3>
@@ -363,6 +384,11 @@ function DelegateDetailPanel({ delegate, coaches, onClose, onSave, onReassign, o
   const [moveTo, setMoveTo] = useState(delegate.coachId || "");
   const [saving, setSaving] = useState(false);
   const [moving, setMoving] = useState(false);
+  // Same drag-to-select fix as Modal/ConfirmDialog above — only dismiss if
+  // the WHOLE click gesture (mousedown AND click) started on the backdrop
+  // itself, not wherever the mouse was released after a drag that began in
+  // e.g. the Notes textarea.
+  const downOnBackdrop = useRef(false);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setVisible(true));
@@ -388,7 +414,11 @@ function DelegateDetailPanel({ delegate, coaches, onClose, onSave, onReassign, o
 
   return (
     <>
-      <div className="tf-panel-overlay" onClick={onClose} />
+      <div
+        className="tf-panel-overlay"
+        onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+        onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
+      />
       <div className="tf-panel" style={{ transform: visible ? "translateX(0)" : "translateX(100%)" }}>
         <div className="tf-between" style={{ marginBottom: 20 }}>
           <h3 style={{ fontSize: 18, fontWeight: 800 }}>{t("Delegate details")}</h3>
@@ -461,7 +491,7 @@ function DelegateDetailPanel({ delegate, coaches, onClose, onSave, onReassign, o
  *  reference exactly. The current stop still gets a red border + "NOW";
  *  that classification is worked out locally from the trip's actual clock.
  * ========================================================================== */
-function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = false, onSetStatus, onToggleComplete, onMoveStop }) {
+function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = false, onSetStatus, onToggleComplete, onMoveStop, isToday = true }) {
   const { t } = useLang();
   const [nowMinutes, setNowMinutes] = useState(() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); });
   const [openId, setOpenId] = useState(null);       // stop whose live-status editor is open
@@ -478,13 +508,19 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
   useEffect(() => { setEditMode(null); }, [openId]);
 
   // Index of the stop happening "now" = the last one whose scheduled time has
-  // passed. -1 means the day hasn't reached its first stop yet.
+  // passed. -1 means the day hasn't reached its first stop yet. Forced to -1
+  // when isToday is false — "now" is only meaningful for the trip's actual
+  // current day; comparing wall-clock time-of-day against a DIFFERENT day's
+  // schedule (previewed via the day switcher) would highlight a "current
+  // stop" and show a misleading Now/Next/On-schedule summary for a day that
+  // isn't actually happening right now.
   const segIndex = useMemo(() => {
+    if (!isToday) return -1;
     let idx = -1;
     const times = items.map((i) => toMinutes(i.startTime));
     for (let i = 0; i < times.length; i++) if (times[i] <= nowMinutes) idx = i;
     return idx;
-  }, [items, nowMinutes]);
+  }, [items, nowMinutes, isToday]);
 
   const dayLabel = `${t("Day")} ${dayNumber}${totalDays ? ` ${t("of")} ${totalDays}` : ""}`;
 
@@ -539,17 +575,21 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
       <div className="tf-schedule">
         <span className="tf-schedule-day">{dayLabel}</span>
         {doneCount > 0 && <><span className="tf-schedule-sep">·</span><span className="tf-schedule-part">{doneCount}/{items.length} {t("done")}</span></>}
-        <span className="tf-schedule-sep">·</span>
-        <span className="tf-schedule-part"><strong>{t("Now")}:</strong> {currentStop ? `${currentStop.title} · ${currentStop.startTime}` : t("Not started")}</span>
-        <span className="tf-schedule-sep">·</span>
-        <span className="tf-schedule-part"><strong>{t("Next")}:</strong> {nextLabel}</span>
-        <span className="tf-schedule-spacer" />
-        {currentCancelled ? (
-          <span className="tf-schedule-pill" style={{ color: "var(--tf-red)", background: "var(--tf-red-bg)" }}><AlertCircle size={12} /> {t("Current stop cancelled")}</span>
-        ) : activeDelay > 0 ? (
-          <span className="tf-schedule-pill" style={{ color: "var(--tf-orange)", background: "var(--tf-orange-bg)" }}><Clock size={12} /> {t("Running")} {fmtDuration(activeDelay)} {t("late")}</span>
-        ) : (
-          <span className="tf-schedule-pill" style={{ color: "var(--tf-green)", background: "var(--tf-green-bg)" }}><CheckCircle2 size={12} /> {t("On schedule")}</span>
+        {isToday && (
+          <>
+            <span className="tf-schedule-sep">·</span>
+            <span className="tf-schedule-part"><strong>{t("Now")}:</strong> {currentStop ? `${currentStop.title} · ${currentStop.startTime}` : t("Not started")}</span>
+            <span className="tf-schedule-sep">·</span>
+            <span className="tf-schedule-part"><strong>{t("Next")}:</strong> {nextLabel}</span>
+            <span className="tf-schedule-spacer" />
+            {currentCancelled ? (
+              <span className="tf-schedule-pill" style={{ color: "var(--tf-red)", background: "var(--tf-red-bg)" }}><AlertCircle size={12} /> {t("Current stop cancelled")}</span>
+            ) : activeDelay > 0 ? (
+              <span className="tf-schedule-pill" style={{ color: "var(--tf-orange)", background: "var(--tf-orange-bg)" }}><Clock size={12} /> {t("Running")} {fmtDuration(activeDelay)} {t("late")}</span>
+            ) : (
+              <span className="tf-schedule-pill" style={{ color: "var(--tf-green)", background: "var(--tf-green-bg)" }}><CheckCircle2 size={12} /> {t("On schedule")}</span>
+            )}
+          </>
         )}
       </div>
 
@@ -790,10 +830,13 @@ function CapacityPlanner({ delegateCount, coachCount, onGenerate }) {
 /* =============================================================================
  *  Hero — plain contextual header matching the reference: title + status
  *  pill + a row of buttons, one grey subtitle line below. Actions adapt to the
- *  trip's phase: Planning/In-progress can edit; Completed is read-only, and
- *  "Trip settings" (the live Late-cutoff) only makes sense in-progress.
+ *  trip's phase: Planning/In-progress can edit; Completed is read-only.
+ *  "Trip settings" (the old single trip-wide Late-cutoff time) was removed
+ *  2026-07-23 — every itinerary stop is now its own cutoff (see
+ *  applyCheckpointLateCutoff() in backend/routes/checkpoints.js), making the
+ *  single global cutoff field redundant.
  * ========================================================================== */
-function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDelegate, onTripSettings, canEdit = true }) {
+function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDelegate, canEdit = true }) {
   const { t } = useLang();
   const statusColor = TRIP_STATUS_COLOR[trip.status] || "grey";
   const showActions = canEdit && mode !== "completed";
@@ -807,7 +850,6 @@ function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDel
         </div>
         {showActions && (
           <div className="tf-hero-actions">
-            {mode === "live" && <button className="tf-btn tf-btn-solid" onClick={onTripSettings}><Settings size={14} /> {t("Trip settings")}</button>}
             <button className="tf-btn tf-btn-solid" onClick={onEditItinerary}><PencilLine size={14} /> {mode === "planning" ? t("Plan itinerary") : t("Edit itinerary")}</button>
             <button className="tf-btn tf-btn-primary" onClick={onAddDelegate}><UserPlus size={14} /> {t("Add delegate")}</button>
           </div>
@@ -820,51 +862,73 @@ function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDel
     </div>
   );
 }
-
-/* ---- TripSettingsModal — per-trip Late-status auto-transition cutoff -------
- * Any delegate still ASSIGNED (not yet checked in) at/past this time on this
- * trip gets auto-flipped to LATE by applyLateCutoff() in backend/data.js.
- * Defaults to "10:00" for any trip nobody has customised.
- * ---------------------------------------------------------------------------- */
-function TripSettingsModal({ tripId, initialCutoff, onClose, onSaved }) {
-  const { t } = useLang();
-  const [cutoff, setCutoff] = useState(initialCutoff || "10:00");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-
-  async function handleSave() {
-    setSaving(true); setError(null);
-    try {
-      const updated = await apiPatch(`/trips/${tripId}/late-cutoff`, { lateCutoffTime: cutoff });
-      onSaved(updated.lateCutoffTime);
-      onClose();
-    } catch (e) {
-      setError(e.message || t("Save failed."));
-    } finally {
-      setSaving(false);
-    }
-  }
-
+/* ---- ItemForm — the add/edit itinerary item fields -----------------
+ * Hoisted OUT of EditItineraryModal (2026-07-23 fix): it used to be a
+ * function declared INSIDE that component's render body, which React treats
+ * as a brand-new component type on every single re-render of the parent —
+ * so the page's 2s live-refresh (fetchAll() below) was destroying and
+ * recreating this form from scratch every 2 seconds, kicking focus out of
+ * whatever input a staff member was mid-typing into. Moving it out here
+ * makes it a stable component identity across re-renders, so typing no
+ * longer races the refresh interval. No behavior change otherwise — same
+ * props, same fields, same save/cancel logic. */
+function ItemForm({ t, form, setForm, categories, error, cancelForm, handleSave, saving, activeForm }) {
   return (
-    <Modal title={t("Trip settings")} onClose={onClose} maxWidth={420}
-      footer={<>
-        <button className="tf-btn tf-btn-ghost" onClick={onClose} disabled={saving}>{t("Cancel")}</button>
-        <button className="tf-btn tf-btn-primary" onClick={handleSave} disabled={saving}>
-          {saving ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />} {t("Save changes")}
+    <div style={{ background: "var(--tf-surface-2)", border: "1px solid var(--tf-border)", borderRadius: 12, padding: 14, marginTop: 8, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 10 }}>
+        <div>
+          <label className="tf-field-label">{t("Day")}</label>
+          <input type="number" min={1} className="tf-input" value={form.dayNumber} onChange={(e) => setForm((f) => ({ ...f, dayNumber: e.target.value }))} />
+        </div>
+        <div>
+          <label className="tf-field-label">{t("Time")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+          <input type="time" className="tf-input" value={form.startTime} onChange={(e) => setForm((f) => ({ ...f, startTime: e.target.value }))} />
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 10 }}>
+        <div>
+          <label className="tf-field-label">{t("Category")}</label>
+          <select className="tf-input" value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
+            {(categories || Object.keys(CATEGORY_META)).map((c) => <option key={c} value={c}>{t(CATEGORY_META[c]?.label || c)}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="tf-field-label">{t("Location")}</label>
+          <input type="text" className="tf-input" placeholder={t("Optional")} value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} />
+        </div>
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <label className="tf-field-label">{t("Activity title")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+        <input type="text" className="tf-input" placeholder={t("e.g. Forbidden City visit")} value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} autoFocus />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: form.status === "delayed" ? "1fr 1fr" : "1fr", gap: 10, marginBottom: 10 }}>
+        <div>
+          <label className="tf-field-label">{t("Live status")}</label>
+          <select className="tf-input" value={form.status} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}>
+            <option value="scheduled">{t("On time")}</option>
+            <option value="delayed">{t("Delayed")}</option>
+            <option value="moved">{t("Moved")}</option>
+            <option value="cancelled">{t("Cancelled")}</option>
+          </select>
+        </div>
+        {form.status === "delayed" && (
+          <div>
+            <label className="tf-field-label">{t("Delayed by (min)")}</label>
+            <input type="number" min={0} className="tf-input" value={form.delayMinutes} onChange={(e) => setForm((f) => ({ ...f, delayMinutes: e.target.value }))} />
+          </div>
+        )}
+      </div>
+      {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginBottom: 8 }}>{error}</p>}
+      <div className="tf-flex tf-gap-8" style={{ justifyContent: "flex-end" }}>
+        <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={cancelForm}>{t("Cancel")}</button>
+        <button className="tf-btn tf-btn-primary tf-btn-sm" onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 size={13} className="spin" /> : null} {activeForm?.mode === "add" ? t("Add item") : t("Save changes")}
         </button>
-      </>}
-    >
-      <label className="tf-field-label">{t("Late-status cutoff time")}</label>
-      <input type="time" className="tf-input" value={cutoff} onChange={(e) => setCutoff(e.target.value)} />
-      <p className="tf-muted" style={{ fontSize: 12, marginTop: 8 }}>
-        {t("A delegate still Assigned (not yet checked in) at or after this time is automatically marked Late.")}
-      </p>
-      {error && <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--tf-red)" }}>{error}</div>}
-    </Modal>
+      </div>
+    </div>
   );
 }
 
-/* ---- EditItineraryModal (category select) -------------------------- */
 function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh, askConfirm }) {
   const { t } = useLang();
   const days = [...new Set(itinerary.map((i) => i.dayNumber))].sort((a, b) => a - b);
@@ -874,6 +938,15 @@ function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh,
   const [form, setForm] = useState({ dayNumber: 1, startTime: "", title: "", location: "", category: "other", status: "scheduled", delayMinutes: 0 });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Minimum gap between two stops on the same day — matches the trip's own
+  // "Buffer time" setting (Settings page's "Checkpoint reset window" card,
+  // see routes/checkpoints.js), decoupled from the checkpoint reset window
+  // (2026-07-23 — they used to share one value, but tightening the reset
+  // window for testing shouldn't also force this gap to shrink).
+  const [minGapMinutes, setMinGapMinutes] = useState(30);
+  useEffect(() => {
+    apiGet(`/trips/${tripId}/checkpoints`).then((r) => setMinGapMinutes(r.itineraryBufferMinutes ?? 30)).catch(() => {});
+  }, [tripId]);
 
   function openAdd(day) {
     setForm({ dayNumber: day, startTime: "", title: "", location: "", category: "other", status: "scheduled", delayMinutes: 0 });
@@ -887,9 +960,27 @@ function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh,
   }
   function cancelForm() { setActiveForm(null); setError(null); }
 
+  function toMinutes(hhmm) {
+    const [h, m] = hhmm.split(":").map(Number);
+    return h * 60 + m;
+  }
+
   async function handleSave() {
     if (!form.title.trim()) { setError(t("Title is required")); return; }
     if (!form.startTime) { setError(t("Time is required")); return; }
+
+    const sameDayItems = itinerary.filter((i) =>
+      i.dayNumber === Number(form.dayNumber) &&
+      i.status !== "cancelled" &&
+      !(activeForm.mode === "edit" && i.id === activeForm.item.id)
+    );
+    const newMinutes = toMinutes(form.startTime);
+    const tooClose = sameDayItems.find((i) => Math.abs(toMinutes(i.startTime) - newMinutes) < minGapMinutes);
+    if (tooClose) {
+      setError(`${t("Must be at least")} ${minGapMinutes} ${t("min from")} "${tooClose.title}" (${tooClose.startTime})`);
+      return;
+    }
+
     setSaving(true); setError(null);
     try {
       const statusFields = { status: form.status, delayMinutes: form.status === "delayed" ? Number(form.delayMinutes) || 0 : 0 };
@@ -917,63 +1008,6 @@ function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh,
     if (!(await askConfirm(t("Delete this item?"), `${t('Delete')} "${item.title}"?`, "danger"))) return;
     try { await apiDelete(`/trips/${tripId}/itinerary/${item.id}`); await onRefresh(); }
     catch (e) { setError(e.message); }
-  }
-
-  function ItemForm() {
-    return (
-      <div style={{ background: "var(--tf-surface-2)", border: "1px solid var(--tf-border)", borderRadius: 12, padding: 14, marginTop: 8, marginBottom: 16 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 10 }}>
-          <div>
-            <label className="tf-field-label">{t("Day")}</label>
-            <input type="number" min={1} className="tf-input" value={form.dayNumber} onChange={(e) => setForm((f) => ({ ...f, dayNumber: e.target.value }))} />
-          </div>
-          <div>
-            <label className="tf-field-label">{t("Time")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
-            <input type="time" className="tf-input" value={form.startTime} onChange={(e) => setForm((f) => ({ ...f, startTime: e.target.value }))} />
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 10 }}>
-          <div>
-            <label className="tf-field-label">{t("Category")}</label>
-            <select className="tf-input" value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
-              {(categories || Object.keys(CATEGORY_META)).map((c) => <option key={c} value={c}>{t(CATEGORY_META[c]?.label || c)}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="tf-field-label">{t("Location")}</label>
-            <input type="text" className="tf-input" placeholder={t("Optional")} value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} />
-          </div>
-        </div>
-        <div style={{ marginBottom: 10 }}>
-          <label className="tf-field-label">{t("Activity title")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
-          <input type="text" className="tf-input" placeholder={t("e.g. Forbidden City visit")} value={form.title} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} autoFocus />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: form.status === "delayed" ? "1fr 1fr" : "1fr", gap: 10, marginBottom: 10 }}>
-          <div>
-            <label className="tf-field-label">{t("Live status")}</label>
-            <select className="tf-input" value={form.status} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}>
-              <option value="scheduled">{t("On time")}</option>
-              <option value="delayed">{t("Delayed")}</option>
-              <option value="moved">{t("Moved")}</option>
-              <option value="cancelled">{t("Cancelled")}</option>
-            </select>
-          </div>
-          {form.status === "delayed" && (
-            <div>
-              <label className="tf-field-label">{t("Delayed by (min)")}</label>
-              <input type="number" min={0} className="tf-input" value={form.delayMinutes} onChange={(e) => setForm((f) => ({ ...f, delayMinutes: e.target.value }))} />
-            </div>
-          )}
-        </div>
-        {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginBottom: 8 }}>{error}</p>}
-        <div className="tf-flex tf-gap-8" style={{ justifyContent: "flex-end" }}>
-          <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={cancelForm}>{t("Cancel")}</button>
-          <button className="tf-btn tf-btn-primary tf-btn-sm" onClick={handleSave} disabled={saving}>
-            {saving ? <Loader2 size={13} className="spin" /> : null} {activeForm?.mode === "add" ? t("Add item") : t("Save changes")}
-          </button>
-        </div>
-      </div>
-    );
   }
 
   const allDays = [...new Set([...days, ...(activeForm?.mode === "add" ? [Number(activeForm.dayNumber)] : [])])].sort((a, b) => a - b);
@@ -1004,11 +1038,15 @@ function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh,
                     <button className="tf-btn tf-btn-ghost tf-btn-icon-only" onClick={() => openEdit(item)} title={t("Edit")}><Edit2 size={13} /></button>
                     <button className="tf-btn tf-btn-ghost tf-btn-icon-only" style={{ color: "var(--tf-red)" }} onClick={() => handleDelete(item)} title={t("Delete")}><Trash2 size={13} /></button>
                   </div>
-                  {activeForm?.mode === "edit" && activeForm.item.id === item.id && <ItemForm />}
+                  {activeForm?.mode === "edit" && activeForm.item.id === item.id && (
+                    <ItemForm t={t} form={form} setForm={setForm} categories={categories} error={error} cancelForm={cancelForm} handleSave={handleSave} saving={saving} activeForm={activeForm} />
+                  )}
                 </div>
               );
             })}
-            {activeForm?.mode === "add" && Number(activeForm.dayNumber) === day && <ItemForm />}
+            {activeForm?.mode === "add" && Number(activeForm.dayNumber) === day && (
+              <ItemForm t={t} form={form} setForm={setForm} categories={categories} error={error} cancelForm={cancelForm} handleSave={handleSave} saving={saving} activeForm={activeForm} />
+            )}
           </div>
         );
       })}
@@ -1251,6 +1289,13 @@ function CoachBoardView({ tripId }) {
   const navigate = useNavigate();
   const { t } = useLang();
   const canEdit = getPermissions().manageTrips; // "View for all, edit gated" (see permissions.js)
+  // Mirrors the app-wide theme (2026-07-23) — the board used to always force
+  // the flat light palette regardless of the rest of the app (a deliberate
+  // v4 design-brief choice, documented in TripCoachPage.css's header), which
+  // read as broken/inconsistent once every other page had a working dark
+  // mode. Same useTfTheme() hook TripsListPage.jsx already uses.
+  const [dark] = useTfTheme();
+  const tfRootClass = `tf-root${dark ? " tf-dark" : ""}`;
 
   const [trip, setTrip] = useState(null);
   const [coaches, setCoaches] = useState([]);
@@ -1260,7 +1305,6 @@ function CoachBoardView({ tripId }) {
   const [loadError, setLoadError] = useState(null);
 
   const [showItinerary, setShowItinerary] = useState(false);
-  const [showTripSettings, setShowTripSettings] = useState(false);
   const [showAddDelegate, setShowAddDelegate] = useState(false);
   const [showAddCoach, setShowAddCoach] = useState(false);
   const [editStaffCoach, setEditStaffCoach] = useState(null);
@@ -1508,9 +1552,19 @@ function CoachBoardView({ tripId }) {
   }
 
   const currentDay = trip?.dayOf ?? 1;
+  // Day switcher for the "Today's itinerary" card (2026-07-23) — it used to
+  // ALWAYS show trip.dayOf with no way to preview any other day's schedule
+  // from this view (only reachable via the separate Edit itinerary modal).
+  // null = "not yet initialized"; syncs to the trip's real current day once
+  // on load, then stays wherever the user picks — a later poll refresh
+  // (fetchAll runs every 2s) must not silently snap the view back to today
+  // out from under someone deliberately looking at a different day.
+  const [viewDay, setViewDay] = useState(null);
+  useEffect(() => { if (viewDay === null && trip) setViewDay(currentDay); }, [trip, viewDay, currentDay]);
+  const displayDay = viewDay ?? currentDay;
   const todayItems = useMemo(
-    () => itinerary.filter((i) => i.dayNumber === currentDay).sort((a, b) => a.startTime.localeCompare(b.startTime)),
-    [itinerary, currentDay]
+    () => itinerary.filter((i) => i.dayNumber === displayDay).sort((a, b) => a.startTime.localeCompare(b.startTime)),
+    [itinerary, displayDay]
   );
 
   // The board adapts to the trip's phase:
@@ -1534,11 +1588,11 @@ function CoachBoardView({ tripId }) {
   }), [delegates, coaches, itinerary, coachIdSet]);
 
   if (!trip && !loadError) {
-    return <div className="tf-root"><div className="tf-page"><SkeletonBoard /></div></div>;
+    return <div className={tfRootClass}><div className="tf-page"><SkeletonBoard /></div></div>;
   }
   if (loadError) {
     return (
-      <div className="tf-root">
+      <div className={tfRootClass}>
         <div className="tf-page">
           <button className="tf-back-btn" style={{ marginBottom: 16 }} onClick={() => navigate("/trips")}>← {t("Back to trips")}</button>
           <div className="tf-card" style={{ display: "flex", alignItems: "center", gap: 12, color: "var(--tf-red)" }}>
@@ -1550,20 +1604,12 @@ function CoachBoardView({ tripId }) {
   }
 
   return (
-    <div className="tf-root">
+    <div className={tfRootClass}>
       <div className="tf-page">
         <ToastStack toasts={toasts} onDismiss={dismissToast} />
         {confirmState && <ConfirmDialog title={confirmState.title} message={confirmState.message} tone={confirmState.tone} onCancel={() => closeConfirm(false)} onConfirm={() => closeConfirm(true)} />}
         {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}
-        {showTripSettings && (
-          <TripSettingsModal
-            tripId={tripId}
-            initialCutoff={trip?.lateCutoffTime}
-            onClose={() => setShowTripSettings(false)}
-            onSaved={(lateCutoffTime) => { setTrip((tr) => (tr ? { ...tr, lateCutoffTime } : tr)); pushToast(t("Save changes") + " ✓"); }}
-          />
-        )}
         {showAddDelegate && <AddDelegateModal tripId={tripId} onClose={() => setShowAddDelegate(false)} onAdded={handleDelegateAdded} />}
         {showAddCoach && <AddCoachModal tripId={tripId} existingCount={coaches.length} onClose={() => setShowAddCoach(false)} onAdded={(c) => { fetchAll(); pushToast(`${c.label} ${t("added")}.`); }} />}
         {panelDelegate && (
@@ -1583,7 +1629,6 @@ function CoachBoardView({ tripId }) {
           trip={trip} coachCount={coaches.length} delegateCount={delegates.length}
           mode={mode} canEdit={canEdit}
           onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
-          onTripSettings={() => setShowTripSettings(true)}
         />
 
         {mode === "planning" && <TripSummaryBar mode="planning" stats={summaryStats} />}
@@ -1591,9 +1636,26 @@ function CoachBoardView({ tripId }) {
         <div className="tf-card">
           {mode === "live" ? (
             <>
-              <div className="tf-section-eyebrow">{t("Today's itinerary")} · {t("Day")} {currentDay}</div>
+              <div className="tf-between" style={{ flexWrap: "wrap", gap: 8, marginBottom: trip.totalDays > 1 ? 10 : 0 }}>
+                <div className="tf-section-eyebrow" style={{ marginBottom: 0 }}>
+                  {displayDay === currentDay ? t("Today's itinerary") : t("Itinerary")} · {t("Day")} {displayDay}
+                </div>
+                {trip.totalDays > 1 && (
+                  <div className="tf-flex tf-gap-6" style={{ flexWrap: "wrap" }}>
+                    {Array.from({ length: trip.totalDays }, (_, i) => i + 1).map((d) => (
+                      <button
+                        key={d}
+                        className={"tf-btn tf-btn-sm " + (d === displayDay ? "tf-btn-solid" : "tf-btn-ghost")}
+                        onClick={() => setViewDay(d)}
+                      >
+                        {t("Day")} {d}{d === currentDay ? ` (${t("Today")})` : ""}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <JourneyTimeline
-                items={todayItems} dayNumber={currentDay} totalDays={trip.totalDays}
+                items={todayItems} dayNumber={displayDay} totalDays={trip.totalDays} isToday={displayDay === currentDay}
                 onAddClick={editable ? () => setShowItinerary(true) : undefined}
                 canEdit={editable} onSetStatus={handleSetItineraryStatus} onToggleComplete={handleToggleComplete} onMoveStop={handleMoveStop}
               />

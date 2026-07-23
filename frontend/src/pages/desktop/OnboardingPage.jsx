@@ -25,6 +25,7 @@ import {
   getTrips,
   confirmDelegates,
   exportRowsCsv,
+  getBadges,
 } from "../../lib/claudeParse.js";
 import { useLang } from "../../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
@@ -79,6 +80,8 @@ export default function OnboardingPage() {
   const inputRef = useRef(null);
   const pollRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
+  const [passesKpi, setPassesKpi] = useState(null); // trip-scoped numbers reported by BoardingPassesView's trip switcher
+  const [parseKpi, setParseKpi] = useState(null);   // trip-scoped numbers for the "Assign to trip" selection
   const [tripId, setTripId] = useState(() => localStorage.getItem(LS_TRIP) || "");
   const [trips, setTrips] = useState([]);
   const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
@@ -126,6 +129,19 @@ export default function OnboardingPage() {
     getOnboardingContext(tripId).then((c) => alive && setContext(c)).catch(() => {});
     return () => { alive = false; };
   }, [tripId]);
+
+  /* ---- KPI card for the "Assign to trip" selection (parse tab) ---------
+   * Same idea as BoardingPassesView's onKpiChange — keeps the header's
+   * TripPulse card in sync with whichever trip is actually selected, instead
+   * of the global assistant snapshot. */
+  useEffect(() => {
+    let alive = true;
+    const currentTrip = trips.find((tr) => tr.id === tripId);
+    getBadges(tripId || "t-1")
+      .then((res) => alive && setParseKpi({ trip: { name: currentTrip?.name, dayOf: currentTrip?.dayOf }, kpis: { total: res.total, present: res.present } }))
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [tripId, trips]);
 
   /* ---- merge server rows into client rows (preserving edits) ----------- */
   const mergeRows = (client, server) => {
@@ -254,7 +270,7 @@ export default function OnboardingPage() {
           <h1 className="page-title">{t("Document parsing")}</h1>
           <p className="page-sub">{t("Read documents into delegates, print QR boarding passes, and board them on-site.")}</p>
         </div>
-        <TripPulse mode="onboarding" />
+        <TripPulse mode="onboarding" data={view === "passes" ? passesKpi : parseKpi} />
       </div>
 
       {/* Tabs — rounded tinted pills, matching the Dashboard's tab group
@@ -275,7 +291,7 @@ export default function OnboardingPage() {
         ))}
       </div>
 
-      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} /></div>}
+      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} onKpiChange={setPassesKpi} /></div>}
 
       {view === "parse" && (<>
       {/* Upload + job status */}
