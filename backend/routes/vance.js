@@ -37,7 +37,7 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
-  getMissing,
+  accountPermissions,
   COACHES,
 } from "../data.js";
 import { requireAuth, requirePermission } from "../auth.js";
@@ -129,7 +129,30 @@ async function init() {
   await q(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
-  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages");
+
+  // MusterChat: direct human↔human messages (staff↔staff two-way, staff→delegate
+  // log), plus video-call entries and shared-document cards. The AI assistant
+  // keeps its own chat_sessions tables above; this is the person-to-person layer
+  // that sits beside it in the same inbox. `convo_key` is an order-independent
+  // key for the pair so A→B and B→A share one thread. `media` holds a data URL
+  // for a video clip, or JSON for a doc-share / call summary.
+  await q(`CREATE TABLE IF NOT EXISTS dm_messages (
+    id             VARCHAR(64) PRIMARY KEY,
+    convo_key      VARCHAR(200) NOT NULL,
+    sender_id      VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    recipient_kind VARCHAR(16) NOT NULL,
+    recipient_id   VARCHAR(64) NOT NULL,
+    kind           VARCHAR(16) NOT NULL DEFAULT 'text',
+    body           TEXT,
+    media          TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    read_at        TIMESTAMPTZ
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_convo ON dm_messages(convo_key, created_at)`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_inbox ON dm_messages(recipient_kind, recipient_id, read_at)`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_sender ON dm_messages(sender_id, created_at)`);
+
+  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages, dm_messages");
   warmUpModel(); // preload the chat model so the first question isn't a cold start
 }
 
@@ -918,8 +941,8 @@ async function buildSnapshot() {
   // (no ORDER BY) trip, which made the assistant + pulse show a different trip
   // and counts than the dashboard.
   const tripUuid = await resolveTripUuid("t-1");
-  const [trip, dashboard, missing] = await Promise.all([
-    getTrip(tripUuid), getDashboard(tripUuid), getMissing(tripUuid),
+  const [trip, dashboard] = await Promise.all([
+    getTrip(tripUuid), getDashboard(tripUuid),
   ]);
 
   /* Rich delegate roster (scoped to the same trip; drives company/industry/VIP
@@ -945,19 +968,36 @@ async function buildSnapshot() {
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
 
-  /* 5-status-aware KPIs computed from the scoped roster. The team's integration
-   * added ARRIVED/ASSIGNED/LATE, but JQ's getDashboard on this branch still
-   * counts PRESENT only — computing here keeps ALL my surfaces (assistant, Trip
-   * Pulse widget, boarding passes) consistent: boarded = PRESENT + ARRIVED,
-   * unassigned = no coach, missing = everyone else (on a coach, not boarded). */
-  const boardedCount = roster.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
-  const unassignedCount = roster.filter((d) => !d.coach_id).length;
+  /* 5-status-aware, SINGLE-SOURCE KPIs + lists. Every delegate is exactly one of:
+   *   boarded    = PRESENT / ARRIVED
+   *   missing    = on a coach, not boarded
+   *   unassigned = no coach, not boarded
+   * Deriving the missing LIST and the missing COUNT from this one partition keeps
+   * the assistant, Trip Pulse and boarding passes perfectly consistent. Before,
+   * the count was roster-derived while the list came from JQ's getMissing(), so
+   * "how many are missing?" and "who's missing?" gave different numbers. */
+  const isBoarded = (d) => d.status === "PRESENT" || d.status === "ARRIVED";
+  const coachLabelById = new Map((dashboard.coaches || []).map((c) => [c.id, c.label || c.name || c.id]));
+  const boardedRoster = roster.filter(isBoarded);
+  const missingRoster = roster.filter((d) => !isBoarded(d) && d.coach_id);
+  const unassignedRoster = roster.filter((d) => !isBoarded(d) && !d.coach_id);
+  const missingList = missingRoster.map((d) => ({
+    name: d.name, vip: !!d.vip, status: d.status, company: d.company,
+    coach_id: d.coach_id, coach: coachLabelById.get(d.coach_id) || null,
+  }));
   const kpis = {
     total: roster.length,
-    present: boardedCount,
-    unassigned: unassignedCount,
-    missing: Math.max(0, roster.length - boardedCount - unassignedCount),
+    present: boardedRoster.length,
+    unassigned: unassignedRoster.length,
+    missing: missingList.length,
   };
+  // Per-coach counts recomputed from the SAME partition, so "which coach has the
+  // most missing" and a coach-scoped "who's missing on Coach 2" always agree.
+  const coaches = (dashboard.coaches?.length ? dashboard.coaches : COACHES).map((c) => ({
+    ...c,
+    boarded: boardedRoster.filter((d) => d.coach_id === c.id).length,
+    missing: missingRoster.filter((d) => d.coach_id === c.id).length,
+  }));
 
   /* Passport validity — delegates whose passport is expired or expires within
    * 6 months. Soonest-to-expire / most-overdue first. */
@@ -1003,9 +1043,8 @@ async function buildSnapshot() {
 
   return {
     asOf: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-    trip, kpis,
-    coaches: dashboard.coaches.length ? dashboard.coaches : COACHES,
-    missing, exceptions, checkins, itinerary,
+    trip, kpis, coaches,
+    missing: missingList, exceptions, checkins, itinerary,
     roster, byIndustry, byCompany, vips, passportIssues,
   };
 }
@@ -1279,6 +1318,21 @@ function computeRisk(snapshot) {
   return items.sort((a, b) => b.score - a.score);
 }
 
+/* Detect a coach referenced in a question — "coach 2", or a coach's label /
+ * name / city — so a missing/present look-up can be scoped to it. Returns the
+ * coach object, or null when the question isn't about a specific coach. */
+function findCoachInText(q, coaches = []) {
+  for (const c of coaches) {
+    for (const cand of [c.label, c.name, c.city].filter(Boolean)) {
+      const s = String(cand).toLowerCase();
+      if (s.length >= 2 && q.includes(s)) return c;
+    }
+    const num = String(c.label ?? c.name ?? "").match(/\d+/)?.[0];
+    if (num && new RegExp(`\\bcoach\\s*0*${num}\\b`).test(q)) return c;
+  }
+  return null;
+}
+
 function answerLocally(question, snapshot) {
   if (!snapshot) return null;
   const q = (question || "").toLowerCase().trim();
@@ -1341,19 +1395,34 @@ function answerLocally(question, snapshot) {
     return `${kpis.total} delegates total — ${kpis.present} present, ${kpis.missing} missing, ${kpis.unassigned} unassigned (not yet on a coach).`;
   }
 
-  // 4) Present / checked-in count
+  // 4) Present / checked-in count — coach-scoped when a coach is named.
   if (!named && (/\b(present|checked[- ]?in|turnout|arrived)\b/.test(q) || has("here yet", "how many are here"))) {
+    const coach = findCoachInText(q, coaches);
+    if (coach) {
+      const cname = coach.label || coach.name;
+      const onCoach = roster.filter((d) => d.coach_id === coach.id);
+      const boarded = onCoach.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
+      return `${bold(boarded)} of ${bold(onCoach.length)} on ${cname} have boarded — ${onCoach.length - boarded} still to go.`;
+    }
     return `${bold(kpis.present)} of ${bold(kpis.total)} delegates are checked in — ${kpis.missing} still missing, ${kpis.unassigned} not yet on a coach.`;
   }
 
-  // 5) Missing (count or list)
+  // 5) Missing (count or list) — scoped to a coach if the question names one, so
+  //    "who is missing from Coach 2?" answers about Coach 2, not the whole trip.
   if (!named && has("missing", "not checked in", "not here", "haven't arrived", "havent arrived", "unaccounted", "who's left", "still to board", "not boarded")) {
-    if (asksCount && !asksWho) return `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
-    if (!missing.length) return "Nobody is currently marked missing — everyone expected is accounted for.";
-    const ordered = [...missing].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
-    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${m.coach ? ` · ${m.coach}` : ""}`);
-    const more = missing.length > 15 ? `\n…and ${missing.length - 15} more.` : "";
-    return `${bold(missing.length)} missing:\n${lines.join("\n")}${more}`;
+    const coach = findCoachInText(q, coaches);
+    const cname = coach ? (coach.label || coach.name) : null;
+    const list = coach ? missing.filter((m) => m.coach_id === coach.id) : missing;
+    // Global count cites kpis.missing (now equal to the list length — both come
+    // from the one buildSnapshot partition); coach-scoped cites the filtered list.
+    if (asksCount && !asksWho) return cname
+      ? `${bold(list.length)} on ${cname} are missing (expected but not yet checked in).`
+      : `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
+    if (!list.length) return cname ? `Everyone on ${cname} has boarded — nobody missing there.` : "Nobody is currently marked missing — everyone expected is accounted for.";
+    const ordered = [...list].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
+    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${!cname && m.coach ? ` · ${m.coach}` : ""}`);
+    const more = list.length > 15 ? `\n…and ${list.length - 15} more.` : "";
+    return `${bold(list.length)} missing${cname ? ` on ${cname}` : ""}:\n${lines.join("\n")}${more}`;
   }
 
   // 6) Unassigned (not on any coach yet)
@@ -1671,6 +1740,204 @@ router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => 
   res.json({ deleted: true });
 }));
 
+/* =============================================================================
+ *  MUSTERCHAT — person-to-person messaging (lives beside the AI assistant in
+ *  the same inbox). Only staff accounts authenticate, so the SENDER is always
+ *  an account; the peer is another account (fully two-way) or a delegate (a
+ *  staff→delegate log, since delegates never log in). Messages persist and are
+ *  polled via /updates for near-real-time delivery.
+ * ========================================================================== */
+
+// Order-independent key for a conversation's two parties, so A→B and B→A share
+// one thread. Account↔account sorts the ids; account↔delegate is per-staffer
+// (each staff member keeps their own thread with a given delegate).
+function convoKey(meAcctId, peerKind, peerId) {
+  if (peerKind === "delegate") return `a:${meAcctId}|d:${peerId}`;
+  const [lo, hi] = [String(meAcctId), String(peerId)].sort();
+  return `a:${lo}|a:${hi}`;
+}
+
+const MSG_KINDS = new Set(["text", "video", "doc", "call"]);
+const MAX_BODY = 8000;                 // chars of text / caption
+const MAX_MEDIA = 12 * 1024 * 1024;    // ~12MB base64 (short clips / small docs)
+
+// Restriction point: staff are always contactable; delegate contacts require
+// the same delegate visibility the rest of the app gates on. Tighten here.
+function canSeeDelegates(account) {
+  const p = accountPermissions(account) || {};
+  return !!(p.viewDocuments || p.viewDashboard || p.manageDelegates);
+}
+
+async function resolvePeer(peerKind, peerId, account) {
+  if (peerKind === "account") {
+    return (await q(`SELECT id, name, username FROM accounts WHERE id = $1`, [peerId])).rows[0] || null;
+  }
+  if (peerKind === "delegate") {
+    if (!canSeeDelegates(account)) return null;
+    return (await q(`SELECT id, name, company FROM delegates WHERE id = $1`, [peerId])).rows[0] || null;
+  }
+  return null;
+}
+
+const previewOf = (m) =>
+  !m ? null
+  : m.kind === "video" ? "📹 Video message"
+  : m.kind === "doc" ? "📄 Document"
+  : m.kind === "call" ? (m.body || "📞 Call")
+  : (m.body || "").slice(0, 80);
+
+// GET /api/messages/contacts — everyone I can message, each with last-message
+// preview, unread count and presence; conversations with history float to top.
+router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+
+  const accounts = (await q(
+    `SELECT id, name, username, role,
+            (last_seen_at IS NOT NULL AND last_seen_at > now() - interval '45 seconds') AS online
+       FROM accounts WHERE id <> $1 ORDER BY name NULLS LAST, username`, [me]
+  )).rows;
+
+  let delegates = [];
+  if (canSeeDelegates(req.account)) {
+    const tripUuid = await resolveTripUuid("t-1");
+    delegates = (await q(
+      `SELECT id, name, company FROM delegates
+        WHERE ($1::uuid IS NULL OR trip_id = $1) ORDER BY name`, [tripUuid]
+    )).rows;
+  }
+
+  // All my messages, oldest→newest, so the last write per convo wins the preview.
+  const mine = (await q(
+    `SELECT convo_key, sender_id, recipient_kind, recipient_id, kind, body, created_at, read_at
+       FROM dm_messages
+      WHERE sender_id = $1 OR (recipient_kind = 'account' AND recipient_id = $1)
+      ORDER BY created_at`, [me]
+  )).rows;
+
+  const lastByConvo = new Map();
+  const unreadByConvo = new Map();
+  for (const m of mine) {
+    lastByConvo.set(m.convo_key, m);
+    if (m.recipient_kind === "account" && m.recipient_id === me && !m.read_at) {
+      unreadByConvo.set(m.convo_key, (unreadByConvo.get(m.convo_key) || 0) + 1);
+    }
+  }
+
+  const build = (kind, row, subtitle, online) => {
+    const key = convoKey(me, kind, row.id);
+    const last = lastByConvo.get(key);
+    return {
+      kind, id: row.id, name: row.name || row.username || "Unknown", subtitle,
+      online: !!online,
+      lastMessage: previewOf(last), lastAt: last?.created_at || null,
+      lastMine: last ? last.sender_id === me : false,
+      unread: unreadByConvo.get(key) || 0,
+    };
+  };
+
+  const contacts = [
+    ...accounts.map((a) => build("account", a, a.role === "admin" ? "Staff · admin" : "Staff", a.online)),
+    ...delegates.map((d) => build("delegate", d, d.company || "Delegate", false)),
+  ];
+  contacts.sort((a, b) => {
+    if (a.lastAt && b.lastAt) return new Date(b.lastAt) - new Date(a.lastAt);
+    if (a.lastAt) return -1;
+    if (b.lastAt) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  res.json({ me: { id: me, name: req.account.name, username: req.account.username }, contacts });
+}));
+
+// GET /api/messages/thread?peerKind=&peerId= — full history with one peer,
+// marking everything they sent me as read.
+router.get("/api/messages/thread", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const peerKind = (req.query.peerKind || "account").toString();
+  const peerId = (req.query.peerId || "").toString();
+  const peer = await resolvePeer(peerKind, peerId, req.account);
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
+
+  const key = convoKey(me, peerKind, peerId);
+  await q(`UPDATE dm_messages SET read_at = now()
+            WHERE convo_key = $1 AND recipient_kind = 'account' AND recipient_id = $2 AND read_at IS NULL`,
+          [key, me]);
+
+  const rows = (await q(
+    `SELECT id, sender_id, kind, body, media, created_at, read_at
+       FROM dm_messages WHERE convo_key = $1 ORDER BY created_at`, [key]
+  )).rows;
+
+  res.json({
+    peer: { kind: peerKind, id: peerId, name: peer.name || peer.username, subtitle: peer.company || null },
+    messages: rows.map((m) => ({
+      id: m.id, kind: m.kind, body: m.body, media: m.media,
+      at: m.created_at, mine: m.sender_id === me, read: !!m.read_at,
+    })),
+  });
+}));
+
+// POST /api/messages/thread — send a message (text | video clip | doc share | call log).
+router.post("/api/messages/thread", requireAuth(), express.json({ limit: "16mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const { peerKind = "account", peerId, kind = "text", body = null, media = null } = req.body || {};
+  if (!peerId) return res.status(400).json({ error: "NO_PEER" });
+  if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
+  if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
+  if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE", message: "That attachment is too large — keep clips short." });
+  if (kind === "text" && !String(body || "").trim()) return res.status(400).json({ error: "EMPTY" });
+
+  const peer = await resolvePeer(peerKind, peerId, req.account);
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
+
+  const id = randomUUID();
+  const key = convoKey(me, peerKind, peerId);
+  await q(
+    `INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [id, key, me, peerKind, peerId, kind, body, media]
+  );
+  res.json({ message: { id, kind, body, media, at: new Date().toISOString(), mine: true, read: false } });
+}));
+
+// GET /api/messages/updates?since=ISO — incoming messages addressed to me since
+// a timestamp (lightweight polling) + my total unread across all threads.
+router.get("/api/messages/updates", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const since = req.query.since ? new Date(req.query.since.toString()) : new Date(Date.now() - 60000);
+  const rows = (await q(
+    `SELECT id, convo_key, sender_id, kind, body, created_at
+       FROM dm_messages
+      WHERE recipient_kind = 'account' AND recipient_id = $1 AND created_at > $2
+      ORDER BY created_at`, [me, since.toISOString()]
+  )).rows;
+  const unread = (await q(
+    `SELECT COUNT(*)::int AS n FROM dm_messages
+      WHERE recipient_kind = 'account' AND recipient_id = $1 AND read_at IS NULL`, [me]
+  )).rows[0].n;
+  res.json({
+    now: new Date().toISOString(),
+    unread,
+    incoming: rows.map((m) => ({ id: m.id, convoKey: m.convo_key, senderId: m.sender_id, kind: m.kind, preview: previewOf(m), at: m.created_at })),
+  });
+}));
+
+// POST /api/messages/read — mark a whole thread read.
+router.post("/api/messages/read", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const { peerKind = "account", peerId } = req.body || {};
+  if (!peerId) return res.status(400).json({ error: "NO_PEER" });
+  const key = convoKey(me, peerKind, peerId);
+  await q(`UPDATE dm_messages SET read_at = now()
+            WHERE convo_key = $1 AND recipient_kind = 'account' AND recipient_id = $2 AND read_at IS NULL`, [key, me]);
+  res.json({ ok: true });
+}));
+
 export default router;
 
 /* ---- Exposed for unit testing (tests/vance/) ----------------------------- *
@@ -1689,4 +1956,5 @@ export {
   answerLocally,
   computeRisk,
   checkPassportExpiry,
+  convoKey,
 };

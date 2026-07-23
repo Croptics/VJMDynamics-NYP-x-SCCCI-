@@ -16,6 +16,7 @@ import {
   Phone,
   Globe,
   Check,
+  X,
 } from "lucide-react";
 import { ConfidenceBadge } from "../components/StatusBadge.jsx";
 import {
@@ -88,6 +89,13 @@ export default function OnboardingPage() {
   const [search, setSearch] = useState("");
   const [view, setView] = useState("parse"); // parse | passes | scan
   const [context, setContext] = useState({ existingNames: [], coaches: [] });
+  const [toast, setToast] = useState(null); // { type: "ok"|"error"|"warn", msg } — inline, replaces alert()
+  const notify = useCallback((type, msg) => setToast({ type, msg, at: Date.now() }), []);
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast((c) => (c && c.at === toast.at ? null : c)), 4500);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   /* ---- duplicate set (names already in the selected trip) --------------- */
   const existingSet = useMemo(
@@ -112,9 +120,14 @@ export default function OnboardingPage() {
       .then((list) => {
         if (!alive) return;
         setTrips(list);
-        // Drop a stale saved trip id (e.g. the old hardcoded t-2/t-3) that no
-        // longer matches a real trip, so we never submit against a dead id.
-        setTripId((cur) => (cur && !list.some((tr) => tr.id === cur) ? "" : cur));
+        // Keep a valid saved choice; auto-select when there's only ONE trip (so
+        // the user doesn't parse a doc then get "choose a trip" at confirm time);
+        // otherwise clear a stale id and let them pick.
+        setTripId((cur) => {
+          if (cur && list.some((tr) => tr.id === cur)) return cur;
+          if (list.length === 1) return list[0].id;
+          return "";
+        });
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -219,28 +232,39 @@ export default function OnboardingPage() {
 
   /* ---- confirm --------------------------------------------------------- */
   const confirmAndAdd = async () => {
-    if (!tripId) { alert(t("Please choose a trip to assign these delegates to first.")); return; }
+    if (!tripId) { notify("error", t("Please choose a trip to assign these delegates to first.")); return; }
     if (reviewNeeded > 0 && !window.confirm(t("Some rows still need review. Add them anyway?"))) return;
     const toAdd = rows.filter((r) => !isDup(r));
     const skipped = rows.length - toAdd.length;
-    if (toAdd.length === 0) { alert(t("Every extracted delegate is already in this trip.")); return; }
+    if (toAdd.length === 0) { notify("warn", t("Every extracted delegate is already in this trip.")); return; }
     setSaving(true);
     try {
       const { added, skippedInvalid = 0 } = await confirmDelegates(tripId, toAdd);
       const notes = [];
       if (skipped) notes.push(`${skipped} ${t("duplicates skipped")}`);
       if (skippedInvalid) notes.push(`${skippedInvalid} ${t("invalid skipped")}`);
-      alert(`${added} ${t("delegates added to the trip.")}${notes.length ? ` (${notes.join(", ")})` : ""}`);
+      notify("ok", `${added} ${t("delegates added to the trip.")}${notes.length ? ` (${notes.join(", ")})` : ""}`);
       setRows([]);
       setJob(null);
       localStorage.removeItem(LS_JOB);
       localStorage.removeItem(LS_ROWS);
       getOnboardingContext(tripId).then(setContext).catch(() => {});
     } catch (err) {
-      alert(err.message || t("Couldn't save the delegates. Please try again."));
+      notify("error", err.message || t("Couldn't save the delegates. Please try again."));
     } finally {
       setSaving(false);
     }
+  };
+
+  /* Cancel a running/queued parse and clear the workspace. */
+  const cancelJob = () => {
+    clearInterval(pollRef.current);
+    pollRef.current = null;
+    setJob(null);
+    setRows([]);
+    setSearch("");
+    localStorage.removeItem(LS_JOB);
+    localStorage.removeItem(LS_ROWS);
   };
 
   const pct = job && job.total ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0;
@@ -333,6 +357,9 @@ export default function OnboardingPage() {
                     {job.fileName}
                   </div>
                   {job.method && <span className="badge badge-present" style={{ fontSize: 11 }}>{job.method}</span>}
+                  <button className="mg-iconbtn" title={job.status === "running" ? t("Cancel parse") : t("Clear")} onClick={cancelJob} style={{ color: "var(--ink-3)" }}>
+                    <X size={15} />
+                  </button>
                 </div>
 
                 {job.status === "running" && (
@@ -510,6 +537,20 @@ export default function OnboardingPage() {
       )}
 
       </>)}
+
+      {/* Inline toast — replaces blocking alert() dialogs */}
+      {toast && (
+        <div role="status" style={{
+          position: "fixed", bottom: 24, right: 24, zIndex: 80, maxWidth: 380,
+          background: toast.type === "error" ? "var(--st-missing)" : toast.type === "warn" ? "var(--st-review)" : "var(--st-present)",
+          color: "#fff", padding: "12px 16px", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,0.20)",
+          display: "flex", alignItems: "center", gap: 10, fontSize: 13.5, fontWeight: 500,
+        }}>
+          {toast.type === "ok" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}
+          <span style={{ flex: 1 }}>{toast.msg}</span>
+          <span role="button" onClick={() => setToast(null)} style={{ cursor: "pointer", opacity: 0.85, display: "flex" }}><X size={15} /></span>
+        </div>
+      )}
 
       <style>{`
         .spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}

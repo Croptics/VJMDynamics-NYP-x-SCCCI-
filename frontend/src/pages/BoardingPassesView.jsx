@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
 import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode } from "lucide-react";
 import { getBadges } from "../lib/claudeParse.js";
@@ -32,6 +32,7 @@ export default function BoardingPassesView({ tripId }) {
   const { t } = useLang();
   const [data, setData] = useState({ delegates: [], coaches: [], total: 0, present: 0 });
   const [qr, setQr] = useState({});           // delegateId -> QR data URL
+  const qrRef = useRef({});                    // authoritative QR cache (survives polls)
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
@@ -39,19 +40,29 @@ export default function BoardingPassesView({ tripId }) {
   const [copied, setCopied] = useState(false);
   const [printOne, setPrintOne] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await getBadges(tripId || "t-1");
       setData(res);
-      const entries = await Promise.all(
-        res.delegates.map(async (d) => [d.id, d.qr_code ? await QRCode.toDataURL(d.qr_code, { width: 260, margin: 1 }) : null])
-      );
-      setQr(Object.fromEntries(entries));
-    } catch { /* ignore */ } finally { setLoading(false); }
+      // Generate QR data URLs only for delegates we haven't rendered yet — cheap
+      // on every poll, and it scales to large trips (no full re-render each time).
+      const need = res.delegates.filter((d) => d.qr_code && !qrRef.current[d.id]);
+      if (need.length) {
+        const entries = await Promise.all(need.map(async (d) => [d.id, await QRCode.toDataURL(d.qr_code, { width: 260, margin: 1 })]));
+        qrRef.current = { ...qrRef.current, ...Object.fromEntries(entries) };
+        setQr(qrRef.current);
+      }
+    } catch { /* ignore */ } finally { if (!silent) setLoading(false); }
   }, [tripId]);
 
-  useEffect(() => { load(); }, [load]);
+  // Load once, then poll silently so boarding counts/statuses stay live during
+  // muster without a manual Refresh (the "watch people board" use case).
+  useEffect(() => {
+    load();
+    const id = setInterval(() => load(true), 5000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const coachOf = useCallback((id) => data.coaches.find((c) => c.id === id) || null, [data.coaches]);
   const coachLabel = (c) => (c ? `${c.name}${c.city ? ` · ${c.city}` : ""}` : t("No coach assigned"));
@@ -122,7 +133,7 @@ export default function BoardingPassesView({ tripId }) {
           </p>
         </div>
         <div className="row" style={{ gap: 10 }}>
-          <button className="btn btn-ghost" onClick={load}><RefreshCw size={15} /> {t("Refresh")}</button>
+          <button className="btn btn-ghost" onClick={() => load()}><RefreshCw size={15} /> {t("Refresh")}</button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
             <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
           </button>

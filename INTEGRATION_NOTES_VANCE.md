@@ -16,10 +16,39 @@ backend/routes/vance.js                    ← all APIs (parsing, boarding passe
 frontend/src/lib/claudeParse.js            ← parse / confirm / badges / check-in bridge
 frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (2 tabs: parse / boarding passes)
 frontend/src/pages/BoardingPassesView.jsx  ← pass desk: search/filter, per-coach list, view/print a pass
-frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6 (streaming AI + saved history)
+frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6, now "MusterChat" inbox (AI assistant + human messaging)
+frontend/src/lib/messagesApi.js            ← MusterChat client (contacts / thread / send / poll / read)
+frontend/src/components/mchat/AssistantConversation.jsx ← the AI assistant, as the pinned first chat
+frontend/src/components/mchat/HumanThread.jsx           ← staff↔staff / staff→delegate conversation
+frontend/src/components/mchat/VideoCallOverlay.jsx      ← live-camera call screen (remote simulated)
+frontend/src/components/mchat/DocShareCard.jsx          ← parsed-doc card w/ "Add to trip"
 frontend/src/components/TripPulse.jsx       ← header status widget: onboarding progress (Onboarding tab) / ranked "what to watch" risks (Assistant)
 frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
 ```
+
+## MusterChat — team messaging + video + doc-share (Screen 6 evolution)
+
+A WhatsApp-style inbox that folds the AI assistant and **person-to-person messaging**
+into one contact rail (AI pinned on top, staff + delegates below). Only staff
+accounts authenticate, so the sender is always an account; the peer is another
+account (fully two-way) or a delegate (a staff→delegate log). Persisted in a new
+`dm_messages` table (additive migration in `ensureReady()`); near-real-time via
+polling. Video calls use the **real local camera** (`getUserMedia`) with the
+remote party simulated — demoable on one laptop, no signaling server. A 📎 in the
+composer parses a document inline and shares it as a card with a one-tap
+**Add to trip** (reuses the onboarding confirm — the document-reader bridge).
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/messages/contacts` | signed-in | Staff + delegates w/ last-message preview, unread, presence |
+| GET | `/api/messages/thread` | signed-in | Full history with one peer (auto-marks read) |
+| POST | `/api/messages/thread` | signed-in | Send `text` / `video` clip / `doc` share / `call` log |
+| GET | `/api/messages/updates` | signed-in | New incoming since a timestamp + total unread (polling) |
+| POST | `/api/messages/read` | signed-in | Mark a thread read |
+
+Restriction point: `canSeeDelegates()` gates delegate contacts behind the same
+delegate-visibility perms as the rest of the app; staff are always contactable.
+Conversation pairing (`convoKey`) is unit-tested in `tests/vance/messaging.test.js`.
 
 Dependencies added by this module: `unpdf` (backend PDF text extraction) and
 `qrcode` (frontend QR-pass generation).
