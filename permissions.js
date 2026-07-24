@@ -77,6 +77,20 @@ export const PERMISSIONS = [
     parent: "manageDelegates",
   },
   {
+    key: "viewDelegateDetails",
+    label: "View delegate details",
+    desc: "Open a delegate's full profile — phone number, last known location, and checkpoint timeline",
+    chip: "Delegate details",
+    // This view had no dedicated gate at all before (anyone who could see the
+    // roster row could open the full profile too) — default TRUE so no
+    // existing staff account silently loses access the moment this
+    // permission starts being checked; an admin narrows it per-account
+    // going forward (2026-07-25).
+    default: true,
+    group: "action",
+    parent: "manageDelegates",
+  },
+  {
     key: "manageTrips",
     label: "Manage trips",
     desc: "Edit trips, coaches and itineraries on the Trips board",

@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — mobile trip scope
+ * ============================================================================= */
 // Shared "which trip is the mobile app currently looking at" state
 // (2026-07-23). Every mobile page used to hardcode its own local
 // `TRIP_ID = "t-1"` constant independently, so there was no way to point the

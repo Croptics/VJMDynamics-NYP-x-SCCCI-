@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — Delegate widgets
+ * ============================================================================= */
 import { useState } from "react";
 import { useLang } from "../lib/i18n.jsx";
 

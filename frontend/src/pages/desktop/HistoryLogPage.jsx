@@ -12,7 +12,7 @@ import { useLang } from "../../lib/i18n.jsx";
 // eligible entry — matches the patch-shape keys updateDelegate() (backend)
 // accepts/returns, see data.js's PROFILE_FIELDS + the core CRUD fields.
 const FIELD_LABEL = {
-  name: "Name", coachId: "Coach", status: "Status", vip: "VIP",
+  name: "Name", coachId: "Coach", status: "Status", vip: "VIP", cancelled: "Cancelled", cancelReason: "Cancellation reason",
   lastSeen: "Last seen", lastLocation: "Last location",
   company: "Company", role: "Role", industry: "Industry",
   email: "Email", phone: "Phone", website: "Website",

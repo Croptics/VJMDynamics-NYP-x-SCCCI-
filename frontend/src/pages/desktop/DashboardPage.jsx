@@ -35,14 +35,20 @@ import {
   Globe2,
   BadgeCheck,
   StickyNote,
+  Bell,
+  Ban,
+  LocateFixed,
+  Siren,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
 import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 import ExportModal from "../../components/ExportModal.jsx";
+import PhotoCropModal from "../../components/PhotoCropModal.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 
 /**
@@ -79,7 +85,7 @@ function saveSelectedTripId(id) {
 }
 
 const EMPTY_FORM = {
-  name: "", coachId: "", status: "ARRIVED", vip: false, lastSeen: "", lastLocation: "",
+  name: "", coachId: "", status: "ARRIVED", vip: false, cancelled: false, cancelReason: "", lastSeen: "", lastLocation: "",
   company: "", role: "", industry: "", email: "", phone: "", website: "",
   passportNumber: "", nationality: "", passportExpiry: "", accessibilityNotes: "", notes: "",
 };
@@ -136,6 +142,7 @@ export default function DashboardPage() {
   const [trips, setTrips] = useState([]);            // all trips (for the dropdown)
   const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
   const [currentCheckpoint, setCurrentCheckpoint] = useState(null); // the itinerary stop that's "current" right now, or null
+  const [nextCheckpoint, setNextCheckpoint] = useState(null); // whatever stop immediately follows it, or null (2026-07-25)
 
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
@@ -205,6 +212,23 @@ export default function DashboardPage() {
   const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoErr, setPhotoErr] = useState("");
+  // "Use my current location" for the Missing lastLocation field (2026-07-24)
+  // — see lib/geolocation.js for what this actually reads (the STAFF
+  // device's own GPS, not the delegate's).
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState(null);
+  async function useMyLocation() {
+    setLocating(true);
+    setLocateError(null);
+    try {
+      const loc = await getCurrentLocationString();
+      setForm((f) => ({ ...f, lastLocation: loc }));
+    } catch (err) {
+      setLocateError(geolocationErrorMessage(err));
+    } finally {
+      setLocating(false);
+    }
+  }
   const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null (Reverse headcount's quick popup)
   // Delegate profile view — combines what used to be 3 separate popups
   // (edit modal's read-only fields, checkpoint timeline modal, location map
@@ -212,9 +236,116 @@ export default function DashboardPage() {
   // the main table (2026-07-24). Editing still opens the existing Create/
   // Edit modal via the profile's own "Edit" button.
   const [profileDelegate, setProfileDelegate] = useState(null);
+  // Gate for actually OPENING the profile (2026-07-25, new
+  // viewDelegateDetails permission) — every "open" call site below goes
+  // through this instead of setProfileDelegate directly, so the gate lives
+  // in one place rather than being repeated (and possibly missed) at each
+  // of the several places a row/name can be clicked to open it.
+  function openProfile(d) {
+    if (perms.viewDelegateDetails) setProfileDelegate(d);
+  }
   // Full-size photo lightbox — the profile panel's thumbnail is too small to
   // make out a face clearly; click it to view full-size (2026-07-24).
   const [enlargedPhoto, setEnlargedPhoto] = useState(null);
+  // { delegate, reason } while the "Mark as cancelled" reason prompt is
+  // open, else null — see toggleCancelled()/confirmCancel() below.
+  const [cancelPrompt, setCancelPrompt] = useState(null);
+  // Alerts moved out of the page flow entirely into a small icon-button +
+  // modal beside Export (2026-07-24 feedback, second round — the collapsed
+  // inline card still took a permanent row at the top of every visit; "move
+  // the alert to a small icon button beside the export").
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  // "Emergency" section inside this same Alerts modal (2026-07-25) —
+  // acknowledging an escalation used to make it vanish entirely, which
+  // doesn't scale once there are many open at once (e.g. 50 delegates
+  // escalated at busy period). Open OR acknowledged (not yet resolved)
+  // escalations stay listed here so staff can work through them at their
+  // own pace instead of the top banner being the only place to see them.
+  const [activeEscalations, setActiveEscalations] = useState([]);
+  const [escalationBusyId, setEscalationBusyId] = useState(null);
+  useEffect(() => {
+    if (!alertsOpen) return;
+    let alive = true;
+    apiGet("/escalations/active").then((r) => { if (alive) setActiveEscalations(r.escalations || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, [alertsOpen]);
+  async function acknowledgeEscalationRow(id) {
+    setEscalationBusyId(id);
+    try {
+      await apiPost(`/escalations/${id}/acknowledge`, {});
+      setActiveEscalations((prev) => prev.map((e) => (e.id === id ? { ...e, status: "acknowledged" } : e)));
+    } catch { /* leave as-is — next open of the modal will reconcile */ }
+    finally { setEscalationBusyId(null); }
+  }
+  async function resolveEscalationRow(id) {
+    setEscalationBusyId(id);
+    try {
+      await apiPost(`/escalations/${id}/resolve`, {});
+      setActiveEscalations((prev) => prev.filter((e) => e.id !== id));
+    } catch { /* leave as-is */ }
+    finally { setEscalationBusyId(null); }
+  }
+
+  // "Escalate to office" (2026-07-24) — a DELIBERATE, staff-clicked action
+  // for when a Missing delegate isn't answering their phone; never automatic.
+  // See EscalationBanner.jsx for how office/admin staff actually get alerted
+  // once this fires (in-app banner + tab-flash/chime + email/SMS/WhatsApp).
+  const [escalatingDelegate, setEscalatingDelegate] = useState(null);
+  const [escalateMessage, setEscalateMessage] = useState("");
+  const [escalateSaving, setEscalateSaving] = useState(false);
+  const [escalateErr, setEscalateErr] = useState(null);
+  // Who to alert (2026-07-24, "on frontend I can choose who to alert to") —
+  // fetched fresh each time the modal opens (admin accounts with an email on
+  // file), all pre-checked by default so not touching anything still alerts
+  // everyone, same as before this was pickable.
+  const [escalateRecipients, setEscalateRecipients] = useState([]);
+  const [escalateSelected, setEscalateSelected] = useState(new Set());
+  function openEscalate(d) {
+    setEscalatingDelegate(d);
+    setEscalateMessage(t("Not answering phone calls"));
+    setEscalateErr(null);
+    // tripId passed so the backend can float the trip's own lead to the top
+    // of the list (2026-07-25) — a smarter default, not a hard restriction;
+    // every admin still appears and stays pre-checked.
+    const qs = currentTripUuid ? `?tripId=${encodeURIComponent(currentTripUuid)}` : "";
+    apiGet(`/escalations/recipients${qs}`).then((r) => {
+      const list = r.recipients || [];
+      setEscalateRecipients(list);
+      setEscalateSelected(new Set(list.map((p) => p.email)));
+    }).catch(() => { setEscalateRecipients([]); setEscalateSelected(new Set()); });
+  }
+  function toggleEscalateRecipient(email) {
+    setEscalateSelected((prev) => {
+      const next = new Set(prev);
+      next.has(email) ? next.delete(email) : next.add(email);
+      return next;
+    });
+  }
+  async function submitEscalation() {
+    setEscalateSaving(true);
+    setEscalateErr(null);
+    try {
+      const r = await apiPost("/escalations", {
+        tripId: currentTripUuid || null,
+        delegateId: escalatingDelegate.id,
+        message: escalateMessage.trim(),
+        recipientEmails: [...escalateSelected],
+      });
+      // Dedupe guard (2026-07-25) — this delegate already had an open
+      // escalation, so nothing new was sent; say so rather than implying a
+      // fresh alert just went out.
+      if (r.alreadyOpen) {
+        setEscalateErr(t("This delegate already has an open escalation — no new alert was sent."));
+        setEscalateSaving(false);
+        return;
+      }
+      setEscalatingDelegate(null);
+    } catch (e) {
+      setEscalateErr(e.message || t("Couldn't send the escalation. Please try again."));
+    } finally {
+      setEscalateSaving(false);
+    }
+  }
 
   // Guards against overlapping polls (e.g. a slow response still in flight
   // when the next 2s tick fires) — same pattern as useSessionGuard's
@@ -230,7 +361,13 @@ export default function DashboardPage() {
         apiGet(`/trips/${selectedTripId}/dashboard`),
         apiGet(`/trips/${selectedTripId}/missing`),
         apiGet(`/trips/${selectedTripId}/delegates`),
-        apiGet(`/activity?limit=200${historyScope === "trip" ? `&tripId=${selectedTripId}` : ""}`),
+        // This is the small inline "History tracker" card (360px scroll box on
+        // the dashboard, not the full audit log — that's HistoryLogPage.jsx,
+        // fetched separately at limit=1000 only when you open /history).
+        // Was limit=200 every 8s poll tick; cut to 30 (2026-07-24, Neon
+        // egress reduction) since nobody scrolls through 200 rows in a
+        // 360px box anyway — "View full log" is one click away for that.
+        apiGet(`/activity?limit=30${historyScope === "trip" ? `&tripId=${selectedTripId}` : ""}`),
         apiGet(`/trips/${selectedTripId}/checkpoints`).catch(() => null), // never blocks the rest of the dashboard
       ]);
       setData(dash);
@@ -242,9 +379,16 @@ export default function DashboardPage() {
       // Same "current"/"past"/"upcoming" tagging as the scanner pages.
       if (checkpoints) {
         const all = (checkpoints.days || []).flatMap((day) => day.checkpoints);
-        setCurrentCheckpoint(all.find((c) => c.timeState === "current") || null);
+        const currentIdx = all.findIndex((c) => c.timeState === "current");
+        setCurrentCheckpoint(currentIdx >= 0 ? all[currentIdx] : null);
+        // Whatever stop immediately follows "current" chronologically — the
+        // list is already ordered by day/sort_order/start_time, so the very
+        // next entry IS the next event (2026-07-25 — "then show the next
+        // trip event" once the current one passes).
+        setNextCheckpoint(currentIdx >= 0 ? all[currentIdx + 1] || null : null);
       } else {
         setCurrentCheckpoint(null);
+        setNextCheckpoint(null);
       }
       // Remember the base trip's uuid the first time we load it, so the trip
       // dropdown can list the OTHER trips without duplicating it.
@@ -259,15 +403,19 @@ export default function DashboardPage() {
     }
   }, [selectedTripId, historyScope]);
 
-  // Auto-refresh every 2s so a change made by another signed-in staff member
-  // (a status edit, a new upload, a coach reassignment, etc.) shows up here
+  // Auto-refresh so a change made by another signed-in staff member (a
+  // status edit, a new upload, a coach reassignment, etc.) shows up here
   // without anyone having to hit the manual Refresh button. Safe against the
   // create/edit delegate modal's own form state, which is a separate local
   // copy seeded once when the modal opens — a background refresh of the
-  // underlying `delegates` list doesn't touch it.
+  // underlying `delegates` list doesn't touch it. Was 2s — slowed to 8s
+  // (2026-07-24) after this poll (5 parallel queries, including a 200-row
+  // activity dump and the full delegate list) was found to be the single
+  // biggest contributor to the Neon project's monthly egress quota with
+  // several tabs left open all day; 8s is still fast enough to feel live.
   useEffect(() => {
     load();
-    const id = setInterval(load, 2000);
+    const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, [load]);
 
@@ -303,10 +451,11 @@ export default function DashboardPage() {
   useEffect(() => {
     if (tab !== "staffops" || !perms.manageAccounts) return;
     loadStaffOps();
-    // 2s so a login/logout elsewhere shows up here almost immediately —
-    // scoped to only fire while an admin actually has this tab open, so it
-    // doesn't add load for anyone else.
-    const id = setInterval(loadStaffOps, 2000);
+    // Scoped to only fire while an admin actually has this tab open, so it
+    // doesn't add load for anyone else. Was 2s, slowed to 8s (2026-07-24,
+    // Neon egress reduction) — still shows a login/logout elsewhere within
+    // one tick.
+    const id = setInterval(loadStaffOps, 8000);
     return () => clearInterval(id);
   }, [tab, perms.manageAccounts, loadStaffOps]);
 
@@ -347,6 +496,10 @@ export default function DashboardPage() {
       // matching option instead of silently showing blank.
       status: d.status === "PRESENT" ? "ARRIVED" : (d.status || "UNASSIGNED"),
       vip: !!d.vip,
+      cancelled: !!d.cancelled,
+      // GET returns the raw DB column name (snake_case) for this one, same
+      // convention as passport_no/passport_expiry above.
+      cancelReason: d.cancel_reason || "",
       lastSeen: d.lastSeen || "",
       lastLocation: d.lastLocation || "",
       company: d.company || "", role: d.role || "", industry: d.industry || "",
@@ -419,8 +572,10 @@ export default function DashboardPage() {
       setFormErr("Please enter a phone number.");
       return;
     }
-    // A coach is required unless the delegate is explicitly Unassigned.
-    if (form.status !== "UNASSIGNED" && !form.coachId) {
+    // A coach is required unless the delegate is explicitly Unassigned —
+    // Cancelled always forces UNASSIGNED server-side regardless of whatever
+    // status is still selected, so skip this check when cancelled is on.
+    if (!form.cancelled && form.status !== "UNASSIGNED" && !form.coachId) {
       setFormErr("Please select a coach, or set status to Unassigned.");
       return;
     }
@@ -438,6 +593,8 @@ export default function DashboardPage() {
       coachId: form.status === "UNASSIGNED" ? null : form.coachId || null,
       status: form.status,
       vip: form.vip,
+      cancelled: form.cancelled,
+      cancelReason: form.cancelled ? form.cancelReason.trim() : "",
       // Last seen / location only ever apply while a delegate is missing —
       // cleared on save otherwise so switching status away from Missing
       // doesn't silently carry stale data forward into a later Missing spell.
@@ -474,6 +631,39 @@ export default function DashboardPage() {
       await load();
     } catch (e) {
       setError(e.message || "Delete failed.");
+    }
+  }
+
+  // Mark/unmark a delegate as Cancelled (2026-07-24) — for an Assigned
+  // delegate who won't make it after all, usually found out day-of. The
+  // backend always forces status back to UNASSIGNED and clears coachId when
+  // cancelled=true (see normalize() in db/delegates.js), freeing their seat.
+  // Cancelling opens `cancelPrompt` (a small reason-textfield modal, see its
+  // render further down) rather than a plain window.confirm — "add a
+  // textfield that let staff put what happen" — since the whole point is
+  // capturing WHY, not just a yes/no. Un-cancelling needs no reason, so it
+  // goes straight to the PATCH.
+  async function toggleCancelled(d) {
+    if (!d.cancelled) { setCancelPrompt({ delegate: d, reason: "" }); return; }
+    try {
+      const updated = await apiPatch(`/delegates/${d.id}`, { cancelled: false });
+      setProfileDelegate((p) => (p && p.id === d.id ? { ...p, ...updated } : p));
+      await load();
+    } catch (e) {
+      setError(e.message || "Could not update this delegate.");
+    }
+  }
+
+  async function confirmCancel() {
+    if (!cancelPrompt) return;
+    const { delegate, reason } = cancelPrompt;
+    try {
+      const updated = await apiPatch(`/delegates/${delegate.id}`, { cancelled: true, cancelReason: reason.trim() });
+      setProfileDelegate((p) => (p && p.id === delegate.id ? { ...p, ...updated } : p));
+      setCancelPrompt(null);
+      await load();
+    } catch (e) {
+      setError(e.message || "Could not update this delegate.");
     }
   }
 
@@ -558,11 +748,24 @@ export default function DashboardPage() {
   // up under "Arrived" instead of silently vanishing from that filter.
   const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
 
+  // Feeds the new Alerts card (2026-07-24) — "if it's missing, it will
+  // mention, late will be brief and show who's late... those who are
+  // cancel status also display". `missing` (state) is already the
+  // trip-scoped Missing list with lastSeen/lastLocation/phone; Late and
+  // Cancelled are derived here from the full delegates list since there's
+  // no separate endpoint for either.
+  const lateDelegates = useMemo(() => delegates.filter((d) => effectiveStatus(d) === "LATE"), [delegates]);
+  const cancelledDelegates = useMemo(() => delegates.filter((d) => d.cancelled), [delegates]);
+
   // The "All delegates" table, after the search box, status filter and sort.
   const visibleDelegates = useMemo(() => {
     const query = delegateQuery.trim().toLowerCase();
     let list = delegates.filter((d) => {
-      if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
+      // "CANCELLED" isn't a real status value (see backend/db/schema.js's
+      // comment) — it's a boolean layered on top of UNASSIGNED, so it's
+      // filtered separately here rather than through effectiveStatus().
+      if (statusFilter === "CANCELLED") { if (!d.cancelled) return false; }
+      else if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
       // Coach filter: a real coach id matches that coach; "UNASSIGNED" matches
       // delegates with no coach (coachId null/empty).
       if (coachFilter === "UNASSIGNED") {
@@ -672,8 +875,13 @@ export default function DashboardPage() {
               scanner pages auto-focus on, so the Dashboard doesn't leave you
               guessing which event is live without switching to /trips. */}
           {currentCheckpoint && (
-            <span className="badge badge-assigned" style={{ marginTop: 6, display: "inline-flex" }}>
+            <span className="badge badge-assigned" style={{ marginTop: 6, display: "inline-flex", flexWrap: "wrap" }}>
               <Clock size={12} /> {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${currentCheckpoint.scheduledTime}` : ""}
+              {nextCheckpoint && (
+                <span style={{ opacity: 0.75, marginLeft: 6 }}>
+                  · {t("Next")}: {nextCheckpoint.label}{nextCheckpoint.scheduledTime ? ` · ${nextCheckpoint.scheduledTime}` : ""}
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -691,6 +899,26 @@ export default function DashboardPage() {
           >
             <RefreshCw size={16} className={loading ? "spin" : ""} /> {t("Refresh")}
           </button>
+          {data && (missing.length > 0 || lateDelegates.length > 0 || cancelledDelegates.length > 0) && (
+            <button
+              className="btn btn-ghost"
+              onClick={() => setAlertsOpen(true)}
+              title={t("Alerts")}
+              aria-label={t("Alerts")}
+              style={{ position: "relative" }}
+            >
+              <Bell size={16} />
+              <span
+                style={{
+                  position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, padding: "0 3px",
+                  borderRadius: 999, background: "var(--st-missing)", color: "#fff",
+                  fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                {missing.length + lateDelegates.length + cancelledDelegates.length}
+              </span>
+            </button>
+          )}
           <button className="btn btn-primary" onClick={() => setExportOpen(true)} disabled={!data} style={{ display: perms.exportData ? undefined : "none" }}>
             <Download size={16} /> {t("Export")}
           </button>
@@ -877,7 +1105,9 @@ export default function DashboardPage() {
                       <span className="badge badge-missing">{coachMissing.length} {t("not boarded")}</span>
                     )}
                   </div>
-                  <div style={{ height: 8, borderRadius: 999, overflow: "hidden", backgroundClip: "padding-box", border: "1px solid var(--line)", boxSizing: "border-box", background: coachBarGradient(segs) }} />
+                  <div className="roster-bar" style={{ height: 8 }}>
+                    {segs.map((s, i) => <span key={i} style={{ width: `${s.pct}%`, background: `var(--st-${s.tone})` }} />)}
+                  </div>
 
                   {c.total === 0 ? (
                     <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("No delegates assigned to this coach yet.")}</div>
@@ -900,11 +1130,11 @@ export default function DashboardPage() {
                           key={m.id}
                           className="row between"
                           style={{ gap: 10, cursor: "pointer" }}
-                          onClick={() => setProfileDelegate(m)}
+                          onClick={() => openProfile(m)}
                           role="button"
                           tabIndex={0}
                           aria-label={`${t("View profile")} — ${m.name}`}
-                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setProfileDelegate(m); }}
+                          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openProfile(m); }}
                         >
                           <div className="row" style={{ gap: 10, minWidth: 0 }}>
                             <DelegateAvatar delegate={m} style={{ flexShrink: 0 }} />
@@ -1090,13 +1320,18 @@ export default function DashboardPage() {
        * ---------------------------------------------------------------------- */}
       {k && (
         <div className="kpi-row">
+          {/* "of N" and the ring's denominator use trackable (assigned/
+              arrived/late/missing), not total — an Unassigned delegate
+              (including a Cancelled one, always forced to Unassigned) was
+              never on a coach's roster and can't meaningfully be "missing",
+              so counting them here overstated N (2026-07-24). */}
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
-            suffix={`${t("of")} ${k.total}`} foot={trip?.departsIn ? `${t("Departure in")} ${trip.departsIn}` : null} big
-            ringValue={k.missing} ringTotal={k.total}
+            suffix={`${t("of")} ${k.trackable ?? k.total}`} foot={trip?.departsIn ? `${t("Departure in")} ${trip.departsIn}` : null} big
+            ringValue={k.missing} ringTotal={k.trackable ?? k.total}
             onClick={() => showDelegatesFiltered("MISSING")} />
           <Kpi tone="late" icon={Clock} label={t("Late")} value={`${k.late ?? 0}`}
             foot={t("Past cut-off, not checked in")}
-            ringValue={k.late ?? 0} ringTotal={k.total}
+            ringValue={k.late ?? 0} ringTotal={k.trackable ?? k.total}
             onClick={() => showDelegatesFiltered("LATE")} />
           <RosterCard t={t} k={k} onFilter={showDelegatesFiltered} />
         </div>
@@ -1245,21 +1480,37 @@ export default function DashboardPage() {
               />
               <select className="select" style={{ maxWidth: 170 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                 <option value="ALL">{t("All statuses")}</option>
-                <option value="UNASSIGNED">{t("Unassigned")}</option>
-                <option value="ASSIGNED">{t("Assigned")}</option>
-                <option value="ARRIVED">{t("Arrived")}</option>
-                <option value="LATE">{t("Late")}</option>
-                <option value="MISSING">{t("Missing")}</option>
+                <optgroup label={t("Status")}>
+                  <option value="UNASSIGNED">{t("Unassigned")}</option>
+                  <option value="ASSIGNED">{t("Assigned")}</option>
+                  <option value="ARRIVED">{t("Arrived")}</option>
+                  <option value="LATE">{t("Late")}</option>
+                  <option value="MISSING">{t("Missing")}</option>
+                </optgroup>
+                {/* Not a real status (see schema.js's comment on the
+                    `cancelled` column) — grouped apart so it doesn't read as
+                    a 6th value in the same enum as the 5 above. */}
+                <optgroup label={t("Other")}>
+                  <option value="CANCELLED">{t("Cancelled")}</option>
+                </optgroup>
               </select>
               {/* Coach-assignment filter — matches the mobile Attendance
                   page's coach filter. Options come from the live coach list
                   plus an explicit "Unassigned" (delegates with no coach). */}
               <select className="select" style={{ maxWidth: 190 }} value={coachFilter} onChange={(e) => setCoachFilter(e.target.value)}>
                 <option value="ALL">{t("All coaches")}</option>
-                {coaches.map((c) => (
-                  <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
-                ))}
-                <option value="UNASSIGNED">{t("Unassigned")}</option>
+                <optgroup label={t("Coaches")}>
+                  {coaches.map((c) => (
+                    <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
+                  ))}
+                </optgroup>
+                {/* Not a coach — grouped apart so it doesn't read as one
+                    more entry in the same list as the real coaches above
+                    (2026-07-24, same treatment as the status filter's
+                    "Cancelled" grouping). */}
+                <optgroup label={t("Other")}>
+                  <option value="UNASSIGNED">{t("Unassigned")}</option>
+                </optgroup>
               </select>
               <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
                 <option value="name">{t("Sort: Name")}</option>
@@ -1283,8 +1534,11 @@ export default function DashboardPage() {
               {t("No delegates yet. Click")} <strong>{t("Add delegate")}</strong> {t("to create your first record.")}
             </div>
           ) : (
-            <div style={{ maxHeight: 640, overflowY: "auto" }}>
-            <table className="table">
+            // overflowX added (2026-07-24, mobile responsiveness pass) so
+            // this many-column table scrolls horizontally on a narrow
+            // screen instead of clipping/squishing columns.
+            <div style={{ maxHeight: 640, overflowY: "auto", overflowX: "auto" }}>
+            <table className="table" style={{ minWidth: 720 }}>
               <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--surface)" }}>
                 <tr>
                   {perms.manageDelegates && (
@@ -1323,7 +1577,7 @@ export default function DashboardPage() {
                     )}
                     <td>
                       <button
-                        onClick={() => setProfileDelegate(d)}
+                        onClick={() => openProfile(d)}
                         className="row"
                         style={{ gap: 10, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
                         aria-label={`${t("View profile")} — ${d.name}`}
@@ -1338,14 +1592,19 @@ export default function DashboardPage() {
                       </button>
                     </td>
                     <td>{coachName(d.coachId)}</td>
-                    <td><StatusBadge state={d.status} /></td>
+                    <td>
+                      <div className="row" style={{ gap: 6 }}>
+                        <StatusBadge state={d.status} />
+                        {d.cancelled && <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>{t("Cancelled")}</span>}
+                      </div>
+                    </td>
                     {showLastSeenCol && <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>}
                     <td className="muted">{fmtUploadDate(d.createdAt)}</td>
                     {showCreatedByCol && <td className="muted">{d.createdBy || "—"}</td>}
                     <td>
                       <div className="row" style={{ gap: 6 }}>
                         <button
-                          onClick={() => setProfileDelegate(d)}
+                          onClick={() => openProfile(d)}
                           aria-label={`${t("View profile")} — ${d.name}`}
                           title={t("View profile")}
                           style={S.iconBtn}>
@@ -1473,7 +1732,13 @@ export default function DashboardPage() {
 
             <label className="field-label" style={{ marginTop: 14 }}>{t("Status")}</label>
             <select className="select" value={form.status}
-              onChange={(e) => setForm({ ...form, status: e.target.value })}>
+              onChange={(e) => {
+                const status = e.target.value;
+                // Cancelled only ever applies to an Unassigned delegate (see
+                // the checkbox below) — moving away from Unassigned clears
+                // it rather than leaving a stale, now-hidden flag set.
+                setForm((f) => ({ ...f, status, cancelled: status === "UNASSIGNED" ? f.cancelled : false }));
+              }}>
               <option value="UNASSIGNED">{t("Unassigned")}</option>
               <option value="ASSIGNED">{t("Assigned")}</option>
               <option value="ARRIVED">{t("Arrived")}</option>
@@ -1506,6 +1771,18 @@ export default function DashboardPage() {
                 <input className="input" value={form.lastLocation}
                   placeholder={t("e.g. Novotel Beijing Sanyuan, Lobby")}
                   onChange={(e) => setForm({ ...form, lastLocation: e.target.value })} />
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ marginTop: 8 }}
+                  onClick={useMyLocation}
+                  disabled={locating}
+                >
+                  <LocateFixed size={15} /> {locating ? t("Locating…") : t("Use my current location")}
+                </button>
+                {locateError && (
+                  <div className="muted" style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(locateError)}</div>
+                )}
                 {form.lastLocation.trim() && (
                   <div style={{ marginTop: 8 }}>
                     <DelegateLocationMap location={form.lastLocation.trim()} height={160} />
@@ -1519,6 +1796,33 @@ export default function DashboardPage() {
                 onChange={(e) => setForm({ ...form, vip: e.target.checked })} />
               {t("Mark as VIP")}
             </label>
+
+            {/* Only meaningful once a delegate is already Unassigned — a
+                cancellation IS an unassignment, not a separate action that
+                triggers one, so the checkbox only appears here rather than
+                alongside every status (2026-07-24 feedback). */}
+            {editingId && form.status === "UNASSIGNED" && (
+              <label style={{ display: "block", marginTop: 10, fontSize: 14, cursor: "pointer" }}>
+                <span className="row" style={{ gap: 8 }}>
+                  <input type="checkbox" checked={form.cancelled}
+                    onChange={(e) => setForm({ ...form, cancelled: e.target.checked })} />
+                  {t("Cancelled")}
+                </span>
+                <span className="muted" style={{ display: "block", fontSize: 12, marginTop: 2, marginLeft: 24 }}>
+                  {t("Optional — records that this delegate specifically dropped out, rather than never having been assigned.")}
+                </span>
+              </label>
+            )}
+
+            {editingId && form.cancelled && (
+              <div style={{ marginTop: 10, marginLeft: 24 }}>
+                <label className="field-label">{t("What happened?")}</label>
+                <textarea className="input" rows={2} style={{ resize: "vertical", fontFamily: "inherit" }}
+                  placeholder={t("e.g. Flight cancelled, called in sick, no longer travelling with the group…")}
+                  value={form.cancelReason}
+                  onChange={(e) => setForm({ ...form, cancelReason: e.target.value })} />
+              </div>
+            )}
 
             <button
               type="button"
@@ -1639,6 +1943,9 @@ export default function DashboardPage() {
                   <h2 style={{ fontSize: 18 }}>{profileDelegate.name}</h2>
                   <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: "wrap" }}>
                     <StatusBadge state={profileDelegate.status} />
+                    {profileDelegate.cancelled && (
+                      <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>{t("Cancelled")}</span>
+                    )}
                     {profileDelegate.vip && (
                       <span className="badge badge-review" style={{ padding: "2px 8px" }}>
                         <Crown size={12} /> {t("VIP")}
@@ -1648,6 +1955,28 @@ export default function DashboardPage() {
                 </div>
               </div>
               <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                {/* Only offered once already Unassigned — cancelling IS an
+                    unassignment, not a separate action that triggers one
+                    (2026-07-24 feedback); an Assigned/Arrived/Late/Missing
+                    delegate needs Edit → Unassigned first. */}
+                {perms.manageDelegates && profileDelegate.status === "UNASSIGNED" && (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 13, padding: "6px 12px" }}
+                    onClick={() => toggleCancelled(profileDelegate)}
+                  >
+                    {profileDelegate.cancelled ? t("Undo cancellation") : t("Mark as cancelled")}
+                  </button>
+                )}
+                {perms.manageDelegates && profileDelegate.status === "MISSING" && (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 13, padding: "6px 12px", color: "var(--st-missing)" }}
+                    onClick={() => { const d = profileDelegate; setProfileDelegate(null); openEscalate(d); }}
+                  >
+                    <Siren size={14} /> {t("Escalate to office")}
+                  </button>
+                )}
                 {perms.manageDelegates && (
                   <button
                     className="btn btn-ghost"
@@ -1694,6 +2023,15 @@ export default function DashboardPage() {
               <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
             </div>
 
+            {profileDelegate.cancelled && (
+              <div style={{ marginTop: 18, padding: "10px 12px", background: "var(--st-neutral-bg)", borderRadius: "var(--r-sm)" }}>
+                <div className="field-label" style={{ margin: 0 }}>{t("Cancellation reason")}</div>
+                <p style={{ fontSize: 13.5, marginTop: 4 }}>
+                  {profileDelegate.cancel_reason || t("No reason given.")}
+                </p>
+              </div>
+            )}
+
             {(profileDelegate.notes || profileDelegate.accessibility_notes) && (
               <div style={{ marginTop: 18 }}>
                 {profileDelegate.accessibility_notes && (
@@ -1725,7 +2063,7 @@ export default function DashboardPage() {
                 </p>
                 {profileDelegate.lastLocation && (
                   <div style={{ marginTop: 8 }}>
-                    <DelegateLocationMap location={profileDelegate.lastLocation} height={200} />
+                    <DelegateLocationMap location={profileDelegate.lastLocation} height={340} />
                   </div>
                 )}
               </div>
@@ -1736,7 +2074,7 @@ export default function DashboardPage() {
                 <Clock size={13} /> {t("Checkpoint timeline")}
               </div>
               <div style={{ marginTop: 8 }}>
-                <DelegateTimeline delegateId={profileDelegate.id} />
+                <DelegateTimeline delegateId={profileDelegate.id} defaultVisible={2} />
               </div>
             </div>
           </div>
@@ -1748,6 +2086,296 @@ export default function DashboardPage() {
           (2026-07-24). Click anywhere, or X, to close. */}
       {cropFile && (
         <PhotoCropModal file={cropFile} onCancel={() => setCropFile(null)} onSave={handleCropSave} t={t} />
+      )}
+
+      {/* "Mark as cancelled" reason prompt — a dedicated textfield instead
+          of a plain window.confirm, since the whole point of cancelling is
+          capturing WHY (2026-07-24). */}
+      {/* ---- Alerts modal (2026-07-24) --------------------------------------
+       * "if it missing, it will mention, late will be brief and show who
+       * late... those who are cancel status also display" — then moved from
+       * an inline collapsed card to this small icon-button + modal beside
+       * Export, so it doesn't take a permanent row on every visit. Missing
+       * gets full detail rows (last-known-location + Call, matching Reverse
+       * Headcount's own treatment); Late/Cancelled are deliberately brief —
+       * just wrapped name chips. Each section caps how many it shows and
+       * links to the full filtered list via showDelegatesFiltered(). */}
+      {alertsOpen && (
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setAlertsOpen(false); }}>
+          <div className="card" style={{ ...S.modal, width: "min(480px, 100%)", maxHeight: "85vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 16 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <Bell size={18} color="var(--ink-3)" />
+                <h2 style={{ fontSize: 16 }}>{t("Alerts")}</h2>
+              </div>
+              <button onClick={() => setAlertsOpen(false)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+            </div>
+
+            {missing.length === 0 && lateDelegates.length === 0 && cancelledDelegates.length === 0 && activeEscalations.length === 0 && (
+              <div className="muted" style={{ fontSize: 13 }}>{t("Nothing needs your attention right now.")}</div>
+            )}
+
+            {activeEscalations.length > 0 && (
+              <div style={{ marginBottom: 18 }}>
+                <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5, marginBottom: 8 }}>
+                  <Siren size={15} /> {activeEscalations.length} {t("Emergency")}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+                  {activeEscalations.map((e) => (
+                    <div key={e.id} style={{ padding: "10px 12px", background: "var(--st-missing-bg)", borderRadius: "var(--r-sm)" }}>
+                      <div className="row between" style={{ gap: 8 }}>
+                        <div style={{ minWidth: 0, cursor: e.delegateId ? "pointer" : "default" }}
+                          onClick={() => {
+                            if (!e.delegateId) return;
+                            // Look up the REAL delegate record instead of building a
+                            // fake partial one from the escalation row (2026-07-25 bug
+                            // fix) — the synthetic {id,name,phone,lastLocation} object
+                            // was missing status/coachId/vip, so the profile panel
+                            // rendered incomplete (no status badge, no Escalate button,
+                            // "Unassigned" coach) instead of the real full profile.
+                            const real = delegates.find((d) => d.id === e.delegateId);
+                            setAlertsOpen(false);
+                            openProfile(real || { id: e.delegateId, name: e.delegateName, phone: e.delegatePhone, lastLocation: e.delegateLocation });
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                            {e.delegateName || t("General")}
+                            {e.status === "acknowledged" && (
+                              <span className="muted" style={{ fontWeight: 400, fontSize: 11.5 }}> · {t("Acknowledged")}</span>
+                            )}
+                          </div>
+                          <div className="muted" style={{ fontSize: 11.5 }}>
+                            {e.message} {e.createdBy ? `(${t("by")} ${e.createdBy})` : ""}
+                          </div>
+                          {e.delegatePhone && <div className="muted" style={{ fontSize: 11.5 }}>{e.delegatePhone}</div>}
+                          {e.delegateLocation && <div className="muted" style={{ fontSize: 11.5 }}>{e.delegateLocation}</div>}
+                        </div>
+                        <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                          {e.status === "open" && (
+                            <button className="btn btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }}
+                              disabled={escalationBusyId === e.id} onClick={() => acknowledgeEscalationRow(e.id)}>
+                              {t("Acknowledge")}
+                            </button>
+                          )}
+                          <button className="btn btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }}
+                            disabled={escalationBusyId === e.id} onClick={() => resolveEscalationRow(e.id)}>
+                            {t("Resolve")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {missing.length > 0 && (
+              <div style={{ marginBottom: (lateDelegates.length || cancelledDelegates.length) ? 18 : 0 }}>
+                <div className="row between" style={{ marginBottom: 8 }}>
+                  <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5 }}>
+                    <AlertTriangle size={15} /> {missing.length} {t("Missing")}
+                  </div>
+                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
+                    {t("View all")}
+                  </button>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {missing.slice(0, 5).map((m) => (
+                    <div
+                      key={m.id}
+                      className="row between"
+                      style={{ padding: "8px 10px", background: "var(--st-missing-bg)", borderRadius: "var(--r-sm)", cursor: "pointer" }}
+                      onClick={() => { setAlertsOpen(false); openProfile(m); }}
+                    >
+                      <div className="row" style={{ gap: 8, minWidth: 0 }}>
+                        <DelegateAvatar delegate={m} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</div>
+                          <div className="muted" style={{ fontSize: 11.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {m.lastLocation || t("Last known location")}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="row" style={{ gap: 4, flexShrink: 0 }}>
+                        {m.phone && (
+                          <a
+                            href={`tel:${m.phone}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label={`${t("Call")} — ${m.name}`}
+                            style={{ ...S.iconBtn, color: "var(--st-missing)", textDecoration: "none" }}
+                          >
+                            <Phone size={15} />
+                          </a>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); openEscalate(m); }}
+                          aria-label={`${t("Escalate to office")} — ${m.name}`}
+                          title={t("Escalate to office")}
+                          style={{ ...S.iconBtn, color: "var(--st-missing)" }}
+                        >
+                          <Siren size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {missing.length > 5 && (
+                    <button className="btn btn-ghost" style={{ fontSize: 12.5, alignSelf: "flex-start" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
+                      {t("Show")} {missing.length - 5} {t("more")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {lateDelegates.length > 0 && (
+              <div style={{ marginBottom: cancelledDelegates.length ? 18 : 0 }}>
+                <div className="row between" style={{ marginBottom: 8 }}>
+                  <div className="row" style={{ gap: 6, color: "var(--st-late)", fontWeight: 700, fontSize: 13.5 }}>
+                    <Clock size={15} /> {lateDelegates.length} {t("Late")}
+                  </div>
+                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("LATE"); }}>
+                    {t("View all")}
+                  </button>
+                </div>
+                <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {lateDelegates.slice(0, 12).map((d) => (
+                    <span key={d.id} className="badge badge-late" style={{ cursor: "pointer" }} onClick={() => { setAlertsOpen(false); openProfile(d); }}>
+                      {d.name}
+                    </span>
+                  ))}
+                  {lateDelegates.length > 12 && (
+                    <span className="muted" style={{ fontSize: 12, alignSelf: "center" }}>+{lateDelegates.length - 12} {t("more")}</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {cancelledDelegates.length > 0 && (
+              <div>
+                <div className="row between" style={{ marginBottom: 8 }}>
+                  <div className="row" style={{ gap: 6, color: "var(--ink-2)", fontWeight: 700, fontSize: 13.5 }}>
+                    <Ban size={15} /> {cancelledDelegates.length} {t("Cancelled")}
+                  </div>
+                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("CANCELLED"); }}>
+                    {t("View all")}
+                  </button>
+                </div>
+                <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                  {cancelledDelegates.slice(0, 12).map((d) => (
+                    <span
+                      key={d.id}
+                      className="badge badge-neutral"
+                      style={{ cursor: "pointer" }}
+                      title={d.cancel_reason || undefined}
+                      onClick={() => { setAlertsOpen(false); openProfile(d); }}
+                    >
+                      {d.name}
+                    </span>
+                  ))}
+                  {cancelledDelegates.length > 12 && (
+                    <span className="muted" style={{ fontSize: 12, alignSelf: "center" }}>+{cancelledDelegates.length - 12} {t("more")}</span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {escalatingDelegate && (
+        <div style={{ ...S.overlay, zIndex: 60 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setEscalatingDelegate(null); }}>
+          <div className="card" style={{ ...S.modal, width: "min(420px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 4 }}>
+              <div className="row" style={{ gap: 8, color: "var(--st-missing)" }}>
+                <Siren size={18} />
+                <h2 style={{ fontSize: 16 }}>{t("Escalate to office")}</h2>
+              </div>
+              <button onClick={() => setEscalatingDelegate(null)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+            </div>
+            <p className="muted" style={{ fontSize: 13, marginTop: 6, marginBottom: 14 }}>
+              {t("This alerts offsite admin/office staff right away — for when a Missing delegate isn't answering their phone.")} <strong>{escalatingDelegate.name}</strong>
+            </p>
+            <label className="field-label">{t("What's happening?")}</label>
+            <textarea
+              className="input"
+              rows={3}
+              style={{ marginTop: 4, resize: "vertical" }}
+              value={escalateMessage}
+              onChange={(e) => setEscalateMessage(e.target.value)}
+            />
+
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Alert who?")}</label>
+            {escalateRecipients.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                {t("No admin accounts have an email on file yet — add one in Account Control to alert someone by email.")}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, maxHeight: 150, overflowY: "auto" }}>
+                {escalateRecipients.map((p) => (
+                  <label key={p.email} className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={escalateSelected.has(p.email)}
+                      onChange={() => toggleEscalateRecipient(p.email)}
+                    />
+                    <span style={{ fontWeight: 600 }}>{p.name || p.username}</span>
+                    <span className="muted">{p.email}</span>
+                    {p.isTripLead && <span className="badge badge-review" style={{ padding: "1px 7px", fontSize: 10.5 }}>{t("Trip lead")}</span>}
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <p className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
+              {t("Emails can sometimes land in the recipient's Spam folder — ask them to check there and mark it \"Not spam\" the first time.")}
+            </p>
+
+            {escalateErr && <div style={{ color: "var(--st-missing)", fontSize: 12.5, marginTop: 10 }}>{escalateErr}</div>}
+            <div className="row" style={{ gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setEscalatingDelegate(null)} disabled={escalateSaving}>{t("Cancel")}</button>
+              <button
+                className="btn btn-primary"
+                style={{ background: "var(--st-missing)", borderColor: "var(--st-missing)" }}
+                onClick={submitEscalation}
+                disabled={escalateSaving}
+              >
+                <Siren size={15} /> {escalateSaving ? t("Sending…") : t("Escalate now")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cancelPrompt && (
+        <div style={{ ...S.overlay, zIndex: 60 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setCancelPrompt(null); }}>
+          <div className="card" style={{ ...S.modal, width: "min(420px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 14 }}>
+              <h2 style={{ fontSize: 16 }}>{t("Mark as cancelled")}</h2>
+              <button onClick={() => setCancelPrompt(null)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+            </div>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+              {lang === "zh"
+                ? `将 ${cancelPrompt.delegate.name} 标记为已取消？`
+                : `Mark ${cancelPrompt.delegate.name} as cancelled?`}
+            </p>
+            <label className="field-label">{t("What happened?")}</label>
+            <textarea className="input" rows={3} style={{ resize: "vertical", fontFamily: "inherit" }}
+              autoFocus
+              placeholder={t("e.g. Flight cancelled, called in sick, no longer travelling with the group…")}
+              value={cancelPrompt.reason}
+              onChange={(e) => setCancelPrompt((p) => ({ ...p, reason: e.target.value }))} />
+            <div className="row" style={{ gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setCancelPrompt(null)}>{t("Cancel")}</button>
+              <button className="btn btn-primary" onClick={confirmCancel}>{t("Mark as cancelled")}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {enlargedPhoto && (
@@ -1978,32 +2606,28 @@ function staffOpsTimeAgo(iso, t) {
 // previously a single flat red-or-green fill in both places, so two coaches
 // both "in trouble" looked identical whether one was mostly Late or mostly
 // Missing).
+
+// Same flat, solid-block flex-bar as RosterCard's "Roster breakdown" bar
+// (2026-07-24 — "you can look at roster breakdown, that look much
+// cleaner") — plain `<span>` children sized by width%, no gradient/gap/
+// minimum-width tricks. Percentages are relative to the coach's total seat
+// capacity (not just the sum of these 3 segments), so the un-rendered
+// remainder is genuinely "still to board", shown via the container's own
+// background rather than an explicit 4th segment.
 function coachBarSegments(coach, { includeBoarded = true } = {}) {
   const cap = coach.capacity || Math.max(coach.total || 0, 1);
   const segs = [
-    ...(includeBoarded ? [{ n: coach.boarded || 0, color: "var(--st-present)" }] : []),
-    { n: coach.late || 0, color: "var(--st-late)" },
-    { n: coach.missing || 0, color: "var(--st-missing)" },
+    ...(includeBoarded ? [{ n: coach.boarded || 0, tone: "present" }] : []),
+    { n: coach.late || 0, tone: "late" },
+    { n: coach.missing || 0, tone: "missing" },
   ]
     .map((s) => ({ ...s, pct: Math.max(0, Math.round((s.n / cap) * 100)) }))
     .filter((s) => s.pct > 0);
   // Rounding each % independently can sum to just over 100 (e.g. 34+33+34) —
-  // shave the excess off the last segment so the gradient's remainder stop
-  // (which fills everything past the real segments with the track color)
-  // never goes negative.
+  // shave the excess off the last segment so it never overflows the bar.
   const totalPct = segs.reduce((sum, s) => sum + s.pct, 0);
   if (totalPct > 100) segs[segs.length - 1].pct = Math.max(0, segs[segs.length - 1].pct - (totalPct - 100));
   return segs;
-}
-function coachBarGradient(segs, trackColor = "var(--line)") {
-  let acc = 0;
-  const stops = [];
-  for (const s of segs) {
-    stops.push(`${s.color} ${acc}%`, `${s.color} ${acc + s.pct}%`);
-    acc += s.pct;
-  }
-  stops.push(`${trackColor} ${acc}%`, `${trackColor} 100%`);
-  return `linear-gradient(to right, ${stops.join(", ")})`;
 }
 
 function CoachBar({ coach, onOpen }) {
@@ -2045,7 +2669,9 @@ function CoachBar({ coach, onOpen }) {
           {clickable && <ChevronRight size={16} className="muted" />}
         </div>
       </div>
-      <div style={{ height: BAR_H, borderRadius: 999, overflow: "hidden", backgroundClip: "padding-box", border: "1px solid var(--line)", boxSizing: "border-box", background: coachBarGradient(segs) }} />
+      <div className="roster-bar" style={{ height: BAR_H }}>
+        {segs.map((s, i) => <span key={i} style={{ width: `${s.pct}%`, background: `var(--st-${s.tone})` }} />)}
+      </div>
       <div className="muted mono" style={{ fontSize: 12, marginTop: 4 }}>
         {coach.boarded}/{coach.capacity} {t("boarded")}
         {coach.late > 0 && <> · <span style={{ color: "var(--st-late)" }}>{coach.late} {t("late")}</span></>}
@@ -2093,144 +2719,6 @@ function ProfileField({ icon: Icon, label, value, action, mono }) {
   );
 }
 
-// Photo crop/zoom modal shown right after picking a file, before it's
-// uploaded — drag to pan, slider to zoom, circular preview matches the
-// final avatar shape (2026-07-24, "let me resize and choose how my pic
-// gonna be like — common stuff in other websites"). Pure canvas — no
-// cropper library dependency.
-const CROP_VIEWPORT = 280; // on-screen circular preview size (px)
-const CROP_OUTPUT = 480;   // exported square image size (px)
-
-function PhotoCropModal({ file, onCancel, onSave, t }) {
-  const [src, setSrc] = useState(null);
-  const [naturalSize, setNaturalSize] = useState(null);
-  const [zoom, setZoom] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [saving, setSaving] = useState(false);
-  const imgElRef = useRef(null);
-  const dragRef = useRef(null);
-
-  useEffect(() => {
-    const url = URL.createObjectURL(file);
-    setSrc(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
-
-  const baseScale = naturalSize ? Math.max(CROP_VIEWPORT / naturalSize.w, CROP_VIEWPORT / naturalSize.h) : 1;
-  const scale = baseScale * zoom;
-
-  // Keeps the image covering the whole circular viewport no matter how far
-  // it's panned — the image can never be dragged in far enough to reveal
-  // empty space at an edge.
-  function clampOffset(off, s) {
-    if (!naturalSize) return off;
-    const dispW = naturalSize.w * s, dispH = naturalSize.h * s;
-    const maxX = Math.max(0, (dispW - CROP_VIEWPORT) / 2);
-    const maxY = Math.max(0, (dispH - CROP_VIEWPORT) / 2);
-    return { x: Math.min(maxX, Math.max(-maxX, off.x)), y: Math.min(maxY, Math.max(-maxY, off.y)) };
-  }
-
-  useEffect(() => { setOffset((o) => clampOffset(o, scale)); }, [zoom, naturalSize]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function onImgLoad(e) {
-    setNaturalSize({ w: e.target.naturalWidth, h: e.target.naturalHeight });
-    setOffset({ x: 0, y: 0 });
-  }
-
-  function onPointerDown(e) {
-    dragRef.current = { startX: e.clientX, startY: e.clientY, ox: offset.x, oy: offset.y };
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
-  function onPointerMove(e) {
-    if (!dragRef.current) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    setOffset(clampOffset({ x: dragRef.current.ox + dx, y: dragRef.current.oy + dy }, scale));
-  }
-  function onPointerUp() { dragRef.current = null; }
-
-  async function handleSave() {
-    if (!naturalSize) return;
-    setSaving(true);
-    try {
-      const canvas = document.createElement("canvas");
-      canvas.width = CROP_OUTPUT;
-      canvas.height = CROP_OUTPUT;
-      const ctx = canvas.getContext("2d");
-      const outScale = CROP_OUTPUT / CROP_VIEWPORT;
-      const dispW = naturalSize.w * scale * outScale;
-      const dispH = naturalSize.h * scale * outScale;
-      const cx = CROP_OUTPUT / 2 + offset.x * outScale;
-      const cy = CROP_OUTPUT / 2 + offset.y * outScale;
-      // Square output (not circle-clipped) — the circular LOOK comes from
-      // the avatar's own border-radius wherever it's displayed, same as
-      // every other delegate photo already stored; clipping here would bake
-      // a permanent circle into the file with no way to re-crop later.
-      ctx.drawImage(imgElRef.current, cx - dispW / 2, cy - dispH / 2, dispW, dispH);
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
-      onSave(blob);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={{ ...S.overlay, zIndex: 60 }}>
-      <div className="card" style={{ ...S.modal, width: "min(380px, 100%)", textAlign: "center" }}>
-        <div className="row between" style={{ marginBottom: 14 }}>
-          <h2 style={{ fontSize: 16 }}>{t("Adjust photo")}</h2>
-          <button onClick={onCancel} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
-        </div>
-
-        <div
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-          style={{
-            width: CROP_VIEWPORT, height: CROP_VIEWPORT, margin: "0 auto", borderRadius: "50%",
-            overflow: "hidden", position: "relative", background: "#000", cursor: dragRef.current ? "grabbing" : "grab",
-            touchAction: "none", boxShadow: "0 0 0 2px var(--line)",
-          }}
-        >
-          {src && (
-            <img
-              ref={imgElRef}
-              src={src}
-              alt=""
-              draggable={false}
-              onLoad={onImgLoad}
-              style={{
-                position: "absolute", left: "50%", top: "50%",
-                width: naturalSize ? naturalSize.w * scale : "auto",
-                height: naturalSize ? naturalSize.h * scale : "auto",
-                transform: `translate(-50%, -50%) translate(${offset.x}px, ${offset.y}px)`,
-                userSelect: "none", pointerEvents: "none",
-              }}
-            />
-          )}
-        </div>
-
-        <div className="row" style={{ gap: 10, marginTop: 16, alignItems: "center" }}>
-          <span className="muted" style={{ fontSize: 12 }}>{t("Zoom")}</span>
-          <input
-            type="range" min={1} max={3} step={0.01} value={zoom}
-            onChange={(e) => setZoom(Number(e.target.value))}
-            style={{ flex: 1 }}
-          />
-        </div>
-        <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("Drag to reposition, then Save.")}</p>
-
-        <div className="row" style={{ gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
-          <button className="btn btn-ghost" onClick={onCancel} disabled={saving}>{t("Cancel")}</button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !naturalSize}>
-            {saving ? t("Saving…") : t("Save")}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ---- Local styles ------------------------------------------------------- */
 const S = {

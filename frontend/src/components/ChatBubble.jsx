@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — chat shell (wraps Vance's ChatAssistantPage)
+ * ============================================================================= */
 import { useState, useEffect, useRef } from "react";
 import { MessageCircle, X } from "lucide-react";
 import ChatAssistantPage from "../pages/desktop/ChatAssistantPage.jsx";

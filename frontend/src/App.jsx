@@ -5,6 +5,7 @@ import { getToken, clearToken, getPermissions, apiPost } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
+import RegisterPage from "./pages/RegisterPage.jsx";
 import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
 
 // Scaffolds — owned by teammates
@@ -184,6 +185,10 @@ export default function App() {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage onSignIn={handleSignIn} />} />
+        {/* Self-service registration (2026-07-24) — public, like /login. New
+            accounts start "pending" and can't sign in until an admin
+            approves them on Account control, so this never sets `authed`. */}
+        <Route path="/register" element={<RegisterPage />} />
         {/* Passwordless entrance-kiosk scanner — reachable with NO auth at
             all, in both the logged-out and logged-in route trees (see the
             matching entry below). Deliberately registered OUTSIDE Layout/

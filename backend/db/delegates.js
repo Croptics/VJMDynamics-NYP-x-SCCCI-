@@ -30,7 +30,7 @@ function initialsOf(name) {
 }
 
 function rowToDelegate(row) {
-  return { ...row, vip: !!row.vip };
+  return { ...row, vip: !!row.vip, cancelled: !!row.cancelled };
 }
 
 const VALID_STATUSES = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
@@ -41,7 +41,15 @@ function normalize(input, id) {
   // a legacy alias for ARRIVED so those rows/writes keep working instead of
   // silently falling back to UNASSIGNED.
   const raw = input.status === "PRESENT" ? "ARRIVED" : input.status;
-  const status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
+  let status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
+  const cancelled = !!input.cancelled;
+  // Cancelling a delegate (Assigned but won't make it after all, usually
+  // found out day-of — 2026-07-24) always forces them back to UNASSIGNED
+  // and frees their coach seat, regardless of whatever status/coachId was
+  // also in the same patch — enforced here, server-side, so the frontend
+  // can't accidentally leave a delegate ARRIVED/LATE/MISSING AND cancelled
+  // at the same time.
+  if (cancelled) status = "UNASSIGNED";
   return {
     id,
     name: (input.name || "").trim() || "Unnamed delegate",
@@ -49,6 +57,7 @@ function normalize(input, id) {
     coachId: status === "UNASSIGNED" ? null : input.coachId || null,
     status,
     vip: !!input.vip,
+    cancelled,
     lastSeen: (input.lastSeen || "").trim() || null,
     lastLocation: (input.lastLocation || "").trim() || null,
   };
@@ -81,19 +90,22 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
   // send them directly instead of needing a separate follow-up PATCH.
   const profile = {};
   for (const [key, col] of PROFILE_FIELDS) profile[col] = input[key] || null;
+  // Only meaningful while cancelled is actually true — see the schema.js
+  // comment on this column for why it's cleared otherwise.
+  const cancelReason = d.cancelled ? (input.cancelReason || "").trim() || null : null;
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id, "createdBy",
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, cancelled, cancel_reason, "lastSeen", "lastLocation", trip_id, "createdBy",
        company, role, industry, email, phone, website, passport_no, nationality, passport_expiry, accessibility_notes, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
     [
-      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid, actor,
+      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.cancelled, cancelReason, d.lastSeen, d.lastLocation, tripUuid, actor,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
     ]
   );
   await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor, { tripUuid });
   return {
-    ...d, createdBy: actor,
+    ...d, createdBy: actor, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
@@ -128,13 +140,19 @@ export async function updateDelegate(id, patch, actor = null) {
   for (const [key, col] of PROFILE_FIELDS) {
     profile[col] = patch[key] !== undefined ? (patch[key] || null) : existing[col];
   }
+  // Same "only meaningful while cancelled" clearing rule as schema.js's
+  // comment on this column — forced null the instant cancelled flips false,
+  // regardless of what (if anything) the patch said about cancelReason.
+  const cancelReason = merged.cancelled
+    ? (patch.cancelReason !== undefined ? (patch.cancelReason || "").trim() || null : existing.cancel_reason)
+    : null;
   await run(
-    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7,
-       company=$8, role=$9, industry=$10, email=$11, phone=$12, website=$13,
-       passport_no=$14, nationality=$15, passport_expiry=$16, accessibility_notes=$17, notes=$18
-     WHERE id=$19`,
+    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, cancelled=$6, cancel_reason=$7, "lastSeen"=$8, "lastLocation"=$9,
+       company=$10, role=$11, industry=$12, email=$13, phone=$14, website=$15,
+       passport_no=$16, nationality=$17, passport_expiry=$18, accessibility_notes=$19, notes=$20
+     WHERE id=$21`,
     [
-      merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation,
+      merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.cancelled, cancelReason, merged.lastSeen, merged.lastLocation,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
       id,
@@ -149,6 +167,7 @@ export async function updateDelegate(id, patch, actor = null) {
   // else.
   const before = {
     name: existing.name, coachId: existing.coachId, status: existing.status, vip: existing.vip,
+    cancelled: !!existing.cancelled, cancelReason: existing.cancel_reason,
     lastSeen: existing.lastSeen, lastLocation: existing.lastLocation,
     company: existing.company, role: existing.role, industry: existing.industry,
     email: existing.email, phone: existing.phone, website: existing.website,
@@ -157,6 +176,7 @@ export async function updateDelegate(id, patch, actor = null) {
   };
   const after = {
     name: merged.name, coachId: merged.coachId, status: merged.status, vip: merged.vip,
+    cancelled: merged.cancelled, cancelReason,
     lastSeen: merged.lastSeen, lastLocation: merged.lastLocation,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
@@ -169,7 +189,7 @@ export async function updateDelegate(id, patch, actor = null) {
   }
   await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
   return {
-    ...merged,
+    ...merged, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,

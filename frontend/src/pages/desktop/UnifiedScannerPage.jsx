@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — desktop Face + QR scanner
+ * ============================================================================= */
 // frontend/src/pages/desktop/UnifiedScannerPage.jsx
 // "Face Scan + QR Code Scan" — a desktop-native entrance-kiosk page.
 // Route:   /scanner (registered in App.jsx — no permission gate, same as

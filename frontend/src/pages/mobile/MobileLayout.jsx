@@ -6,6 +6,7 @@ import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "./MobileChatBubble.jsx";
+import EscalationBanner from "../../components/EscalationBanner.jsx";
 import { getMobileTripId } from "../../lib/mobileTrip.js";
 import "../../styles/mobile.css";
 
@@ -146,6 +147,7 @@ export default function MobileLayout({ onLogout }) {
         )}
       </div>
       <div className="mobile-page">
+        <EscalationBanner />
         <Outlet context={{ onLogout }} />
       </div>
       <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>

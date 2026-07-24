@@ -1,5 +1,9 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — auth / session
+ * ============================================================================= */
 import { useEffect, useRef } from "react";
-import { apiGet, getUser, getPermissions } from "./api.js";
+import { apiGet, getUser, getPermissions, updateSession } from "./api.js";
 import { translate } from "./i18n.jsx";
 
 // How often (ms) to re-check whether the session is still valid — e.g. an
@@ -35,6 +39,16 @@ export function useSessionGuard(onLogout) {
           JSON.stringify(fresh.permissions) !== JSON.stringify(beforePerms);
         if (changed) {
           forceLogout("Your account access was updated. Please sign in again.");
+          return;
+        }
+        // Keep the stored user object's display-only fields (email, photo,
+        // name) in sync with the backend (2026-07-24) — previously these
+        // only ever got written by the Settings page's own self-edit save,
+        // so an account's email could be set on the backend (e.g. via
+        // registration) yet never actually show up anywhere in the UI until
+        // the user happened to open Settings and hit Save once.
+        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name) {
+          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name } });
         }
       } catch (e) {
         // 401 means the token no longer resolves to any account — it was

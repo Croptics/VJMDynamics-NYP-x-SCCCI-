@@ -102,6 +102,13 @@ export async function getDashboard(tripUuid = null) {
   const late = d.filter((x) => x.status === "LATE").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
   const assigned = d.filter((x) => x.status === "ASSIGNED").length;
+  // Delegates actually on a coach's roster right now — everyone EXCEPT
+  // Unassigned (2026-07-24). Unassigned covers two cases that can never
+  // meaningfully be "missing": a delegate who hasn't been given a coach yet,
+  // and a Cancelled delegate (forced to Unassigned — see normalize() in
+  // db/delegates.js). Counting either in the "Missing right now: X of N"
+  // denominator made N overstate who's actually being tracked on this trip.
+  const trackable = present + missing + late + assigned;
 
   const coachRows = tripUuid
     ? await all("SELECT * FROM coaches WHERE trip_id = $1 ORDER BY sort_order NULLS LAST, id", [tripUuid])
@@ -127,6 +134,7 @@ export async function getDashboard(tripUuid = null) {
     trip: await getTrip(tripUuid),
     kpis: {
       total: d.length,
+      trackable,
       present,
       missing,
       late,

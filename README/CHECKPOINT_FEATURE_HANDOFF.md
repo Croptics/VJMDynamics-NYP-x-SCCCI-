@@ -47,11 +47,38 @@ itinerary CRUD needed. It reads `itinerary_items` read-only, the same way
   dropdowns), so either can be dialed down for testing and back up for a real
   trip without a code change.
 - `applyCheckpointLateCutoff()` — every stop is its own late-cutoff (auto-
-  marks LATE the instant a stop's scheduled time passes with no scan).
+  marks LATE the instant a stop's scheduled time passes with no scan). Also
+  syncs the delegate's GLOBAL status to LATE the first time this happens for
+  a given stop — **gated on the checkin row being freshly inserted this tick**
+  (2026-07-25 bugfix; see below).
 - `resetArrivedBeforeNextCheckpoint()` — within `checkpointResetMinutes` of
-  each non-first stop of the day starting, any delegate globally ARRIVED gets
-  reset to ASSIGNED so they can be freshly scanned in again for the next
-  stop. Both run on the existing 60s scheduler in `server.js`.
+  **any** upcoming stop starting (2026-07-25 — simplified: dropped the
+  earlier "skip the first stop of the day" special case, since a staff member
+  can just as easily fat-finger a delegate to ARRIVED/LATE before the very
+  first checkpoint too), any delegate globally ARRIVED, LATE, or the legacy
+  PRESENT literal gets reset to ASSIGNED so they can be freshly scanned in
+  again for the upcoming stop. A delegate who already has a checkin row for
+  that specific upcoming stop is skipped (protects an early arrival from
+  being bounced back). Both run on the existing 60s scheduler in
+  `server.js`.
+
+  **2026-07-25 bugfix — reset-vs-late-cutoff ping-pong:**
+  `applyCheckpointLateCutoff()`'s GLOBAL-status sync used to be deliberately
+  un-gated ("self-heal any delegate stuck ASSIGNED by the old code" — see the
+  code comment history), meaning it re-examined EVERY already-passed stop of
+  the day, every tick, forever, and flipped any currently-ASSIGNED delegate
+  straight back to LATE — even if that old stop's checkin row already
+  existed from an earlier tick. Combined with `resetArrivedBeforeNextCheckpoint()`
+  resetting a delegate to ASSIGNED ahead of an upcoming stop, this caused a
+  1-tick ping-pong (ASSIGNED → LATE → ASSIGNED → LATE...) the moment more
+  than one stop in the day had elapsed, silently defeating the whole
+  reset-for-rescan feature. Fixed by gating the GLOBAL-status flip on
+  `inserted` (i.e. only the first time a stop's checkin row is created) —
+  restoring the "a stop's late-cutoff only ever fires once per delegate"
+  rule the `ON CONFLICT DO NOTHING` comment already promised. Live-tested:
+  reset held stable for 12+ consecutive ticks (~3 min) with no bounce-back,
+  then correctly went LATE again only once the NEXT stop's own cutoff passed
+  unscanned — a legitimate, separate transition, not the bug.
 - `syncCurrentCheckpointStatus(delegateId, tripUuid, status, actor)` —
   **exported for OTHER files to call**, not a route. Whenever a delegate's
   GLOBAL status is set by hand (not through a scan) to ARRIVED/LATE/MISSING,
@@ -944,6 +971,266 @@ rendered UI at each step.
 
 **Cross-teammate impact:** none — every file above is JQ-owned or a
 JQ-authored one-off script; no teammate's routes/pages were touched.
+
+---
+
+## 2026-07-24 — Self-service registration + admin approval queue (JQ)
+
+Per request: *"new staff who haven't created an account yet, sign up with
+email + username + password, then login with username afterward... add a UI
+for admin to accept or reject the new account creation."*
+
+**Design decision, stated up front:** email is stored as plain text, NOT
+hashed — hashing is only for secrets that must never be reversible
+(passwords); an admin needs to actually SEE the email to decide whether to
+approve someone, so it has to stay human-readable. Email alone isn't what
+makes this secure — anyone can type any address without proving they own it,
+since no verification link is sent. **The admin-approval gate is the real
+security boundary here**, not the email field. A true "click to verify your
+email" flow would need an email-sending service (SendGrid/SES/SMTP) wired in
+— not built, flagged as a possible future step if asked for.
+
+- **Schema** (`backend/db/schema.js`): `accounts.email` (nullable — every
+  pre-existing account predates this feature and has none on file; enforced
+  as *required* only at the application layer for brand-new accounts going
+  forward) + a unique partial index so two accounts can never share one
+  email. `accounts.status` (`'pending' | 'approved' | 'rejected'`, DEFAULT
+  `'approved'` — every existing row backfills to approved the instant the
+  column is added, so nobody who could already log in gets locked out).
+- **`backend/db/accounts.js`**: `registerAccount()` — public self-sign-up,
+  always `role: "staff"` (self-registration can never mint an admin) and
+  always starts `status: "pending"`. `emailProblem()`/`getAccountByEmail()`
+  (format + uniqueness, mirroring the existing `passwordProblem()`
+  convention). `listPendingAccounts()`/`approveAccount()`/`rejectAccount()`
+  — rejecting keeps the row (audit trail; a rejected account can never log
+  in either way) rather than deleting it; an admin can still hard-delete via
+  the existing endpoint if they want it gone entirely. `createAccount()`
+  (the existing admin-direct-create path) and `updateAccount()` both updated
+  to validate/store email too — required on create, optional-but-validated
+  on edit (an edit that leaves it blank on a legacy no-email account can
+  still save, rather than being forced to backfill one that moment).
+- **`backend/routes/auth.js`**: new public `POST /api/auth/register`
+  (rate-limited with the same `authLimiter` as login/reset). `POST
+  /api/auth/login` now checks `status` AFTER the password verifies (not
+  before) — a wrong-password guess against a pending account still just
+  looks like "incorrect credentials", not a hint that account exists and is
+  mid-review — returning `ACCOUNT_PENDING`/`ACCOUNT_REJECTED` with a clear
+  message otherwise.
+- **`backend/routes/accounts.js`**: `GET /api/accounts/pending`, `POST
+  /api/accounts/:id/approve`, `POST /api/accounts/:id/reject` — all
+  `manageAccounts`-gated, same tier as the rest of Account control.
+- **`frontend/src/pages/RegisterPage.jsx`** (new) — mirrors `LoginPage.jsx`'s
+  layout exactly (same brand-panel/form-panel split) so it reads as one
+  continuous flow. Email/username/password/confirm-password, all required;
+  success shows a "your account is awaiting admin approval" screen rather
+  than logging in (there's nothing to log into yet). New public `/register`
+  route in `App.jsx`; `LoginPage.jsx` gained a "New staff? Create an
+  account" link, plus handling for the new `ACCOUNT_PENDING`/
+  `ACCOUNT_REJECTED` login error codes (previously would have fallen
+  through to a misleading "can't reach the server" message).
+- **`AccountControlPage.jsx`**: new "Pending approval" card (only rendered
+  when there's actually something to review) showing each pending
+  account's username + email with Approve/Reject buttons. Email field added
+  to the New/Edit account modal (required for new accounts, shown as a
+  muted subtitle under the username in the accounts table when present) and
+  threaded through `save()`'s payload the same "don't force it on an
+  edit that doesn't touch it" way as the backend.
+
+**Testing:** full live curl round-trip against the running dev backend —
+register → blocked login (`ACCOUNT_PENDING`) → approve → login succeeds;
+register → reject → blocked login (`ACCOUNT_REJECTED`) stays blocked;
+duplicate email, duplicate username, invalid email, and weak password all
+correctly rejected at registration. `esbuild`/`vite build` clean throughout.
+
+**Housekeeping (same batch):** deleted all 50 `staff_001`–`staff_050` test
+accounts from the database (their generator script was already removed
+earlier this session) — previewed the exact match first (50 of 58 total,
+none outside that range), then deleted all 50, confirmed the account count
+dropped to the expected 8 real accounts.
+
+**Cross-teammate impact:** none — every file above is JQ-owned.
+
+---
+
+## 2026-07-24 — Settings page: self-service profile editing (photo, name, username, email, password) (JQ)
+
+Per request: *"under setting page. pls give option to add profile pic, change
+name, username, password etc."* Also created 50 throwaway demo pending
+accounts (`demo_staff_01`–`50`, via the real `/auth/register` endpoint) at
+request so the Pending Approval card's search/scroll behaviour could be
+visually checked at scale — **these are still sitting in the database**,
+not yet asked to be cleaned up (unlike the earlier `staff_001`–`050` batch,
+which was explicitly deleted). Flagging so nobody mistakes them for real
+staff later.
+
+- **Schema** (`backend/db/schema.js`): `accounts."photoUrl"` / `accounts.
+  "photoPublicId"` — same shape as delegate photos, but stored under a
+  **separate** Cloudinary folder (`mustergo/accounts` vs `mustergo/
+  delegates`) so the delegates-only Media Manager's "purge all" action can
+  never touch an account's own profile picture.
+- **`backend/db/accounts.js`**: `updateOwnAccount(id, patch)` — deliberately
+  NOT a thin wrapper around the admin-side `updateAccount()`, because this
+  one must be callable by ANY signed-in account (no `manageAccounts`
+  permission) and therefore can never accept `role`/`permissions` at all —
+  those fields simply aren't read from `patch`. Changing the password
+  requires `patch.currentPassword` to verify against the existing hash
+  first (`CURRENT_PASSWORD_INCORRECT` if wrong) — a real identity check
+  neither the admin-edit path nor the no-questions "forgot password" flow
+  enforces. `setAccountPhoto()`/`clearAccountPhoto()` mirror the existing
+  delegate-photo functions exactly.
+- **`backend/routes/auth.js`**: `PATCH /api/auth/me` (any signed-in account,
+  own id only) — always returns a fresh token, since changing your own
+  username invalidates the old token's embedded lookup. `POST`/`DELETE
+  /api/auth/me/photo` — same multer config (5MB, image-only) as the
+  existing delegate-photo route, uploads to Cloudinary, destroys the old
+  asset on replace/remove. `GET /api/auth/session` now also returns
+  `email`/`photoUrl`.
+- **`frontend/src/components/PhotoCropModal.jsx`** (new, extracted): the
+  circular drag-to-pan/zoom-to-crop modal used by the delegate photo
+  feature was pulled out of `DashboardPage.jsx` into its own file so
+  `SettingsPage.jsx` could reuse the identical crop flow for account
+  photos instead of duplicating it. `DashboardPage.jsx` now just imports
+  it — no behaviour change there.
+- **`frontend/src/pages/desktop/SettingsPage.jsx`**: the Account card is now
+  editable in place — a small camera-badge button on the avatar opens the
+  file picker → crop modal → uploads; a photo can be clicked to enlarge or
+  removed entirely. An "Edit profile" button opens a modal with Name/
+  Username/Email fields plus an optional "change password" section
+  (current password required only if a new one is being set). On save,
+  calls `updateSession()` with the fresh token/account from the backend so
+  the sidebar/Settings reflect the change immediately — no re-login
+  needed.
+
+**Testing:** live curl round-trip against the running dev backend on
+`staff_194` — patched name/email, confirmed via `GET /api/auth/session`
+before/after; wrong `currentPassword` correctly returned 401
+`CURRENT_PASSWORD_INCORRECT`; reverted the test edit back to the original
+name/email afterward. `node --check` on both backend files, `npx vite
+build` clean on the frontend. Photo upload itself was NOT live-tested this
+pass (no working way to synthesize a test image file in this sandbox this
+session) — it's structurally identical to the already-proven delegate
+photo upload flow (same multer config, same `uploadImage`/`destroyImage`
+calls), so this is a lower-confidence gap, not an untested guess.
+
+**Cross-teammate impact:** none — every file above is JQ-owned (including
+the newly-extracted `PhotoCropModal.jsx`, since its only two callers are
+both JQ's own pages).
+
+---
+
+## 2026-07-24 — Pending approval: "Approve all" / "Reject all" bulk actions (JQ)
+
+Per request while manually clearing the 50 demo pending accounts by hand:
+*"give me the option to reject all and accept all."*
+
+- **`backend/db/accounts.js`**: `approveAllPending()` / `rejectAllPending()`
+  — one bulk `UPDATE ... WHERE status = 'pending' RETURNING id` each, not a
+  loop over the single-account version, since this needs to cover
+  potentially dozens of rows in one request. Returns the actual row count
+  changed.
+- **`backend/routes/accounts.js`**: `POST /api/accounts/pending/approve-all`
+  / `POST /api/accounts/pending/reject-all`, same `manageAccounts` gate as
+  every other route in this file. Static paths, so no ordering conflict
+  with the existing `/:id/approve` and `/:id/reject` routes.
+- **`AccountControlPage.jsx`**: "Reject all" / "Approve all" buttons added
+  to the Pending approval card's header, next to the search box. Both go
+  through the same confirm-dialog step first (Approve all is the more
+  consequential of the two — it lets every pending account sign in
+  immediately — but Reject all still touches every row at once, so neither
+  fires straight from the button).
+
+**Testing:** live curl round-trip — registered 3 throwaway accounts,
+`reject-all` returned `{count: 3}` and a subsequent login attempt on one of
+them correctly came back `ACCOUNT_REJECTED`; registered 2 more, `approve-
+all` returned `{count: 2}` and login succeeded on one of them. All 5 test
+accounts deleted afterward. `node --check` on both backend files, `npx vite
+build` clean on the frontend.
+
+**Housekeeping (same batch):** the 50 `demo_staff_01`–`50` accounts flagged
+in the previous entry as still sitting in the database have now been
+deleted (via a one-off script run directly against the DB, since a bash curl
+loop hit repeated transient connection failures partway through — a Node
+script reusing the app's own `db/connection.js` pool was the reliable
+alternative). Total accounts back down to the expected 8 real + 1 kiosk.
+
+**Cross-teammate impact:** none — every file above is JQ-owned.
+
+---
+
+## 2026-07-24 — Reduced polling frequency (Neon egress relief) (JQ)
+
+The Neon dashboard flagged the project at 98.2% of its monthly network
+transfer allowance. Audited every `setInterval`-driven poll in the frontend;
+found the desktop Dashboard's 2s auto-refresh — 5 parallel queries per tick,
+including a 200-row activity dump and the full delegate list — as by far
+the single biggest contributor, compounded by 4 other 2s pollers running
+the same pattern on mobile pages. None of these had a real reason to be
+2s specifically; they were tuned for "feels instant," not for cost.
+
+Slowed 5 hot loops from 2s → 8s (a 4x cut on this traffic, the rest of the
+poller list — 3s/5s/15s — was left alone, ranked as lower-impact by the
+same audit):
+- `DashboardPage.jsx` — main dashboard auto-refresh, and the Staff
+  Operations tab's active-sessions poll.
+- `MobileHomePage.jsx` — the open-issues badge count, and the main
+  attendance-board load.
+- `MobileAttendancePage.jsx` — the attendance-list auto-refresh.
+
+**Not touched:** photo storage (already Cloudinary URLs, not DB egress),
+Vite's dev-server HMR (separate connection entirely), and the 3s/5s/15s
+pollers (session check, exception badge, trip pulse, mobile trips/ops) —
+all ranked meaningfully lower-traffic by the audit, so left as-is rather
+than over-tuning everything at once.
+
+**Testing:** `npx vite build` clean. This is a pure interval-value change —
+no new code paths, so no live curl testing was needed; the existing
+functional tests for these pages already cover the auto-refresh behavior
+itself.
+
+**Follow-up same day:** cut the Dashboard's inline "History tracker" card
+fetch from `limit=200` to `limit=30` (`DashboardPage.jsx:244`) — that card
+is a 360px scrollable box, nowhere near tall enough to show 200 rows at
+once, and the full audit log is one click away via "View full log"
+(`HistoryLogPage.jsx`, unaffected — it fetches its own `limit=1000`
+separately, only when that page is opened). Live-verified against the
+running backend: `GET /api/activity?limit=30` correctly returns 30 rows
+out of 235 total available, `limit=1000` still returns everything.
+
+**Cross-teammate impact:** none — every file above is JQ-owned.
+
+---
+
+## 2026-07-24 — Document parsing now attaches delegate photos from the source PDF (JQ, touches Vance's file)
+
+**⚠️ This one edits `backend/routes/vance.js` — Document Parsing / DocuSync AI is Vance's owned feature, not JQ's.** Done at explicit request: *"can you adjust the ai so can store the image of delegate into cloudinary and assign the image to that delegate... other than that pls do not affect vance ai stuff."* Kept strictly additive — Vance's `structureFromText`/`structurePage`/`structureFromVision` prompts, the Claude/Ollama calls, and the OCR fallback are all untouched byte-for-byte; this only adds a new best-effort step around them plus one new field threaded through `toRow()` and the confirm endpoint.
+
+**Why this needed a new dependency:** delegate directory PDFs (like the sample tested) embed each person's headshot as an image inside the PDF, but Vance's existing pipeline only ever reads TEXT out of PDFs (`unpdf`'s `extractText`) — it never looked at embedded images. Extracting and re-encoding an embedded image needs a canvas/image library, and none existed in the backend. Added `@napi-rs/canvas` (prebuilt binaries, no native compile step — low install risk) to `backend/package.json`.
+
+**How it works** (`routes/vance.js`):
+- `extractPagePhotoBuffers(page)` / `extractPdfPagePhotos(buf)` (new) — walks each PDF page's `paintImageXObject` operators via `unpdf/pdfjs` (already a transitive dependency, no new PDF parser), in on-page drawn order. Filters to "photo-shaped" images only (aspect ratio 0.6–1.4, ≥80×80px) to exclude wide banner/header graphics; images pdf.js can't resolve (seen for some decorative graphics nested in a form-XObject group) are skipped, not treated as an error.
+- `uploadDelegatePhoto(buffer)` (new) — uploads to the SAME Cloudinary folder (`mustergo/delegates`) manual delegate photo uploads already use, via the existing `lib/cloudinary.js` helpers. Never throws — a failed/unconfigured upload just means no photo, not a broken parse job.
+- `runParseJob`'s PDF text branch — after `structurePage(page)` returns raw records for a page, they're deduped with the SAME `finalizeRecords()` Vance already uses for the final output (this is the one non-obvious bit: a bilingual directory often makes the model emit a person's Chinese name and romanised name as two separate raw rows, so the photo-count check has to compare against the deduped per-page count, not the raw one, or 2 real photos would never count-match 4 raw rows). Photos only get attached when a page's photo count exactly matches its deduped record count — a mismatch drops that page's photos entirely rather than risking a wrong photo on the wrong delegate. Matching is by READING ORDER within a page, which held up on the tested template but isn't something that can be verified for an arbitrary document layout.
+- `toRow()` now carries `photoUrl`/`photoPublicId` through to the frontend when present (null otherwise).
+- The confirm endpoint (`POST /api/trips/:id/onboarding/confirm`) now calls `setDelegatePhoto()` after `createDelegate()` when a row has `photoUrl` set.
+- `OnboardingPage.jsx` — the parsed-rows list now shows the actual extracted photo instead of the initials avatar when one was matched (small, additive UI touch; no other change to this page).
+
+**Testing:** live end-to-end against the running dev backend using a real 2-page bilingual delegation PDF (4 delegates, 2 per page) —
+1. First run: page 2's photos matched correctly, page 1's didn't — root-caused to the bilingual-duplicate-row issue above, fixed by deduping before the count check.
+2. Second run (after the fix): page 1's records came back EMPTY entirely — root-caused to the local Ollama model's known flakiness on this bilingual page (unrelated to this feature — the same small-model unreliability already documented earlier in this file), not a bug in the photo pipeline.
+3. Third run: all 4 delegates parsed AND all 4 photos matched correctly — verified by downloading one resulting Cloudinary URL and visually confirming it was the right person's face.
+4. Ran the parsed rows through the real confirm endpoint — 4 delegates created with `photoUrl` populated, then deleted (test data cleanup); 4 orphaned Cloudinary uploads from the failed intermediate runs also destroyed manually. `node --check` on `vance.js`, `npx vite build` clean on the frontend.
+
+**Known limitation, disclosed to the user:** matching relies on the small local Ollama model reliably extracting the right number of records per page — when it doesn't (as in run 2 above), that page's photos are safely dropped rather than mismatched, but the delegate just won't get a photo that run. A Claude API key configured would make this far more reliable (Claude's text extraction doesn't show the same flakiness Ollama does on bilingual pages), same tradeoff Vance's existing pipeline already documents for text parsing overall.
+
+**Cross-teammate impact:** real — this is Vance's file. Flag to Vance: `routes/vance.js` gained new imports (`setDelegatePhoto` from `data.js`, `isConfigured`/`uploadImage`/`DELEGATE_PHOTO_FOLDER` from `lib/cloudinary.js`) and ~100 new lines of additive photo-extraction code, plus a new backend dependency (`@napi-rs/canvas`). No existing function in this file was rewritten — only `toRow()` gained two new fields and the PDF-text loop in `runParseJob` gained the photo-matching step around the unchanged `structurePage()` call.
+
+**⛔ REVERTED same day, after the above shipped:** *"now i realise that because of pdpa i can't do this."* Automatically extracting an identifiable person's face from a document they didn't submit themselves, without consent, and sending it to a third-party US cloud service (Cloudinary) is a real PDPA exposure that a "cartoonify it" style-transfer step wouldn't actually fix — it would just add MORE processing of the same personal data, not less; a stylised image still derived from a real identifiable photo isn't meaningfully anonymised. Decision: remove the auto-extraction entirely rather than try to soften it. Reverted:
+- `routes/vance.js`: removed `extractPagePhotoBuffers()`, `extractPdfPagePhotos()`, `uploadDelegatePhoto()`, the `photoUrl`/`photoPublicId` fields on `toRow()`, the photo-matching step in `runParseJob`'s PDF branch, the `setDelegatePhoto()` call in the confirm endpoint, and the `setDelegatePhoto`/Cloudinary imports — back to exactly the file's pre-feature shape.
+- `backend/package.json`: `@napi-rs/canvas` uninstalled (`npm uninstall`), confirmed gone from `package.json` and `node_modules`.
+- `frontend/src/pages/desktop/OnboardingPage.jsx`: photo-thumbnail-or-initials branch reverted back to the plain initials avatar.
+- Verified the revert live: re-ran the exact same sample PDF through `/api/documents/parse-async` — all 4 delegates parsed correctly, with NO `photoUrl` key present anywhere in the response (confirmed via `'photoUrl' in r` on every row), matching pre-feature behaviour exactly. `npx vite build` produced the SAME bundle hash as the last pre-feature build, a strong signal the frontend revert was byte-clean. `node --check` on `vance.js` clean.
+- Nothing about Vance's own document-parsing/chatbot logic was ever touched by either the build or the revert — the file is back to its original state, not a modified-then-patched one.
+- **Not revisited today, worth a separate conversation if wanted later:** the pre-existing MANUAL delegate-photo-upload feature (staff deliberately uploads one photo at a time, unrelated to today's build/revert) may be worth the same PDPA review at some point, since it also stores real faces in Cloudinary — flagged to the user as a separate, smaller decision, not acted on.
 
 ---
 

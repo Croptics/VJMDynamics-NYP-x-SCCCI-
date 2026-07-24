@@ -60,12 +60,12 @@
   --tf-surface: #ffffff;
   --tf-surface-2: #f6f7fa;
   --tf-border: #e5e7eb;
-  --tf-text: #111827;
-  --tf-text-2: #4b5563;
-  --tf-text-3: #9ca3af;
-  --tf-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --tf-shadow-md: 0 2px 6px rgba(15, 23, 42, 0.06);
-  --tf-shadow-lg: 0 10px 24px rgba(15, 23, 42, 0.12);
+  --tf-text: #0f172a;
+  --tf-text-2: #475569;
+  --tf-text-3: #64748b;
+  --tf-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --tf-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.05);
+  --tf-shadow-lg: 0 16px 40px rgba(15, 23, 42, 0.16), 0 4px 12px rgba(15, 23, 42, 0.08);
   --tf-radius-sm: 10px;
   --tf-radius-md: 14px;
   --tf-radius-lg: 16px;
@@ -300,18 +300,57 @@
 }
 .tf-fleet-card {
   position: relative; background: var(--tf-surface); border: 1px solid var(--tf-border);
-  border-radius: var(--tf-radius-md); padding: 14px; transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  border-radius: var(--tf-radius-md); padding: 15px; box-shadow: var(--tf-shadow-sm);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
   display: flex; flex-direction: column;
 }
+.tf-fleet-card:hover { box-shadow: var(--tf-shadow-md); }
 .tf-fleet-card.is-drop-target { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg), var(--tf-shadow-md); transform: translateY(-2px); }
 .tf-fleet-card.is-drop-target.is-full { border-color: var(--tf-red); box-shadow: 0 0 0 3px var(--tf-red-bg), var(--tf-shadow-md); }
-.tf-fleet-card.is-unassigned { background: var(--tf-yellow-bg); border-style: dashed; }
+.tf-fleet-card.is-unassigned { background: var(--tf-yellow-bg); border-style: dashed; box-shadow: none; }
 .tf-fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.tf-fleet-label { font-size: 14.5px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; color: var(--tf-text); display: block; }
-.tf-fleet-sub { font-size: 11.5px; color: var(--tf-text-3); font-weight: 600; margin-top: 2px; }
-.tf-fleet-drop-label { font-size: 11.5px; color: var(--tf-blue); font-weight: 700; margin-top: 2px; }
+.tf-fleet-label { font-size: 16px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; color: var(--tf-text); display: flex; align-items: center; gap: 6px; letter-spacing: -0.01em; }
+.tf-fleet-label-ico { color: var(--tf-text-3); flex-shrink: 0; }
+.tf-fleet-sub { font-size: 12px; color: var(--tf-text-2); font-weight: 600; margin-top: 3px; }
+.tf-fleet-captain { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; color: var(--tf-text-2); margin-top: 6px; }
+.tf-fleet-captain svg { color: var(--tf-text-3); }
+.tf-fleet-drop-label { font-size: 12px; color: var(--tf-blue); font-weight: 700; margin-top: 3px; }
 .tf-fleet-drop-label.is-full { color: var(--tf-red); }
-.tf-badge-pill { font-size: 10.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+.tf-badge-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 800; padding: 4px 11px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+/* Coach capacity / seat indicator */
+.tf-fleet-capacity { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.tf-fleet-cap-track { flex: 1; height: 10px; border-radius: 999px; background: var(--tf-grey-bg); overflow: hidden; box-shadow: inset 0 0 0 1px rgba(15,23,42,0.04); }
+.tf-fleet-cap-fill { display: block; height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+.tf-fleet-cap-label { font-size: 12.5px; font-weight: 800; white-space: nowrap; flex-shrink: 0; letter-spacing: -0.01em; }
+/* Per-delegate status pill on the card */
+.tf-del-status { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
+
+/* ---- Generic KPI summary cards (Trips overview, etc.) --------------------- */
+.tf-kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+.tf-kpi { display: flex; flex-direction: column; gap: 3px; padding: 14px 16px; border-radius: var(--tf-radius-md); border: 1px solid var(--tf-border); background: var(--tf-surface); box-shadow: var(--tf-shadow-sm); }
+.tf-kpi-n { font-size: 30px; font-weight: 800; line-height: 1; letter-spacing: -0.03em; color: var(--tf-text); }
+.tf-kpi-l { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tf-text-3); }
+.tf-kpi.is-green { border-top: 3px solid var(--tf-green); }
+.tf-kpi.is-green .tf-kpi-n { color: var(--tf-green); }
+.tf-kpi.is-blue { border-top: 3px solid var(--tf-blue); }
+.tf-kpi.is-blue .tf-kpi-n { color: var(--tf-blue); }
+.tf-kpi.is-grey { border-top: 3px solid var(--tf-grey); }
+.tf-kpi.is-ink { border-top: 3px solid var(--tf-text); }
+.tf-kpi.is-orange { border-top: 3px solid var(--tf-orange); }
+.tf-kpi.is-orange .tf-kpi-n { color: var(--tf-orange); }
+.tf-kpi.is-red { border-top: 3px solid var(--tf-red); }
+.tf-kpi.is-red .tf-kpi-n { color: var(--tf-red); }
+.tf-kpi.is-yellow { border-top: 3px solid var(--tf-yellow); }
+.tf-kpi.is-yellow .tf-kpi-n { color: var(--tf-yellow); }
+@media (max-width: 640px) { .tf-kpi-row, .tf-att-summary { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- Live command-centre KPI row (in-progress board) --------------------- */
+.tf-kpi-row-5 { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 760px) { .tf-kpi-row-5 { grid-template-columns: repeat(2, 1fr); } }
+
+/* Coach status accent rail */
+.tf-fleet-card.has-missing { border-left: 3px solid var(--tf-red); }
+.tf-fleet-card.all-in { border-left: 3px solid var(--tf-green); }
 .tf-badge-count {
   width: 22px; height: 22px; border-radius: 999px; display: flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 800; flex-shrink: 0;
@@ -346,6 +385,91 @@
 .tf-delegate-card.is-dragging { opacity: 0.3; }
 .tf-delegate-card.is-missing { background: var(--tf-red-bg); border-color: var(--tf-red-line); }
 .tf-delegate-card.is-vip { border-color: var(--tf-purple-line); }
+/* Wrong-coach ("UFO") flag — a delegate sitting on a coach not on this trip. */
+.tf-delegate-card.is-wrongcoach { border-color: var(--tf-red); box-shadow: 0 0 0 2px var(--tf-red-bg); }
+.tf-wrongcoach-tag {
+  display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 999px; color: var(--tf-red); background: var(--tf-red-bg);
+}
+.tf-wrongcoach-banner {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+  padding: 10px 13px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-red-bg); border: 1px solid var(--tf-red-line); color: var(--tf-red);
+  font-size: 12.5px; line-height: 1.4;
+}
+.tf-wrongcoach-banner svg { flex-shrink: 0; }
+.tf-wrongcoach-banner strong { font-weight: 800; }
+/* Scoped-view banner — a coach captain seeing only their own coach. */
+.tf-scope-banner {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+  padding: 10px 13px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-blue-bg); border: 1px solid var(--tf-blue-line); color: var(--tf-blue);
+  font-size: 12.5px; line-height: 1.4;
+}
+.tf-scope-banner svg { flex-shrink: 0; }
+.tf-scope-banner strong { font-weight: 800; }
+/* Change-history (audit) list — before → after per event. */
+.tf-audit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.tf-audit-item { border: 1px solid var(--tf-border); border-radius: var(--tf-radius-sm); padding: 10px 12px; background: var(--tf-surface); }
+.tf-audit-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tf-audit-summary { font-size: 13.5px; font-weight: 800; color: var(--tf-text); }
+.tf-audit-meta { font-size: 11.5px; color: var(--tf-text-2); white-space: nowrap; }
+.tf-audit-diff { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.tf-audit-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.tf-audit-key { min-width: 92px; color: var(--tf-text-3); font-weight: 700; }
+.tf-audit-from { color: var(--tf-red); text-decoration: line-through; }
+.tf-audit-arrow { color: var(--tf-text-3); }
+.tf-audit-to { color: var(--tf-green); font-weight: 700; }
+/* ---- Per-event attendance modal ------------------------------------------- */
+/* Summary KPI row */
+.tf-att-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+.tf-att-kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border); background: var(--tf-surface-2); }
+.tf-att-kpi-n { font-size: 26px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.tf-att-kpi-l { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tf-text-3); }
+.tf-att-kpi.is-green { background: var(--tf-green-bg); border-color: var(--tf-green-line); }
+.tf-att-kpi.is-green .tf-att-kpi-n { color: var(--tf-green); }
+.tf-att-kpi.is-orange { background: var(--tf-orange-bg); border-color: var(--tf-orange-line); }
+.tf-att-kpi.is-orange .tf-att-kpi-n { color: var(--tf-orange); }
+.tf-att-kpi.is-red { background: var(--tf-red-bg); border-color: var(--tf-red-line); }
+.tf-att-kpi.is-red .tf-att-kpi-n { color: var(--tf-red); }
+.tf-att-kpi.is-grey .tf-att-kpi-n { color: var(--tf-text); }
+
+/* Coach group */
+.tf-att-coach { margin-bottom: 18px; }
+.tf-att-coach-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.tf-att-coach-name { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 800; color: var(--tf-text); }
+.tf-att-coach-count { font-size: 12.5px; font-weight: 700; color: var(--tf-text-2); }
+.tf-att-coach-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--tf-grey-bg); overflow: hidden; }
+.tf-att-coach-bar > span { display: block; height: 100%; background: var(--tf-green); border-radius: 999px; transition: width 0.3s ease; }
+
+/* Delegate rows — taller, alternating tint, coloured left accent by status */
+.tf-att-row { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border); background: var(--tf-surface); margin-bottom: 7px; border-left-width: 3px; }
+.tf-att-row.is-green  { border-left-color: var(--tf-green); }
+.tf-att-row.is-orange { border-left-color: var(--tf-orange); }
+.tf-att-row.is-red    { border-left-color: var(--tf-red); }
+.tf-att-name { font-size: 14px; font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Segmented control — one connected group, filled/checked when active */
+.tf-segmented { display: inline-flex; flex-shrink: 0; border-radius: 9px; overflow: hidden; border: 1px solid var(--tf-border); }
+.tf-seg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; padding: 6px 11px; border: none; border-left: 1px solid var(--tf-border); background: var(--tf-surface); color: var(--tf-text-2); cursor: pointer; transition: background 0.12s ease, color 0.12s ease; }
+.tf-seg:first-child { border-left: none; }
+.tf-seg:hover { background: var(--tf-surface-2); }
+.tf-seg.is-active.is-green  { background: var(--tf-green);  color: #fff; }
+.tf-seg.is-active.is-orange { background: var(--tf-orange); color: #fff; }
+.tf-seg.is-active.is-red    { background: var(--tf-red);    color: #fff; }
+.tf-seg:disabled { opacity: 0.6; cursor: default; }
+
+/* History as a vertical timeline */
+.tf-att-history-title { font-size: 14px; font-weight: 800; margin: 20px 0 12px; padding-top: 16px; border-top: 1px solid var(--tf-border); }
+.tf-att-timeline { display: flex; flex-direction: column; max-height: 34vh; overflow-y: auto; }
+.tf-tl-item { display: flex; gap: 12px; padding-bottom: 14px; position: relative; }
+.tf-tl-item:not(:last-child)::before { content: ""; position: absolute; left: 13px; top: 26px; bottom: 0; width: 2px; background: var(--tf-border); }
+.tf-tl-dot { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 1; }
+.tf-tl-body { min-width: 0; }
+.tf-tl-line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.tf-tl-line strong { font-weight: 800; }
+.tf-tl-meta { font-size: 12px; color: var(--tf-text-2); margin-top: 2px; }
 .tf-avatar {
   width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
   font-size: 10.5px; font-weight: 800; flex-shrink: 0;
@@ -419,12 +543,22 @@
 .tf-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px; border-bottom: 1px solid var(--tf-border); flex-shrink: 0; }
 .tf-modal-body { padding: 20px 22px; overflow-y: auto; }
 .tf-modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px; border-top: 1px solid var(--tf-border); background: var(--tf-surface-2); flex-shrink: 0; }
-.tf-field-label { display: block; font-size: 12px; font-weight: 700; color: var(--tf-text-2); margin-bottom: 6px; }
-.tf-input {
-  width: 100%; padding: 9px 12px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border);
-  background: var(--tf-surface); color: var(--tf-text); font-size: 13.5px; outline: none; transition: border-color 0.15s ease;
+.tf-field-label { display: block; font-size: 12.5px; font-weight: 800; color: var(--tf-text); margin-bottom: 6px; }
+.tf-req { color: var(--tf-red); font-weight: 800; }
+.tf-help { font-size: 12px; color: var(--tf-text-3); margin: 4px 0 14px; line-height: 1.4; }
+.tf-form-error { color: var(--tf-red); font-size: 13px; font-weight: 600; margin-top: 10px; }
+/* Grouped form section heading */
+.tf-form-section {
+  font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--tf-text-3);
+  margin: 6px 0 12px; padding-bottom: 7px; border-bottom: 1px solid var(--tf-border);
 }
-.tf-input:focus { border-color: var(--tf-blue); }
+.tf-form-section:not(:first-child) { margin-top: 22px; }
+.tf-btn-lg { padding: 10px 18px; font-size: 14px; font-weight: 800; }
+.tf-input {
+  width: 100%; padding: 10px 12px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border);
+  background: var(--tf-surface); color: var(--tf-text); font-size: 14px; outline: none; transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.tf-input:focus { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg); }
 .tf-input[readonly] { background: var(--tf-surface-2); color: var(--tf-text-2); cursor: default; }
 
 /* ---- Slide-out delegate panel -------------------------------------------------------- */

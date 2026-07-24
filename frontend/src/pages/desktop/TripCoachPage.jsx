@@ -73,7 +73,7 @@ import {
   Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare, MapPin,
   Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Clock, Circle,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
 import "./TripCoachPage.css";
@@ -88,6 +88,7 @@ const TRIP_STATUS_COLOR = { "In progress": "green", Planning: "blue", Completed:
 // for ARRIVED (some check-in routes still write it), so it maps to the same
 // green. UNASSIGNED is muted grey (2026-07-19, was yellow).
 const STATUS_AVATAR = { PRESENT: "green", ARRIVED: "green", ASSIGNED: "blue", LATE: "orange", MISSING: "red", UNASSIGNED: "grey" };
+const STATUS_TEXT = { PRESENT: "Arrived", ARRIVED: "Arrived", ASSIGNED: "Assigned", LATE: "Late", MISSING: "Missing", UNASSIGNED: "Unassigned" };
 
 // Live itinerary-stop status (see desmond.js). "scheduled" is the on-time
 // default and renders no tag; the other three surface a coloured tag on the
@@ -100,7 +101,7 @@ const ITIN_STATUS_META = {
 // Coach bus-arrival status — the badge cycles through these in order.
 const COACH_ARRIVAL_META = {
   not_arrived: { label: "Bus not arrived", short: "Not arrived", color: "grey" },
-  en_route:    { label: "Bus on route",    short: "On route",    color: "orange" },
+  en_route:    { label: "Bus en route",    short: "En route",    color: "orange" },
   arrived:     { label: "Bus arrived",     short: "Arrived",     color: "green" },
 };
 const ARRIVAL_CYCLE = { not_arrived: "en_route", en_route: "arrived", arrived: "not_arrived" };
@@ -245,7 +246,7 @@ function SkeletonBoard() {
  * accessibility/notes still surface via a hover/focus tooltip — invisible at
  * rest, so it doesn't change the look.
  * ---------------------------------------------------------------------------- */
-function DelegateCard({ delegate, ghost = false, dragging = false, onPointerDownCard, onKeyOpen, onRemove }) {
+function DelegateCard({ delegate, ghost = false, dragging = false, wrongCoach = false, onPointerDownCard, onKeyOpen, onRemove }) {
   const { t } = useLang();
   const isMissing = delegate.status === "MISSING";
   const colorKey = STATUS_AVATAR[delegate.status] || "grey";
@@ -256,7 +257,7 @@ function DelegateCard({ delegate, ghost = false, dragging = false, onPointerDown
       onPointerDown={ghost ? undefined : (e) => onPointerDownCard(e, delegate)}
       onKeyDown={ghost ? undefined : (e) => { if ((e.key === "Enter" || e.key === " ") && onKeyOpen) { e.preventDefault(); onKeyOpen(delegate); } }}
       tabIndex={ghost ? undefined : 0}
-      className={`tf-delegate-card${dragging && !ghost ? " is-dragging" : ""}${isMissing ? " is-missing" : ""}${delegate.vip ? " is-vip" : ""}`}
+      className={`tf-delegate-card${dragging && !ghost ? " is-dragging" : ""}${isMissing ? " is-missing" : ""}${wrongCoach ? " is-wrongcoach" : ""}${delegate.vip ? " is-vip" : ""}`}
     >
       <div className="tf-avatar" style={{ background: `var(--tf-${colorKey}-bg)`, color: `var(--tf-${colorKey})` }}>
         {initials(delegate.name)}
@@ -265,7 +266,17 @@ function DelegateCard({ delegate, ghost = false, dragging = false, onPointerDown
         {delegate.name}
         {!!delegate.vip && <Star size={10} fill="var(--tf-purple)" color="var(--tf-purple)" />}
         {!!delegate.accessibilityNotes && <Accessibility size={10} color="var(--tf-blue)" />}
+        {wrongCoach && (
+          <span className="tf-wrongcoach-tag" title={t("Assigned to a coach that isn't on this trip — reassign or remove.")}>
+            <AlertCircle size={10} /> {t("Wrong coach")}
+          </span>
+        )}
       </div>
+      {!ghost && delegate.status && delegate.status !== "UNASSIGNED" && (
+        <span className="tf-del-status" style={{ color: `var(--tf-${colorKey})`, background: `var(--tf-${colorKey}-bg)` }}>
+          {t(STATUS_TEXT[delegate.status] || delegate.status)}
+        </span>
+      )}
       {!ghost && onRemove && (
         <button
           className="tf-toast-close"
@@ -296,7 +307,7 @@ function DelegateCard({ delegate, ghost = false, dragging = false, onPointerDown
  * badge, delegate cards, and a "+N more" expand when there are more than
  * VISIBLE_LIMIT.
  * ---------------------------------------------------------------------------- */
-function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onPointerDownCard, onKeyOpen, draggingId, onRemoveCoach, onRemoveDelegate, onEditStaff, onCycleArrival, mode = "live" }) {
+function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onPointerDownCard, onKeyOpen, draggingId, onRemoveCoach, onRemoveDelegate, onEditStaff, onCycleArrival, mode = "live", wrongCoachIds }) {
   const { t } = useLang();
   const [expanded, setExpanded] = useState(false);
   const missing = delegates.filter((d) => d.status === "MISSING").length;
@@ -304,9 +315,12 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
   const visible = expanded ? delegates : delegates.slice(0, VISIBLE_LIMIT);
   const remaining = delegates.length - visible.length;
   const isFull = !isUnassigned && coach.capacity > 0 && (coach.total ?? 0) >= coach.capacity;
+  // Status accent so a coordinator can distinguish problem coaches at a glance:
+  // red rail = someone missing, green rail = everyone boarded.
+  const statusAccent = isUnassigned || !showBoarding ? "" : missing > 0 ? " has-missing" : (coach.total ?? 0) > 0 ? " all-in" : "";
 
   return (
-    <div ref={colRef} className={`tf-fleet-card${isOver ? " is-drop-target" : ""}${isOver && isFull ? " is-full" : ""}${isUnassigned ? " is-unassigned" : ""}`}>
+    <div ref={colRef} className={`tf-fleet-card${isOver ? " is-drop-target" : ""}${isOver && isFull ? " is-full" : ""}${isUnassigned ? " is-unassigned" : ""}${statusAccent}`}>
       <div className="tf-fleet-head">
         <div style={{ minWidth: 0 }}>
           {!isUnassigned && onEditStaff ? (
@@ -316,10 +330,10 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
               style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}
               title={t("Switch staff")}
             >
-              {coach.label}
+              {!isUnassigned && <Bus size={15} className="tf-fleet-label-ico" />}{coach.label}
             </button>
           ) : (
-            <span className="tf-fleet-label">{coach.label}</span>
+            <span className="tf-fleet-label">{!isUnassigned && <Bus size={15} className="tf-fleet-label-ico" />}{coach.label}</span>
           )}
           {isUnassigned ? (
             <div className="tf-fleet-sub">{t("Needs a coach")}</div>
@@ -329,6 +343,9 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
             <div className="tf-fleet-sub">{coach.boarded ?? 0}/{coach.total ?? 0} {t("boarded")}</div>
           ) : (
             <div className="tf-fleet-sub">{coach.total ?? 0} {t(coach.total === 1 ? "delegate" : "delegates")}{coach.capacity ? ` · ${coach.capacity} ${t("seats")}` : ""}</div>
+          )}
+          {!isUnassigned && (coach.captainName || coach.captainUsername) && (
+            <div className="tf-fleet-captain"><Users size={11} /> {t("Captain")}: {coach.captainName || coach.captainUsername}</div>
           )}
           {!isUnassigned && mode === "live" && (() => {
             const av = COACH_ARRIVAL_META[coach.arrivalStatus] || COACH_ARRIVAL_META.not_arrived;
@@ -349,6 +366,8 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
             <span className="tf-badge-count" style={{ background: "var(--tf-grey-bg)", color: "var(--tf-grey)" }}>{delegates.length}</span>
           ) : missing > 0 ? (
             <span className="tf-badge-pill" style={{ background: "var(--tf-red-bg)", color: "var(--tf-red)" }}>{missing} {t("missing")}</span>
+          ) : (coach.boarded ?? 0) < (coach.total ?? 0) ? (
+            <span className="tf-badge-pill" style={{ background: "var(--tf-orange-bg)", color: "var(--tf-orange)" }}>{(coach.total ?? 0) - (coach.boarded ?? 0)} {t("not in")}</span>
           ) : (
             <span className="tf-badge-pill" style={{ background: "var(--tf-green-bg)", color: "var(--tf-green)" }}>{t("All in")}</span>
           )}
@@ -358,9 +377,26 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
         </div>
       </div>
 
+      {!isUnassigned && coach.capacity > 0 && (() => {
+        const used = coach.total ?? 0;
+        const ratio = used / coach.capacity;
+        const over = used > coach.capacity;
+        const capColor = over || ratio >= 1 ? "red" : ratio >= 0.85 ? "orange" : "green";
+        return (
+          <div className="tf-fleet-capacity">
+            <div className="tf-fleet-cap-track">
+              <span className="tf-fleet-cap-fill" style={{ width: `${Math.min(100, Math.round(ratio * 100))}%`, background: `var(--tf-${capColor})` }} />
+            </div>
+            <span className="tf-fleet-cap-label" style={{ color: `var(--tf-${capColor})` }}>
+              {used}<span style={{ color: "var(--tf-text-3)" }}>/{coach.capacity}</span> {t("seats")}{over ? ` · ${t("Over capacity")}` : ratio >= 1 ? ` · ${t("Full")}` : ""}
+            </span>
+          </div>
+        );
+      })()}
+
       <div className="tf-fleet-body">
         {visible.map((d) => (
-          <DelegateCard key={d.id} delegate={d} dragging={draggingId === d.id} onPointerDownCard={onPointerDownCard} onKeyOpen={onKeyOpen} onRemove={onRemoveDelegate} />
+          <DelegateCard key={d.id} delegate={d} dragging={draggingId === d.id} wrongCoach={!!wrongCoachIds && wrongCoachIds.has(d.id)} onPointerDownCard={onPointerDownCard} onKeyOpen={onKeyOpen} onRemove={onRemoveDelegate} />
         ))}
         {isOver && (
           <div style={{ border: `2px dashed var(--tf-${isFull ? "red" : "blue"})`, borderRadius: 10, padding: "12px 8px", textAlign: "center", color: `var(--tf-${isFull ? "red" : "blue"})`, fontSize: 12, fontWeight: 700 }}>
@@ -491,7 +527,7 @@ function DelegateDetailPanel({ delegate, coaches, onClose, onSave, onReassign, o
  *  reference exactly. The current stop still gets a red border + "NOW";
  *  that classification is worked out locally from the trip's actual clock.
  * ========================================================================== */
-function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = false, onSetStatus, onToggleComplete, onMoveStop, isToday = true }) {
+function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = false, onSetStatus, onToggleComplete, onMoveStop, onOpenAttendance, isToday = true }) {
   const { t } = useLang();
   const [nowMinutes, setNowMinutes] = useState(() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); });
   const [openId, setOpenId] = useState(null);       // stop whose live-status editor is open
@@ -661,6 +697,8 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ color: "var(--tf-green)" }} onClick={() => { if (onToggleComplete) onToggleComplete(editItem); }}>
               {editItem.completed ? <><Circle size={12} /> {t("Mark not done")}</> : <><CheckCircle2 size={12} /> {t("Mark done")}</>}
             </button>
+            <span className="tf-editor-divider" />
+            <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={() => { if (onOpenAttendance) onOpenAttendance(editItem); }}><Users size={12} /> {t("Attendance & history")}</button>
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ marginLeft: "auto" }} onClick={() => setOpenId(null)}>{t("Close")}</button>
           </div>
 
@@ -756,6 +794,21 @@ function SummaryStat({ label, value, tone }) {
     <div className="tf-summary-stat">
       <div className="tf-summary-stat-label">{label}</div>
       <div className="tf-summary-stat-value" style={tone ? { color: `var(--tf-${tone})` } : undefined}>{value}</div>
+    </div>
+  );
+}
+/* Live "command centre" bar — the at-a-glance operational answer for an
+ * in-progress trip: how many are checked in, and the exception counts a
+ * coordinator needs to spot in seconds (missing / late / unassigned). */
+function LiveOpsBar({ stats }) {
+  const { t } = useLang();
+  return (
+    <div className="tf-kpi-row tf-kpi-row-5">
+      <div className="tf-kpi is-green"><span className="tf-kpi-n">{stats.present}/{stats.delegates}</span><span className="tf-kpi-l">{t("Checked in")}</span></div>
+      <div className="tf-kpi is-orange"><span className="tf-kpi-n">{stats.late}</span><span className="tf-kpi-l">{t("Late")}</span></div>
+      <div className="tf-kpi is-red"><span className="tf-kpi-n">{stats.missing}</span><span className="tf-kpi-l">{t("Missing")}</span></div>
+      <div className="tf-kpi is-yellow"><span className="tf-kpi-n">{stats.unassigned}</span><span className="tf-kpi-l">{t("Unassigned")}</span></div>
+      <div className="tf-kpi is-blue"><span className="tf-kpi-n">{stats.coaches}</span><span className="tf-kpi-l">{t("Coaches")}</span></div>
     </div>
   );
 }
@@ -1114,15 +1167,15 @@ function AddDelegateModal({ tripId, onClose, onAdded }) {
   }
 
   return (
-    <Modal title={t("Add delegate")} onClose={onClose} maxWidth={440}
+    <Modal title={t("Add delegate")} onClose={onClose} maxWidth={480}
       footer={<>
         <button className="tf-btn tf-btn-ghost" onClick={onClose}>{t("Cancel")}</button>
-        <button className="tf-btn tf-btn-primary" onClick={handleSubmit} disabled={saving}>
+        <button className="tf-btn tf-btn-primary tf-btn-lg" onClick={handleSubmit} disabled={saving}>
           {saving ? <Loader2 size={14} className="spin" /> : <UserPlus size={14} />} {t("Add delegate")}
         </button>
       </>}
     >
-      <label className="tf-field-label">{t("Full name")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+      <label className="tf-field-label">{t("Full name")} <span className="tf-req">*</span></label>
       <input className="tf-input" style={{ marginBottom: roster.length ? 4 : 14 }} placeholder={t("e.g. Tan S.L.")} value={name}
         list="tf-roster-names" autoComplete="off"
         onChange={(e) => handleNameChange(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} autoFocus />
@@ -1177,22 +1230,49 @@ function StaffSelect({ value, onChange, staff, assignments, excludeCoachId }) {
   );
 }
 
+/* Captain = the LOGIN account scoped to this coach. When set, that person sees
+ * only this coach on the board (unless they're an admin). Separate from the
+ * staff/guide directory above, which is display-only. */
+// Many accounts have `name` equal to (or just a different case of) their own
+// `username` — showing both then read as a literal duplicate, e.g.
+// "Vance · vance (admin)" (2026-07-25 fix). Only shows the username
+// separately when it's actually a distinct piece of information.
+function captainLabel(a) {
+  const name = (a.name || a.username || "").trim();
+  const sameAsUsername = name.toLowerCase() === (a.username || "").trim().toLowerCase();
+  return sameAsUsername ? `${name} (${a.role})` : `${name} · ${a.username} (${a.role})`;
+}
+
+function CaptainSelect({ value, onChange, accounts }) {
+  const { t } = useLang();
+  return (
+    <select className="tf-input" value={value || ""} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{t("No captain — anyone can see all coaches")}</option>
+      {accounts.map((a) => (
+        <option key={a.id} value={a.id}>{captainLabel(a)}</option>
+      ))}
+    </select>
+  );
+}
+
 function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   const { t } = useLang();
   const [label, setLabel] = useState(`Coach ${existingCount + 1}`);
   const [capacity, setCapacity] = useState(40);
   const [driverName, setDriverName] = useState("");
   const [staffUserId, setStaffUserId] = useState("");
+  const [accountId, setAccountId] = useState("");
   const [staff, setStaff] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, a] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments")]);
-        setStaff(s.staff); setAssignments(a.assignments);
+        const [s, a, acc] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments"), apiGet("/assignable-accounts")]);
+        setStaff(s.staff); setAssignments(a.assignments); setAccounts(acc.accounts || []);
       } catch (e) { setError(e.message); }
     })();
   }, []);
@@ -1203,33 +1283,43 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
     if (!staffUserId) { setError(t("Every coach needs a staff member")); return; }
     setSaving(true); setError(null);
     try {
-      const coach = await apiPost(`/coaches`, { tripId, label: label.trim(), capacity: Number(capacity), staffUserId, driverName: driverName.trim() });
+      const coach = await apiPost(`/coaches`, { tripId, label: label.trim(), capacity: Number(capacity), staffUserId, driverName: driverName.trim(), accountId: accountId || null });
       onAdded(coach); onClose();
     } catch (e) { setError(e.message); setSaving(false); }
   }
 
+  const capNum = Number(capacity);
   return (
-    <Modal title={t("Add coach")} onClose={onClose} maxWidth={420}
+    <Modal title={t("Add coach")} onClose={onClose} maxWidth={480}
       footer={<>
         <button className="tf-btn tf-btn-ghost" onClick={onClose}>{t("Cancel")}</button>
-        <button className="tf-btn tf-btn-primary" onClick={handleSubmit} disabled={saving}>
+        <button className="tf-btn tf-btn-primary tf-btn-lg" onClick={handleSubmit} disabled={saving}>
           {saving ? <Loader2 size={14} className="spin" /> : <Bus size={14} />} {t("Add coach")}
         </button>
       </>}
     >
-      <label className="tf-field-label">{t("Coach label")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+      <div className="tf-form-section">{t("Coach details")}</div>
+      <label className="tf-field-label">{t("Coach label")} <span className="tf-req">*</span></label>
       <input className="tf-input" style={{ marginBottom: 14 }} value={label} autoFocus onChange={(e) => setLabel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
 
-      <label className="tf-field-label">{t("Capacity (seats)")}</label>
-      <input type="number" className="tf-input" style={{ marginBottom: 14 }} min={1} max={200} value={capacity} onChange={(e) => setCapacity(e.target.value)} />
+      <label className="tf-field-label">{t("Capacity (seats)")} <span className="tf-req">*</span></label>
+      <input type="number" className="tf-input" style={{ marginBottom: capNum >= 1 ? 4 : 4 }} min={1} max={200} value={capacity} onChange={(e) => setCapacity(e.target.value)} />
+      <p className="tf-help" style={{ color: capNum < 1 ? "var(--tf-red)" : "var(--tf-text-3)" }}>
+        {capNum < 1 ? t("Capacity must be at least 1.") : t("Maximum number of delegates this coach can seat.")}
+      </p>
 
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Navigation size={13} /> {t("Driver name")}</label>
-      <input className="tf-input" style={{ marginBottom: 14 }} placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
+      <input className="tf-input" placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
 
-      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
+      <div className="tf-form-section">{t("Staff & access")}</div>
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")} <span className="tf-req">*</span></label>
       <StaffSelect value={staffUserId} onChange={setStaffUserId} staff={staff} assignments={assignments} excludeCoachId={null} />
-      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6 }}>{t("Every coach needs at least one staff member assigned.")}</p>
-      {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 8 }}>{error}</p>}
+      <p className="tf-help">{t("Every coach needs at least one staff member assigned.")}</p>
+
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center", marginTop: 14 }}><Users size={13} /> {t("Coach captain (login)")}</label>
+      <CaptainSelect value={accountId} onChange={setAccountId} accounts={accounts} />
+      <p className="tf-help">{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
+      {error && <p className="tf-form-error">{error}</p>}
     </Modal>
   );
 }
@@ -1238,16 +1328,18 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
   const { t } = useLang();
   const [staffUserId, setStaffUserId] = useState(coach.staffUserId || "");
   const [driverName, setDriverName] = useState(coach.driverName || "");
+  const [accountId, setAccountId] = useState(coach.accountId || "");
   const [staff, setStaff] = useState([]);
   const [assignments, setAssignments] = useState([]);
+  const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [s, a] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments")]);
-        setStaff(s.staff); setAssignments(a.assignments);
+        const [s, a, acc] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments"), apiGet("/assignable-accounts")]);
+        setStaff(s.staff); setAssignments(a.assignments); setAccounts(acc.accounts || []);
       } catch (e) { setError(e.message); }
     })();
   }, []);
@@ -1256,7 +1348,7 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
     if (!staffUserId) { setError(t("Every coach needs a staff member")); return; }
     setSaving(true); setError(null);
     try {
-      const updated = await apiPatch(`/coaches/${coach.id}`, { staffUserId, driverName: driverName.trim() });
+      const updated = await apiPatch(`/coaches/${coach.id}`, { staffUserId, driverName: driverName.trim(), accountId: accountId || null });
       onSaved(updated); onClose();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -1276,8 +1368,250 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
         {t("Picking someone already on another coach moves them here — it doesn't remove them there automatically, so you'll see them flagged on both boards until you fix the other one up too.")}
       </p>
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Navigation size={13} /> {t("Driver name")}</label>
-      <input className="tf-input" placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
+      <input className="tf-input" style={{ marginBottom: 14 }} placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
+
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Coach captain (login)")}</label>
+      <CaptainSelect value={accountId} onChange={setAccountId} accounts={accounts} />
+      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6 }}>{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
       {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 10 }}>{error}</p>}
+    </Modal>
+  );
+}
+
+/* ---- HistoryModal — persisted before/after audit for this trip -------------
+ * Reads GET /api/trips/:tripId/audit (trip_event_log). Each event shows who did
+ * it, when, a summary, and — for edits — a compact field-by-field "before →
+ * after" diff so a coordinator can see exactly what a value changed from and to.
+ * Creates show the values set; deletes show what was removed. ---------------- */
+function fmtAuditVal(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  return String(v);
+}
+function diffFields(before, after) {
+  const b = before || {}; const a = after || {};
+  const keys = [...new Set([...Object.keys(b), ...Object.keys(a)])];
+  return keys
+    .filter((k) => JSON.stringify(b[k]) !== JSON.stringify(a[k]))
+    .map((k) => ({ key: k, from: b[k], to: a[k] }));
+}
+
+const HISTORY_ICON = { coach: Bus, itinerary: MapPin, delegate: UserPlus, trip: PencilLine };
+function HistoryModal({ tripId, onClose }) {
+  const { t } = useLang();
+  const [events, setEvents] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let live = true;
+    apiGet(`/trips/${tripId}/audit?limit=80`)
+      .then((r) => { if (live) setEvents(r.events || []); })
+      .catch((e) => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [tripId]);
+
+  return (
+    <Modal title={t("Change history")} onClose={onClose} maxWidth={560}>
+      <p className="tf-muted" style={{ fontSize: 12, marginTop: -4, marginBottom: 14 }}>
+        {t("Every trip-management change, newest first, with what each value was before and after. Delegate attendance changes also appear in the app's History Log.")}
+      </p>
+      {error && <p style={{ color: "var(--tf-red)", fontSize: 13 }}>{error}</p>}
+      {!events && !error && <div className="tf-flex" style={{ justifyContent: "center", padding: 20 }}><Loader2 size={18} className="spin" /></div>}
+      {events && events.length === 0 && <p className="tf-muted" style={{ fontSize: 13 }}>{t("No changes recorded yet.")}</p>}
+      {events && events.length > 0 && (
+        <div className="tf-att-timeline" style={{ maxHeight: "60vh" }}>
+          {events.map((ev) => {
+            const rows = diffFields(ev.before, ev.after);
+            const isCreate = !ev.before && ev.after;
+            const isDelete = ev.before && !ev.after;
+            const Icon = HISTORY_ICON[ev.entity] || Circle;
+            const tone = isCreate ? "green" : isDelete ? "red" : "blue";
+            return (
+              <div key={ev.id} className="tf-tl-item">
+                <span className="tf-tl-dot" style={{ color: `var(--tf-${tone})`, background: `var(--tf-${tone}-bg)` }}><Icon size={13} /></span>
+                <div className="tf-tl-body" style={{ flex: 1 }}>
+                  <div className="tf-audit-head">
+                    <span className="tf-audit-summary">{ev.summary}</span>
+                    <span className="tf-audit-meta">{ev.actor || "System"} · {new Date(ev.at).toLocaleString()}</span>
+                  </div>
+                  {rows.length > 0 && (
+                    <div className="tf-audit-diff">
+                      {rows.map((r) => (
+                        <div key={r.key} className="tf-audit-row">
+                          <span className="tf-audit-key">{r.key}</span>
+                          {isCreate || isDelete ? (
+                            <span className="tf-audit-to">{fmtAuditVal(isCreate ? r.to : r.from)}</span>
+                          ) : (
+                            <>
+                              <span className="tf-audit-from">{fmtAuditVal(r.from)}</span>
+                              <span className="tf-audit-arrow">→</span>
+                              <span className="tf-audit-to">{fmtAuditVal(r.to)}</span>
+                            </>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ---- AttendanceModal — per-event (checkpoint) attendance + before/after log --
+ * For one itinerary stop: shows every coach's delegates with their status AT
+ * that stop (present / late / missing / not recorded), lets an editor set it,
+ * and lists the full before→after change history. Scoped: a captain only sees
+ * (and marks) their own coach. Writes go to
+ * POST /trips/:tripId/itinerary/:itemId/attendance. --------------------------- */
+const ATT_META = {
+  ARRIVED: { label: "Present", color: "green" },
+  LATE:    { label: "Late",    color: "orange" },
+  MISSING: { label: "Missing", color: "red" },
+};
+function AttendanceModal({ tripId, item, scopedCoachId, canEdit, onClose }) {
+  const { t } = useLang();
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [savingId, setSavingId] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiGet(`/trips/${tripId}/itinerary/${item.id}/attendance`);
+      setData(r);
+    } catch (e) { setError(e.message); }
+  }, [tripId, item.id]);
+  useEffect(() => { load(); }, [load]);
+
+  async function setStatus(delegateId, status) {
+    setSavingId(delegateId + status); setError(null);
+    try {
+      await apiPost(`/trips/${tripId}/itinerary/${item.id}/attendance`, { delegateId, status });
+      await load();
+    } catch (e) { setError(e.message); }
+    finally { setSavingId(null); }
+  }
+
+  // Group delegates by coach (respecting the captain scope).
+  const groups = useMemo(() => {
+    if (!data) return [];
+    const rows = scopedCoachId ? data.delegates.filter((d) => d.coachId === scopedCoachId) : data.delegates;
+    const byCoach = new Map();
+    for (const d of rows) {
+      const key = d.coachId || "__un__";
+      if (!byCoach.has(key)) byCoach.set(key, { coachId: d.coachId, coachLabel: d.coachLabel || t("Unassigned"), sort: d.coachSort ?? 999, delegates: [] });
+      byCoach.get(key).delegates.push(d);
+    }
+    return [...byCoach.values()].sort((a, b) => a.sort - b.sort);
+  }, [data, scopedCoachId, t]);
+
+  const history = useMemo(() => {
+    if (!data) return [];
+    return scopedCoachId ? data.history.filter((h) => h.coachId === scopedCoachId) : data.history;
+  }, [data, scopedCoachId]);
+
+  // Headline counts across everything shown — so a manager reads the numbers,
+  // not counts rows by hand.
+  const summary = useMemo(() => {
+    const all = groups.flatMap((g) => g.delegates);
+    return {
+      present: all.filter((d) => d.status === "ARRIVED").length,
+      late: all.filter((d) => d.status === "LATE").length,
+      missing: all.filter((d) => d.status === "MISSING").length,
+      total: all.length,
+    };
+  }, [groups]);
+
+  const ATT_ICON = { ARRIVED: CheckCircle2, LATE: Clock, MISSING: AlertCircle };
+
+  return (
+    <Modal title={`${t("Attendance")} · ${item.startTime} ${item.title}`} onClose={onClose} maxWidth={660}>
+      {error && <p style={{ color: "var(--tf-red)", fontSize: 13.5 }}>{error}</p>}
+      {!data && !error && <div className="tf-flex" style={{ justifyContent: "center", padding: 28 }}><Loader2 size={20} className="spin" /></div>}
+      {data && (
+        <>
+          {/* Summary KPIs */}
+          <div className="tf-att-summary">
+            <div className="tf-att-kpi is-green"><span className="tf-att-kpi-n">{summary.present}</span><span className="tf-att-kpi-l">{t("Present")}</span></div>
+            <div className="tf-att-kpi is-orange"><span className="tf-att-kpi-n">{summary.late}</span><span className="tf-att-kpi-l">{t("Late")}</span></div>
+            <div className="tf-att-kpi is-red"><span className="tf-att-kpi-n">{summary.missing}</span><span className="tf-att-kpi-l">{t("Missing")}</span></div>
+            <div className="tf-att-kpi is-grey"><span className="tf-att-kpi-n">{summary.total}</span><span className="tf-att-kpi-l">{t("Total")}</span></div>
+          </div>
+
+          {groups.length === 0 && <p className="tf-muted" style={{ fontSize: 13.5 }}>{t("No delegates to show.")}</p>}
+          {groups.map((g) => {
+            const present = g.delegates.filter((d) => d.status === "ARRIVED").length;
+            const pct = g.delegates.length ? Math.round((present / g.delegates.length) * 100) : 0;
+            return (
+              <div key={g.coachId || "un"} className="tf-att-coach">
+                <div className="tf-att-coach-head">
+                  <span className="tf-att-coach-name"><Bus size={15} /> {g.coachLabel}</span>
+                  <span className="tf-att-coach-count">{present}/{g.delegates.length} {t("present")}</span>
+                  <span className="tf-att-coach-bar"><span style={{ width: `${pct}%` }} /></span>
+                </div>
+                {g.delegates.map((d) => {
+                  const meta = d.status ? ATT_META[d.status] : null;
+                  const Icon = d.status ? ATT_ICON[d.status] : null;
+                  return (
+                    <div key={d.delegateId} className={`tf-att-row${meta ? ` is-${meta.color}` : ""}`}>
+                      <span className="tf-att-name">{d.name}</span>
+                      {!canEdit && (meta
+                        ? <span className="tf-badge-pill" style={{ color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>{Icon && <Icon size={11} />} {t(meta.label)}</span>
+                        : <span className="tf-badge-pill" style={{ color: "var(--tf-text-3)", background: "var(--tf-grey-bg)" }}>{t("Not recorded")}</span>)}
+                      {canEdit && (
+                        <span className="tf-segmented" role="group">
+                          {["ARRIVED", "LATE", "MISSING"].map((s) => {
+                            const SIcon = ATT_ICON[s];
+                            const active = d.status === s;
+                            return (
+                              <button key={s} type="button"
+                                className={`tf-seg is-${ATT_META[s].color}${active ? " is-active" : ""}`}
+                                disabled={savingId === d.delegateId + s}
+                                onClick={() => setStatus(d.delegateId, s)}>
+                                <SIcon size={12} /> {t(ATT_META[s].label)}
+                              </button>
+                            );
+                          })}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+
+          <div className="tf-att-history-title">{t("Change history")} <span className="tf-muted" style={{ fontWeight: 600, fontSize: 12 }}>· {t("before → after")}</span></div>
+          {history.length === 0
+            ? <p className="tf-muted" style={{ fontSize: 13 }}>{t("No attendance changes recorded for this event yet.")}</p>
+            : (
+              <div className="tf-att-timeline">
+                {history.map((h) => {
+                  const toMeta = ATT_META[h.toStatus];
+                  const Icon = ATT_ICON[h.toStatus] || CheckCircle2;
+                  return (
+                    <div key={h.id} className="tf-tl-item">
+                      <span className="tf-tl-dot" style={{ color: `var(--tf-${toMeta?.color || "grey"})`, background: `var(--tf-${toMeta?.color || "grey"}-bg)` }}><Icon size={13} /></span>
+                      <div className="tf-tl-body">
+                        <div className="tf-tl-line">
+                          <strong>{h.delegateName}</strong>
+                          <span className="tf-audit-from">{h.fromStatus ? t(ATT_META[h.fromStatus]?.label || h.fromStatus) : t("Not recorded")}</span>
+                          <span className="tf-audit-arrow">→</span>
+                          <span className="tf-audit-to">{t(toMeta?.label || h.toStatus)}</span>
+                        </div>
+                        <div className="tf-tl-meta">{h.coachLabel ? `${h.coachLabel} · ` : ""}{t("by")} {h.actor} · {new Date(h.at).toLocaleString()}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+        </>
+      )}
     </Modal>
   );
 }
@@ -1307,6 +1641,8 @@ function CoachBoardView({ tripId }) {
   const [showItinerary, setShowItinerary] = useState(false);
   const [showAddDelegate, setShowAddDelegate] = useState(false);
   const [showAddCoach, setShowAddCoach] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [attendanceItem, setAttendanceItem] = useState(null);
   const [editStaffCoach, setEditStaffCoach] = useState(null);
   const [panelDelegate, setPanelDelegate] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
@@ -1550,6 +1886,17 @@ function CoachBoardView({ tripId }) {
     if (!delegatesByCoach[key]) delegatesByCoach[key] = [];
     delegatesByCoach[key].push(d);
   }
+  // Wrong-coach / "UFO" flagging: a delegate whose coachId points at a coach
+  // that ISN'T on this trip (a stale cross-trip assignment, a scan under the
+  // wrong coach that stuck, or a coach that was later removed). These used to
+  // be silently folded into Unassigned above, so staff had no idea anything was
+  // off. Now they still show under Unassigned but are visibly FLAGGED, with a
+  // board-level banner, so a coordinator can spot and reassign them. (The live
+  // scanner already rejects a wrong-coach QR at scan time with COACH_MISMATCH;
+  // this is the board-side visibility of anyone who ended up mis-coached.)
+  const wrongCoachIds = new Set(
+    delegates.filter((d) => d.coachId && !coachIdSet.has(d.coachId)).map((d) => d.id)
+  );
 
   const currentDay = trip?.dayOf ?? 1;
   // Day switcher for the "Today's itinerary" card (2026-07-23) — it used to
@@ -1575,17 +1922,31 @@ function CoachBoardView({ tripId }) {
   const mode = trip?.status === "In progress" ? "live" : trip?.status === "Planning" ? "planning" : "completed";
   const editable = canEdit && mode !== "completed";
 
+  // Per-coach scoping: a signed-in person who CAPTAINS a coach on this trip and
+  // isn't an admin sees ONLY their own coach — the client's "staff on Coach 1
+  // sees only Coach 1" rule. Admins, and coordinators who don't captain any
+  // coach here, see the whole board.
+  // NB: the login only stores { username, name, role, permissions } — NO id —
+  // so we match on username (coach.captainUsername) rather than account id.
+  const me = getUser() || {};
+  const myCoach = coaches.find((c) => c.captainUsername && me.username && c.captainUsername === me.username) || null;
+  const scopedToCoach = !!myCoach && me.role !== "admin";
+  const boardCoaches = scopedToCoach ? coaches.filter((c) => c.id === myCoach.id) : coaches;
+  // When scoped, every count reflects just the captain's own coach.
+  const statDelegates = scopedToCoach ? delegates.filter((d) => d.coachId === myCoach.id) : delegates;
+
   const summaryStats = useMemo(() => ({
-    delegates: delegates.length,
-    present: delegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
-    missing: delegates.filter((d) => d.status === "MISSING").length,
-    unassigned: delegates.filter((d) => !(d.coachId && coachIdSet.has(d.coachId))).length,
-    coaches: coaches.length,
+    delegates: statDelegates.length,
+    present: statDelegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
+    late: statDelegates.filter((d) => d.status === "LATE").length,
+    missing: statDelegates.filter((d) => d.status === "MISSING").length,
+    unassigned: scopedToCoach ? 0 : delegates.filter((d) => !(d.coachId && coachIdSet.has(d.coachId))).length,
+    coaches: scopedToCoach ? 1 : coaches.length,
     itinStops: itinerary.length,
     itinDays: new Set(itinerary.map((i) => i.dayNumber)).size,
     itinDone: itinerary.filter((i) => i.completed).length,
     itinCancelled: itinerary.filter((i) => i.status === "cancelled").length,
-  }), [delegates, coaches, itinerary, coachIdSet]);
+  }), [delegates, statDelegates, scopedToCoach, coaches, itinerary, coachIdSet]);
 
   if (!trip && !loadError) {
     return <div className={tfRootClass}><div className="tf-page"><SkeletonBoard /></div></div>;
@@ -1612,6 +1973,15 @@ function CoachBoardView({ tripId }) {
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}
         {showAddDelegate && <AddDelegateModal tripId={tripId} onClose={() => setShowAddDelegate(false)} onAdded={handleDelegateAdded} />}
         {showAddCoach && <AddCoachModal tripId={tripId} existingCount={coaches.length} onClose={() => setShowAddCoach(false)} onAdded={(c) => { fetchAll(); pushToast(`${c.label} ${t("added")}.`); }} />}
+        {showHistory && <HistoryModal tripId={tripId} onClose={() => setShowHistory(false)} />}
+        {attendanceItem && (
+          <AttendanceModal
+            tripId={tripId} item={attendanceItem}
+            scopedCoachId={scopedToCoach ? myCoach.id : null}
+            canEdit={editable}
+            onClose={() => setAttendanceItem(null)}
+          />
+        )}
         {panelDelegate && (
           <DelegateDetailPanel
             delegate={panelDelegate} coaches={coaches}
@@ -1632,6 +2002,7 @@ function CoachBoardView({ tripId }) {
         />
 
         {mode === "planning" && <TripSummaryBar mode="planning" stats={summaryStats} />}
+        {mode === "live" && <LiveOpsBar stats={summaryStats} />}
 
         <div className="tf-card">
           {mode === "live" ? (
@@ -1658,6 +2029,7 @@ function CoachBoardView({ tripId }) {
                 items={todayItems} dayNumber={displayDay} totalDays={trip.totalDays} isToday={displayDay === currentDay}
                 onAddClick={editable ? () => setShowItinerary(true) : undefined}
                 canEdit={editable} onSetStatus={handleSetItineraryStatus} onToggleComplete={handleToggleComplete} onMoveStop={handleMoveStop}
+                onOpenAttendance={(it) => setAttendanceItem(it)}
               />
             </>
           ) : mode === "planning" ? (
@@ -1684,34 +2056,59 @@ function CoachBoardView({ tripId }) {
           <div className="tf-section-head">
             <div>
               <span className="tf-section-title">{mode === "completed" ? t("Final coach assignments") : t("Coach assignments")}</span>
-              <div className="tf-section-sub">
-                {mode === "planning" ? t("Assign delegates to coaches before the trip departs")
-                  : mode === "completed" ? t("Where everyone ended up")
-                  : t("Drag any delegate card between columns to reassign on the fly")}
-              </div>
+              {!scopedToCoach && (
+                <div className="tf-section-sub">
+                  {mode === "planning" ? t("Assign delegates to coaches before the trip departs")
+                    : mode === "completed" ? t("Where everyone ended up")
+                    : t("Drag any delegate card between columns to reassign on the fly")}
+                </div>
+              )}
             </div>
+            <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={() => setShowHistory(true)} title={t("View change history")}>
+              <Clock size={13} /> {t("History")}
+            </button>
           </div>
 
-          {mode === "planning" && editable && (
+          {scopedToCoach && (
+            <div className="tf-scope-banner" role="status">
+              <Users size={15} />
+              <span>{t("You're the captain of")} <strong>{myCoach.label}</strong>. {t("Other coaches are hidden.")} ({boardCoaches.length}/{coaches.length})</span>
+            </div>
+          )}
+
+          {mode === "planning" && editable && !scopedToCoach && (
             <CapacityPlanner delegateCount={delegates.length} coachCount={coaches.length} onGenerate={handleGenerateCoaches} />
           )}
 
+          {!scopedToCoach && wrongCoachIds.size > 0 && (
+            <div className="tf-wrongcoach-banner" role="alert">
+              <AlertCircle size={15} />
+              <span>
+                <strong>{wrongCoachIds.size}</strong> {t(wrongCoachIds.size === 1 ? "delegate is on a coach that isn't on this trip" : "delegates are on a coach that isn't on this trip")}.{" "}
+                {t("They're shown under Unassigned — reassign them to a coach here, or remove them.")}
+              </span>
+            </div>
+          )}
+
           <div className="tf-fleet-scroll">
-            {coaches.map((coach) => (
+            {boardCoaches.map((coach) => (
               <FleetCard
                 key={coach.id} coach={coach} delegates={delegatesByCoach[coach.id] || []} mode={mode}
                 isOver={overCol === coach.id} colRef={(node) => { colRefs.current[coach.id] = node; }}
                 onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id}
-                onRemoveCoach={editable ? handleRemoveCoach : undefined} onRemoveDelegate={editable ? handleRemoveDelegate : undefined} onEditStaff={editable ? setEditStaffCoach : undefined}
+                onRemoveCoach={editable && !scopedToCoach ? handleRemoveCoach : undefined} onRemoveDelegate={editable ? handleRemoveDelegate : undefined} onEditStaff={editable && !scopedToCoach ? setEditStaffCoach : undefined}
                 onCycleArrival={editable && mode === "live" ? handleCycleArrival : undefined}
               />
             ))}
-            <FleetCard
-              coach={{ id: UNASSIGNED_COL, label: t("Unassigned") }} delegates={delegatesByCoach[UNASSIGNED_COL] || []} mode={mode}
-              isUnassigned isOver={overCol === UNASSIGNED_COL} colRef={(node) => { colRefs.current[UNASSIGNED_COL] = node; }}
-              onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id} onRemoveDelegate={editable ? handleRemoveDelegate : undefined}
-            />
-            {editable && <button className="tf-add-fleet-card" onClick={() => setShowAddCoach(true)}><Plus size={18} /> {t("Add coach")}</button>}
+            {!scopedToCoach && (
+              <FleetCard
+                coach={{ id: UNASSIGNED_COL, label: t("Unassigned") }} delegates={delegatesByCoach[UNASSIGNED_COL] || []} mode={mode}
+                isUnassigned isOver={overCol === UNASSIGNED_COL} colRef={(node) => { colRefs.current[UNASSIGNED_COL] = node; }}
+                onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id} onRemoveDelegate={editable ? handleRemoveDelegate : undefined}
+                wrongCoachIds={wrongCoachIds}
+              />
+            )}
+            {editable && !scopedToCoach && <button className="tf-add-fleet-card" onClick={() => setShowAddCoach(true)}><Plus size={18} /> {t("Add coach")}</button>}
           </div>
         </div>
       </div>

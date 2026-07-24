@@ -7,7 +7,7 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react";
+import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight, Eye, EyeOff } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../../permissions.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -24,6 +24,7 @@ import { useLang } from "../../lib/i18n.jsx";
 const EMPTY_FORM = {
   username: "",
   name: "",
+  email: "",
   password: "",
   role: "staff",
   perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
@@ -91,6 +92,8 @@ const ERR_TEXT = {
   WEAK_PASSWORD: "Password must be at least 8 characters, with a letter and a number.",
   LAST_MAIN: "You can't remove or demote the last Admin account.",
   NOT_FOUND: "That account no longer exists.",
+  EMAIL_REQUIRED: "A valid email address is required.",
+  EMAIL_TAKEN: "That email is already registered to another account.",
 };
 
 // Password rule (mirrors the backend check in data.js). Returns a message, or
@@ -115,6 +118,7 @@ export default function AccountControlPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formErr, setFormErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showPw, setShowPw] = useState(false);
   // Only dismiss if the WHOLE click gesture started on the backdrop, not
   // wherever the mouse was released after dragging to select text in a
   // username/password field.
@@ -170,10 +174,74 @@ export default function AccountControlPage() {
     }
   }, []);
 
+  // Self-registration approval queue (2026-07-24) — accounts that signed up
+  // via the public /register page and are stuck "pending" until approved or
+  // rejected here. Loaded alongside the main account list.
+  const [pendingAccounts, setPendingAccounts] = useState([]);
+  const [pendingBusyId, setPendingBusyId] = useState(null);
+  // Search — real registration volume can easily get messy at 50+ pending
+  // requests (2026-07-24 feedback), same fix pattern as everywhere else in
+  // this app: a search box + a bounded, independently-scrollable list.
+  const [pendingSearch, setPendingSearch] = useState("");
+  const loadPending = useCallback(async () => {
+    try { setPendingAccounts((await apiGet("/accounts/pending")).accounts || []); } catch { /* non-fatal — banner just shows empty */ }
+  }, []);
+
+  async function approvePending(id) {
+    setPendingBusyId(id);
+    try {
+      await apiPost(`/accounts/${id}/approve`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || "Could not approve this account.");
+    } finally {
+      setPendingBusyId(null);
+    }
+  }
+
+  async function rejectPending(id) {
+    setPendingBusyId(id);
+    try {
+      await apiPost(`/accounts/${id}/reject`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || "Could not reject this account.");
+    } finally {
+      setPendingBusyId(null);
+    }
+  }
+
+  const visiblePendingAccounts = useMemo(() => {
+    const q = pendingSearch.trim().toLowerCase();
+    if (!q) return pendingAccounts;
+    return pendingAccounts.filter((a) => `${a.username} ${a.email || ""}`.toLowerCase().includes(q));
+  }, [pendingAccounts, pendingSearch]);
+
+  // "Approve all"/"Reject all" (2026-07-24, requested while clearing 50 demo
+  // pending accounts by hand) — a single bulk request instead of looping the
+  // per-account endpoint. Asks for confirmation first since acting on every
+  // pending account at once (especially Approve all) isn't easily undone.
+  const [bulkPendingBusy, setBulkPendingBusy] = useState(false);
+  const [bulkPendingConfirm, setBulkPendingConfirm] = useState(null); // "approve" | "reject" | null
+
+  async function runBulkPending(action) {
+    setBulkPendingConfirm(null);
+    setBulkPendingBusy(true);
+    try {
+      await apiPost(`/accounts/pending/${action}-all`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || `Could not ${action} all pending accounts.`);
+    } finally {
+      setBulkPendingBusy(false);
+    }
+  }
+
   useEffect(() => {
     load();
     loadRoleTemplates();
-  }, [load, loadRoleTemplates]);
+    loadPending();
+  }, [load, loadRoleTemplates, loadPending]);
 
   // Search + role filter + sort, applied in that order. Search matches
   // username or display name (case-insensitive substring).
@@ -317,6 +385,7 @@ export default function AccountControlPage() {
     setForm({
       username: a.username,
       name: a.name || "",
+      email: a.email || "",
       password: "",
       perms,
       role: a.role === "admin" ? "admin" : "staff",
@@ -375,6 +444,11 @@ export default function AccountControlPage() {
     setFormErr("");
     if (!form.username.trim()) return setFormErr(ERR_TEXT.USERNAME_REQUIRED);
     if (!editingId && !form.password) return setFormErr(ERR_TEXT.PASSWORD_REQUIRED);
+    // Email is compulsory for a brand-new account (2026-07-24 — "need email
+    // for each staff and admin now"), but NOT force-required when editing an
+    // existing pre-2026-07-24 account that never had one on file — see the
+    // payload note below on why it's simply omitted rather than sent blank.
+    if (!editingId && !form.email.trim()) return setFormErr(ERR_TEXT.EMAIL_REQUIRED);
     // Enforce the password rule when creating, or when editing AND a new
     // password was typed (blank on edit = keep the current one).
     if (form.password) {
@@ -390,6 +464,11 @@ export default function AccountControlPage() {
       permissions: form.perms,
     };
     if (form.password) payload.password = form.password; // blank on edit = keep current
+    // Only sent if actually filled in — an edit that leaves this blank on an
+    // account with no email yet should still be able to save (e.g. just
+    // changing a permission), not get blocked into backfilling an email
+    // that account never had. A brand-new account already required it above.
+    if (form.email.trim()) payload.email = form.email.trim();
 
     try {
       if (editingId) {
@@ -480,6 +559,124 @@ export default function AccountControlPage() {
         </div>
       )}
 
+      {/* ---- Pending approval (2026-07-24) ---------------------------------
+       * "add a ui for admin to accept or reject the new account creation on
+       * account control page." Self-registered accounts (see RegisterPage.jsx)
+       * sit here, unable to sign in, until an admin approves or rejects them.
+       * Only rendered when there's actually something to review. */}
+      {pendingAccounts.length > 0 && (
+        <div className="card" style={{ marginTop: 20, padding: 20, borderColor: "var(--st-review)", background: "var(--st-review-bg)" }}>
+          <div className="row between" style={{ marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <UserPlus size={18} color="var(--st-review)" />
+              <h2 style={{ fontSize: 16 }}>{t("Pending approval")}</h2>
+              <span className="badge badge-review" style={{ padding: "2px 8px" }}>{pendingAccounts.length}</span>
+            </div>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {/* Bulk actions (2026-07-24) — a single confirm-gated request
+                  instead of clicking Approve/Reject one-by-one down a long
+                  list. Reject all is the safer of the two (rejected accounts
+                  just can't log in — nothing is deleted), Approve all is
+                  more consequential since it lets every one of them sign in
+                  immediately, so both go through the same confirm step. */}
+              <button
+                className="btn btn-ghost"
+                style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+                onClick={() => setBulkPendingConfirm("reject")}
+                disabled={bulkPendingBusy}
+              >
+                {t("Reject all")}
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => setBulkPendingConfirm("approve")}
+                disabled={bulkPendingBusy}
+              >
+                {t("Approve all")}
+              </button>
+              {/* Search — real registration volume gets messy fast otherwise
+                  (2026-07-24 feedback, live-demoed at 50 pending requests). */}
+              {pendingAccounts.length > 6 && (
+                <div style={{ position: "relative", maxWidth: 240, flex: "1 1 200px" }}>
+                  <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+                  <input
+                    className="input"
+                    style={{ paddingLeft: 32, background: "var(--surface)" }}
+                    placeholder={t("Search name or email…")}
+                    value={pendingSearch}
+                    onChange={(e) => setPendingSearch(e.target.value)}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+          {/* Bounded, independently-scrollable list — same pattern as the
+              Reverse Headcount coach lists / Staff Ops active-sessions grid
+              elsewhere in this app, so a real volume of requests never
+              pushes the rest of Account control off-screen. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto", paddingRight: 4 }}>
+            {visiblePendingAccounts.length === 0 && (
+              <div className="muted" style={{ fontSize: 13, textAlign: "center", padding: "12px 0" }}>
+                {t("No pending requests match your search.")}
+              </div>
+            )}
+            {visiblePendingAccounts.map((a) => (
+              <div key={a.id} className="row between" style={{ padding: "10px 12px", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <span className="mono" style={{ fontWeight: 600 }}>{a.username}</span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>{a.email || t("No email on file")}</div>
+                </div>
+                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+                    onClick={() => rejectPending(a.id)}
+                    disabled={pendingBusyId === a.id}
+                  >
+                    {t("Reject")}
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => approvePending(a.id)}
+                    disabled={pendingBusyId === a.id}
+                  >
+                    {pendingBusyId === a.id ? t("Saving…") : t("Approve")}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {bulkPendingConfirm && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 60 }}>
+          <div className="card" style={{ width: "min(400px, 100%)", padding: 22 }}>
+            <h2 style={{ fontSize: 16, marginBottom: 8 }}>
+              {bulkPendingConfirm === "approve" ? t("Approve all pending accounts?") : t("Reject all pending accounts?")}
+            </h2>
+            <p className="muted" style={{ fontSize: 13, marginBottom: 18 }}>
+              {bulkPendingConfirm === "approve"
+                ? t("Every pending account below will be approved and able to sign in immediately.")
+                : t("Every pending account below will be rejected. They'll stay in the system but won't be able to sign in.")}
+            </p>
+            <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setBulkPendingConfirm(null)} disabled={bulkPendingBusy}>{t("Cancel")}</button>
+              <button
+                className={bulkPendingConfirm === "reject" ? "btn btn-ghost" : "btn btn-primary"}
+                style={bulkPendingConfirm === "reject" ? { color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" } : undefined}
+                onClick={() => runBulkPending(bulkPendingConfirm)}
+                disabled={bulkPendingBusy}
+              >
+                {bulkPendingBusy ? t("Saving…") : (bulkPendingConfirm === "approve" ? t("Approve all") : t("Reject all"))}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
         <div className="row" style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", gap: 8 }}>
           <ShieldCheck size={18} color="var(--ink-3)" />
@@ -566,9 +763,14 @@ export default function AccountControlPage() {
           {/* Fixed-height scroll area with a sticky header — mirrors the
               All-delegates table (2026-07-24). Without this, 50+ staff
               accounts rendered as one long unpaginated list, which was the
-              "too messy" complaint. */}
-          <div style={{ maxHeight: 640, overflowY: "auto" }}>
-          <table className="table">
+              "too messy" complaint. overflowX added (2026-07-24, mobile
+              responsiveness pass) so this many-column table scrolls
+              horizontally on a narrow screen instead of clipping/squishing
+              columns — the sidebar/page shell already collapses correctly
+              below 1024px, but the table itself had no horizontal-scroll
+              safety net. */}
+          <div style={{ maxHeight: 640, overflowY: "auto", overflowX: "auto" }}>
+          <table className="table" style={{ minWidth: 640 }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--surface)" }}>
               <tr>
                 <th style={{ width: 36 }}>
@@ -616,11 +818,27 @@ export default function AccountControlPage() {
                     </td>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
-                        <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
-                          {a.username.slice(0, 2).toUpperCase()}
-                        </span>
-                        <span className="mono" style={{ fontWeight: 500 }}>{a.username}</span>
-                        {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>{t("You")}</span>}
+                        {a.photoUrl ? (
+                          <img className="avatar" src={a.photoUrl} alt="" style={{ objectFit: "cover" }} />
+                        ) : (
+                          <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
+                            {a.username.slice(0, 2).toUpperCase()}
+                          </span>
+                        )}
+                        <div style={{ minWidth: 0 }}>
+                          <div className="row" style={{ gap: 6 }}>
+                            <span className="mono" style={{ fontWeight: 500 }}>{a.username}</span>
+                            {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>{t("You")}</span>}
+                          </div>
+                          {/* Email (2026-07-24) — added going forward for every
+                              new account; pre-existing accounts predate this
+                              field and simply show nothing here. */}
+                          {a.email && (
+                            <div className="muted" style={{ fontSize: 11.5, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {a.email}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td>{a.name || "—"}</td>
@@ -704,12 +922,32 @@ export default function AccountControlPage() {
               placeholder={t("e.g. John Tan")}
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
+            {/* Compulsory for a brand-new account; optional when editing one
+                that predates this field (2026-07-24). */}
+            <label className="field-label" style={{ marginTop: 14 }}>
+              {t("Email")} {!editingId && <span style={{ color: "var(--scc-red)" }}>*</span>}
+            </label>
+            <input className="input" type="email" value={form.email}
+              placeholder={t("e.g. john.tan@sccci.org.sg")}
+              onChange={(e) => setForm({ ...form, email: e.target.value })} />
+
             <label className="field-label" style={{ marginTop: 14 }}>
               {t("Password")} {editingId && <span className="muted">({t("leave blank to keep current")})</span>}
             </label>
-            <input className="input" type="password" value={form.password}
-              placeholder={editingId ? "••••••••" : t("Set a password")}
-              onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            <div style={{ position: "relative" }}>
+              <input className="input" type={showPw ? "text" : "password"} value={form.password}
+                placeholder={editingId ? "••••••••" : t("Set a password")}
+                style={{ paddingRight: 42 }}
+                onChange={(e) => setForm({ ...form, password: e.target.value })} />
+              <button
+                type="button"
+                onClick={() => setShowPw((v) => !v)}
+                aria-label={showPw ? t("Hide password") : t("Show password")}
+                style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--scc-red)", display: "flex" }}
+              >
+                {showPw ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
             {(!editingId || form.password) && (
               <p className="muted" style={{ fontSize: 12, marginTop: 6,
                 color: form.password && passwordProblem(form.password) ? "var(--st-missing)" : undefined }}>

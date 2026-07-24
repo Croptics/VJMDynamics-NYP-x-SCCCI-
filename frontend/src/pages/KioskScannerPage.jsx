@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — passwordless entrance kiosk
+ * ============================================================================= */
 // frontend/src/pages/KioskScannerPage.jsx
 // PASSWORDLESS entrance-kiosk scanner (Face + QR). Route: /kiosk-scan.
 //

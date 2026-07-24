@@ -43,6 +43,25 @@ export async function createSchema() {
   // NOT NULL DEFAULT now() means existing rows get the migration time and new
   // rows default to their insert time (createDelegate doesn't set it).
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()`);
+  // "Cancelled" — a delegate who was Assigned but can't make it after all,
+  // usually found out day-of (2026-07-24). Deliberately NOT a 6th value on
+  // the status enum (UNASSIGNED/ASSIGNED/ARRIVED/LATE/MISSING is already
+  // duplicated across ~5 files — badges, KPIs, coach capacity, exports,
+  // Late-cutoff — adding a 6th status would mean touching all of them and
+  // risks anything that assumes exactly 5). Instead a plain boolean layered
+  // on top: cancelling a delegate forces status back to UNASSIGNED and
+  // clears their coachId (see updateDelegate() in db/delegates.js), freeing
+  // their seat, while this flag keeps them distinguishable in the UI from a
+  // delegate who's simply pending assignment.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT false`);
+  // Free-text "what happened" reason captured at the moment of cancelling —
+  // requested so a staff member (often on mobile, in the field) can record
+  // WHY someone dropped out, not just that they did. Cleared automatically
+  // whenever cancelled flips back to false (same "only meaningful while the
+  // flag is on" pattern as lastSeen/lastLocation clearing once a delegate is
+  // no longer Missing) so it can't linger as stale context for a totally
+  // different later cancellation.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS cancel_reason TEXT`);
   // Profile photo — set only via POST /api/delegates/:id/photo (uploads
   // through Cloudinary, see uploadDelegatePhoto in server.js), never via the
   // plain PATCH /api/delegates/:id JSON route, so a client can't just PATCH
@@ -82,6 +101,30 @@ export async function createSchema() {
   // Staff Operations dashboard's "active now" list (accounts seen in the last
   // ~45s, comfortably wider than the 15s poll interval).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`);
+  // Self-service registration (2026-07-24) — `email` (nullable, since every
+  // existing account predates this feature and none of them have one on
+  // file; enforced as REQUIRED only at the application layer for NEW
+  // accounts going forward — both self-registered and admin-created).
+  // Stored as plain text, same tier as username — it's an identity/contact
+  // field, not a secret, so it must stay human-readable for the approval
+  // screen; only passwords ever get hashed.
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email) WHERE email IS NOT NULL`);
+  // "pending" (awaiting admin review) / "approved" / "rejected". Existing
+  // rows backfill to "approved" via this DEFAULT the moment the column is
+  // added, so nobody who could already log in gets locked out by this
+  // feature landing. Only a fresh self-registration ever starts "pending" —
+  // accounts an admin creates directly on Account control are approved
+  // immediately (an admin creating the account IS the approval).
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'approved'`);
+  // Own-profile picture (2026-07-24, Settings page self-service editing) —
+  // same photoUrl/photoPublicId pattern as delegates.js, but a SEPARATE
+  // Cloudinary folder ("mustergo/accounts", see lib/cloudinary.js call
+  // sites in routes/auth.js) so an account's own avatar never mixes with
+  // delegate photos in the Settings → Image storage media manager, which
+  // is hardcoded to the delegates folder only.
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
 
   // Named, admin-managed access-role templates (2026-07-24) — Account
   // control's "Apply template" quick-fill + "Access role" filter used to be
@@ -268,6 +311,28 @@ export async function createSchema() {
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_checkin_item ON checkpoint_checkins(itinerary_item_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_checkin_delegate ON checkpoint_checkins(delegate_id, created_at DESC)`);
+
+  /* ---- Emergency escalations (2026-07-24) ---------------------------------
+   * A DELIBERATE, staff-clicked "alert the office" action — never automatic
+   * (per the user: only escalate when staff decides to click). One row per
+   * escalation; `status` moves open -> acknowledged -> resolved. Every
+   * signed-in account polls for open ones (see routes/escalations.js) so
+   * office/admin staff see an unmissable banner regardless of which page
+   * they're on. */
+  await run(`CREATE TABLE IF NOT EXISTS escalations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trip_id UUID REFERENCES trips(uuid_id) ON DELETE SET NULL,
+    delegate_id VARCHAR(64) REFERENCES delegates(id) ON DELETE SET NULL,
+    message TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'open',
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    acknowledged_by VARCHAR(255),
+    acknowledged_at TIMESTAMPTZ,
+    resolved_by VARCHAR(255),
+    resolved_at TIMESTAMPTZ
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status, created_at DESC)`);
 }
 
 export async function seed() {

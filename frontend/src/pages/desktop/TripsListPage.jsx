@@ -25,7 +25,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin, Plus, Pencil, Trash2, X } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import "./TripCoachPage.css";
@@ -357,7 +357,16 @@ export default function TripsListPage() {
   const [query, setQuery] = useState("");
   const [formTrip, setFormTrip] = useState(null);   // null = closed · {} = new · {…trip} = edit
   const [deleteTripState, setDeleteTripState] = useState(null);
+  const [captainTripIds, setCaptainTripIds] = useState(null); // Set of trip ids this account captains
   const canEdit = getPermissions().manageTrips; // gate edit controls (see permissions.js)
+
+  // A non-admin who captains at least one coach is a "coach captain": they see
+  // ONLY the trip(s) they're assigned to, and can't create/seed trips. Admins
+  // and non-captain coordinators keep the full list.
+  const me = getUser() || {};
+  const isCaptain = me.role !== "admin" && !!captainTripIds && captainTripIds.size > 0;
+  // Trip-level create/edit/delete is coordinator/admin territory — never a captain's.
+  const canManageTrips = canEdit && !isCaptain;
 
   const fetchTrips = useCallback(async () => {
     try {
@@ -370,6 +379,13 @@ export default function TripsListPage() {
   }, []);
 
   useEffect(() => { fetchTrips(); }, [fetchTrips]);
+
+  // Which trips does the signed-in account captain? (empty for admins/coordinators)
+  useEffect(() => {
+    apiGet("/my-captain-coaches")
+      .then((r) => setCaptainTripIds(new Set((r.coaches || []).map((c) => c.tripId))))
+      .catch(() => setCaptainTripIds(new Set()));
+  }, []);
 
   async function handleSeed() {
     setSeeding(true);
@@ -392,10 +408,12 @@ export default function TripsListPage() {
 
   const filteredTrips = useMemo(() => {
     if (!trips) return [];
+    // Captains only ever see the trip(s) they're assigned to.
+    const base = isCaptain ? trips.filter((tr) => captainTripIds.has(tr.id)) : trips;
     const q = query.trim().toLowerCase();
-    if (!q) return trips;
-    return trips.filter((tr) => tr.name.toLowerCase().includes(q) || (tr.lead || "").toLowerCase().includes(q));
-  }, [trips, query]);
+    if (!q) return base;
+    return base.filter((tr) => tr.name.toLowerCase().includes(q) || (tr.lead || "").toLowerCase().includes(q));
+  }, [trips, query, isCaptain, captainTripIds]);
 
   return (
     <div className={`tf-root${dark ? " tf-dark" : ""}`}>
@@ -409,7 +427,7 @@ export default function TripsListPage() {
             {/* Persistent seed control — previously only reachable from the
                zero-trips empty state, so once any trip existed there was no
                UI path left to add the newer demo trips. Gated on manageTrips. */}
-            {canEdit && trips && !loadError && (
+            {canEdit && !isCaptain && trips && !loadError && (
               <>
                 {seedMessage && (
                   <span className="tf-muted" style={{ fontSize: 12.5, fontWeight: 600 }}>{seedMessage}</span>
@@ -446,11 +464,11 @@ export default function TripsListPage() {
             <EmptyIllustration />
             <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>{t("No trips yet")}</h2>
             <p className="tf-muted" style={{ fontSize: 13.5, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
-              {canEdit
+              {canManageTrips
                 ? t("Create your first trip, or use “Seed more trips” above to explore with demo data.")
                 : t("No trips have been added yet. Please check back later.")}
             </p>
-            {canEdit && (
+            {canManageTrips && (
               <button className="tf-btn tf-btn-primary" style={{ marginTop: 16 }} onClick={() => setFormTrip({})}>
                 <Plus size={14} /> {t("New trip")}
               </button>
@@ -465,12 +483,9 @@ export default function TripsListPage() {
                 <Search size={15} color="var(--tf-text-3)" />
                 <input placeholder={t("Search trips…")} value={query} onChange={(e) => setQuery(e.target.value)} />
               </div>
-              <span className="tf-muted" style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap" }}>
-                {query.trim() ? `${filteredTrips.length} ${t("of")} ${trips.length}` : trips.length} {t(trips.length === 1 ? "trip" : "trips")}
-              </span>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
               {filteredTrips.map((trip) => (
                 <div
                   key={trip.id}
@@ -491,7 +506,7 @@ export default function TripsListPage() {
                     <h3 style={{ fontSize: 16.5, fontWeight: 800, minWidth: 0 }}>{trip.name}</h3>
                     <div className="tf-flex tf-gap-6" style={{ alignItems: "center", flexShrink: 0 }}>
                       <StatusChip status={trip.status} />
-                      {canEdit && (
+                      {canManageTrips && (
                         <>
                           <button
                             className="tf-btn tf-btn-ghost tf-btn-icon-only"

@@ -134,6 +134,10 @@ export default function LoginPage({ onSignIn }) {
         setError("Too many attempts. Please wait a few minutes and try again.");
       } else if (e?.status === 400) {
         setError("Please enter your Staff ID and password.");
+      } else if (e?.code === "ACCOUNT_PENDING") {
+        setError("Your account is awaiting admin approval.");
+      } else if (e?.code === "ACCOUNT_REJECTED") {
+        setError("Your registration was not approved. Contact an admin.");
       } else {
         setError("Can't reach the server. Make sure the backend is running.");
       }
@@ -267,6 +271,20 @@ export default function LoginPage({ onSignIn }) {
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
             {t("By signing in, you accept the SCCCI data handling policy.")}
+          </p>
+
+          {/* Self-service registration (2026-07-24) — new accounts start
+              "pending" and need an admin's approval before they can sign
+              in, see RegisterPage.jsx / Account control. */}
+          <p className="muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
+            {t("New staff?")}{" "}
+            <button
+              type="button"
+              onClick={() => navigate("/register")}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 13, fontWeight: 600 }}
+            >
+              {t("Create an account")}
+            </button>
           </p>
         </form>
       </div>

@@ -77,6 +77,9 @@ app.use(historyRouter);
 import checkpointsRouter from "./routes/checkpoints.js";
 app.use(checkpointsRouter);
 
+import escalationsRouter from "./routes/escalations.js";
+app.use(escalationsRouter);
+
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
  *

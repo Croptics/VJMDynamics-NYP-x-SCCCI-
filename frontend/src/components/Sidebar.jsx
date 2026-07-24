@@ -1,3 +1,8 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — App shell & navigation
+ * ============================================================================= */
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   LayoutGrid,
@@ -24,6 +29,15 @@ import { useTheme } from "../lib/theme.jsx";
  * The account block + Log out button sit pinned to the bottom.
  */
 export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) {
+  // Re-render when Settings updates the session (name/photo/etc.) — plain
+  // storage writes (updateSession) don't trigger React on their own.
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    const onSessionUpdated = () => forceUpdate((n) => n + 1);
+    window.addEventListener("mg-session-updated", onSessionUpdated);
+    return () => window.removeEventListener("mg-session-updated", onSessionUpdated);
+  }, []);
+
   const perms = getPermissions();
   const isAdmin = !!perms.manageAccounts;
   const { lang, toggleLang, t } = useLang();
@@ -114,32 +128,41 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
             style={S.accountLink}
             title={t("Settings")}
           >
-            <span className="avatar" style={S.avatar}>{initials}</span>
+            {user.photoUrl ? (
+              <img className="avatar" src={user.photoUrl} alt="" style={{ ...S.avatar, objectFit: "cover" }} />
+            ) : (
+              <span className="avatar" style={S.avatar}>{initials}</span>
+            )}
             <div style={{ minWidth: 0 }}>
               <div style={S.name}>{displayName}</div>
               <div className="muted" style={{ fontSize: 11 }}>{roleLabel}</div>
             </div>
           </NavLink>
-          {/* Help / User guide — a utility affordance next to the theme
-              toggle, not a primary nav destination (see the items array). */}
-          <NavLink
-            to="/guide"
-            className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
-            style={S.themeBtn}
-            title={t("User guide")}
-            aria-label={t("User guide")}
-          >
-            <HelpCircle size={16} />
-          </NavLink>
-          <button
-            className="btn btn-ghost"
-            style={S.themeBtn}
-            onClick={toggleTheme}
-            title={t(theme === "dark" ? "Light mode" : "Dark mode")}
-            aria-label={t(theme === "dark" ? "Light mode" : "Dark mode")}
-          >
-            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
+          {/* Help/User guide + theme toggle — grouped and explicitly pinned
+              to the far right edge (marginLeft: auto) rather than relying on
+              accountLink's flex:1 alone to push them there (2026-07-24 —
+              "align the dark theme button and user guide button to
+              right"). */}
+          <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexShrink: 0 }}>
+            <NavLink
+              to="/guide"
+              className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
+              style={S.themeBtn}
+              title={t("User guide")}
+              aria-label={t("User guide")}
+            >
+              <HelpCircle size={16} />
+            </NavLink>
+            <button
+              className="btn btn-ghost"
+              style={S.themeBtn}
+              onClick={toggleTheme}
+              title={t(theme === "dark" ? "Light mode" : "Dark mode")}
+              aria-label={t(theme === "dark" ? "Light mode" : "Dark mode")}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </div>
         </div>
         <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={handleLogout}>
           <LogOut size={16} /> {t("Log out")}

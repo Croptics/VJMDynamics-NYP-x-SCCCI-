@@ -25,15 +25,25 @@ const STATUS_TONE = { ARRIVED: "present", LATE: "late", MISSING: "missing" };
 // convention as every other status label in the app) — map before t().
 const STATUS_LABEL = { ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
 
-export default function DelegateTimeline({ delegateId }) {
+/**
+ * `defaultVisible` (optional, 2026-07-25) — when set, only this many entries
+ * show initially, with a "Show N more" button to reveal the rest — for a
+ * context like mobile's delegate detail sheet where the timeline is one of
+ * several sections and a long history shouldn't push everything else below
+ * it off-screen. Omit it (as the desktop profile panel still does) for the
+ * original "always show everything" behaviour.
+ */
+export default function DelegateTimeline({ delegateId, defaultVisible }) {
   const { t } = useLang();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setData(null);
     setError("");
+    setExpanded(false);
     apiGet(`/delegates/${delegateId}/checkpoint-timeline`)
       .then((d) => { if (alive) setData(d); })
       .catch((e) => { if (alive) setError(e.message || "Could not load timeline."); });
@@ -54,9 +64,13 @@ export default function DelegateTimeline({ delegateId }) {
     );
   }
 
+  const showLimit = defaultVisible && !expanded ? defaultVisible : data.timeline.length;
+  const visible = data.timeline.slice(0, showLimit);
+  const remaining = data.timeline.length - visible.length;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {data.timeline.map((entry) => {
+      {visible.map((entry) => {
         const Icon = METHOD_ICON[entry.method] || Clock;
         const tone = STATUS_TONE[entry.status] || "neutral";
         return (
@@ -86,6 +100,11 @@ export default function DelegateTimeline({ delegateId }) {
           </div>
         );
       })}
+      {remaining > 0 && (
+        <button className="btn btn-ghost" style={{ alignSelf: "flex-start", fontSize: 12.5 }} onClick={() => setExpanded(true)}>
+          {t("Show")} {remaining} {t("more")}
+        </button>
+      )}
     </div>
   );
 }

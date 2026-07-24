@@ -23,6 +23,48 @@ simplified). Where something changed, it's called out.
 
 ---
 
+## ⚠️ CRITICAL — known gap: no offline support (2026-07-25)
+
+**Read this before doing any more work on attendance/check-in features.**
+Client feedback: staff need to be able to take attendance even with **no
+internet signal** (common on-site) — this is NOT built yet. Do not assume the
+app works offline anywhere; it currently doesn't.
+
+**What's actually true today:**
+1. **Login/auth is *mostly* fine already.** A JWT is self-verifying — the
+   existing session-check (`useSessionGuard.js`) already tolerates an
+   unreachable server (only forces logout on an explicit 401, not on a
+   network failure). So the realistic constraint is "online once per shift"
+   (log in before losing signal), not continuous connectivity. No urgent
+   work needed here.
+2. **QR / face scan are EXPECTED to fail offline, by design.** Both need
+   server-side data (the real delegate record, the reference photo) to mean
+   anything — there's no honest way to verify someone offline. The fix
+   needed is just a clear "No connection — use manual check-in" message, not
+   a real offline scan capability.
+3. **Manual check-in is the actual gap — not yet built.** Needs an offline
+   queue ("outbox") + optimistic UI: a failed write gets queued locally (the
+   *intended action* — delegate, new status, timestamp, who — not just
+   cached data) and replayed against the backend once connectivity returns
+   (`online` event + periodic retry), with a "N changes waiting to sync"
+   indicator. Plain `localStorage` of data alone does NOT solve this — the
+   problem is queuing a WRITE, not caching a read.
+4. **A service worker (PWA asset caching) is a separate, also-needed piece**
+   — without it, a fully offline phone may fail to load the app at all, not
+   just fail API calls.
+
+**Recommendation:** three independently-buildable pieces — (a) tolerate-
+offline session handling (mostly already true, low effort), (b) offline
+queue for manual check-in writes (the piece that actually addresses the
+client's stated concern), (c) service worker for the app shell (supporting
+piece, makes (b) usable when the page itself can't load).
+
+**Status: advised only, nothing built yet as of this entry.** If you're an
+AI assistant reading this before starting attendance/offline-related work,
+surface this section to the user first rather than assuming it's handled.
+
+---
+
 ## Quick start (all features)
 
 ```bash

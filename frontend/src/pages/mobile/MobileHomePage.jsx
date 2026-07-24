@@ -69,7 +69,8 @@ export default function MobileHomePage() {
 
   useEffect(() => {
     getCriticalOpenCount().then(setOpenIssueCount).catch(() => {});
-    const id = setInterval(() => { getCriticalOpenCount().then(setOpenIssueCount).catch(() => {}); }, 2000);
+    // Was 2s, slowed to 8s (2026-07-24, Neon egress reduction).
+    const id = setInterval(() => { getCriticalOpenCount().then(setOpenIssueCount).catch(() => {}); }, 8000);
     return () => clearInterval(id);
   }, []);
 
@@ -79,9 +80,10 @@ export default function MobileHomePage() {
 
   useEffect(() => {
     load();
-    // 2s auto-refresh so a change made by another signed-in staff member
-    // shows up here without needing to tap the manual Refresh button.
-    const id = setInterval(load, 2000);
+    // Auto-refresh so a change made by another signed-in staff member shows
+    // up here without needing to tap the manual Refresh button. Was 2s,
+    // slowed to 8s (2026-07-24, Neon egress reduction).
+    const id = setInterval(load, 8000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tripId]);

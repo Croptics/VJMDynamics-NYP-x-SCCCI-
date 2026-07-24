@@ -1,7 +1,12 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — Excel export dialog
+ * ============================================================================= */
 import { useEffect, useState, useRef } from "react";
 import { X, Download, Sparkles, Loader2 } from "lucide-react";
 import { apiGet, apiPost, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { useElapsedSeconds } from "../lib/useElapsedSeconds.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const UNASSIGNED_KEY = "__unassigned";
@@ -34,6 +39,8 @@ export default function ExportModal({ tripId, onClose }) {
 
   const [prompt, setPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiStartedAt, setAiStartedAt] = useState(null);
+  const aiElapsed = useElapsedSeconds(aiBusy, aiStartedAt);
   const [aiNote, setAiNote] = useState(null);     // { tone: "ok"|"err", text }
 
   const [busy, setBusy] = useState(false);
@@ -62,6 +69,7 @@ export default function ExportModal({ tripId, onClose }) {
     const q = prompt.trim();
     if (!q) return;
     setAiBusy(true);
+    setAiStartedAt(Date.now());
     setAiNote(null);
     try {
       const { filter } = await apiPost(`/trips/${tripId}/export/ai-filter`, { prompt: q });
@@ -173,9 +181,25 @@ export default function ExportModal({ tripId, onClose }) {
                 style={{ flex: 1 }}
               />
               <button className="btn btn-dark" onClick={applyAi} disabled={aiBusy || !prompt.trim()} style={{ flexShrink: 0 }}>
-                {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} {t("Apply")}
+                {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} {aiBusy ? `${t("Apply")} ${aiElapsed}s` : t("Apply")}
               </button>
             </div>
+            {/* "What you can ask" guidance while idle, elapsed-time readout
+                while busy — never both (2026-07-24, same treatment as the
+                Analytics chart-assist box). This only ever produces a
+                status/coach/VIP filter — it can't filter by company,
+                industry, or any date/time — so that's spelled out up front
+                rather than letting a request for something it can't do
+                silently produce a wrong or empty filter. */}
+            {aiBusy ? (
+              <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                {t("usually 5–20s, longer if using local AI")}
+              </div>
+            ) : (
+              <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+                {t("Can filter by: status, coach, or VIP. Can't filter by company, industry, or date.")}
+              </div>
+            )}
             {aiNote && (
               <div style={{ fontSize: 12, marginTop: 8, color: aiNote.tone === "ok" ? "var(--st-present)" : "var(--st-unassigned)" }}>
                 {aiNote.text}

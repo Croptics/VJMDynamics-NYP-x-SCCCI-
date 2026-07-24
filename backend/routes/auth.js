@@ -15,9 +15,11 @@
  * signed JWT (see ../auth.js) — set JWT_SECRET in backend/.env for production.
  */
 import { Router } from "express";
+import multer from "multer";
 import { wrap } from "../lib/wrap.js";
 import { rateLimit } from "../lib/rateLimit.js";
 import { makeToken, accountFromReq, requireAuth, signKioskToken } from "../lib/auth.js";
+import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../lib/cloudinary.js";
 import {
   getAccountByUsername,
   verifyPassword,
@@ -27,6 +29,10 @@ import {
   resetPassword,
   touchLastSeen,
   clearLastSeen,
+  registerAccount,
+  updateOwnAccount,
+  setAccountPhoto,
+  clearAccountPhoto,
 } from "../data.js";
 
 const router = Router();
@@ -49,6 +55,17 @@ router.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
   if (!acc || !(await verifyPassword(password, acc.password))) {
     return res.status(401).json({ error: "INVALID_CREDENTIALS", message: "Incorrect Staff ID or password." });
   }
+  // Self-registered accounts (2026-07-24) can't log in until an admin
+  // approves them on Account control — checked AFTER the password verifies
+  // (not before) so a wrong-password guess against a pending account still
+  // just looks like "incorrect credentials", not a hint that the account
+  // exists and is mid-review.
+  if (acc.status === "pending") {
+    return res.status(403).json({ error: "ACCOUNT_PENDING", message: "Your account is awaiting admin approval." });
+  }
+  if (acc.status === "rejected") {
+    return res.status(403).json({ error: "ACCOUNT_REJECTED", message: "Your registration was not approved. Contact an admin." });
+  }
   await upgradePasswordIfNeeded(acc, password);
   authLimiter.clear(req); // successful login — reset this IP's attempt counter
 
@@ -62,6 +79,33 @@ router.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
     username: acc.username,
     permissions: accountPermissions(acc),
   });
+}));
+
+/**
+ * POST /api/auth/register — public self-service sign-up (2026-07-24). Email
+ * + username + password, all required (see registerAccount() in
+ * db/accounts.js for the exact validation). Always creates a "staff" account
+ * in "pending" status — it exists in the DB but CANNOT sign in (see the
+ * status check on /api/auth/login above) until an admin approves it on
+ * Account control. Rate-limited with the same authLimiter as login/reset —
+ * a public, unauthenticated endpoint that writes to the accounts table is
+ * exactly the kind of thing worth throttling.
+ */
+router.post("/api/auth/register", authLimiter, wrap(async (req, res) => {
+  const { email, username, password } = req.body || {};
+  if (!email || !username || !password) {
+    return res.status(400).json({ error: "MISSING_FIELDS", message: "Email, username, and password are all required." });
+  }
+  const result = await registerAccount({ email, username, password });
+  if (result.error) {
+    const status = result.error === "USERNAME_TAKEN" || result.error === "EMAIL_TAKEN" ? 409 : 400;
+    return res.status(status).json({
+      error: result.error,
+      message: result.message || "Couldn't create that account. Check your details and try again.",
+    });
+  }
+  authLimiter.clear(req);
+  res.status(201).json({ ok: true, message: "Account created — awaiting admin approval before you can sign in." });
 }));
 
 // "Forgot password" self-service reset. Public (no token — you don't have a
@@ -100,6 +144,8 @@ router.get("/api/auth/session", wrap(async (req, res) => {
   res.json({
     username: acc.username,
     name: acc.name,
+    email: acc.email || null,
+    photoUrl: acc.photoUrl || null,
     role: acc.role,
     permissions: accountPermissions(acc),
   });
@@ -116,6 +162,78 @@ router.post("/api/auth/logout", requireAuth(), wrap(async (req, res) => {
   const acc = await accountFromReq(req);
   if (acc) await clearLastSeen(acc.id);
   res.json({ ok: true });
+}));
+
+/**
+ * PATCH /api/auth/me — self-service "edit my profile" (2026-07-24, Settings
+ * page). ANY signed-in account can call this on their OWN id — no
+ * manageAccounts permission needed, unlike the admin-only PATCH
+ * /api/accounts/:id. Can change name/username/email/password; can NEVER
+ * touch role or permissions (see updateOwnAccount() in db/accounts.js,
+ * which doesn't even accept those fields). Changing the password requires
+ * `currentPassword` to verify identity first.
+ *
+ * Always hands back a fresh token — editing your own username invalidates
+ * the OLD token's embedded username lookup, so the frontend must swap to
+ * this new one immediately rather than getting silently logged out.
+ */
+router.patch("/api/auth/me", requireAuth(), wrap(async (req, res) => {
+  const result = await updateOwnAccount(req.account.id, req.body || {});
+  if (result.error) {
+    const status = result.error === "USERNAME_TAKEN" || result.error === "EMAIL_TAKEN" ? 409
+      : result.error === "CURRENT_PASSWORD_INCORRECT" ? 401
+      : 400;
+    const message = result.message
+      || (result.error === "CURRENT_PASSWORD_INCORRECT" ? "Your current password is incorrect." : undefined)
+      || "Couldn't save your profile. Check your details and try again.";
+    return res.status(status).json({ error: result.error, message });
+  }
+  res.json({
+    account: result.account,
+    token: makeToken(result.account.username, req.account.token_version ?? 0),
+  });
+}));
+
+// Profile photo uploads — memory storage (never touches local disk), same
+// 5MB/image-only guard as the delegate photo route in routes/delegates.js.
+const profilePhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) return cb(new Error("UNSUPPORTED_TYPE"));
+    cb(null, true);
+  },
+});
+
+router.post("/api/auth/me/photo", requireAuth(), (req, res, next) => {
+  profilePhotoUpload.single("photo")(req, res, (err) => {
+    if (err) {
+      const code = err.message === "UNSUPPORTED_TYPE" ? "UNSUPPORTED_TYPE" : "UPLOAD_FAILED";
+      const message = code === "UNSUPPORTED_TYPE" ? "Please upload an image file." : "Upload too large (5MB max) or failed.";
+      return res.status(400).json({ error: code, message });
+    }
+    next();
+  });
+}, wrap(async (req, res) => {
+  if (!photoStorageConfigured()) {
+    return res.status(503).json({ error: "PHOTO_STORAGE_NOT_CONFIGURED", message: "Photo storage isn't set up on this server yet." });
+  }
+  if (!req.file) return res.status(400).json({ error: "FILE_REQUIRED", message: "Please choose an image." });
+
+  // A SEPARATE Cloudinary folder from delegate photos (see the schema.js
+  // comment on this column) — never touched by the delegates-only media
+  // manager's "purge all" action.
+  const { url, publicId } = await uploadImage(req.file.buffer, "mustergo/accounts");
+  const oldPublicId = await setAccountPhoto(req.account.id, url, publicId);
+  if (oldPublicId) await destroyImage(oldPublicId); // replacing a photo — clean up the old asset
+
+  res.json({ photoUrl: url });
+}));
+
+router.delete("/api/auth/me/photo", requireAuth(), wrap(async (req, res) => {
+  const oldPublicId = await clearAccountPhoto(req.account.id);
+  if (oldPublicId) await destroyImage(oldPublicId);
+  res.json({ deleted: true });
 }));
 
 /**

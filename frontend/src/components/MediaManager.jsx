@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — Image storage admin (Settings)
+ * ============================================================================= */
 import { useEffect, useState, useRef } from "react";
 import { Image as ImageIcon, RefreshCw, Trash2, AlertTriangle, Loader2, CheckSquare, Square } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";

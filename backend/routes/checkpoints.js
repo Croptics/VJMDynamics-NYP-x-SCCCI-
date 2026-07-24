@@ -147,11 +147,16 @@ export async function syncCurrentCheckpointStatus(delegateId, tripUuid, status, 
 /**
  * Auto-transition: within trips."checkpointResetMinutes" (default 5,
  * per-trip, adjustable via PATCH /api/trips/:id/checkpoint-reset-window)
- * before each NON-FIRST checkpoint of the day starts, any delegate still
- * globally ARRIVED gets reset back to ASSIGNED —
- * so staff can freshly scan them in again for the upcoming stop, and the
- * Dashboard's Arrived/Missing counts reflect "checked in for what's
- * happening now," not a stale arrival from an earlier stop hours ago.
+ * before ANY checkpoint starts — including the very first stop of the day
+ * (2026-07-25, simplified: "whatever event upcoming, when I set the time to
+ * 5 min, it should change the status of late/arrived back to assigned" —
+ * dropped the earlier "skip the first stop" special case, since a staff
+ * member can just as easily fat-finger a delegate to ARRIVED/LATE before the
+ * day's very first checkpoint too) — any delegate still globally
+ * ARRIVED/LATE/PRESENT gets reset back to ASSIGNED, so staff can freshly
+ * scan them in again for the upcoming stop, and the Dashboard's
+ * Arrived/Missing counts reflect "checked in for what's happening now," not
+ * a stale/mistaken status from earlier.
  *
  * Per-checkpoint tracking (checkpoint_checkins) already keeps each stop's
  * OWN independent record — this only touches the GLOBAL delegates.status
@@ -163,6 +168,11 @@ export async function syncCurrentCheckpointStatus(delegateId, tripUuid, status, 
  * in at the UPCOMING checkpoint specifically (they arrived early) is never
  * reset — only delegates with no check-in yet for that stop are, so an
  * early arrival can't get bounced back to ASSIGNED on the next minute's run.
+ *
+ * Matches the legacy 'PRESENT' literal too (pre-5-status migration — see
+ * normalize() in db/delegates.js and isBoarded() in db/dashboard.js, which
+ * already treat it as an ARRIVED alias everywhere else) so old rows that
+ * still carry that exact value aren't silently skipped by this reset.
  */
 export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -176,33 +186,21 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
     ORDER BY i.trip_id, i.day_number, i.sort_order, i.start_time
   `);
 
-  // Group by (trip, day) so "is this the first stop of the day" can be
-  // determined — the very first stop has nothing before it to reset FROM.
-  const byTripDay = new Map();
-  for (const item of items) {
-    const key = `${item.tripId}::${item.dayNumber}`;
-    if (!byTripDay.has(key)) byTripDay.set(key, []);
-    byTripDay.get(key).push(item);
-  }
-
   let updated = 0;
-  for (const dayItems of byTripDay.values()) {
-    for (let i = 1; i < dayItems.length; i++) { // start at 1 — skip the first stop of the day
-      const item = dayItems[i];
-      const [h, m] = item.scheduledTime.split(":").map(Number);
-      const minutesUntil = h * 60 + m - nowMinutes;
-      if (minutesUntil < 0 || minutesUntil > item.resetWindowMinutes) continue; // not in the pre-window
+  for (const item of items) {
+    const [h, m] = item.scheduledTime.split(":").map(Number);
+    const minutesUntil = h * 60 + m - nowMinutes;
+    if (minutesUntil < 0 || minutesUntil > item.resetWindowMinutes) continue; // not in the pre-window
 
-      const candidates = await all(
-        `SELECT id FROM delegates
-         WHERE trip_id = $1 AND "coachId" IS NOT NULL AND status = 'ARRIVED'
-           AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
-        [item.tripId, item.id]
-      );
-      for (const d of candidates) {
-        const result = await updateDelegate(d.id, { status: "ASSIGNED" }, "System");
-        if (result) updated++;
-      }
+    const candidates = await all(
+      `SELECT id FROM delegates
+       WHERE trip_id = $1 AND "coachId" IS NOT NULL AND status IN ('ARRIVED', 'LATE', 'PRESENT')
+         AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
+      [item.tripId, item.id]
+    );
+    for (const d of candidates) {
+      const result = await updateDelegate(d.id, { status: "ASSIGNED" }, "System");
+      if (result) updated++;
     }
   }
   return { updated };
@@ -239,7 +237,7 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
     const itemMinutes = h * 60 + m;
     if (nowMinutes - itemMinutes <= CHECKPOINT_GRACE_MINUTES) continue; // still current or upcoming
 
-    const delegates = await all(`SELECT id FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
+    const delegates = await all(`SELECT id, status FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
     for (const d of delegates) {
       const inserted = await get(
         `INSERT INTO checkpoint_checkins (itinerary_item_id, delegate_id, status, method, scanned_by)
@@ -249,10 +247,82 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
         [item.id, d.id]
       );
       if (inserted) updated++;
+      // BUG FIX (2026-07-24): this used to only write the per-checkpoint
+      // check-in row above — it never touched the delegate's own GLOBAL
+      // status, which is what the Dashboard/All-delegates table/KPIs
+      // actually read. A delegate could be genuinely past a stop's cutoff
+      // with no scan and still show "Assigned" everywhere except the
+      // checkpoint-detail views. Only promotes ASSIGNED -> LATE (never
+      // clobbers ARRIVED/MISSING/UNASSIGNED/an-already-LATE delegate) — same
+      // "only touch what this transition actually means" rule
+      // resetArrivedBeforeNextCheckpoint() above already follows. Goes
+      // through updateDelegate() so it's a real, rollback-eligible History
+      // Log entry, same as every other auto-transition here.
+      //
+      // Gated on `inserted` (2026-07-25 — re-added after finding a live
+      // conflict): this loop re-examines EVERY already-passed stop of the
+      // day, every single tick, forever. Without the `inserted` gate, a
+      // delegate legitimately reset back to ASSIGNED by
+      // resetArrivedBeforeNextCheckpoint() (so they can be freshly scanned
+      // for the NEXT stop) got immediately bounced straight back to LATE on
+      // the very next tick — judged all over again against an OLD stop that
+      // already has its checkin row, defeating the whole reset-for-rescan
+      // feature the moment more than one stop in the day has elapsed.
+      // Gating on `inserted` means a stop's late-cutoff only ever fires
+      // ONCE per delegate (when its checkin row is first created) — exactly
+      // the "never touched again" safety rail the ON CONFLICT DO NOTHING
+      // comment above already promises, instead of re-litigating a
+      // long-past, already-resolved stop on every tick.
+      if (inserted && d.status === "ASSIGNED") {
+        await updateDelegate(d.id, { status: "LATE" }, "System").catch((err) =>
+          console.error("  Checkpoint late-cutoff status sync failed:", err.message || err)
+        );
+      }
     }
   }
   return { checked: items.length, updated };
 }
+
+/**
+ * GET /api/trips/:id/checkpoint-stats (2026-07-24) — arrived/missing/late
+ * counts for EVERY scheduled itinerary stop on this trip, in one query —
+ * powers the Analytics tab's per-itinerary attendance chart (replaced the
+ * old "delegates onboarded over time" line chart, which only ever showed
+ * upload volume, not attendance). One row per stop, in schedule order;
+ * cancelled stops excluded (nothing to scan there). Counts come from
+ * checkpoint_checkins, the same per-stop records the scanner pages and
+ * applyCheckpointLateCutoff() above already read/write — this endpoint adds
+ * no new tracking, just aggregates what's already there.
+ */
+router.get("/api/trips/:id/checkpoint-stats", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  if (!tripUuid) return res.status(404).json({ error: "TRIP_NOT_FOUND" });
+
+  const rows = await all(
+    `SELECT i.id, i.title AS label, i.day_number AS "dayNumber",
+            TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime",
+            COUNT(cc.id) FILTER (WHERE cc.status = 'ARRIVED') AS arrived,
+            COUNT(cc.id) FILTER (WHERE cc.status = 'MISSING') AS missing,
+            COUNT(cc.id) FILTER (WHERE cc.status = 'LATE') AS late
+     FROM itinerary_items i
+     LEFT JOIN checkpoint_checkins cc ON cc.itinerary_item_id = i.id
+     WHERE i.trip_id = $1 AND COALESCE(i.status, 'scheduled') <> 'cancelled'
+     GROUP BY i.id, i.title, i.day_number, i.start_time
+     ORDER BY i.day_number, i.start_time`,
+    [tripUuid]
+  );
+  res.json({
+    stops: rows.map((r) => ({
+      id: r.id,
+      label: r.label,
+      dayNumber: r.dayNumber,
+      scheduledTime: r.scheduledTime,
+      arrived: Number(r.arrived),
+      missing: Number(r.missing),
+      late: Number(r.late),
+    })),
+  });
+}));
 
 /**
  * GET /api/trips/:id/checkpoints — every scheduled itinerary stop for this

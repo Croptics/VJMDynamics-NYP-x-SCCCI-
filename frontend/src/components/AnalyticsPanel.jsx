@@ -1,13 +1,18 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — Dashboard Analytics (charts + AI)
+ * ============================================================================= */
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2 } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  AreaChart, Area, LineChart, Line,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList,
+  LineChart, Line,
 } from "recharts";
-import { getUser, apiPost } from "../lib/api.js";
+import { getUser, apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { subscribe as subscribeInsights, getSnapshot as getInsightsSnapshot, generateInsights as runGenerateInsights } from "../lib/insightsStore.js";
+import { useElapsedSeconds } from "../lib/useElapsedSeconds.js";
 
 /**
  * Analytics panel — the "Analytics" tab inside the Dashboard page.
@@ -34,6 +39,7 @@ const S = {
 const COLORS = {
   present: "#16a34a",
   missing: "#e1232a",
+  late: "#f97316",
   unassigned: "#d97706",
   vip: "#e1232a",
   nonVip: "#6b7280",
@@ -48,7 +54,8 @@ const WIDGETS = [
   { key: "breakdown", label: "Attendance breakdown" },
   { key: "coachLoad", label: "Coach load" },
   { key: "vipMissing", label: "VIP vs. non-VIP missing" },
-  { key: "onboardingTrend", label: "Delegates onboarded over time" },
+  { key: "checkpointBreakdown", label: "Attendance by itinerary stop" },
+  { key: "boardingByDay", label: "Boarding over the trip" },
 ];
 
 /** Split the AI-generated insights text into individual points, stripping
@@ -101,8 +108,9 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
   // Dashboard tabs (which unmounts this panel) or navigating away entirely
   // (user report: it used to silently reset because the request's result
   // had nowhere left to land once this component was gone).
-  const { loading: insightsLoading, insights, asOf: insightsAsOf, source: insightsSource, error: insightsError } =
+  const { loading: insightsLoading, insights, asOf: insightsAsOf, source: insightsSource, error: insightsError, startedAt: insightsStartedAt } =
     useSyncExternalStore(subscribeInsights, () => getInsightsSnapshot(tripId));
+  const insightsElapsed = useElapsedSeconds(insightsLoading, insightsStartedAt);
 
   function generateInsights() {
     runGenerateInsights(tripId, lang);
@@ -128,6 +136,8 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
   const [chartPrompt, setChartPrompt] = useState("");
   const [chartAiBusy, setChartAiBusy] = useState(false);
   const [chartAiError, setChartAiError] = useState(null);
+  const [chartAiStartedAt, setChartAiStartedAt] = useState(null);
+  const chartAiElapsed = useElapsedSeconds(chartAiBusy, chartAiStartedAt);
 
   const coachNameById = useMemo(() => {
     const m = new Map();
@@ -159,7 +169,7 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
   async function askAiForChart() {
     const prompt = chartPrompt.trim();
     if (!prompt) return;
-    setChartAiBusy(true); setChartAiError(null);
+    setChartAiBusy(true); setChartAiError(null); setChartAiStartedAt(Date.now());
     try {
       const res = await apiPost(`/trips/${tripId}/analytics/ai-chart`, { prompt });
       setCustomChartType(res.chartType);
@@ -228,31 +238,59 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
     ];
   }, [missing, coachFilter, t]);
 
-  // Cumulative headcount over time, from each delegate's real createdAt
-  // (upload timestamp) — no separate tracking needed, this is the same
-  // column that already drives the "Uploaded" column on "All delegates".
-  // Bucketed by day; a day with zero uploads carries the running total
-  // forward flat rather than dropping to zero, so the line reads as "team
-  // size over time" rather than "uploads per day".
-  const onboardingTrend = useMemo(() => {
-    const withDates = delegates
-      .filter((d) => d.createdAt)
-      .map((d) => new Date(d.createdAt))
-      .filter((d) => !isNaN(d))
-      .sort((a, b) => a - b);
-    if (withDates.length === 0) return [];
-    const dayKey = (d) => d.toLocaleDateString([], { day: "2-digit", month: "short" });
-    const counts = new Map();
-    withDates.forEach((d) => {
-      const k = dayKey(d);
-      counts.set(k, (counts.get(k) || 0) + 1);
-    });
-    let running = 0;
-    return [...counts.entries()].map(([date, added]) => {
-      running += added;
-      return { date, total: running };
-    });
-  }, [delegates]);
+  // Missing/Late/Arrived per itinerary stop (2026-07-24) — replaced the old
+  // "delegates onboarded over time" line chart, which only ever showed
+  // upload volume, not attendance. Fetched separately from the trip-wide
+  // `data`/`missing`/`delegates` props this panel otherwise just reads,
+  // since per-checkpoint counts aren't part of that payload — refetches
+  // whenever the trip changes or the parent's shared poll ticks (`data`
+  // changing is that tick), so this stays roughly as live as the rest of
+  // the Dashboard without running its own separate interval.
+  const [checkpointStats, setCheckpointStats] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    apiGet(`/trips/${tripId}/checkpoint-stats`)
+      .then((r) => { if (alive) setCheckpointStats(r.stops || []); })
+      .catch(() => { if (alive) setCheckpointStats([]); });
+    return () => { alive = false; };
+  }, [tripId, data]);
+
+  const checkpointChartData = useMemo(() => (
+    checkpointStats.map((s) => ({
+      // Short tick label (just the time) so the x-axis doesn't collide with
+      // the legend below it (2026-07-24 — "abit messy"); the full stop name
+      // still shows in the tooltip via stopLabel below.
+      time: s.scheduledTime,
+      stopLabel: `${s.scheduledTime} ${s.label}`.trim(),
+      [t("Arrived")]: s.arrived,
+      [t("Late")]: s.late,
+      [t("Missing")]: s.missing,
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [checkpointStats, lang]);
+
+  // "Boarding over the trip" (2026-07-25) — one bar per DAY instead of per
+  // stop: how much of the whole roster has boarded by the day's LAST stop
+  // (checkpointStats is already ordered day/time ascending from the backend,
+  // so keeping the last entry per day naturally picks the latest stop that
+  // day) vs. everyone else who hasn't yet — a simpler at-a-glance rollup
+  // than the full per-stop breakdown above. Bar height is the constant
+  // total roster size, split onboard/not — not the stop's own
+  // arrived+late+missing sum, since a delegate with no check-in record yet
+  // for that stop (still just ASSIGNED) wouldn't be counted by any of those
+  // three, which would make the bar shorter than the real roster.
+  const boardingByDayData = useMemo(() => {
+    const lastPerDay = new Map();
+    for (const s of checkpointStats) lastPerDay.set(s.dayNumber, s);
+    const total = delegates.length;
+    return [...lastPerDay.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([day, s]) => ({
+        day: `D${day}`,
+        onboard: s.arrived,
+        missing: Math.max(total - s.arrived, 0),
+      }));
+  }, [checkpointStats, delegates]);
 
   return (
     <div>
@@ -303,7 +341,7 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
             </div>
           </div>
           <button className="btn btn-primary" onClick={generateInsights} disabled={insightsLoading}>
-            <Sparkles size={16} /> {insightsLoading ? t("Generating…") : t("Generate Insights")}
+            <Sparkles size={16} /> {insightsLoading ? `${t("Generating…")} ${insightsElapsed}s` : t("Generate Insights")}
           </button>
         </div>
 
@@ -318,6 +356,16 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
 
         {insightsLoading && (
           <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+            {/* Live elapsed-time readout (2026-07-24 — "there no time
+                tracker when i click ai generate stuff") — local Ollama can
+                genuinely take 10-30s+ depending on the machine, so a plain
+                spinner with no feedback read as hung/broken. */}
+            <div className="row" style={{ gap: 8, marginBottom: 10, fontSize: 12.5 }}>
+              <span className="spin" style={{ display: "inline-flex" }}><Sparkles size={13} /></span>
+              <span className="muted">
+                {t("Thinking…")} {insightsElapsed}s — {t("usually 5–20s, longer if using local AI")}
+              </span>
+            </div>
             {[0, 1, 2].map((i) => (
               <div key={i} className="skeleton-line" style={{
                 height: 14, borderRadius: 4, marginBottom: i < 2 ? 10 : 0,
@@ -384,9 +432,27 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
             onKeyDown={(e) => e.key === "Enter" && askAiForChart()}
           />
           <button className="btn btn-ghost" onClick={askAiForChart} disabled={chartAiBusy || !chartPrompt.trim()}>
-            <Wand2 size={15} /> {chartAiBusy ? t("Thinking…") : t("Ask AI")}
+            <Wand2 size={15} /> {chartAiBusy ? `${t("Thinking…")} ${chartAiElapsed}s` : t("Ask AI")}
           </button>
         </div>
+        {/* "What you can ask" guidance while idle, the elapsed-time hint
+            while busy — never both at once (2026-07-24 — "add validation to
+            certain thing i can say and can't and make it so user can
+            understand what they can ask"). This box can't reliably reject
+            an out-of-scope request client-side (it's natural language, and
+            the model itself decides), so the fix is setting expectations
+            up front instead: the only things a chart can ever group by are
+            these 5 fixed fields, spelled out here, and NOT a date/time
+            trend since there's no time dimension in the data at all. */}
+        {chartAiBusy ? (
+          <div className="muted" style={{ fontSize: 12, marginTop: -8, marginBottom: 14 }}>
+            {t("usually 5–20s, longer if using local AI")}
+          </div>
+        ) : (
+          <div className="muted" style={{ fontSize: 11.5, marginTop: -8, marginBottom: 14 }}>
+            {t("Can group by: status, coach, company, industry, or VIP. Can't chart trends over time or dates — there's no time dimension to group by.")}
+          </div>
+        )}
         {chartAiError && (
           <div style={{
             marginBottom: 14, padding: "10px 12px", borderRadius: "var(--r-sm)",
@@ -567,26 +633,45 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
             </div>
           )}
 
-          {visible.onboardingTrend && (
+          {visible.checkpointBreakdown && (
             <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Delegates onboarded over time")}</h2>
-              {onboardingTrend.length === 0 ? (
-                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No upload history yet.")}</div>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Attendance by itinerary stop")}</h2>
+              {checkpointChartData.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
               ) : (
-                <ResponsiveContainer width="100%" height={240}>
-                  <AreaChart data={onboardingTrend}>
-                    <defs>
-                      <linearGradient id="mgTrendFill" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--scc-red)" stopOpacity={0.28} />
-                        <stop offset="100%" stopColor="var(--scc-red)" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={checkpointChartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }} barCategoryGap="20%">
                     <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="date" fontSize={12} />
-                    <YAxis fontSize={12} allowDecimals={false} />
-                    <Tooltip formatter={(v) => [v, t("Total delegates")]} />
-                    <Area type="monotone" dataKey="total" stroke="var(--scc-red)" strokeWidth={2} fill="url(#mgTrendFill)" name={t("Total delegates")} />
-                  </AreaChart>
+                    <XAxis dataKey="time" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis fontSize={12} allowDecimals={false} width={28} />
+                    <Tooltip labelFormatter={(_, p) => p?.[0]?.payload?.stopLabel || ""} />
+                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
+                    <Bar dataKey={t("Arrived")} fill={COLORS.present} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey={t("Late")} fill={COLORS.late} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey={t("Missing")} fill={COLORS.missing} radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+
+          {visible.boardingByDay && (
+            <div className="card" style={{ padding: 20 }}>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Boarding over the trip")}</h2>
+              {boardingByDayData.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={boardingByDayData} margin={{ top: 20, right: 8, left: 0, bottom: 4 }} barCategoryGap="30%">
+                    <XAxis dataKey="day" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis hide allowDecimals={false} />
+                    <Tooltip />
+                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
+                    <Bar dataKey="onboard" name={t("Onboard")} stackId="board" fill={COLORS.present} radius={[0, 0, 0, 0]}>
+                      <LabelList dataKey="onboard" position="top" style={{ fontWeight: 700, fontSize: 13 }} />
+                    </Bar>
+                    <Bar dataKey="missing" name={t("Missing")} stackId="board" fill={COLORS.missing} radius={[3, 3, 0, 0]} />
+                  </BarChart>
                 </ResponsiveContainer>
               )}
             </div>

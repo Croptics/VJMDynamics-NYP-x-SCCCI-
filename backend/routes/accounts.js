@@ -13,6 +13,7 @@ import { makeToken, requirePermission } from "../lib/auth.js";
 import {
   listAccounts, createAccount, updateAccount, deleteAccount, listActiveAccounts,
   listRoleTemplates, createRoleTemplate, updateRoleTemplate, deleteRoleTemplate,
+  listPendingAccounts, approveAccount, rejectAccount, approveAllPending, rejectAllPending,
 } from "../data.js";
 
 const router = Router();
@@ -63,6 +64,36 @@ router.delete("/api/accounts/:id", requirePermission("manageAccounts"), wrap(asy
   res.json(result);
 }));
 
+// Self-registration approval queue (2026-07-24) — "Pending approval" section
+// on Account control. Same manageAccounts gate as the rest of this file.
+router.get("/api/accounts/pending", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+  res.json({ accounts: await listPendingAccounts() });
+}));
+
+router.post("/api/accounts/:id/approve", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const result = await approveAccount(req.params.id);
+  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
+  res.json(result.account);
+}));
+
+router.post("/api/accounts/:id/reject", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const result = await rejectAccount(req.params.id);
+  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
+  res.json(result.account);
+}));
+
+// Bulk actions for the Pending approval card's "Approve all"/"Reject all"
+// buttons (2026-07-24) — registered ahead of nothing special since these are
+// static paths, not /:id, so there's no route-ordering conflict with the
+// two routes above.
+router.post("/api/accounts/pending/approve-all", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+  res.json(await approveAllPending());
+}));
+
+router.post("/api/accounts/pending/reject-all", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+  res.json(await rejectAllPending());
+}));
+
 // Role templates — "Manage roles" screen. Same manageAccounts gate as the
 // rest of Account control (creating/editing a role is itself an account-
 // administration action).
@@ -90,9 +121,9 @@ router.delete("/api/role-templates/:id", requirePermission("manageAccounts"), wr
 
 function accountErrStatus(code) {
   if (code === "NOT_FOUND") return 404;
-  if (code === "USERNAME_TAKEN") return 409;
+  if (code === "USERNAME_TAKEN" || code === "EMAIL_TAKEN") return 409;
   if (code === "LAST_MAIN") return 409;
-  return 400; // USERNAME_REQUIRED / PASSWORD_REQUIRED / WEAK_PASSWORD
+  return 400; // USERNAME_REQUIRED / PASSWORD_REQUIRED / WEAK_PASSWORD / EMAIL_REQUIRED
 }
 
 export default router;

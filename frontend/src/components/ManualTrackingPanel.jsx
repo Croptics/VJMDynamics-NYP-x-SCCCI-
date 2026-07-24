@@ -217,25 +217,28 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn, tr
                   {/* Undo — only next to a delegate THIS panel just marked
                       present (justMarked), for the accidental-click case;
                       delegates already ARRIVED from an earlier session/scan
-                      don't get one (nothing to "undo" here). */}
-                  {justMarked.has(d.delegateId) && (
+                      don't get one (nothing to "undo" here). Hidden entirely
+                      without canEdit (2026-07-24) — a disabled-but-visible
+                      action button read as broken rather than as "you don't
+                      have permission", same fix already applied on mobile. */}
+                  {canEdit && justMarked.has(d.delegateId) && (
                     <button
                       className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12 }}
-                      onClick={() => undoPresent(d)} disabled={!canEdit || busyId === d.delegateId}
+                      onClick={() => undoPresent(d)} disabled={busyId === d.delegateId}
                       title="Undo — revert to Assigned"
                     >
                       {busyId === d.delegateId ? "…" : (<><Undo2 size={13} /> Undo</>)}
                     </button>
                   )}
                 </div>
-              ) : (
+              ) : canEdit ? (
                 <button
                   className="btn btn-dark" style={{ padding: "7px 12px", fontSize: 12.5, flexShrink: 0 }}
-                  onClick={() => markPresent(d)} disabled={!canEdit || busyId === d.delegateId}
+                  onClick={() => markPresent(d)} disabled={busyId === d.delegateId}
                 >
                   {busyId === d.delegateId ? "…" : (<><UserCheck size={14} /> Mark present</>)}
                 </button>
-              )}
+              ) : null}
             </div>
           );
         })}
