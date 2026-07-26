@@ -21,6 +21,22 @@ a few things changed during the merge (auth was unified onto JQ's signed-JWT
 system, features were put behind permissions, and Desmond's database setup was
 simplified). Where something changed, it's called out.
 
+## For any AI reading this (any session, any chat)
+
+**Keep this file updated automatically whenever integration-relevant code
+changes — don't wait to be asked.** Update this file (not just
+`PROJECT_STRUCTURE.md`) whenever: a permission is added/removed/renamed in
+`permissions.js` (add it to the "Permissions" section below with what it
+gates and its default); ownership of a file/route shifts, or a new file is
+added that another teammate's branch might also touch; or a change reads or
+writes a column/table another teammate's feature owns (call this out
+explicitly, even read-only — that's exactly the kind of integration hazard
+this doc exists to flag before a merge goes wrong). Append new points under
+the existing "Permissions" section or the relevant numbered Feature section
+rather than creating new top-level structure, unless it's a genuinely new
+cross-cutting mechanism (like the coach-captain scoping layer) that doesn't
+belong to any one Feature section.
+
 ---
 
 ## ⚠️ CRITICAL — known gap: no offline support (2026-07-25)
@@ -193,6 +209,34 @@ writes.
 - **The chat assistant** was open to **any signed-in user** with no permission at
   all; now gated on **`viewChatbot`** (desktop) / **`viewMobileChatbot`** (mobile),
   both defaulting **on** for the same "don't silently revoke existing access" reason.
+
+**2026-07-27 — `manageAnnouncements` added, plus a NEW cross-cutting
+access-control layer (coach-captain Staff scoping):**
+
+- **`manageAnnouncements`** (action permission, defaults **off**) now gates
+  posting/editing/deleting on the new Trip Announcements page
+  (`routes/announcements.js`) — separate from `manageAccounts`, which
+  previously did this job as a stand-in. Viewing stays on the existing
+  `viewAnnouncements` (defaults **on**).
+- **Coach-captain-based Staff visibility** (`getVisibleCoachIds()` in
+  `db/dashboard.js`) is a NEW, separate mechanism from the permission-toggle
+  system above — worth flagging here because it silently changes what data
+  several shared read routes return, not just what a UI button does. Built on
+  Desmond's **existing** "Coach captain" field (`coaches.account_id`, added
+  for the Trips board's Switch-staff modal), which was previously just
+  stored/displayed with **no enforcement anywhere**. Now enforced: a Staff
+  account only sees delegates/KPIs/coach-status/history/export data for
+  coaches THEY personally captain; an uncaptained coach is hidden from Staff
+  entirely (not "open to everyone" — a coach with no captain assigned yet is
+  simply invisible to Staff until one is). Admin always bypasses, same as
+  every other check in this app. A Staff account that captains NO coach on a
+  given trip falls back to seeing everything unrestricted (so this doesn't
+  silently lock out every existing account the moment it ships).
+  **Touches shared files other teammates' branches may also touch**:
+  `routes/dashboard.js`, `routes/delegates.js`, `routes/history.js`,
+  `routes/export.js` (each now calls `getVisibleCoachIds(tripUuid, req.account)`
+  and filters its own result before returning) — reads `coaches.account_id`,
+  a column Desmond's `routes/desmond.js` owns/writes, but never mutates it.
 
 ---
 

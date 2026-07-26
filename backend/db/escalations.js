@@ -63,8 +63,15 @@ export async function listOpenEscalations() {
  *  once there are many (e.g. 50 delegates escalated) — nobody could go back
  *  and actually work through them. This is where they live until someone
  *  explicitly resolves them. Includes phone/lastLocation so the modal can
- *  show full delegate context without a second round-trip per row. */
-export async function listActiveEscalations() {
+ *  show full delegate context without a second round-trip per row.
+ *
+ *  `tripId` (optional, 2026-07-25 bugfix) — scopes the list to one trip's own
+ *  escalations. Without this, a staff member viewing Trip A's Dashboard saw
+ *  EVERY trip's active escalations mixed together (e.g. a delegate from a
+ *  completely different, unrelated trip showing up in "Emergency" here) —
+ *  the query never filtered by trip at all. Pass nothing to keep the old
+ *  "every trip" behaviour (used nowhere currently, kept for flexibility). */
+export async function listActiveEscalations(tripId) {
   return all(`
     SELECT e.id, e.trip_id AS "tripId", t.name AS "tripName", e.delegate_id AS "delegateId",
            d.name AS "delegateName", d.phone AS "delegatePhone", d."lastLocation" AS "delegateLocation",
@@ -74,8 +81,9 @@ export async function listActiveEscalations() {
     LEFT JOIN trips t ON t.uuid_id = e.trip_id
     LEFT JOIN delegates d ON d.id = e.delegate_id
     WHERE e.status IN ('open', 'acknowledged')
+      ${tripId ? "AND e.trip_id = $1" : ""}
     ORDER BY e.created_at DESC
-  `);
+  `, tripId ? [tripId] : []);
 }
 
 export async function acknowledgeEscalation(id, actor) {

@@ -39,7 +39,7 @@ import { wrap } from "../lib/wrap.js";
 import { actorOf } from "../lib/actor.js";
 import { requireAuth, requireKioskOrAuth, requireKioskOrPermission } from "../lib/auth.js";
 import { all, get, run } from "../db/connection.js";
-import { getTrip, resolveTripUuid } from "../db/dashboard.js";
+import { getTrip, resolveTripUuid, getVisibleCoachIds } from "../db/dashboard.js";
 import { updateDelegate } from "../db/delegates.js";
 
 const router = Router();
@@ -447,11 +447,18 @@ router.post("/api/checkpoints/:id/checkins", requireKioskOrPermission("manageDel
  * that reflect only the currently-active checkpoint, not the whole trip.
  */
 router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res) => {
-  const item = await get(`SELECT id FROM itinerary_items WHERE id = $1`, [req.params.id]);
+  const item = await get(`SELECT id, trip_id AS "tripId" FROM itinerary_items WHERE id = $1`, [req.params.id]);
   if (!item) return res.status(404).json({ error: "CHECKPOINT_NOT_FOUND" });
 
-  const checkins = await all(
-    `SELECT cc.id, cc.delegate_id AS "delegateId", d.name AS "delegateName", cc.status, cc.method,
+  // Coach-scoped Staff visibility (2026-07-27 security audit finding —
+  // this route returned every delegate at a checkpoint regardless of coach,
+  // bypassing the same restriction dashboard.js/delegates.js already
+  // enforce via getVisibleCoachIds()). See db/dashboard.js's doc for the
+  // full "captain your own coach" semantics.
+  const visibleCoachIds = await getVisibleCoachIds(item.tripId, req.account);
+
+  const rows = await all(
+    `SELECT cc.id, cc.delegate_id AS "delegateId", d.name AS "delegateName", d."coachId", cc.status, cc.method,
             cc.scanned_by AS "scannedBy", cc.created_at AS "createdAt", cc.updated_at AS "updatedAt"
      FROM checkpoint_checkins cc
      JOIN delegates d ON d.id = cc.delegate_id
@@ -459,6 +466,8 @@ router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res)
      ORDER BY cc.updated_at DESC`,
     [req.params.id]
   );
+  const scoped = visibleCoachIds ? rows.filter((c) => visibleCoachIds.has(c.coachId)) : rows;
+  const checkins = scoped.map(({ coachId, ...rest }) => rest); // internal-only, never was part of the public shape
   const stats = {
     arrived: checkins.filter((c) => c.status === "ARRIVED").length,
     missing: checkins.filter((c) => c.status === "MISSING").length,
@@ -474,8 +483,17 @@ router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res)
  * Powers the Delegate Timeline on both Desktop and Mobile.
  */
 router.get("/api/delegates/:id/checkpoint-timeline", requireAuth(), wrap(async (req, res) => {
-  const delegate = await get(`SELECT id, name FROM delegates WHERE id = $1`, [req.params.id]);
+  const delegate = await get(`SELECT id, name, trip_id AS "tripId", "coachId" FROM delegates WHERE id = $1`, [req.params.id]);
   if (!delegate) return res.status(404).json({ error: "DELEGATE_NOT_FOUND" });
+
+  // Coach-scoped Staff visibility (2026-07-27 security audit finding — this
+  // route returned ANY delegate's full checkpoint history given their id,
+  // with no ownership check at all, letting a coach-scoped Staff account
+  // enumerate/guess ids to pull another captain's delegate's timeline).
+  const visibleCoachIds = await getVisibleCoachIds(delegate.tripId, req.account);
+  if (visibleCoachIds && !visibleCoachIds.has(delegate.coachId)) {
+    return res.status(403).json({ error: "FORBIDDEN", message: "You can only view delegates on your own coach." });
+  }
 
   const timeline = await all(
     `SELECT cc.id, cc.status, cc.method, cc.scanned_by AS "scannedBy",

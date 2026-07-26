@@ -10,6 +10,7 @@ import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
 
 // Scaffolds — owned by teammates
 import DashboardPage from "./pages/desktop/DashboardPage.jsx";
+import AnnouncementsPage from "./pages/desktop/AnnouncementsPage.jsx";
 import TripCoachPage from "./pages/desktop/TripCoachPage.jsx";
 import UnifiedScannerPage from "./pages/desktop/UnifiedScannerPage.jsx";
 import ExceptionInboxPage from "./pages/desktop/ExceptionInboxPage.jsx";
@@ -53,6 +54,7 @@ function setUiMode(mode) {
 // (an account with literally every view unchecked still lands somewhere).
 const DESKTOP_FALLBACK_ORDER = [
   { path: "/dashboard", perm: "viewDashboard" },
+  { path: "/announcements", perm: "viewAnnouncements" },
   { path: "/trips", perm: "viewTrips" },
   { path: "/onboarding", perm: "viewDocuments" },
   { path: "/scanner", perm: "viewScanner" },
@@ -226,6 +228,8 @@ export default function App() {
         <Route path="/dashboard" element={<ViewGate perm="viewDashboard"><DashboardPage /></ViewGate>} />
 
         {/* Desmond — Trip Booking & Dynamic Coach Management (Screen 3) */}
+        <Route path="/announcements" element={<ViewGate perm="viewAnnouncements"><AnnouncementsPage /></ViewGate>} />
+
         <Route path="/trips" element={<ViewGate perm="viewTrips"><TripCoachPage /></ViewGate>} />
 
         {/* Vance — AI Document Parsing & Onboarding (Screen 4) — FULL.

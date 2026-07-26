@@ -9,6 +9,16 @@ crashes.
 All credentials go in **`backend/.env`** (or `frontend/.env` for the one
 frontend-side key) — never commit these files; both are already gitignored.
 
+## For any AI reading this (any session, any chat)
+
+**Keep this file updated automatically — don't wait to be asked.** Whenever a
+new external service gets integrated, an existing one's usage scope changes
+(new folder, new use case, new API surface — e.g. Cloudinary going from
+photos-only to also handling video across 3 folders), or a cost/setup step
+changes, update that service's section here. Keep the same per-service shape
+(What it's for / Cost / Setup / any "Managing X" subsection) so every service
+reads consistently, and update the summary table at the bottom to match.
+
 ---
 
 ## 1. Postgres database — required
@@ -32,14 +42,27 @@ storage, which is very roomy for a few thousand delegate rows).
 
 ---
 
-## 2. Cloudinary — delegate & account profile photos
+## 2. Cloudinary — photos, announcement media, and the User Guide video
 
-**What it's for:** stores every uploaded photo (delegate photos, staff
-profile pictures in Settings) as a hosted URL, rather than in the database.
+**What it's for:** stores every uploaded image/video (delegate photos, staff
+profile pictures in Settings, trip announcement photos/videos, and the User
+Guide's walkthrough video) as a hosted URL, rather than in the database.
+Originally photo-only — extended (2026-07-27) to also handle video uploads
+(`uploadVideo`/`destroyVideo` in `backend/lib/cloudinary.js`, same
+memory-storage multer pattern, just `resource_type: "video"`) once
+Announcements and the User Guide both needed video support.
+
+**Three separate folders**, each independently listable/deletable/purgeable
+from Settings — a purge in one folder can never touch another:
+- `mustergo/delegates` — delegate/staff profile photos (images only)
+- `mustergo/announcements` — trip announcement media (images **and** videos,
+  up to 6 images + 2 videos per announcement)
+- `mustergo/guide` — the single User Guide walkthrough video
 
 **Cost:** free tier — 25 monthly credits (~1GB storage / bandwidth /
-1,000 transformations, whichever is used first). Plenty for photo storage at
-this app's scale; only likely to matter if traffic/photo count grows a lot.
+1,000 transformations, whichever is used first). Video assets consume
+roughly 2x the credits of a similarly-sized image — still plenty at this
+app's scale, only likely to matter if traffic/media volume grows a lot.
 
 **Setup:**
 1. Sign up free at **cloudinary.com**.
@@ -51,12 +74,15 @@ this app's scale; only likely to matter if traffic/photo count grows a lot.
    CLOUDINARY_API_KEY=
    CLOUDINARY_API_SECRET=
    ```
-4. Without this set, photo uploads show a clear "photo storage isn't set up
-   yet" message instead of failing silently.
+4. Without this set, uploads show a clear "storage isn't set up yet" message
+   instead of failing silently.
 
-**Managing storage:** Settings → Image storage (admin-only) lists every photo
-this app has ever uploaded and can bulk-delete/purge, so storage never grows
-unbounded without anyone noticing.
+**Managing storage:** Settings → Image storage (admin-only) — three separate
+panels, one per folder above, each listing every asset actually in Cloudinary
+and letting an admin bulk-delete/purge it. Deleting from here also unlinks
+whatever in the app was pointing at that asset (a delegate's photoUrl, an
+announcement's images/videos array, the User Guide video row), so storage
+never grows unbounded and nothing keeps pointing at a deleted asset.
 
 ---
 
@@ -246,7 +272,7 @@ sender-approval process before use).
 | Service | Required? | Cost | Powers |
 |---|---|---|---|
 | Postgres (Neon) | **Required** | Free tier is enough | Everything — the database |
-| Cloudinary | Optional | Free tier (25 credits/mo) | Delegate/staff profile photos |
+| Cloudinary | Optional | Free tier (25 credits/mo) | Delegate/staff photos, announcement media (image+video), User Guide video |
 | Google Maps (Embed API) | Optional | Free | "Last known location" map |
 | AMap | N/A | Free, no key needed | Same map, China-focused alternative |
 | Ollama | Optional (recommended) | Free | AI Insights / chatbot / document parsing |

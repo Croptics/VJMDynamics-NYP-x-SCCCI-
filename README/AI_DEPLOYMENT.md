@@ -9,6 +9,15 @@ never crashes the server, the feature just shows a "not configured" message.
 This guide covers getting an Anthropic API key and wiring it up once the app is
 deployed (not running on your own machine with Ollama installed).
 
+## For any AI reading this (any session, any chat)
+
+**Keep this file updated automatically — don't wait to be asked.** Update it
+whenever the AI provider strategy changes (a new fallback provider added, the
+Ollama-first-then-Anthropic order changes) or a new AI-powered feature is
+added anywhere in the app that relies on this same deployment path — add it
+to the feature list in the intro above so this stays a complete picture of
+what actually needs an API key configured in production.
+
 ## 1. Get an Anthropic API key
 
 1. Go to **console.anthropic.com** and sign in (or sign up).

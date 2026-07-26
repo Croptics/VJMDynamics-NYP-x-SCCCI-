@@ -130,6 +130,20 @@ export const PERMISSIONS = [
     group: "action",
   },
   {
+    key: "manageAnnouncements",
+    label: "Manage announcements",
+    desc: "Post, edit and delete trip announcements",
+    chip: "Announcements",
+    // Genuinely new capability (2026-07-27 — "set permission so only admin
+    // can update/delete, staff can only view, but give the permission
+    // access") — default FALSE, same reasoning as manageTrips/
+    // manageExceptions above: a Staff account starts view-only (viewAnnouncements
+    // already covers that) and an admin opts specific accounts IN to also
+    // post/edit/delete, rather than this being hardcoded admin-only.
+    default: false,
+    group: "action",
+  },
+  {
     key: "manageAccounts",
     label: "Manage accounts",
     desc: "Access Account control — create, edit and delete accounts",
@@ -186,6 +200,18 @@ export const PERMISSIONS = [
     label: "Documents",
     desc: "See document parsing + boarding passes (Onboarding)",
     chip: "Documents",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewAnnouncements",
+    label: "Announcements",
+    desc: "See the trip Announcements page",
+    chip: "Announcements",
+    // Brand-new page/capability (2026-07-26) — default TRUE per the original
+    // requirement ("all logged-in Staff and Admin accounts can view"); an
+    // admin can still narrow it per-account afterwards, same as every other
+    // view toggle here.
     default: true,
     group: "desktopView",
   },

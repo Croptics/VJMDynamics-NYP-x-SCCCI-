@@ -94,9 +94,45 @@ export async function resolveTripUuid(tripId) {
 // undercount every delegate checked in after the ARRIVED migration.
 const isBoarded = (x) => x.status === "PRESENT" || x.status === "ARRIVED";
 
-export async function getDashboard(tripUuid = null) {
-  const d = await listDelegates(tripUuid);
-  const activity = await getActivity(8); // small preview — full history lives on its own endpoint
+/** Staff-scoped visibility (2026-07-27 — "for staff permission is to see
+ *  their assigned coach delegate... limited ui access for staff base on the
+ *  trip coach assigned"). Built on the EXISTING "Coach captain" field
+ *  (coaches.account_id — added by Desmond's Trips board for TransitFlow's
+ *  Switch-staff modal) which was previously just stored/displayed with no
+ *  actual enforcement anywhere — this is the first place it's actually
+ *  enforced. A Staff account only sees delegates/coaches for coaches THEY
+ *  personally captain. A coach with no captain assigned is hidden from
+ *  Staff entirely (2026-07-27 revision — "if a bus is not assign to any
+ *  staff, should be hidden for staff account"; the original plan treated an
+ *  uncaptained coach as "open to everyone", but that let a scoped Staff
+ *  account still see every not-yet-assigned coach). Admin bypasses
+ *  entirely, same as every other permission check in this app.
+ *
+ *  Returns null for "no restriction" — either the account is an Admin, or a
+ *  Staff account that doesn't captain ANY coach on this trip (falls back to
+ *  today's unrestricted behaviour rather than silently locking out every
+ *  existing staff account the moment this ships — an admin opts a specific
+ *  account IN by assigning them a coach, rather than everyone being opted
+ *  out by default). Otherwise returns a Set of ONLY the coach ids this
+ *  account captains. */
+export async function getVisibleCoachIds(tripUuid, account) {
+  if (!account || account.role === "admin") return null;
+  const coaches = tripUuid
+    ? await all(`SELECT id, account_id AS "accountId" FROM coaches WHERE trip_id = $1`, [tripUuid])
+    : await all(`SELECT id, account_id AS "accountId" FROM coaches`);
+  const mine = coaches.filter((c) => c.accountId === account.id).map((c) => c.id);
+  if (mine.length === 0) return null;
+  return new Set(mine);
+}
+
+export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
+  let d = await listDelegates(tripUuid);
+  // Unassigned delegates (coachId null) aren't part of any coach, so a
+  // captain-scoped staff account has no reason to see them — they only ever
+  // show up again once assigned to a coach that account can see.
+  if (visibleCoachIds) d = d.filter((x) => visibleCoachIds.has(x.coachId));
+  let activity = await getActivity(8); // small preview — full history lives on its own endpoint
+  if (visibleCoachIds) activity = activity.filter((a) => !a.coachId || visibleCoachIds.has(a.coachId));
   const present = d.filter(isBoarded).length;
   const missing = d.filter((x) => x.status === "MISSING").length;
   const late = d.filter((x) => x.status === "LATE").length;
@@ -110,9 +146,10 @@ export async function getDashboard(tripUuid = null) {
   // denominator made N overstate who's actually being tracked on this trip.
   const trackable = present + missing + late + assigned;
 
-  const coachRows = tripUuid
+  let coachRows = tripUuid
     ? await all("SELECT * FROM coaches WHERE trip_id = $1 ORDER BY sort_order NULLS LAST, id", [tripUuid])
     : await all("SELECT * FROM coaches ORDER BY id");
+  if (visibleCoachIds) coachRows = coachRows.filter((c) => visibleCoachIds.has(c.id));
   const coaches = coachRows.map((c) => {
     const assigned = d.filter((x) => x.coachId === c.id);
     return {
@@ -150,10 +187,11 @@ export async function getDashboard(tripUuid = null) {
   };
 }
 
-export async function getMissing(tripUuid = null) {
+export async function getMissing(tripUuid = null, visibleCoachIds = null) {
   const coaches = await all("SELECT * FROM coaches");
   return (await listDelegates(tripUuid))
     .filter((x) => x.status === "MISSING")
+    .filter((x) => !visibleCoachIds || visibleCoachIds.has(x.coachId))
     .map((x) => {
       const coach = coaches.find((c) => c.id === x.coachId);
       return {

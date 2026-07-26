@@ -80,6 +80,12 @@ app.use(checkpointsRouter);
 import escalationsRouter from "./routes/escalations.js";
 app.use(escalationsRouter);
 
+import announcementsRouter from "./routes/announcements.js";
+app.use(announcementsRouter);
+
+import guideVideoRouter from "./routes/guideVideo.js";
+app.use(guideVideoRouter);
+
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
  *

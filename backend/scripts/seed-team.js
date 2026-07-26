@@ -62,7 +62,15 @@ function readConfig() {
 }
 
 async function nextAccountId(pool) {
-  const r = await pool.query(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts`);
+  // Matches db/accounts.js's own nextAccountId() — restricted to ids that are
+  // actually "u-<integer>" (2026-07-26 bugfix). Without this filter, the
+  // CAST blows up on any non-numeric id, e.g. the seeded "u-kiosk" row for
+  // __kiosk__ ("invalid input syntax for type integer: 'kiosk'") — never hit
+  // on the shared Neon DB since this script had already run there long
+  // before kiosk existed, but breaks immediately on any fresh database.
+  const r = await pool.query(
+    `SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts WHERE id ~ '^u-[0-9]+$'`
+  );
   return Number(r.rows[0].m) + 1;
 }
 

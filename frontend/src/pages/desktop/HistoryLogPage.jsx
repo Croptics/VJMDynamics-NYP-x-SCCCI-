@@ -4,7 +4,7 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search } from "lucide-react";
+import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
 import { apiGet, apiPost, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -308,6 +308,16 @@ export default function HistoryLogPage() {
                             {a.tripName}
                           </span>
                         )}
+                        {/* Which coach the affected delegate is CURRENTLY on
+                            (2026-07-27, "show the coach assigned") — same
+                            data the "All coaches" filter dropdown already
+                            reads (a.coachName), just also shown inline per
+                            entry so it's visible without having to filter. */}
+                        {a.coachName && (
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", background: "var(--surface-2)", border: "1px solid var(--line)", padding: "2px 8px", borderRadius: 999 }}>
+                            {a.coachName}
+                          </span>
+                        )}
                       </div>
                       <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
                       {canRollback && (
@@ -398,5 +408,9 @@ function styleForKind(kind) {
   if (kind === "exception") return { color: "var(--st-missing)", bg: "var(--st-missing-bg)", Icon: AlertTriangle };
   if (kind === "reassign") return { color: "var(--st-unassigned)", bg: "var(--st-unassigned-bg)", Icon: Pencil };
   if (kind === "checkin") return { color: "var(--st-present)", bg: "var(--st-present-bg)", Icon: UserPlus };
+  // 2026-07-27 — escalations (create/acknowledge/resolve) now log to the
+  // History Log too; own colour/icon so they read as distinct from a
+  // routine delegate edit.
+  if (kind === "escalation") return { color: "var(--st-missing)", bg: "var(--st-missing-bg)", Icon: Siren };
   return VERB_STYLE.default;
 }

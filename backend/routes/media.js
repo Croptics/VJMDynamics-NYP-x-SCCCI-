@@ -6,69 +6,138 @@
  *  instead — see README/INTEGRATION_NOTES.md at the project root.
  * ============================================================================= */
 /**
- * Image storage management — GET/POST /api/media/images[...]
+ * Cloudinary storage management — GET/POST /api/media/:folderKey[...]
  *
  * Admin-only bulk view over the app's Cloudinary storage (Settings → Image
- * storage): list every delegate-photo asset actually sitting in Cloudinary,
- * delete a chosen subset, or purge the whole folder in one action. Gated on
+ * storage): list every asset actually sitting in a given folder, delete a
+ * chosen subset, or purge the whole folder in one action. Gated on
  * manageAccounts — same tier as Account control, since this is an
- * account-wide infrastructure action, not routine delegate editing.
+ * account-wide infrastructure action, not routine per-feature editing.
  *
- * Every delete here (selected or purge) also unlinks the affected delegates'
- * photoUrl/photoPublicId columns, so the app never keeps pointing at an
- * image that no longer exists in storage — the same cleanup the per-delegate
- * photo routes in server.js already do, just working from the storage side
- * (a Cloudinary publicId) instead of a specific delegate id.
+ * Generalised (2026-07-27, "give me the option to delete announcement image/
+ * video upload, same for user guide") from a delegates-only single-folder
+ * tool into three named folders (see FOLDERS below) — the delegates folder
+ * is images only, announcements has both images and videos, guide is video
+ * only. Every delete here (selected or purge) also unlinks whatever in the
+ * app was pointing at that asset (a delegate's photoUrl, an announcement's
+ * images/videos array, the guide_video row) so nothing keeps pointing at an
+ * asset that no longer exists in storage.
  */
 
 import { Router } from "express";
-import { isConfigured, listImages, destroyImages, purgeAllImages, DELEGATE_PHOTO_FOLDER } from "../lib/cloudinary.js";
+import {
+  isConfigured,
+  listImages, destroyImages, purgeAllImages,
+  listVideos, destroyVideos, purgeAllVideos,
+  DELEGATE_PHOTO_FOLDER, ANNOUNCEMENT_FOLDER, GUIDE_VIDEO_FOLDER,
+} from "../lib/cloudinary.js";
 import { listDelegatesWithPhoto, clearPhotoByPublicId } from "../data.js";
+import { unlinkMediaByPublicId } from "../db/announcements.js";
+import { clearGuideVideoIfMatches } from "../db/guideVideo.js";
 import { requirePermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-router.get("/api/media/images", requirePermission("manageAccounts"), wrap(async (req, res) => {
+// Every folder this admin tool can see/manage, and how to reconcile the rest
+// of the app after a delete. `hasImages`/`hasVideos` decide which Cloudinary
+// listing(s) to query; `unlink(publicIds)` runs after ANY delete (selected
+// or purge) in that folder.
+const FOLDERS = {
+  delegates: {
+    path: DELEGATE_PHOTO_FOLDER, label: "Delegate photos",
+    hasImages: true, hasVideos: false,
+    unlink: async (publicIds) => ({ unlinkedDelegates: await clearPhotoByPublicId(publicIds) }),
+  },
+  announcements: {
+    path: ANNOUNCEMENT_FOLDER, label: "Announcement media",
+    hasImages: true, hasVideos: true,
+    unlink: async (publicIds) => ({ unlinkedAnnouncements: await unlinkMediaByPublicId(publicIds) }),
+  },
+  guide: {
+    path: GUIDE_VIDEO_FOLDER, label: "User Guide video",
+    hasImages: false, hasVideos: true,
+    unlink: async (publicIds) => ({ clearedGuideVideo: await clearGuideVideoIfMatches(publicIds) }),
+  },
+};
+
+function resolveFolder(req, res) {
+  const folder = FOLDERS[req.params.folderKey];
+  if (!folder) {
+    res.status(404).json({ error: "UNKNOWN_FOLDER", message: "Unknown media folder." });
+    return null;
+  }
+  return folder;
+}
+
+router.get("/api/media/:folderKey", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const folder = resolveFolder(req, res);
+  if (!folder) return;
   if (!isConfigured()) {
     return res.status(503).json({ error: "NOT_CONFIGURED", message: "Cloudinary isn't configured (CLOUDINARY_* in backend/.env)." });
   }
-  const [images, withPhoto] = await Promise.all([listImages(), listDelegatesWithPhoto()]);
+  const [images, videos, withPhoto] = await Promise.all([
+    folder.hasImages ? listImages(folder.path) : [],
+    folder.hasVideos ? listVideos(folder.path) : [],
+    req.params.folderKey === "delegates" ? listDelegatesWithPhoto() : [],
+  ]);
   const byPublicId = new Map(withPhoto.map((d) => [d.photoPublicId, d]));
   const withOwner = images.map((img) => {
     const owner = byPublicId.get(img.publicId);
-    return { ...img, delegateId: owner?.id || null, delegateName: owner?.name || null };
+    return { ...img, type: "image", delegateId: owner?.id || null, delegateName: owner?.name || null };
   });
-  const totalBytes = images.reduce((sum, i) => sum + (i.bytes || 0), 0);
-  res.json({ folder: DELEGATE_PHOTO_FOLDER, total: images.length, totalBytes, images: withOwner });
+  const taggedVideos = videos.map((v) => ({ ...v, type: "video" }));
+  const totalBytes = [...images, ...videos].reduce((sum, i) => sum + (i.bytes || 0), 0);
+  res.json({
+    folder: folder.path, label: folder.label,
+    total: images.length + videos.length, totalBytes,
+    images: withOwner, videos: taggedVideos,
+  });
 }));
 
-router.post("/api/media/images/delete", requirePermission("manageAccounts"), wrap(async (req, res) => {
+router.post("/api/media/:folderKey/delete", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const folder = resolveFolder(req, res);
+  if (!folder) return;
   if (!isConfigured()) {
     return res.status(503).json({ error: "NOT_CONFIGURED", message: "Cloudinary isn't configured (CLOUDINARY_* in backend/.env)." });
   }
-  const publicIds = Array.isArray(req.body?.publicIds) ? req.body.publicIds.filter((id) => typeof id === "string" && id) : [];
-  if (!publicIds.length) return res.status(400).json({ error: "NO_IMAGES", message: "No images selected." });
+  // items: [{publicId, type}] — type picks which Cloudinary resource_type to
+  // destroy with, since an image/video with the same publicId string would
+  // otherwise be ambiguous.
+  const items = Array.isArray(req.body?.items) ? req.body.items.filter((i) => i?.publicId && (i.type === "image" || i.type === "video")) : [];
+  if (!items.length) return res.status(400).json({ error: "NO_ITEMS", message: "No media selected." });
 
-  const deleted = await destroyImages(publicIds);
-  const unlinked = await clearPhotoByPublicId(deleted);
-  res.json({ deletedCount: deleted.length, unlinkedDelegates: unlinked });
+  const imageIds = items.filter((i) => i.type === "image").map((i) => i.publicId);
+  const videoIds = items.filter((i) => i.type === "video").map((i) => i.publicId);
+  const [deletedImages, deletedVideos] = await Promise.all([
+    imageIds.length ? destroyImages(imageIds) : [],
+    videoIds.length ? destroyVideos(videoIds) : [],
+  ]);
+  const deleted = [...deletedImages, ...deletedVideos];
+  const unlinkResult = await folder.unlink(deleted);
+  res.json({ deletedCount: deleted.length, ...unlinkResult });
 }));
 
-router.post("/api/media/images/purge", requirePermission("manageAccounts"), wrap(async (req, res) => {
+router.post("/api/media/:folderKey/purge", requirePermission("manageAccounts"), wrap(async (req, res) => {
+  const folder = resolveFolder(req, res);
+  if (!folder) return;
   if (!isConfigured()) {
     return res.status(503).json({ error: "NOT_CONFIGURED", message: "Cloudinary isn't configured (CLOUDINARY_* in backend/.env)." });
   }
   // A second, explicit confirmation carried in the request body (the UI
   // requires literally typing "DELETE ALL" before this button even becomes
   // clickable) — belt-and-suspenders against a stray/automated call, since
-  // this destroys every stored delegate photo in one shot with no undo.
+  // this destroys every stored asset in the folder in one shot with no undo.
   if (req.body?.confirm !== "DELETE ALL") {
     return res.status(400).json({ error: "NOT_CONFIRMED", message: "Confirmation phrase missing or incorrect." });
   }
-  const deleted = await purgeAllImages();
-  const unlinked = await clearPhotoByPublicId(deleted);
-  res.json({ deletedCount: deleted.length, unlinkedDelegates: unlinked });
+  const [deletedImages, deletedVideos] = await Promise.all([
+    folder.hasImages ? purgeAllImages(folder.path) : [],
+    folder.hasVideos ? purgeAllVideos(folder.path) : [],
+  ]);
+  const deleted = [...deletedImages, ...deletedVideos];
+  const unlinkResult = await folder.unlink(deleted);
+  res.json({ deletedCount: deleted.length, ...unlinkResult });
 }));
 
 export default router;

@@ -15,11 +15,17 @@ import EscalationBanner from "./EscalationBanner.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
-import { getPermissions } from "../lib/api.js";
+import { getPermissions, apiGet } from "../lib/api.js";
+import { countUnseenAnnouncements } from "../lib/announcementsSeen.js";
 
 // How often (ms) to refresh the sidebar's critical-exception badge. Kept
 // separate from the session-guard's own interval since it's unrelated data.
 const EXCEPTION_BADGE_INTERVAL_MS = 15000;
+
+// Same localStorage key DashboardPage.jsx/AnnouncementsPage.jsx use for
+// "currently viewing trip" — the announcements badge tracks THAT trip, same
+// as the page it links to.
+const DASHBOARD_TRIP_KEY = "mg_dashboard_trip";
 
 /**
  * Admin shell layout. The sidebar persists; routed pages render in <Outlet/>.
@@ -36,6 +42,7 @@ const EXCEPTION_BADGE_INTERVAL_MS = 15000;
 export default function Layout({ onLogout }) {
   const { t } = useLang();
   const [openExceptions, setOpenExceptions] = useState(0);
+  const [unseenAnnouncements, setUnseenAnnouncements] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
   // Same drag-to-select-text guard used across every modal in the app —
@@ -60,6 +67,26 @@ export default function Layout({ onLogout }) {
       } catch {
         // Exception module unreachable/not seeded yet — leave the badge at 0
         // rather than showing a stale or broken count.
+      }
+    }
+    loadBadge();
+    const iv = setInterval(loadBadge, EXCEPTION_BADGE_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
+
+  useEffect(() => {
+    if (!getPermissions().viewAnnouncements) return;
+    let cancelled = false;
+    async function loadBadge() {
+      let tripId;
+      try { tripId = localStorage.getItem(DASHBOARD_TRIP_KEY); } catch { tripId = null; }
+      if (!tripId) return; // nobody's picked a trip yet — nothing to badge against
+      try {
+        const data = await apiGet(`/trips/${tripId}/announcements`);
+        if (!cancelled) setUnseenAnnouncements(countUnseenAnnouncements(tripId, data.announcements || []));
+      } catch {
+        // Trip switched/deleted mid-poll, or backend hiccup — leave the last
+        // known count rather than flashing the badge to 0.
       }
     }
     loadBadge();
@@ -93,7 +120,7 @@ export default function Layout({ onLogout }) {
         />
       )}
 
-      <Sidebar exceptionCount={openExceptions} onLogout={onLogout} open={sidebarOpen} />
+      <Sidebar exceptionCount={openExceptions} announcementCount={unseenAnnouncements} onLogout={onLogout} open={sidebarOpen} />
       <main className="main">
         <EscalationBanner />
         <Outlet />

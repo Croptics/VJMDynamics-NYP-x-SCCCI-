@@ -25,7 +25,8 @@ import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { actorOf } from "../lib/actor.js";
-import { all } from "../db/connection.js";
+import { all, get } from "../db/connection.js";
+import { logActivity } from "../db/history.js";
 import { createEscalation, listOpenEscalations, listActiveEscalations, acknowledgeEscalation, acknowledgeAllOpen, resolveEscalation } from "../db/escalations.js";
 import { sendEscalationEmails, sendEscalationSms, sendEscalationWhatsApp, buildEscalationHtml } from "../lib/notify.js";
 
@@ -65,15 +66,30 @@ async function listRecipientCandidates(tripId) {
  *   2. ESCALATION_EMAIL_TO env override (comma-separated), for a deployment
  *      that wants a fixed list regardless of what's picked in the UI.
  *   3. Every admin account's own email, as a default so this still works
- *      out of the box before anyone's picked anything. */
-async function resolveEmailRecipients(recipientEmails) {
+ *      out of the box before anyone's picked anything.
+ *
+ *  2026-07-27 security fix: `recipientEmails` used to be trusted verbatim
+ *  from the request body — any account with `manageDelegates` (not just an
+ *  admin) could set `recipientEmails: ["attacker@evil.com"]` and have the
+ *  server email that delegate's name/phone/last-known-location to an
+ *  arbitrary address, bypassing the "pick from real admin accounts" picker
+ *  entirely. Now validated against `listRecipientCandidates()` — the exact
+ *  same admin-email allowlist the frontend's own picker is built from — and
+ *  anything not on it is silently dropped rather than trusted. */
+async function resolveEmailRecipients(recipientEmails, tripId) {
+  const candidates = await listRecipientCandidates(tripId);
+  const allowed = new Set(candidates.map((r) => r.email).filter(Boolean));
   if (Array.isArray(recipientEmails) && recipientEmails.length) {
-    return recipientEmails.map((e) => String(e).trim()).filter(Boolean);
+    const requested = recipientEmails.map((e) => String(e).trim()).filter(Boolean);
+    const valid = requested.filter((e) => allowed.has(e));
+    if (valid.length) return valid;
+    // Nothing requested was actually a real admin's email — fall through to
+    // the same defaults as if nothing had been specified, rather than
+    // silently emailing no one.
   }
   const override = (process.env.ESCALATION_EMAIL_TO || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (override.length) return override;
-  const rows = await listRecipientCandidates();
-  return rows.map((r) => r.email).filter(Boolean);
+  return [...allowed];
 }
 
 router.get("/api/escalations/recipients", requireAuth(), wrap(async (req, res) => {
@@ -125,10 +141,21 @@ router.post("/api/escalations", requirePermission("manageDelegates"), wrap(async
     phone: delegate?.phone, lastLocation: delegate?.lastLocation, tripName,
   });
 
-  const recipients = await resolveEmailRecipients(recipientEmails);
+  const recipients = await resolveEmailRecipients(recipientEmails, escalation.tripId);
   const emailSent = await sendEscalationEmails(recipients, { subject, text, html });
   const sms = await sendEscalationSms(text);
   const whatsapp = await sendEscalationWhatsApp(text);
+
+  // History Log entry (2026-07-27 — "update the history log according to
+  // what new feature i added so far, escalate etc.") — escalations never
+  // showed up in the audit trail at all before this; `kind: "escalation"`
+  // gets its own icon/colour on both HistoryLogPage.jsx and the Dashboard's
+  // inline History tracker card. delegateId in meta is what makes the
+  // "which coach" badge resolvable, same as every other delegate-tied entry.
+  await logActivity(
+    `${delegate?.name || "A delegate"} escalated to office${escalation.message ? ` — ${escalation.message}` : ""}`,
+    "escalation", actor, { delegateId: escalation.delegateId, tripUuid: escalation.tripId }
+  );
 
   res.status(201).json({ escalation, alreadyOpen: false, notified: { emailSent, sms, whatsapp, to: recipients } });
 }));
@@ -140,13 +167,34 @@ router.get("/api/escalations/open", requireAuth(), wrap(async (_req, res) => {
 // Feeds the Alerts modal's "Emergency" section (2026-07-25) — open AND
 // acknowledged, so an escalation stays reviewable/actionable until someone
 // explicitly resolves it, instead of vanishing the moment it's acknowledged.
-router.get("/api/escalations/active", requireAuth(), wrap(async (_req, res) => {
-  res.json({ escalations: await listActiveEscalations() });
+// Scoped to ?tripId= (the Dashboard's currently viewed trip) — see
+// listActiveEscalations()'s own doc for the bug this fixes.
+router.get("/api/escalations/active", requireAuth(), wrap(async (req, res) => {
+  res.json({ escalations: await listActiveEscalations(req.query.tripId || null) });
 }));
 
+// Small shared lookup for the History Log entry logged on acknowledge/
+// resolve — those two db/escalations.js functions only ever take an id, so
+// this grabs the delegate name + trip uuid separately rather than changing
+// their return shape just for logging.
+async function getEscalationLogContext(id) {
+  return get(
+    `SELECT e.delegate_id AS "delegateId", e.trip_id AS "tripId", d.name AS "delegateName"
+       FROM escalations e LEFT JOIN delegates d ON d.id = e.delegate_id WHERE e.id = $1`,
+    [id]
+  );
+}
+
 router.post("/api/escalations/:id/acknowledge", requireAuth(), wrap(async (req, res) => {
+  const ctx = await getEscalationLogContext(req.params.id);
   const result = await acknowledgeEscalation(req.params.id, actorOf(req));
   if (result.error) return res.status(result.error === "NOT_FOUND" ? 404 : 409).json(result);
+  if (ctx) {
+    await logActivity(
+      `${ctx.delegateName || "Escalation"} acknowledged`,
+      "escalation", actorOf(req), { delegateId: ctx.delegateId, tripUuid: ctx.tripId }
+    );
+  }
   res.json(result);
 }));
 
@@ -156,12 +204,27 @@ router.post("/api/escalations/:id/acknowledge", requireAuth(), wrap(async (req, 
 // still shows up in the Alerts modal's Emergency section — nothing is lost,
 // just cleared off the banner in one go.
 router.post("/api/escalations/acknowledge-all", requireAuth(), wrap(async (req, res) => {
-  res.json(await acknowledgeAllOpen(actorOf(req)));
+  const result = await acknowledgeAllOpen(actorOf(req));
+  if (result.count > 0) {
+    await logActivity(`${result.count} escalation(s) acknowledged`, "escalation", actorOf(req), {});
+  }
+  res.json(result);
 }));
 
 router.post("/api/escalations/:id/resolve", requireAuth(), wrap(async (req, res) => {
+  const ctx = await getEscalationLogContext(req.params.id);
   const result = await resolveEscalation(req.params.id, actorOf(req));
   if (result.error) return res.status(404).json(result);
+  // Separate from the "<name> updated / Status: X → ARRIVED" entry
+  // resolveEscalation() already produces via updateDelegate() — this one
+  // specifically marks that the status change came from resolving an
+  // escalation, not a routine manual edit.
+  if (ctx) {
+    await logActivity(
+      `${ctx.delegateName || "Escalation"} resolved`,
+      "escalation", actorOf(req), { delegateId: ctx.delegateId, tripUuid: ctx.tripId }
+    );
+  }
   res.json(result);
 }));
 

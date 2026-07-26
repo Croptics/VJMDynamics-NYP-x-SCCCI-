@@ -192,6 +192,7 @@ export async function createAccount(input) {
   const username = String(input.username || "").trim();
   const password = String(input.password || "");
   const email = String(input.email || "").trim();
+  const phone = String(input.phone || "").trim();
   const name = String(input.name || "").trim() || username;
   // Role is now an independent, explicit field (the Account control role
   // picker) — NOT derived from whichever permission checkboxes are ticked.
@@ -217,8 +218,8 @@ export async function createAccount(input) {
   // status defaults to 'approved' (see schema.js) — an admin creating an
   // account directly on Account control IS the approval, unlike a public
   // self-registration (see registerAccount()), which starts 'pending'.
-  await run(`INSERT INTO accounts (id, username, name, email, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, [
-    id, username, name, email, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
+  await run(`INSERT INTO accounts (id, username, name, email, phone, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [
+    id, username, name, email, phone || null, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
@@ -327,6 +328,8 @@ export async function updateAccount(id, patch) {
     email = nextEmail;
   }
 
+  const phone = patch.phone !== undefined ? String(patch.phone).trim() : existing.phone;
+
   if (!username) return { error: "USERNAME_REQUIRED" };
   const clash = await getAccountByUsername(username);
   if (clash && clash.id !== id) return { error: "USERNAME_TAKEN" };
@@ -340,8 +343,8 @@ export async function updateAccount(id, patch) {
     return { error: "LAST_MAIN" };
   }
 
-  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, password=$4, role=$5, permissions=$6 WHERE id=$7`, [
-    username, name, email, password, role, JSON.stringify(perms), id,
+  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5, role=$6, permissions=$7 WHERE id=$8`, [
+    username, name, email, phone || null, password, role, JSON.stringify(perms), id,
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
@@ -374,6 +377,8 @@ export async function updateOwnAccount(id, patch) {
     email = nextEmail;
   }
 
+  const phone = patch.phone !== undefined ? String(patch.phone).trim() : existing.phone;
+
   let password = existing.password;
   if (patch.newPassword) {
     if (!(await verifyPassword(patch.currentPassword, existing.password))) {
@@ -392,8 +397,8 @@ export async function updateOwnAccount(id, patch) {
     if (emailClash && emailClash.id !== id) return { error: "EMAIL_TAKEN" };
   }
 
-  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, password=$4 WHERE id=$5`, [
-    username, name, email, password, id,
+  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5 WHERE id=$6`, [
+    username, name, email, phone || null, password, id,
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }

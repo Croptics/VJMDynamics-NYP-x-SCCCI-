@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, ScanFace } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, ScanFace, Bell } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
@@ -40,6 +40,10 @@ export default function MobileHomePage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Trip Announcements (2026-07-25) — read-only here; posting/deleting stays
+  // a desktop-only admin action (DashboardPage.jsx).
+  const [announcements, setAnnouncements] = useState([]);
+  const [announcementsExpanded, setAnnouncementsExpanded] = useState(false);
 
   // Trip switcher — restricted to "In progress" trips only (a Planning or
   // Completed trip has no live attendance to track on a phone, so switching
@@ -95,6 +99,7 @@ export default function MobileHomePage() {
     setError(null);
     try {
       setData(await apiGet(`/trips/${tripId}/dashboard`));
+      apiGet(`/trips/${tripId}/announcements`).then((r) => setAnnouncements(r.announcements || [])).catch(() => {});
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -176,6 +181,42 @@ export default function MobileHomePage() {
             <span className="badge" style={{ background: "rgba(255,255,255,.22)", color: "#fff", marginTop: 10, display: "inline-block" }}>
               {t("Departure in")} {trip.departsIn}
             </span>
+          )}
+        </div>
+      )}
+
+      {/* Trip Announcements (2026-07-25) — read-only card; tapping expands
+          the full list inline (no separate page/tab, to keep mobile nav
+          light — the desktop Dashboard is where an admin actually posts). */}
+      {announcements.length > 0 && (
+        <div className="mobile-card" style={{ marginTop: 14, cursor: "pointer" }} onClick={() => setAnnouncementsExpanded((v) => !v)}>
+          <div className="row between" style={{ gap: 8 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center", minWidth: 0 }}>
+              <Bell size={16} color="var(--scc-red)" style={{ flexShrink: 0 }} />
+              {!announcementsExpanded ? (
+                <div style={{ minWidth: 0 }}>
+                  <strong style={{ fontSize: 13.5 }}>{announcements[0].title}</strong>
+                  <div className="muted" style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {announcements[0].message}
+                  </div>
+                </div>
+              ) : (
+                <strong style={{ fontSize: 13.5 }}>{t("Trip Announcements")}</strong>
+              )}
+            </div>
+            {announcements.length > 1 && !announcementsExpanded && (
+              <span className="muted" style={{ fontSize: 12, flexShrink: 0 }}>+{announcements.length - 1} {t("more")}</span>
+            )}
+          </div>
+          {announcementsExpanded && (
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              {announcements.map((a) => (
+                <div key={a.id} style={{ paddingTop: 8, borderTop: "1px solid var(--line)" }}>
+                  <strong style={{ fontSize: 13.5 }}>{a.title}</strong>
+                  <p style={{ fontSize: 13, marginTop: 2, whiteSpace: "pre-wrap" }}>{a.message}</p>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

@@ -31,6 +31,14 @@ export default function ExportModal({ tripId, onClose }) {
   const [vipOnly, setVipOnly] = useState(false);
   const [columns, setColumns] = useState([]);
   const [includeAiSummary, setIncludeAiSummary] = useState(false);
+  // Defaults ON (2026-07-25 — "the whole purpose of this export is [seeing]
+  // the time of delegate status... at end of event, [or] in middle of
+  // event") — the per-checkpoint record is the actual meaningful audit trail
+  // once a trip ends, unlike the Delegates sheet's status column, which is
+  // only ever a snapshot of a value the reset/late-cutoff schedulers keep
+  // changing. Still toggleable off for someone who genuinely just wants the
+  // lightweight live snapshot.
+  const [includeCheckpoints, setIncludeCheckpoints] = useState(true);
   // The workbook's own language — an independent, explicit per-export choice
   // (defaults to the app's current UI language, but overridable), since a
   // staff member might work in English but need to hand a Chinese-language
@@ -96,7 +104,7 @@ export default function ExportModal({ tripId, onClose }) {
       const res = await fetch(`${API_BASE}/trips/${tripId}/export`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ statuses, coachIds, vipOnly, columns, includeAiSummary, lang: exportLang }),
+        body: JSON.stringify({ statuses, coachIds, vipOnly, columns, includeAiSummary, includeCheckpoints, lang: exportLang }),
       });
       if (!res.ok) {
         throw new Error(
@@ -237,6 +245,8 @@ export default function ExportModal({ tripId, onClose }) {
             <Toggle checked={vipOnly} onChange={() => setVipOnly((v) => !v)} label={t("VIP delegates only")} />
             <Toggle checked={includeAiSummary} onChange={() => setIncludeAiSummary((v) => !v)}
               label={t("Add an AI summary sheet note")} hint={t("A short written recap of this export (needs AI configured).")} />
+            <Toggle checked={includeCheckpoints} onChange={() => setIncludeCheckpoints((v) => !v)}
+              label={t("Include per-checkpoint history")} hint={t("A separate sheet: every stop each delegate was arrived/late/missing at, not just their current status.")} />
           </div>
 
           {/* Columns */}

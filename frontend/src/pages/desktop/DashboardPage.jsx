@@ -7,7 +7,7 @@
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import {
   Download,
   RefreshCw,
@@ -18,6 +18,7 @@ import {
   Activity,
   Crown,
   Plus,
+  Minus,
   Pencil,
   Trash2,
   X,
@@ -39,6 +40,7 @@ import {
   Ban,
   LocateFixed,
   Siren,
+  BedDouble,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
@@ -88,6 +90,7 @@ const EMPTY_FORM = {
   name: "", coachId: "", status: "ARRIVED", vip: false, cancelled: false, cancelReason: "", lastSeen: "", lastLocation: "",
   company: "", role: "", industry: "", email: "", phone: "", website: "",
   passportNumber: "", nationality: "", passportExpiry: "", accessibilityNotes: "", notes: "",
+  hotelName: "", roomNumber: "",
 };
 
 export default function DashboardPage() {
@@ -102,6 +105,23 @@ export default function DashboardPage() {
   // adminOnly doc — Staff can never be individually granted it).
   const { t, lang } = useLang();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Arrived via EscalationBanner's "View" jump (2026-07-25 — "if I'm on a
+  // different trip I don't know which trip to [go to]") — ?tripId= picks the
+  // right trip below (overriding whatever was last persisted), and
+  // ?escalationDelegate= is consumed once that trip's roster loads (see the
+  // effect near the delegates state) to auto-open that delegate's profile.
+  // Read once for the FIRST render only (a fresh page load already lands with
+  // the right query string) — the reactive case (clicking "View" while
+  // already ON /dashboard, so this component never remounts) is handled by
+  // the separate `location.search`-watching effect further down; without
+  // that second effect, a `useState(() => ...)` initializer like this one
+  // never re-fires on a same-route navigation (2026-07-25 bugfix — "I click
+  // View but it doesn't show, only works after I refresh").
+  const initialEscalationParams = new URLSearchParams(location.search);
+  const [pendingEscalationDelegateId, setPendingEscalationDelegateId] = useState(
+    () => initialEscalationParams.get("escalationDelegate")
+  );
   // Shared by every modal overlay below (only one is ever open at a time) —
   // only dismiss if the WHOLE click gesture started on the backdrop itself,
   // not wherever the mouse was released after a drag-select that began in a
@@ -135,10 +155,17 @@ export default function DashboardPage() {
   const [delegates, setDelegates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Countdown to the next auto-refresh tick (2026-07-27 — "update this will
+  // see how long it refresh") — the poll itself is a fixed 8s interval (see
+  // the comment on that useEffect below); this is purely a visual "time
+  // until next sync" next to the Live badge, reset to REFRESH_SECONDS every
+  // time `load()` actually completes.
+  const REFRESH_SECONDS = 8;
+  const [refreshCountdown, setRefreshCountdown] = useState(REFRESH_SECONDS);
 
   // Trip switcher — the whole dashboard re-points to the selected trip.
   // "t-1" = the default Beijing trip (unfiltered); anything else is a trip uuid.
-  const [selectedTripId, setSelectedTripId] = useState(loadSelectedTripId);
+  const [selectedTripId, setSelectedTripId] = useState(() => initialEscalationParams.get("tripId") || loadSelectedTripId());
   const [trips, setTrips] = useState([]);            // all trips (for the dropdown)
   const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
   const [currentCheckpoint, setCurrentCheckpoint] = useState(null); // the itinerary stop that's "current" right now, or null
@@ -263,12 +290,18 @@ export default function DashboardPage() {
   // own pace instead of the top banner being the only place to see them.
   const [activeEscalations, setActiveEscalations] = useState([]);
   const [escalationBusyId, setEscalationBusyId] = useState(null);
-  useEffect(() => {
-    if (!alertsOpen) return;
-    let alive = true;
-    apiGet("/escalations/active").then((r) => { if (alive) setActiveEscalations(r.escalations || []); }).catch(() => {});
-    return () => { alive = false; };
-  }, [alertsOpen]);
+  // Search + cap-at-5 for the Emergency section (2026-07-26 — "50 mock
+  // escalations... abit hard to navigate") — Missing/Late/Cancelled below it
+  // already cap at 5 with a "View all"/"Show more", Emergency was the one
+  // section that dumped every row into one small scrollbox unfiltered.
+  // Emergency has no equivalent delegate-status filter to route to (it's not
+  // a delegate field), so "show more" expands in place instead of navigating.
+  const [escalationQuery, setEscalationQuery] = useState("");
+  const [showAllEscalations, setShowAllEscalations] = useState(false);
+  // NOTE: the effect that fetches /escalations/active lives further down,
+  // right after `currentTripUuid` is declared — it depends on that value,
+  // which isn't available yet at this point in the component (2026-07-25,
+  // fixing a "Cannot access 'currentTripUuid' before initialization" crash).
   async function acknowledgeEscalationRow(id) {
     setEscalationBusyId(id);
     try {
@@ -277,11 +310,29 @@ export default function DashboardPage() {
     } catch { /* leave as-is — next open of the modal will reconcile */ }
     finally { setEscalationBusyId(null); }
   }
-  async function resolveEscalationRow(id) {
+  async function resolveEscalationRow(id, delegateName) {
+    // Resolve auto-sets the delegate to Arrived (2026-07-27 — "should notify
+    // the user if click resolve will go to arrived, make sure to click once
+    // found the delegate") — a confirm so this can't happen by an accidental
+    // click, since it's a real status change, not just clearing the alert.
+    const msg = lang === "zh"
+      ? `解决此紧急情况会将${delegateName ? `"${delegateName}"` : "该代表"}的状态设为"已抵达"。请确认已经找到本人后再点击。`
+      : `Resolving this will set ${delegateName ? `"${delegateName}"` : "this delegate"}'s status to Arrived. Only confirm once you've actually found them.`;
+    if (!window.confirm(msg)) return;
     setEscalationBusyId(id);
     try {
       await apiPost(`/escalations/${id}/resolve`, {});
       setActiveEscalations((prev) => prev.filter((e) => e.id !== id));
+      // Resolving flips the delegate's global status to ARRIVED server-side
+      // (see db/escalations.js's resolveEscalation) — without this refresh,
+      // `delegates`/`missing` stayed stale until the next 8s poll, so the
+      // Alerts modal's Missing section kept showing them even though they'd
+      // just been un-escalated (2026-07-27 — "if i click resolve, it should
+      // not display in missing section"). Since missingNotEscalated only
+      // hides a delegate WHILE they're in activeEscalations, removing them
+      // from that list above would otherwise make them reappear in Missing
+      // with stale (pre-resolve) data for one poll cycle.
+      load();
     } catch { /* leave as-is */ }
     finally { setEscalationBusyId(null); }
   }
@@ -400,8 +451,17 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
       loadingRef.current = false;
+      setRefreshCountdown(REFRESH_SECONDS);
     }
   }, [selectedTripId, historyScope]);
+
+  // Ticks the visible countdown down every second between polls — a
+  // separate 1s interval rather than piggybacking on the 8s poll interval
+  // below, since that one only fires the actual refetch, not a UI tick.
+  useEffect(() => {
+    const id = setInterval(() => setRefreshCountdown((s) => Math.max(0, s - 1)), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Auto-refresh so a change made by another signed-in staff member (a
   // status edit, a new upload, a coach reassignment, etc.) shows up here
@@ -418,6 +478,59 @@ export default function DashboardPage() {
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, [load]);
+
+  // Reactively re-reads ?tripId=/?escalationDelegate= on every URL change
+  // (2026-07-25 bugfix) — clicking EscalationBanner's "View" while ALREADY on
+  // /dashboard doesn't remount this component, just re-renders it with a new
+  // location; the useState initializers above only ever read the query
+  // string ONCE (at first mount), so a same-route click silently did
+  // nothing until a full page reload force-remounted everything fresh.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const tripId = params.get("tripId");
+    const delegateId = params.get("escalationDelegate");
+    const openAlerts = params.get("openAlerts");
+    if (tripId) setSelectedTripId(tripId);
+    if (delegateId) setPendingEscalationDelegateId(delegateId);
+    // ?openAlerts= (2026-07-26 — "the view button link to alert page instead,
+    // cause i can only see 1 delegate only") — EscalationBanner's "View" now
+    // opens the FULL Emergency list in the Alerts modal instead of deep-
+    // linking to just the first escalated delegate's profile, since a busy
+    // trip can have several open at once. No roster wait needed (unlike
+    // escalationDelegate above), so strip the param immediately here.
+    if (openAlerts) {
+      setAlertsOpen(true);
+      navigate("/dashboard", { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search]);
+
+  // Consumes ?escalationDelegate= once this trip's roster has actually
+  // loaded (2026-07-25, EscalationBanner's "View" jump) — opens that
+  // delegate's real profile, persists the trip switch so it sticks after
+  // this, and strips the query params so refreshing/revisiting doesn't
+  // re-trigger it.
+  //
+  // Gated on `!loading` (2026-07-25 bugfix): navigating here from a
+  // different trip re-renders this SAME component (no unmount), so
+  // `delegates` still held the PREVIOUS trip's roster for one render before
+  // `load()` refetched — this effect ran immediately against that stale
+  // data, never found a match, and gave up (cleared the pending id) before
+  // the new trip's real delegates ever arrived. `load()` sets `loading:true`
+  // synchronously the instant selectedTripId changes (in the effect just
+  // above, which runs first) — so this only ever evaluates once against
+  // data that's actually settled for the current trip.
+  useEffect(() => {
+    if (!pendingEscalationDelegateId || loading || delegates.length === 0) return;
+    const found = delegates.find((d) => d.id === pendingEscalationDelegateId);
+    if (found) {
+      openProfile(found);
+      saveSelectedTripId(selectedTripId);
+    }
+    setPendingEscalationDelegateId(null);
+    navigate("/dashboard", { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [delegates, loading, pendingEscalationDelegateId]);
 
   // Trip list for the switcher (Desmond's all-trips), fetched once. If the
   // persisted selectedTripId (see loadSelectedTripId above) no longer exists
@@ -508,6 +621,7 @@ export default function DashboardPage() {
       // rest are already single-word/camelCase-compatible either way.
       passportNumber: d.passport_no || "", nationality: d.nationality || "", passportExpiry: d.passport_expiry || "",
       accessibilityNotes: d.accessibility_notes || "", notes: d.notes || "",
+      hotelName: d.hotel_name || "", roomNumber: d.room_number || "",
     });
     setEditingPhotoUrl(d.photoUrl || null);
     setFormErr("");
@@ -605,6 +719,7 @@ export default function DashboardPage() {
       passportNumber: form.passportNumber.trim(), nationality: form.nationality.trim(),
       passportExpiry: form.passportExpiry.trim(),
       accessibilityNotes: form.accessibilityNotes.trim(), notes: form.notes.trim(),
+      hotelName: form.hotelName.trim(), roomNumber: form.roomNumber.trim(),
     };
     try {
       if (editingId) {
@@ -756,6 +871,14 @@ export default function DashboardPage() {
   // no separate endpoint for either.
   const lateDelegates = useMemo(() => delegates.filter((d) => effectiveStatus(d) === "LATE"), [delegates]);
   const cancelledDelegates = useMemo(() => delegates.filter((d) => d.cancelled), [delegates]);
+  // Alerts modal (2026-07-26 — "if i escalated, i think the missing can hide
+  // it, cause showing double stuff can be very confusing") — a delegate
+  // already showing in the Emergency section shouldn't ALSO show in Missing
+  // right below it; the Emergency card already covers them (with
+  // Acknowledge/Resolve), so Missing here only needs whoever ISN'T already
+  // being handled as an emergency.
+  const escalatedDelegateIds = useMemo(() => new Set(activeEscalations.map((e) => e.delegateId).filter(Boolean)), [activeEscalations]);
+  const missingNotEscalated = useMemo(() => missing.filter((m) => !escalatedDelegateIds.has(m.id)), [missing, escalatedDelegateIds]);
 
   // The "All delegates" table, after the search box, status filter and sort.
   const visibleDelegates = useMemo(() => {
@@ -793,6 +916,25 @@ export default function DashboardPage() {
   /* ---- Trip switcher derived state -------------------------------------- */
   // The uuid of the trip currently shown (for the "open in Trips board" links).
   const currentTripUuid = selectedTripId === TRIP_ID ? (trip?.uuid_id || mainTrip?.uuid) : selectedTripId;
+
+  // Fetches the Alerts modal's "Emergency" list — declared here (not up by
+  // activeEscalations' own useState above) because it depends on
+  // currentTripUuid, which isn't defined until this point in the component.
+  // Scoped to the currently viewed trip (2026-07-25 bugfix) — this used to
+  // fetch EVERY trip's active escalations unfiltered, so a delegate escalated
+  // on a completely different trip showed up here too, and clicking them
+  // opened an incomplete synthetic profile (no status badge) since they were
+  // never in this trip's own `delegates` array.
+  useEffect(() => {
+    if (!alertsOpen) return;
+    setEscalationQuery("");
+    setShowAllEscalations(false);
+    let alive = true;
+    const qs = currentTripUuid ? `?tripId=${encodeURIComponent(currentTripUuid)}` : "";
+    apiGet(`/escalations/active${qs}`).then((r) => { if (alive) setActiveEscalations(r.escalations || []); }).catch(() => {});
+    return () => { alive = false; };
+  }, [alertsOpen, currentTripUuid]);
+
   // Dropdown: the base trip (as "t-1", unfiltered) + every other trip by uuid
   // — restricted to trips actually "In progress" (2026-07-24): a
   // Planning/Completed trip has nothing live to switch to and view here,
@@ -875,21 +1017,26 @@ export default function DashboardPage() {
               scanner pages auto-focus on, so the Dashboard doesn't leave you
               guessing which event is live without switching to /trips. */}
           {currentCheckpoint && (
-            <span className="badge badge-assigned" style={{ marginTop: 6, display: "inline-flex", flexWrap: "wrap" }}>
-              <Clock size={12} /> {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${currentCheckpoint.scheduledTime}` : ""}
+            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+              <span className="badge badge-assigned" style={{ display: "inline-flex", maxWidth: "100%" }}>
+                <Clock size={12} style={{ flexShrink: 0 }} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${currentCheckpoint.scheduledTime}` : ""}
+                </span>
+              </span>
               {nextCheckpoint && (
-                <span style={{ opacity: 0.75, marginLeft: 6 }}>
-                  · {t("Next")}: {nextCheckpoint.label}{nextCheckpoint.scheduledTime ? ` · ${nextCheckpoint.scheduledTime}` : ""}
+                <span className="muted" style={{ fontSize: 12, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {t("Next")}: {nextCheckpoint.label}{nextCheckpoint.scheduledTime ? ` · ${nextCheckpoint.scheduledTime}` : ""}
                 </span>
               )}
-            </span>
+            </div>
           )}
         </div>
 
         <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
           {data && (
-            <span className="badge badge-present">
-              <span style={S.dot} /> {t("Live · synced")}
+            <span className="badge badge-present" title={t("Auto-refreshes every 8 seconds")}>
+              <span style={S.dot} /> {t("Live · synced")} · {refreshCountdown}s
             </span>
           )}
           <button
@@ -969,6 +1116,19 @@ export default function DashboardPage() {
             }}
           >
             <BarChart3 size={16} /> {t("Analytics")}
+          </button>
+        )}
+        {perms.manageDelegates && (
+          <button
+            className="btn"
+            onClick={() => setTab("rooms")}
+            style={{
+              background: tab === "rooms" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "rooms" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "rooms" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            }}
+          >
+            <BedDouble size={16} /> {t("Room Management")}
           </button>
         )}
         {perms.manageAccounts && (
@@ -1186,6 +1346,10 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {tab === "rooms" && perms.manageDelegates && (
+        <RoomManagementTab delegates={delegates} coaches={coaches} coachName={coachName} onSaved={load} t={t} lang={lang} />
+      )}
+
       {tab === "staffops" && perms.manageAccounts && (
         <div style={{ marginTop: 20 }}>
           <p className="page-sub" style={{ margin: 0 }}>
@@ -1285,7 +1449,7 @@ export default function DashboardPage() {
                         </div>
                       )}
                       {visibleActiveStaff.map((acc) => (
-                        <div key={acc.id} className="row" style={{ gap: 10, padding: "8px 10px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", minWidth: 0 }}>
+                        <div key={acc.id} className="row" style={{ gap: 10, padding: "8px 10px", borderRadius: "var(--r-sm)", minWidth: 0 }}>
                           <span className="avatar" style={{ background: "var(--st-present-bg)", color: "var(--st-present)", flexShrink: 0 }}>
                             {(acc.name || acc.username).trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase()}
                           </span>
@@ -1596,6 +1760,11 @@ export default function DashboardPage() {
                       <div className="row" style={{ gap: 6 }}>
                         <StatusBadge state={d.status} />
                         {d.cancelled && <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>{t("Cancelled")}</span>}
+                        {d.escalated && (
+                          <span className="badge badge-missing" style={{ padding: "2px 8px" }}>
+                            <Siren size={11} /> {t("Escalated")}
+                          </span>
+                        )}
                       </div>
                     </td>
                     {showLastSeenCol && <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>}
@@ -1868,6 +2037,14 @@ export default function DashboardPage() {
                   <label className="field-label">{t("Passport expiry")}</label>
                   <input className="input" type="date" value={form.passportExpiry} onChange={(e) => setForm({ ...form, passportExpiry: e.target.value })} />
                 </div>
+                <div>
+                  <label className="field-label">{t("Hotel")}</label>
+                  <input className="input" value={form.hotelName} onChange={(e) => setForm({ ...form, hotelName: e.target.value })} />
+                </div>
+                <div>
+                  <label className="field-label">{t("Room number")}</label>
+                  <input className="input" value={form.roomNumber} onChange={(e) => setForm({ ...form, roomNumber: e.target.value })} />
+                </div>
                 <div style={{ gridColumn: "1 / -1" }}>
                   <label className="field-label">{t("Accessibility notes")}</label>
                   <input className="input" value={form.accessibilityNotes} onChange={(e) => setForm({ ...form, accessibilityNotes: e.target.value })} />
@@ -1946,6 +2123,11 @@ export default function DashboardPage() {
                     {profileDelegate.cancelled && (
                       <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>{t("Cancelled")}</span>
                     )}
+                    {profileDelegate.escalated && (
+                      <span className="badge badge-missing" style={{ padding: "2px 8px" }}>
+                        <Siren size={11} /> {t("Escalated")}
+                      </span>
+                    )}
                     {profileDelegate.vip && (
                       <span className="badge badge-review" style={{ padding: "2px 8px" }}>
                         <Crown size={12} /> {t("VIP")}
@@ -1968,7 +2150,12 @@ export default function DashboardPage() {
                     {profileDelegate.cancelled ? t("Undo cancellation") : t("Mark as cancelled")}
                   </button>
                 )}
-                {perms.manageDelegates && profileDelegate.status === "MISSING" && (
+                {/* Both hidden while already escalated (2026-07-25) — no
+                    point offering to escalate someone again mid-escalation,
+                    and Edit is hidden so this becomes a focused "what's the
+                    emergency, who raised it" view rather than a normal
+                    editable profile until the escalation is resolved. */}
+                {perms.manageDelegates && profileDelegate.status === "MISSING" && !profileDelegate.escalated && (
                   <button
                     className="btn btn-ghost"
                     style={{ fontSize: 13, padding: "6px 12px", color: "var(--st-missing)" }}
@@ -1977,7 +2164,7 @@ export default function DashboardPage() {
                     <Siren size={14} /> {t("Escalate to office")}
                   </button>
                 )}
-                {perms.manageDelegates && (
+                {perms.manageDelegates && !profileDelegate.escalated && (
                   <button
                     className="btn btn-ghost"
                     style={{ fontSize: 13, padding: "6px 12px" }}
@@ -2016,11 +2203,23 @@ export default function DashboardPage() {
                 )}
               />
               <ProfileField label={t("Coach")} value={coachName(profileDelegate.coachId)} />
-              <ProfileField icon={Briefcase} label={t("Company")} value={[profileDelegate.role, profileDelegate.company].filter(Boolean).join(" · ")} />
-              <ProfileField label={t("Industry")} value={profileDelegate.industry} />
-              <ProfileField label={t("Nationality")} value={profileDelegate.nationality} />
-              <ProfileField icon={BadgeCheck} label={t("Passport number")} value={profileDelegate.passport_no} mono />
-              <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
+              {/* While escalated, swap the profile/travel-document fields
+                  (Company/Industry/Nationality/Passport) for which TRIP this
+                  is under (2026-07-25) — you can land on this profile from a
+                  different trip's context via the escalation banner's "View"
+                  jump, and those document fields aren't what matters for an
+                  active emergency. */}
+              {profileDelegate.escalated ? (
+                <ProfileField icon={MapPin} label={t("Trip")} value={trip?.name} />
+              ) : (
+                <>
+                  <ProfileField icon={Briefcase} label={t("Company")} value={[profileDelegate.role, profileDelegate.company].filter(Boolean).join(" · ")} />
+                  <ProfileField label={t("Industry")} value={profileDelegate.industry} />
+                  <ProfileField label={t("Nationality")} value={profileDelegate.nationality} />
+                  <ProfileField icon={BadgeCheck} label={t("Passport number")} value={profileDelegate.passport_no} mono />
+                  <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
+                </>
+              )}
             </div>
 
             {profileDelegate.cancelled && (
@@ -2028,6 +2227,50 @@ export default function DashboardPage() {
                 <div className="field-label" style={{ margin: 0 }}>{t("Cancellation reason")}</div>
                 <p style={{ fontSize: 13.5, marginTop: 4 }}>
                   {profileDelegate.cancel_reason || t("No reason given.")}
+                </p>
+              </div>
+            )}
+
+            {/* Room allocation (2026-07-26) — hidden while escalated, same
+                "declutter for the emergency" reasoning as Company/Industry
+                above; shown whenever set, with a quick prompt to add it via
+                Edit when it's still empty. */}
+            {!profileDelegate.escalated && (
+              <div style={{ marginTop: 18, padding: "10px 12px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+                <div className="field-label" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+                  <BedDouble size={13} /> {t("Room")}
+                </div>
+                {profileDelegate.hotel_name || profileDelegate.room_number ? (
+                  <p style={{ fontSize: 13.5, marginTop: 4 }}>
+                    {[profileDelegate.hotel_name, profileDelegate.room_number ? `${t("Room")} ${profileDelegate.room_number}` : null].filter(Boolean).join(" · ")}
+                  </p>
+                ) : (
+                  <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>{t("No room assigned yet.")}</p>
+                )}
+              </div>
+            )}
+
+            {/* Replaces the Checkpoint timeline while an escalation is active
+                (2026-07-25) — the point of opening this profile right now is
+                the emergency itself, not routine scan history. */}
+            {profileDelegate.escalated && (
+              <div style={{
+                marginTop: 18, padding: 14, borderRadius: "var(--r-md)",
+                background: "var(--st-missing-bg)", border: "1px solid var(--st-missing)",
+              }}>
+                <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                  <span style={{
+                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+                    background: "var(--st-missing)", color: "#fff", display: "grid", placeItems: "center",
+                  }}>
+                    <Siren size={13} />
+                  </span>
+                  <span style={{ fontWeight: 700, fontSize: 13.5, color: "var(--st-missing)" }}>
+                    {t("Escalated by")} {profileDelegate.escalatedBy || t("Staff")}
+                  </span>
+                </div>
+                <p style={{ fontSize: 14, lineHeight: 1.45, margin: "8px 0 0 34px" }}>
+                  {profileDelegate.escalationMessage || t("No message given.")}
                 </p>
               </div>
             )}
@@ -2069,14 +2312,16 @@ export default function DashboardPage() {
               </div>
             )}
 
-            <div style={{ marginTop: 20 }}>
-              <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <Clock size={13} /> {t("Checkpoint timeline")}
+            {!profileDelegate.escalated && (
+              <div style={{ marginTop: 20 }}>
+                <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Clock size={13} /> {t("Checkpoint timeline")}
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <DelegateTimeline delegateId={profileDelegate.id} defaultVisible={2} />
+                </div>
               </div>
-              <div style={{ marginTop: 8 }}>
-                <DelegateTimeline delegateId={profileDelegate.id} defaultVisible={2} />
-              </div>
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -2113,17 +2358,38 @@ export default function DashboardPage() {
               <button onClick={() => setAlertsOpen(false)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
             </div>
 
-            {missing.length === 0 && lateDelegates.length === 0 && cancelledDelegates.length === 0 && activeEscalations.length === 0 && (
+            {missingNotEscalated.length === 0 && lateDelegates.length === 0 && cancelledDelegates.length === 0 && activeEscalations.length === 0 && (
               <div className="muted" style={{ fontSize: 13 }}>{t("Nothing needs your attention right now.")}</div>
             )}
 
-            {activeEscalations.length > 0 && (
+            {activeEscalations.length > 0 && (() => {
+              const q = escalationQuery.trim().toLowerCase();
+              const filtered = q
+                ? activeEscalations.filter((e) =>
+                    (e.delegateName || "").toLowerCase().includes(q) ||
+                    (e.message || "").toLowerCase().includes(q) ||
+                    (e.createdBy || "").toLowerCase().includes(q))
+                : activeEscalations;
+              const visible = showAllEscalations ? filtered : filtered.slice(0, 5);
+              return (
               <div style={{ marginBottom: 18 }}>
-                <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5, marginBottom: 8 }}>
-                  <Siren size={15} /> {activeEscalations.length} {t("Emergency")}
+                <div className="row between" style={{ marginBottom: 8, gap: 8 }}>
+                  <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5 }}>
+                    <Siren size={15} /> {activeEscalations.length} {t("Emergency")}
+                  </div>
+                  {activeEscalations.length > 5 && (
+                    <input
+                      className="input" style={{ fontSize: 12, padding: "4px 8px", maxWidth: 140 }}
+                      placeholder={t("Search…")} value={escalationQuery}
+                      onChange={(e) => { setEscalationQuery(e.target.value); setShowAllEscalations(false); }}
+                    />
+                  )}
                 </div>
+                {filtered.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 12.5 }}>{t("No matches.")}</div>
+                ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
-                  {activeEscalations.map((e) => (
+                  {visible.map((e) => (
                     <div key={e.id} style={{ padding: "10px 12px", background: "var(--st-missing-bg)", borderRadius: "var(--r-sm)" }}>
                       <div className="row between" style={{ gap: 8 }}>
                         <div style={{ minWidth: 0, cursor: e.delegateId ? "pointer" : "default" }}
@@ -2160,7 +2426,7 @@ export default function DashboardPage() {
                             </button>
                           )}
                           <button className="btn btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }}
-                            disabled={escalationBusyId === e.id} onClick={() => resolveEscalationRow(e.id)}>
+                            disabled={escalationBusyId === e.id} onClick={() => resolveEscalationRow(e.id, e.delegateName)}>
                             {t("Resolve")}
                           </button>
                         </div>
@@ -2168,21 +2434,28 @@ export default function DashboardPage() {
                     </div>
                   ))}
                 </div>
+                )}
+                {!showAllEscalations && filtered.length > 5 && (
+                  <button className="btn btn-ghost" style={{ fontSize: 12.5, marginTop: 8 }} onClick={() => setShowAllEscalations(true)}>
+                    {t("Show")} {filtered.length - 5} {t("more")}
+                  </button>
+                )}
               </div>
-            )}
+              );
+            })()}
 
-            {missing.length > 0 && (
+            {missingNotEscalated.length > 0 && (
               <div style={{ marginBottom: (lateDelegates.length || cancelledDelegates.length) ? 18 : 0 }}>
                 <div className="row between" style={{ marginBottom: 8 }}>
                   <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5 }}>
-                    <AlertTriangle size={15} /> {missing.length} {t("Missing")}
+                    <AlertTriangle size={15} /> {missingNotEscalated.length} {t("Missing")}
                   </div>
                   <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
                     {t("View all")}
                   </button>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {missing.slice(0, 5).map((m) => (
+                  {missingNotEscalated.slice(0, 5).map((m) => (
                     <div
                       key={m.id}
                       className="row between"
@@ -2220,9 +2493,9 @@ export default function DashboardPage() {
                       </div>
                     </div>
                   ))}
-                  {missing.length > 5 && (
+                  {missingNotEscalated.length > 5 && (
                     <button className="btn btn-ghost" style={{ fontSize: 12.5, alignSelf: "flex-start" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
-                      {t("Show")} {missing.length - 5} {t("more")}
+                      {t("Show")} {missingNotEscalated.length - 5} {t("more")}
                     </button>
                   )}
                 </div>
@@ -2695,6 +2968,8 @@ function translateActivityText(text, t) {
 function activityColor(kind) {
   if (kind === "exception") return "var(--st-missing)";
   if (kind === "reassign") return "var(--st-unassigned)";
+  // 2026-07-27 — escalations now log here too (see routes/escalations.js).
+  if (kind === "escalation") return "var(--st-missing)";
   return "var(--st-present)";
 }
 
@@ -2714,6 +2989,248 @@ function ProfileField({ icon: Icon, label, value, action, mono }) {
       <div className="row" style={{ gap: 8, alignItems: "center" }}>
         <span className={mono ? "mono" : undefined} style={{ fontSize: 14, fontWeight: 500 }}>{value}</span>
         {action}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Room Management tab (2026-07-26) — hotel/room quick-edit across the whole
+ * roster, e.g. an end-of-day pass reassigning rooms. Reuses the SAME
+ * `delegates` list the Delegate tab already has (no separate fetch) — edits
+ * are per-row, local until "Save" is clicked for that row, so switching away
+ * mid-edit never half-saves anything.
+ */
+// Bumps a room number's trailing digits by `delta`, preserving any prefix
+// and zero-padding (e.g. "12A" -> "13A", "05" -> "06") — room numbers are
+// free text (some trips prefix a block letter), not a plain integer, so a
+// naive Number(value)+1 would break on anything non-numeric.
+function bumpRoomNumber(value, delta) {
+  const str = String(value ?? "");
+  const m = str.match(/^(.*?)(\d+)(\D*)$/);
+  if (!m) return delta > 0 ? `${str}1` : str; // nothing to decrement from
+  const [, prefix, digits, suffix] = m;
+  const next = Math.max(0, parseInt(digits, 10) + delta);
+  return prefix + String(next).padStart(digits.length, "0") + suffix;
+}
+
+function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) {
+  const [query, setQuery] = useState("");
+  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId>
+  const [sortMode, setSortMode] = useState("name"); // name | coach | room
+  const [edits, setEdits] = useState({}); // { [delegateId]: { hotelName, roomNumber } }
+  const [savingId, setSavingId] = useState(null);
+  // Pagination (2026-07-27 — "make sure to add something in all delegate
+  // section, so when there alot of delegate") — mirrors the main "All
+  // delegates" table's own Rows-per-page/Prev/Next pattern, own local state
+  // since this is a separate component instance.
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Bulk "everyone's in the same hotel" assignment (2026-07-26 — "it should
+  // reflect to all delegate because they should stay in the same hotel").
+  // Deliberately overwrites EVERY delegate's hotel unconditionally (a
+  // window.confirm gates it, same pattern as "Delete all" elsewhere on this
+  // page) — the per-row inputs right below stay there for the special-case
+  // delegate who's actually in a different hotel, edited AFTER the bulk set.
+  const [bulkHotel, setBulkHotel] = useState("");
+  const [bulkSaving, setBulkSaving] = useState(false);
+
+  // Unassigned delegates aren't confirmed for this trip's coach/itinerary yet
+  // (2026-07-26 — "if they are not assigned. they should not be going to
+  // hotel") — exclude them from Room Management entirely, not just the
+  // filter dropdown, so they never get swept into the bulk hotel-for-all
+  // either.
+  const roomable = delegates.filter((d) => d.coachId);
+
+  function fieldFor(d) {
+    return edits[d.id] || { hotelName: d.hotel_name || "", roomNumber: d.room_number || "" };
+  }
+  function setField(d, key, value) {
+    setEdits((prev) => ({ ...prev, [d.id]: { ...fieldFor(d), [key]: value } }));
+  }
+  async function save(d) {
+    const { hotelName, roomNumber } = fieldFor(d);
+    setSavingId(d.id);
+    try {
+      await apiPatch(`/delegates/${d.id}`, { hotelName: hotelName.trim(), roomNumber: roomNumber.trim() });
+      setEdits((prev) => { const next = { ...prev }; delete next[d.id]; return next; });
+      onSaved();
+    } catch {
+      /* leave the local edit in place so nothing typed is lost — the row's
+         "Save" stays clickable to retry */
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  async function applyHotelToAll() {
+    const name = bulkHotel.trim();
+    if (!name || roomable.length === 0) return;
+    const msg = lang === "zh"
+      ? `将全部 ${roomable.length} 位（已分配教练的）代表的酒店设为 "${name}"？个别房间号不受影响，之后仍可单独修改。`
+      : `Set the hotel to "${name}" for all ${roomable.length} coach-assigned delegates? Room numbers are untouched — you can still edit individual delegates afterwards for a special case.`;
+    if (!window.confirm(msg)) return;
+    setBulkSaving(true);
+    try {
+      await Promise.all(roomable.map((d) => apiPatch(`/delegates/${d.id}`, { hotelName: name, roomNumber: d.room_number || "" })));
+      setBulkHotel("");
+      setEdits({});
+      onSaved();
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
+  const filtered = roomable
+    .filter((d) => !query.trim() || d.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .filter((d) => coachFilter === "ALL" || d.coachId === coachFilter)
+    .sort((a, b) => {
+      if (sortMode === "coach") return coachName(a.coachId).localeCompare(coachName(b.coachId)) || a.name.localeCompare(b.name);
+      if (sortMode === "room") return (a.room_number || "￿").localeCompare(b.room_number || "￿") || a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name);
+    });
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const clampedPage = Math.min(page, pageCount - 1);
+  useEffect(() => { if (clampedPage !== page) setPage(clampedPage); }, [clampedPage, page]);
+  useEffect(() => { setPage(0); }, [query, coachFilter, sortMode, pageSize]);
+  const rowsShown = filtered.slice(clampedPage * pageSize, (clampedPage + 1) * pageSize);
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <p className="page-sub" style={{ margin: "0 0 14px" }}>
+        {t("Assign or reassign hotel/room per delegate — handy for an end-of-day pass.")}
+      </p>
+
+      {/* ---- Bulk "everyone's in this hotel" ------------------------------ */}
+      <div className="card" style={{ padding: 14, marginBottom: 16, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <BedDouble size={16} color="var(--ink-3)" style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{t("Set hotel for everyone")}</span>
+        <input
+          className="input" style={{ maxWidth: 260, fontSize: 13 }}
+          placeholder={t("e.g. Grand Hyatt")}
+          value={bulkHotel} onChange={(e) => setBulkHotel(e.target.value)}
+        />
+        <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 12px" }}
+          onClick={applyHotelToAll} disabled={bulkSaving || !bulkHotel.trim() || roomable.length === 0}>
+          {bulkSaving ? t("Applying…") : `${t("Apply to all")} ${roomable.length}`}
+        </button>
+        <span className="muted" style={{ fontSize: 11.5, width: "100%" }}>
+          {t("Room numbers are untouched — edit individual rows below for a delegate in a different hotel. Delegates without a coach aren't shown here — they aren't confirmed for a hotel yet.")}
+        </span>
+      </div>
+
+      {/* ---- Search / filter / sort ---------------------------------------- */}
+      <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", maxWidth: 260, flex: "1 1 200px" }}>
+          <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+          <input className="input" style={{ paddingLeft: 32 }} placeholder={t("Search name…")}
+            value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <select className="select" style={{ maxWidth: 190 }} value={coachFilter} onChange={(e) => setCoachFilter(e.target.value)}>
+          <option value="ALL">{t("All coaches")}</option>
+          <optgroup label={t("Coaches")}>
+            {coaches.map((c) => (
+              <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
+            ))}
+          </optgroup>
+        </select>
+        <select className="select" style={{ maxWidth: 160 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+          <option value="name">{t("Sort by name")}</option>
+          <option value="coach">{t("Sort by coach")}</option>
+          <option value="room">{t("Sort by room")}</option>
+        </select>
+      </div>
+
+      <div className="card" style={{ overflow: "hidden" }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{t("Name")}</th>
+              <th>{t("Coach")}</th>
+              <th>{t("Hotel")}</th>
+              <th>{t("Room number")}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rowsShown.map((d) => {
+              const f = fieldFor(d);
+              const dirty = edits[d.id] !== undefined;
+              return (
+                <tr key={d.id}>
+                  <td>{d.name}</td>
+                  <td className="muted">{coachName(d.coachId)}</td>
+                  <td>
+                    <input className="input" style={{ fontSize: 13 }} value={f.hotelName}
+                      onChange={(e) => setField(d, "hotelName", e.target.value)} placeholder={t("Hotel")} />
+                  </td>
+                  <td>
+                    {/* Increment/decrement stepper (2026-07-27 — "option to
+                        do increment for the room number") — handy for
+                        assigning consecutive rooms down a delegate list
+                        without retyping the whole number each time. */}
+                    <div className="row" style={{ gap: 4, alignItems: "center" }}>
+                      <button
+                        className="btn btn-ghost" style={{ padding: "4px 6px", flexShrink: 0 }}
+                        aria-label={t("Decrease room number")}
+                        onClick={() => setField(d, "roomNumber", bumpRoomNumber(f.roomNumber, -1))}
+                      >
+                        <Minus size={12} />
+                      </button>
+                      <input className="input" style={{ fontSize: 13, maxWidth: 90, textAlign: "center" }} value={f.roomNumber}
+                        onChange={(e) => setField(d, "roomNumber", e.target.value)} placeholder={t("Room")} />
+                      <button
+                        className="btn btn-ghost" style={{ padding: "4px 6px", flexShrink: 0 }}
+                        aria-label={t("Increase room number")}
+                        onClick={() => setField(d, "roomNumber", bumpRoomNumber(f.roomNumber, 1))}
+                      >
+                        <Plus size={12} />
+                      </button>
+                    </div>
+                  </td>
+                  <td>
+                    {dirty && (
+                      <button className="btn btn-ghost" style={{ fontSize: 12.5, padding: "4px 10px" }}
+                        onClick={() => save(d)} disabled={savingId === d.id}>
+                        {savingId === d.id ? t("Saving…") : t("Save")}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={5} className="muted" style={{ textAlign: "center", padding: 20 }}>{t("No delegates match your search.")}</td></tr>
+            )}
+          </tbody>
+        </table>
+        {filtered.length > 0 && (
+          <div className="row between" style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", flexWrap: "wrap", gap: 10 }}>
+            <span className="muted" style={{ fontSize: 12.5 }}>
+              {t("Showing")} {clampedPage * pageSize + 1}–{Math.min((clampedPage + 1) * pageSize, filtered.length)} {t("of")} {filtered.length}
+            </span>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: 12.5 }}>{t("Rows per page")}</span>
+              <select className="select" style={{ width: 76, padding: "4px 8px" }} value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}>
+                {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPage === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}>
+                <ChevronLeft size={14} /> {t("Prev")}
+              </button>
+              <span className="muted" style={{ fontSize: 12.5 }}>{t("Page")} {clampedPage + 1} {t("of")} {pageCount}</span>
+              <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPage >= pageCount - 1}
+                onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}>
+                {t("Next")} <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -6,6 +6,23 @@ Jayden's Exception Logging branch next. Hand this file to your own Claude
 session so it has the context without re-deriving it from scratch. Sections
 below are grouped by owner so you can jump straight to what's relevant to you._
 
+## For any AI reading this (any session, any chat)
+
+**Keep this file updated automatically — don't wait to be asked.** This
+doc's scope is the multi-checkpoint attendance feature specifically (the
+`checkpoint_checkins` table, `routes/checkpoints.js`, the reset-window/
+late-cutoff schedulers, and anything Desmond/Vimal/Jayden's branches need to
+know about it). Append a new dated `## YYYY-MM-DD — <short title>` section at
+the END of the file (append-only — this is a chronological handoff log, past
+entries don't get rewritten) whenever: a bug in the checkpoint/reset/
+late-cutoff logic gets found and fixed, the feature's behavior changes, OR
+something elsewhere in the codebase touches ground this doc documents in
+detail (e.g. `activity_log`'s schema/kinds — see the History tracker section)
+even if the change itself lives in a different feature. Live-test claims
+before writing them down, same as every existing entry does, and say clearly
+when something couldn't be verified (no browser available, timing-dependent,
+etc.) rather than asserting it worked.
+
 ## What this feature is
 
 A new, additive layer: instead of a delegate having ONE global status for the
@@ -1315,3 +1332,35 @@ and the reset-window scheduler's ~5-minute ARRIVED→ASSIGNED transition
 (not re-triggered live this pass — timing-dependent, needs a real wait or a
 clock-adjusted test). A fresh session with real browser access should close
 that gap.
+
+## 2026-07-27 — `activity_log` gains an `"escalation"` kind (touchpoint for this doc's own History tracker section)
+
+**JQ's own files (`routes/escalations.js`, `HistoryLogPage.jsx`,
+`DashboardPage.jsx`), no teammate impact.** Not a checkpoint-feature change
+itself, but directly touches the `activity_log`/History tracker internals
+this doc documents in detail above (the 2026-07-24 "History tracker was
+completely global" entry), so recording it here rather than only in
+`INTEGRATION_NOTES.md`.
+
+- Escalation create/acknowledge/resolve now each call `logActivity()` with a
+  new `kind: "escalation"` (previously escalations left NO audit trail at
+  all — `routes/escalations.js` never touched `activity_log`). Resolving
+  still also produces the pre-existing "`<name> updated` / Status: X → ARRIVED"
+  entry via `updateDelegate()` inside `resolveEscalation()` — the new
+  `escalation`-kind entry is a SEPARATE, additional row, not a replacement,
+  so a resolve now leaves 2 History Log entries instead of 1.
+- `HistoryLogPage.jsx` and the Dashboard's inline History tracker card both
+  got a dedicated icon/colour for `kind === "escalation"` (Siren icon,
+  `--st-missing` red) — falls back to the generic `Activity` icon/style for
+  any kind added later without a dedicated case.
+- `HistoryLogPage.jsx` entries also gained a "which coach" badge (reads the
+  same `a.coachName` field the existing coach-filter dropdown already used,
+  just also rendered inline per entry) — confirmed live that it only ever
+  populates for entries whose `delegateId` still resolves to a real,
+  currently-coached delegate (an add/remove entry, or one whose delegate was
+  since deleted, correctly shows no coach badge — same "derive fresh, don't
+  store a stale snapshot" behavior the coach-filter dropdown already relied on).
+- Live-tested the full lifecycle on a scratch delegate: escalate → acknowledge
+  → resolve all produced correctly-tagged `activity_log` rows with the right
+  coach name attached; cleaned up the scratch delegate and its activity rows
+  afterward.

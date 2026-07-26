@@ -16,7 +16,7 @@ import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
 import { actorOf } from "../lib/actor.js";
 import { requireAuth, requirePermission } from "../lib/auth.js";
-import { getActivity, deleteActivity, deleteAllActivity, rollbackActivity, applyLateCutoff, resolveTripUuid } from "../data.js";
+import { getActivity, deleteActivity, deleteAllActivity, rollbackActivity, applyLateCutoff, resolveTripUuid, getVisibleCoachIds } from "../data.js";
 
 const router = Router();
 
@@ -25,7 +25,14 @@ const router = Router();
 router.get("/api/activity", requireAuth(), wrap(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 1000);
   const tripUuid = await resolveTripUuid(req.query.tripId);
-  res.json({ activity: await getActivity(limit, tripUuid) });
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  let activity = await getActivity(limit, tripUuid);
+  // Coach-scoped staff (2026-07-27 — see getVisibleCoachIds' doc) only sees
+  // History Log entries for delegates on a coach they can see; entries with
+  // no resolvable coach (a deleted delegate, a trip-level event) still show,
+  // since they aren't clearly someone else's territory.
+  if (visibleCoachIds) activity = activity.filter((a) => !a.coachId || visibleCoachIds.has(a.coachId));
+  res.json({ activity });
 }));
 
 router.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {

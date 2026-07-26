@@ -61,6 +61,37 @@ export async function destroyImage(publicId) {
   }
 }
 
+/** Upload a video buffer (User Guide walkthrough — see GUIDE_VIDEO_FOLDER).
+ *  Mirrors uploadImage() but with resource_type: "video"; Cloudinary streams
+ *  large files internally so this works the same way for a multi-MB upload
+ *  as uploadImage() does for a small photo. */
+export function uploadVideo(buffer, folder) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: "video", overwrite: false },
+      (err, result) => {
+        if (err) return reject(err);
+        const url = cloudinary.url(result.public_id, {
+          resource_type: "video",
+          secure: true,
+        });
+        resolve({ url, publicId: result.public_id });
+      }
+    );
+    stream.end(buffer);
+  });
+}
+
+/** Best-effort video delete — same reasoning as destroyImage(). */
+export async function destroyVideo(publicId) {
+  if (!publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: "video" });
+  } catch {
+    /* ignore — not worth failing the request over a cleanup step */
+  }
+}
+
 /* ---- Media manager (Settings → Image storage) ----------------------------
  * Everything below backs the admin-only bulk image management UI: list every
  * asset actually sitting in Cloudinary storage, delete a chosen subset, or
@@ -75,6 +106,12 @@ export async function destroyImage(publicId) {
 // call to this prefix means "purge all" can never touch an asset outside
 // what this app itself put there, even if the Cloudinary account is shared.
 export const DELEGATE_PHOTO_FOLDER = "mustergo/delegates";
+// Trip Announcement images (2026-07-26) — its own folder, same reasoning as
+// accounts' separate folder: a purge of one asset type should never touch
+// another.
+export const ANNOUNCEMENT_FOLDER = "mustergo/announcements";
+// User Guide walkthrough video (2026-07-26) — own folder, same reasoning.
+export const GUIDE_VIDEO_FOLDER = "mustergo/guide";
 
 /** List every image asset in the app's folder, newest first. Cloudinary caps
  *  a single Admin API page at 500 resources — fine for a delegate-photo
@@ -126,5 +163,52 @@ export async function destroyImages(publicIds) {
 export async function purgeAllImages(folder = DELEGATE_PHOTO_FOLDER) {
   const images = await listImages(folder);
   const deleted = await destroyImages(images.map((i) => i.publicId));
+  return deleted;
+}
+
+/* ---- Video equivalents (2026-07-27, Settings → Announcement media / User
+ * Guide video) — mirror the three image functions above exactly, just
+ * resource_type: "video" throughout. Cloudinary doesn't generate a static
+ * thumbnail for a "type: upload, resource_type: video" listing the same way
+ * it does for images, so `thumbUrl` here is the video URL itself — the admin
+ * UI renders a small muted <video> tile instead of an <img> for these. */
+
+export async function listVideos(folder) {
+  const out = [];
+  let nextCursor;
+  do {
+    const res = await cloudinary.api.resources({
+      type: "upload", resource_type: "video", prefix: folder + "/",
+      max_results: 500, next_cursor: nextCursor,
+    });
+    for (const r of res.resources || []) {
+      out.push({
+        publicId: r.public_id,
+        url: cloudinary.url(r.public_id, { resource_type: "video", secure: true }),
+        bytes: r.bytes, width: r.width, height: r.height, createdAt: r.created_at,
+      });
+    }
+    nextCursor = res.next_cursor;
+  } while (nextCursor);
+  out.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return out;
+}
+
+export async function destroyVideos(publicIds) {
+  const ids = [...new Set(publicIds || [])].filter(Boolean);
+  const deleted = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const res = await cloudinary.api.delete_resources(chunk, { resource_type: "video" });
+    for (const [id, status] of Object.entries(res.deleted || {})) {
+      if (status === "deleted" || status === "not_found") deleted.push(id);
+    }
+  }
+  return deleted;
+}
+
+export async function purgeAllVideos(folder) {
+  const videos = await listVideos(folder);
+  const deleted = await destroyVideos(videos.map((v) => v.publicId));
   return deleted;
 }

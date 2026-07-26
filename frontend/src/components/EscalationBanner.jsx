@@ -3,7 +3,8 @@
  *  PART OF:   MusterGo base — Emergency escalations
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
-import { Siren, X, Check } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Siren, Check, ArrowRight } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { isAlertSoundMuted } from "../lib/alertSound.js";
@@ -16,6 +17,7 @@ const POLL_MS = 8000;
 
 export default function EscalationBanner() {
   const { t } = useLang();
+  const navigate = useNavigate();
   const [open, setOpen] = useState([]);
   const [busy, setBusy] = useState(false);
   const seenIds = useRef(new Set());
@@ -81,6 +83,20 @@ export default function EscalationBanner() {
   if (open.length === 0) return null;
   const [first, ...rest] = open;
 
+  // Jump to the escalated delegate's OWN trip and open the Alerts modal's
+  // full Emergency list (2026-07-26 — "can the view button link to alert
+  // page instead, cause i can only see 1 delegate only"). Used to deep-link
+  // straight to just the FIRST delegate's profile, which hid however many
+  // others ("+N more") were also open — the Alerts modal already shows every
+  // active escalation for the trip with Acknowledge/Resolve right there.
+  // Reads back out in DashboardPage.jsx (?tripId=/?openAlerts= → select that
+  // trip, then setAlertsOpen(true)).
+  function viewFirst() {
+    if (!first.tripId) return;
+    const params = new URLSearchParams({ tripId: first.tripId, openAlerts: "1" });
+    navigate(`/dashboard?${params.toString()}`);
+  }
+
   return (
     <div
       style={{
@@ -97,13 +113,33 @@ export default function EscalationBanner() {
       }}
     >
       <Siren size={18} style={{ flexShrink: 0 }} />
-      <div style={{ flex: 1, minWidth: 0, fontSize: 13.5 }}>
+      <div
+        onClick={first.tripId ? viewFirst : undefined}
+        style={{ flex: 1, minWidth: 0, fontSize: 13.5, cursor: first.tripId ? "pointer" : "default" }}
+        title={first.tripId ? t("Click to view all escalations for this trip") : undefined}
+      >
         <strong>{t("Escalation")}</strong>
         {first.delegateName ? ` — ${first.delegateName}` : ""}
         {first.message ? `: ${first.message}` : ""}
         {first.createdBy ? ` (${t("by")} ${first.createdBy})` : ""}
+        {/* Which trip this is for — without this, an escalation seen while
+            viewing a DIFFERENT trip's dashboard gave no way to tell where it
+            actually belonged (2026-07-25). */}
+        {first.tripName && <span style={{ opacity: 0.85 }}> · {first.tripName}</span>}
         {rest.length > 0 && <span style={{ opacity: 0.85 }}> · +{rest.length} {t("more")}</span>}
       </div>
+      {first.tripId && (
+        <button
+          onClick={viewFirst}
+          style={{
+            background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.35)", color: "#fff",
+            borderRadius: "var(--r-sm)", padding: "5px 10px", fontSize: 12.5, fontWeight: 600,
+            display: "flex", alignItems: "center", gap: 5, cursor: "pointer", flexShrink: 0,
+          }}
+        >
+          {t("View")} <ArrowRight size={13} />
+        </button>
+      )}
       <button
         onClick={acknowledgeAll}
         disabled={busy}

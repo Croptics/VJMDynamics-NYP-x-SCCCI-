@@ -18,6 +18,7 @@ import {
   Moon,
   ScanFace,
   HelpCircle,
+  Megaphone,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -28,7 +29,7 @@ import { useTheme } from "../lib/theme.jsx";
  * `exceptionCount` drives the red pill on the Exceptions item.
  * The account block + Log out button sit pinned to the bottom.
  */
-export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) {
+export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onLogout, open = false }) {
   // Re-render when Settings updates the session (name/photo/etc.) — plain
   // storage writes (updateSession) don't trigger React on their own.
   const [, forceUpdate] = useState(0);
@@ -59,6 +60,12 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     // face/voice matched once they're enrolled), so it sits next to it.
     ...(perms.viewScanner ? [{ to: "/enrolment", label: "Enrolment", icon: UserPlus }] : []),
     ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),
+    // Announcements sits after the action-oriented tools above (2026-07-26 —
+    // "top section purpose is for the stuff/admin purpose, announcement is
+    // just a add-on") — it's a read/broadcast page, not a live-trip workflow
+    // step, so it's grouped with the lower-frequency items at the tail
+    // instead of competing with Trips/Scanner/Enrolment for top billing.
+    ...(perms.viewAnnouncements ? [{ to: "/announcements", label: "Announcements", icon: Megaphone, badge: announcementCount }] : []),
     // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
     // Layout.jsx on every route) instead of a dedicated destination.
     // NOTE: "User guide" is intentionally NOT here — it's a help/reference

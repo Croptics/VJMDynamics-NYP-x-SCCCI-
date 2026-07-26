@@ -33,7 +33,8 @@
 
 import { Router } from "express";
 import ExcelJS from "exceljs";
-import { getTrip, getDashboard, getDelegates, resolveTripUuid } from "../data.js";
+import { getTrip, getDashboard, getDelegates, resolveTripUuid, getVisibleCoachIds } from "../data.js";
+import { all } from "../db/connection.js";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 
 const router = Router();
@@ -59,7 +60,7 @@ const UNASSIGNED_KEY = "__unassigned";
  * someone else, or vice versa. */
 const T = {
   en: {
-    sheetSummary: "Summary", sheetDelegates: "Delegates",
+    sheetSummary: "Summary", sheetDelegates: "Delegates", sheetCheckpoints: "Checkpoint history",
     title: (name) => `${name} — Attendance Export`,
     generated: (when, filters) => `Generated ${when} · Filters — ${filters}`,
     keyMetrics: "KEY METRICS", total: "Total", arrived: "Arrived", missing: "Missing", late: "Late", assigned: "Assigned",
@@ -75,9 +76,14 @@ const T = {
       industry: "Industry", email: "Email", phone: "Phone", nationality: "Nationality",
       passportNumber: "Passport", lastSeen: "Last seen", lastLocation: "Last location", createdAt: "Uploaded",
     },
+    checkpointColumns: {
+      name: "Name", coach: "Coach", day: "Day", checkpoint: "Checkpoint", scheduledTime: "Scheduled time",
+      status: "Status", scannedBy: "Scanned by", updatedAt: "Updated",
+    },
+    noCheckpoints: "No checkpoint scans recorded for the selected delegates.",
   },
   zh: {
-    sheetSummary: "摘要", sheetDelegates: "代表名单",
+    sheetSummary: "摘要", sheetDelegates: "代表名单", sheetCheckpoints: "打卡记录",
     title: (name) => `${name} — 出席情况导出`,
     generated: (when, filters) => `生成于 ${when} · 筛选条件 — ${filters}`,
     keyMetrics: "关键指标", total: "总数", arrived: "已抵达", missing: "缺席", late: "迟到", assigned: "已分配",
@@ -93,6 +99,11 @@ const T = {
       industry: "行业", email: "电子邮箱", phone: "电话", nationality: "国籍",
       passportNumber: "护照号码", lastSeen: "最后出现", lastLocation: "最后位置", createdAt: "上传时间",
     },
+    checkpointColumns: {
+      name: "姓名", coach: "车辆", day: "天数", checkpoint: "打卡点", scheduledTime: "预定时间",
+      status: "状态", scannedBy: "扫描人", updatedAt: "更新时间",
+    },
+    noCheckpoints: "所选代表没有打卡记录。",
   },
 };
 const tt = (lang) => T[lang === "zh" ? "zh" : "en"];
@@ -117,7 +128,13 @@ const ALL_COLUMNS = [
   { key: "phone", label: "Phone", width: 16, get: (d) => d.phone || "" },
   { key: "nationality", label: "Nationality", width: 14, get: (d) => d.nationality || "" },
   { key: "passportNumber", label: "Passport", width: 16, get: (d) => d.passportNumber || "" },
-  { key: "lastSeen", label: "Last seen", width: 22, get: (d) => d.lastSeen || "" },
+  // Strips a redundant leading "Last seen · " (2026-07-25 — free-text field,
+  // staff sometimes type the label itself into the value, e.g. "Last seen ·
+  // 16:53") — the column header already says "Last seen", so the cell
+  // shouldn't repeat it. Only strips an EXACT case-insensitive match of that
+  // phrase, so any other free text (a real place name, "Reset · 14:02", etc.)
+  // is untouched.
+  { key: "lastSeen", label: "Last seen", width: 22, get: (d) => (d.lastSeen || "").replace(/^last seen\s*[·:-]?\s*/i, "") },
   { key: "lastLocation", label: "Last location", width: 24, get: (d) => d.lastLocation || "" },
   { key: "createdAt", label: "Uploaded", width: 18, get: (d) => fmtDate(d.createdAt) },
 ];
@@ -172,8 +189,31 @@ function describeFilters(filters, coaches, lang) {
   return parts.length ? parts.join("  ·  ") : L.filterNone;
 }
 
+/* ---- checkpoint history (2026-07-25) --------------------------------------
+ * The multi-checkpoint attendance feature (routes/checkpoints.js) has never
+ * had an export path — all that per-stop ARRIVED/LATE/MISSING history was
+ * only ever viewable in-app via DelegateTimeline.jsx, one delegate at a time.
+ * This pulls EVERY checkin for the whole trip in one query (not a per-
+ * delegate loop) so an "Include per-checkpoint history" export stays a
+ * single fast query regardless of roster size. Optional/opt-in — omitted
+ * unless explicitly requested, so the default export stays exactly as fast
+ * as before. */
+async function loadCheckpointHistory(tripUuid) {
+  return all(
+    `SELECT cc.delegate_id AS "delegateId", cc.status, cc.method, cc.scanned_by AS "scannedBy",
+            cc.updated_at AS "updatedAt", i.title AS "checkpointLabel",
+            TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime", i.day_number AS "dayNumber"
+     FROM checkpoint_checkins cc
+     JOIN itinerary_items i ON i.id = cc.itinerary_item_id
+     JOIN delegates d ON d.id = cc.delegate_id
+     WHERE d.trip_id = $1
+     ORDER BY i.day_number, i.sort_order, i.start_time, d.name`,
+    [tripUuid]
+  );
+}
+
 /* ---- workbook builder ---------------------------------------------------- */
-function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, lang }) {
+function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, checkpointHistory, lang }) {
   const L = tt(lang);
   const coachName = makeCoachName(coaches, lang);
   const ctx = { coachName, tt: L };
@@ -292,18 +332,112 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
     if (sb !== sa) return sb - sa; // higher index (MISSING) first
     return (a.name || "").localeCompare(b.name || "");
   });
-  for (const d of sorted) {
+  // Colors only the Status cell itself (2026-07-25 — "very messy when a lot
+  // of status", was filling the ENTIRE row, so a sheet where most delegates
+  // share one status turned into one solid-color block with nothing to
+  // visually separate one row from the next). Light zebra banding on top —
+  // independent of status — keeps rows scannable even when Status is
+  // monochrome for pages at a time.
+  const statusIdx = cols.findIndex((c) => c.key === "status");
+  const vipIdx = cols.findIndex((c) => c.key === "vip");
+  sorted.forEach((d, i) => {
     const row = ws.addRow(cols.map((c) => c.get(d, ctx)));
-    const fill = STATUS_FILL[normStatus(d.status)];
-    row.eachCell((cell) => {
+    const band = i % 2 === 1 ? "FFF7F8FA" : null;
+    row.eachCell((cell, col) => {
       cell.border = THIN_BORDER;
-      if (fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+      if (band) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: band } };
     });
-    const vipIdx = cols.findIndex((c) => c.key === "vip");
+    const fill = STATUS_FILL[normStatus(d.status)];
+    if (statusIdx >= 0 && fill) {
+      const cell = row.getCell(statusIdx + 1);
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+      cell.font = { bold: true };
+    }
     if (vipIdx >= 0 && d.vip) row.getCell(vipIdx + 1).font = { bold: true, color: { argb: "FFB45309" } };
-  }
+  });
   ws.columns.forEach((col, i) => { col.width = cols[i]?.width || 16; });
   if (!sorted.length) ws.addRow([L.noMatch]);
+
+  /* ===== Sheet 3 — Checkpoint history (optional, opt-in) ===== */
+  if (checkpointHistory) {
+    const cp = wb.addWorksheet(L.sheetCheckpoints);
+    // Scoped to the SAME filtered delegate set as the Delegates sheet, so a
+    // coordinator filtering to e.g. one coach sees only that coach's
+    // checkpoint history too, not the whole trip's.
+    const delegateById = new Map(delegates.map((d) => [d.id, d]));
+    const rows = checkpointHistory.filter((r) => delegateById.has(r.delegateId));
+
+    // Leaner 5-column layout (2026-07-25 — "very messy when a lot of
+    // status") — Day/Checkpoint/Scheduled time used to repeat IDENTICALLY on
+    // every single row (hundreds of rows sharing one value), so they're
+    // pulled out into one merged banner row per group instead, same idea as
+    // a pivot-table's row grouping.
+    const cpHeader = cp.addRow([
+      L.checkpointColumns.name, L.checkpointColumns.coach, L.checkpointColumns.status,
+      L.checkpointColumns.scannedBy, L.checkpointColumns.updatedAt,
+    ]);
+    cpHeader.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cpHeader.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: BRAND } };
+      cell.alignment = { vertical: "middle" };
+      cell.border = THIN_BORDER;
+    });
+    cp.views = [{ state: "frozen", ySplit: 1 }];
+
+    // Group by (day, checkpoint, scheduledTime), preserving the chronological
+    // order the query already returned rows in (day_number, sort_order,
+    // start_time) — a plain object walk keeps first-seen order in JS, so no
+    // separate sort needed for the groups themselves.
+    const groups = [];
+    const groupIndex = new Map();
+    for (const r of rows) {
+      const key = `${r.dayNumber}::${r.checkpointLabel}::${r.scheduledTime}`;
+      if (!groupIndex.has(key)) {
+        groupIndex.set(key, groups.length);
+        groups.push({ dayNumber: r.dayNumber, checkpointLabel: r.checkpointLabel, scheduledTime: r.scheduledTime, rows: [] });
+      }
+      groups[groupIndex.get(key)].rows.push(r);
+    }
+
+    for (const group of groups) {
+      const bannerRow = cp.addRow([`${L.checkpointColumns.day} ${group.dayNumber} · ${group.checkpointLabel} · ${group.scheduledTime}`]);
+      cp.mergeCells(bannerRow.number, 1, bannerRow.number, 5);
+      bannerRow.getCell(1).font = { bold: true, color: { argb: "FF374151" } };
+      bannerRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE5E7EB" } };
+      bannerRow.getCell(1).alignment = { vertical: "middle" };
+      bannerRow.height = 20;
+
+      // Severity-first within each group (Missing at the top), same
+      // convention as the Delegates sheet.
+      const groupSorted = [...group.rows].sort((a, b) => {
+        const sa = STATUS_ORDER.indexOf(normStatus(a.status));
+        const sb = STATUS_ORDER.indexOf(normStatus(b.status));
+        if (sb !== sa) return sb - sa;
+        const na = delegateById.get(a.delegateId)?.name || "";
+        const nb = delegateById.get(b.delegateId)?.name || "";
+        return na.localeCompare(nb);
+      });
+      groupSorted.forEach((r, i) => {
+        const d = delegateById.get(r.delegateId);
+        const row = cp.addRow([
+          d.name, coachName(d.coachId), L.status[normStatus(r.status)] || r.status, r.scannedBy || "", fmtDate(r.updatedAt),
+        ]);
+        const band = i % 2 === 1 ? "FFF7F8FA" : null;
+        row.eachCell((cell) => {
+          cell.border = THIN_BORDER;
+          if (band) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: band } };
+        });
+        const fill = STATUS_FILL[normStatus(r.status)];
+        if (fill) {
+          const cell = row.getCell(3); // Status column
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+          cell.font = { bold: true };
+        }
+      });
+    }
+    cp.columns = [{ width: 24 }, { width: 20 }, { width: 12 }, { width: 16 }, { width: 18 }];
+    if (!rows.length) cp.addRow([L.noCheckpoints]);
+  }
 
   return wb;
 }
@@ -411,9 +545,16 @@ function sanitizeFilter(raw, coaches) {
 }
 
 /* ---- routes -------------------------------------------------------------- */
-async function loadTripData(idParam) {
+// `account` (2026-07-27 — coach-scoped Staff visibility, see
+// getVisibleCoachIds' doc in db/dashboard.js) restricts an export to only
+// the delegates/coaches that account can actually see on the Dashboard —
+// otherwise a scoped Staff account could export the whole trip's roster via
+// this route even though the UI itself only shows them their own coach.
+async function loadTripData(idParam, account = null) {
   const tripUuid = await resolveTripUuid(idParam);
-  const [trip, delegates, dash] = await Promise.all([getTrip(tripUuid), getDelegates(tripUuid), getDashboard(tripUuid)]);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, account);
+  const [trip, allDelegates, dash] = await Promise.all([getTrip(tripUuid), getDelegates(tripUuid), getDashboard(tripUuid, visibleCoachIds)]);
+  const delegates = visibleCoachIds ? allDelegates.filter((d) => visibleCoachIds.has(d.coachId)) : allDelegates;
   return { tripUuid, trip, delegates, coaches: dash.coaches || [] };
 }
 
@@ -465,16 +606,16 @@ async function maybeAiSummary(trip, filtered, coaches, filters, lang) {
 }
 
 async function handleExport(req, res, filters, options) {
-  const { trip, delegates, coaches } = await loadTripData(req.params.id);
+  const { tripUuid, trip, delegates, coaches } = await loadTripData(req.params.id, req.account);
   const filtered = delegates.filter((d) => passesFilter(d, filters));
   const lang = options.lang === "zh" ? "zh" : "en";
 
-  let aiSummary = null;
-  if (options.includeAiSummary && filtered.length) {
-    aiSummary = await maybeAiSummary(trip, filtered, coaches, filters, lang);
-  }
+  const [aiSummary, checkpointHistory] = await Promise.all([
+    options.includeAiSummary && filtered.length ? maybeAiSummary(trip, filtered, coaches, filters, lang) : null,
+    options.includeCheckpoints ? loadCheckpointHistory(tripUuid) : null,
+  ]);
 
-  const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, lang });
+  const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, checkpointHistory, lang });
 
   // Filename stays plain-ASCII/English regardless of content language — a
   // Chinese filename can still round-trip through Content-Disposition fine
@@ -499,6 +640,7 @@ router.post("/api/trips/:id/export", requirePermission("exportData"), wrap(async
   const options = {
     columns: Array.isArray(body.columns) ? body.columns.filter((k) => ALL_COLUMNS.some((c) => c.key === k)) : null,
     includeAiSummary: !!body.includeAiSummary,
+    includeCheckpoints: !!body.includeCheckpoints,
     // Independent, explicit per-export choice (ExportModal's language
     // selector) — NOT implicitly tied to the requesting staff member's own
     // UI language, since they might need to hand a report in the other
@@ -516,7 +658,7 @@ router.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async 
 // Metadata for the export config modal — the columns it can offer and the
 // coaches it can filter by (names resolved server-side).
 router.get("/api/trips/:id/export/options", requireAuth(), wrap(async (req, res) => {
-  const { coaches } = await loadTripData(req.params.id);
+  const { coaches } = await loadTripData(req.params.id, req.account);
   res.json({
     columns: ALL_COLUMNS.map((c) => ({ key: c.key, label: c.label })),
     defaultColumns: DEFAULT_COLUMNS,
@@ -530,7 +672,7 @@ router.get("/api/trips/:id/export/options", requireAuth(), wrap(async (req, res)
 router.post("/api/trips/:id/export/ai-filter", requirePermission("exportData"), wrap(async (req, res) => {
   const request = (req.body?.prompt || "").toString().trim();
   if (!request) return res.status(400).json({ error: "NO_PROMPT", message: "Describe what to export." });
-  const { coaches } = await loadTripData(req.params.id);
+  const { coaches } = await loadTripData(req.params.id, req.account);
   const prompt = buildFilterPrompt(request, coaches);
 
   const viaOllama = await tryOllama(prompt, { json: true, numPredict: 80 });

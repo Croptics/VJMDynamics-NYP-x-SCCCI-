@@ -126,6 +126,14 @@ export async function createSchema() {
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
 
+  // Contact number (2026-07-25) — nullable, same tier as email (a plain
+  // contact field, not a secret). Added so escalations can eventually reach
+  // an admin/staff by SMS/WhatsApp (routes/escalations.js, lib/notify.js —
+  // currently email-only; the Twilio SMS/WhatsApp path is stubbed until a
+  // real paid account is set up) — without a phone number on file for any
+  // account, that path has nowhere to send to no matter how it's wired up.
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
+
   // Named, admin-managed access-role templates (2026-07-24) — Account
   // control's "Apply template" quick-fill + "Access role" filter used to be
   // 2 templates hardcoded in the frontend; now real, persisted rows any
@@ -211,6 +219,12 @@ export async function createSchema() {
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS notes               TEXT`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS company             VARCHAR(255)`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS accessibility_notes TEXT`);
+  // Room allocation (2026-07-26) — hotel name + room number, editable from
+  // the delegate profile/Edit modal and the dedicated Room Management tab;
+  // pre-fillable from Vance's document parser (routes/vance.js) when a
+  // parsed itinerary/rooming list includes them.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS hotel_name          VARCHAR(255)`);
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS room_number         VARCHAR(32)`);
 
   // itinerary_items: per-trip schedule strip driving the journey timeline.
   await run(`CREATE TABLE IF NOT EXISTS itinerary_items (
@@ -333,6 +347,63 @@ export async function createSchema() {
     resolved_at TIMESTAMPTZ
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status, created_at DESC)`);
+
+  // Trip Announcements (2026-07-25) — admin-posted critical updates, scoped
+  // per trip, visible to every signed-in Staff/Admin viewing that trip (own
+  // "viewAnnouncements" desktopView permission, defaults true — see
+  // permissions.js; only POSTING is admin-only, enforced in
+  // routes/announcements.js). Own dedicated page (2026-07-26) rather than a
+  // Dashboard widget — "make it a separate page... follow the trip ongoing
+  // itinerary" — so an announcement can optionally tag the itinerary stop
+  // it's about (itinerary_item_id, nullable — a general/trip-wide notice
+  // just leaves it null).
+  await run(`CREATE TABLE IF NOT EXISTS announcements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trip_id UUID REFERENCES trips(uuid_id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_announcements_trip ON announcements(trip_id, created_at DESC)`);
+  // Optional image (2026-07-26 — "can give option to add image so can see
+  // the next location etc.") — same Cloudinary photoUrl/photoPublicId
+  // pattern as accounts/delegates, own "mustergo/announcements" folder (see
+  // routes/announcements.js) so deleting one never touches account/delegate
+  // photos.
+  await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS "imageUrl" TEXT`);
+  await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS "imagePublicId" TEXT`);
+  // Optional itinerary-stop tag (2026-07-26 bugfix: this was originally
+  // inside the CREATE TABLE above, which no-ops once the table already
+  // exists — moved to its own ALTER, same as imageUrl/imagePublicId, so it
+  // actually lands on a database that already had this table from before
+  // this column existed).
+  await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS itinerary_item_id UUID REFERENCES itinerary_items(id) ON DELETE SET NULL`);
+  // Multiple images per announcement (2026-07-27) — the ORIGINAL "imageUrl"/
+  // "imagePublicId" columns above only ever held one photo; new posts store
+  // every photo here instead (array of {url, publicId}), while old rows keep
+  // rendering via the legacy single column (see db/announcements.js's doc).
+  await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS images JSONB NOT NULL DEFAULT '[]'::jsonb`);
+  // Videos per announcement (2026-07-27 — "give me... video upload also")
+  // — same {url, publicId} array shape as images, uploaded via
+  // lib/cloudinary.js's uploadVideo/destroyVideo (already added for the User
+  // Guide walkthrough video, reused here for the same resource_type:"video"
+  // Cloudinary handling).
+  await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS videos JSONB NOT NULL DEFAULT '[]'::jsonb`);
+
+  // Single-row table backing the User Guide's "Walkthrough video" placeholder
+  // (2026-07-26) — global, not per-trip, so a fixed id=1 row is simplest.
+  // Admin uploads once from the Getting Started tab; every account sees the
+  // same video. Cloudinary asset lives in the "mustergo/guide" folder (see
+  // lib/cloudinary.js's GUIDE_VIDEO_FOLDER).
+  await run(`CREATE TABLE IF NOT EXISTS guide_video (
+    id SMALLINT PRIMARY KEY DEFAULT 1,
+    url TEXT,
+    public_id TEXT,
+    uploaded_by VARCHAR(255),
+    uploaded_at TIMESTAMPTZ,
+    CONSTRAINT guide_video_single_row CHECK (id = 1)
+  )`);
 }
 
 export async function seed() {

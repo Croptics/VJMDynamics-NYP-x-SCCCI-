@@ -25,6 +25,7 @@ const EMPTY_FORM = {
   username: "",
   name: "",
   email: "",
+  phone: "",
   password: "",
   role: "staff",
   perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
@@ -386,6 +387,7 @@ export default function AccountControlPage() {
       username: a.username,
       name: a.name || "",
       email: a.email || "",
+      phone: a.phone || "",
       password: "",
       perms,
       role: a.role === "admin" ? "admin" : "staff",
@@ -469,6 +471,7 @@ export default function AccountControlPage() {
     // changing a permission), not get blocked into backfilling an email
     // that account never had. A brand-new account already required it above.
     if (form.email.trim()) payload.email = form.email.trim();
+    if (form.phone.trim()) payload.phone = form.phone.trim();
 
     try {
       if (editingId) {
@@ -930,6 +933,13 @@ export default function AccountControlPage() {
             <input className="input" type="email" value={form.email}
               placeholder={t("e.g. john.tan@sccci.org.sg")}
               onChange={(e) => setForm({ ...form, email: e.target.value })} />
+
+            <label className="field-label" style={{ marginTop: 14 }}>
+              {t("Contact number")} <span className="muted">({t("optional")})</span>
+            </label>
+            <input className="input" type="tel" value={form.phone}
+              placeholder={t("e.g. +65 9123 4567")}
+              onChange={(e) => setForm({ ...form, phone: e.target.value })} />
 
             <label className="field-label" style={{ marginTop: 14 }}>
               {t("Password")} {editingId && <span className="muted">({t("leave blank to keep current")})</span>}

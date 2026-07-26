@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
-import { ShieldCheck, Sun, Moon, Languages, Timer, Camera, X, Pencil, Bell, BellOff, Mail, Trash2 } from "lucide-react";
+import { ShieldCheck, Sun, Moon, Languages, Timer, Camera, X, Pencil, Bell, BellOff, Mail, Phone, Trash2, Megaphone, Video } from "lucide-react";
 import { getUser, getPermissions, apiGet, apiPatch, apiPost, apiDelete, updateSession } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
@@ -102,6 +102,7 @@ export default function SettingsPage() {
       name: user.name || "",
       username: user.username || "",
       email: user.email || "",
+      phone: user.phone || "",
       currentPassword: "",
       newPassword: "",
       confirmPassword: "",
@@ -125,6 +126,7 @@ export default function SettingsPage() {
         name: profileForm.name.trim(),
         username: profileForm.username.trim(),
         email: profileForm.email.trim(),
+        phone: profileForm.phone.trim(),
       };
       if (profileForm.newPassword) {
         patch.currentPassword = profileForm.currentPassword;
@@ -306,6 +308,12 @@ export default function SettingsPage() {
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</span>
                 </div>
               )}
+              {user.phone && (
+                <div className="row muted" style={{ fontSize: 12.5, gap: 6, alignItems: "center" }}>
+                  <Phone size={12} style={{ flexShrink: 0 }} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.phone}</span>
+                </div>
+              )}
               {user.photoUrl && (
                 <button
                   className="btn btn-ghost"
@@ -369,9 +377,17 @@ export default function SettingsPage() {
 
             <label className="muted" style={{ fontSize: 12.5 }}>{t("Email")}</label>
             <input
-              className="input" type="email" style={{ marginTop: 4, marginBottom: 16 }}
+              className="input" type="email" style={{ marginTop: 4, marginBottom: 12 }}
               value={profileForm.email}
               onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
+            />
+
+            <label className="muted" style={{ fontSize: 12.5 }}>{t("Contact number")}</label>
+            <input
+              className="input" type="tel" style={{ marginTop: 4, marginBottom: 16 }}
+              placeholder={t("Optional — e.g. +65 9123 4567")}
+              value={profileForm.phone}
+              onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
             />
 
             <div className="muted" style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 8, borderTop: "1px solid var(--line-2)", paddingTop: 14 }}>
@@ -578,8 +594,30 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* ---- Image storage (manageAccounts-gated) ------------------------ */}
-      {perms.manageAccounts && <MediaManager />}
+      {/* ---- Storage management (manageAccounts-gated) --------------------
+       * Three separate folders (2026-07-27 — "give me the option to delete
+       * announcement image/video upload, same for user guide"): this used to
+       * be delegate photos only; announcement media and the User Guide video
+       * were uploadable with no way to manage/delete them from here. */}
+      {perms.manageAccounts && (
+        <>
+          <MediaManager
+            folderKey="delegates" icon={Camera}
+            title="Delegate photos"
+            desc="Delegate profile photos stored in Cloudinary — delete individual images, or clear everything at once."
+          />
+          <MediaManager
+            folderKey="announcements" icon={Megaphone}
+            title="Announcement media"
+            desc="Images and videos attached to trip announcements — delete individual items, or clear everything at once."
+          />
+          <MediaManager
+            folderKey="guide" icon={Video}
+            title="User Guide video"
+            desc="The walkthrough video shown on the User Guide's Getting Started tab."
+          />
+        </>
+      )}
     </div>
   );
 }
