@@ -151,8 +151,45 @@ async function init() {
   await q(`CREATE INDEX IF NOT EXISTS idx_dm_convo ON dm_messages(convo_key, created_at)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_dm_inbox ON dm_messages(recipient_kind, recipient_id, read_at)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_dm_sender ON dm_messages(sender_id, created_at)`);
+  // WhatsApp-style edit / delete (additive). `edited_at` stamps an edited text;
+  // `deleted_at` soft-deletes (the row stays for ordering, but body/media are
+  // blanked on read so the content is gone — "This message was deleted").
+  await q(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS edited_at  TIMESTAMPTZ`);
+  await q(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
 
-  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages, dm_messages");
+  // MusterChat calling: WebRTC signaling relay. Two staff exchange offer/answer/
+  // ICE via these rows (polled), so a real peer-to-peer audio/video call
+  // connects without any dedicated signaling server. Rows are short-lived.
+  await q(`CREATE TABLE IF NOT EXISTS call_signals (
+    id          VARCHAR(64) PRIMARY KEY,
+    call_id     VARCHAR(64) NOT NULL,
+    from_id     VARCHAR(64) NOT NULL,
+    from_name   VARCHAR(255),
+    to_id       VARCHAR(64) NOT NULL,
+    kind        VARCHAR(16) NOT NULL,
+    payload     TEXT,
+    mode        VARCHAR(8),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_call_signals_to ON call_signals(to_id, created_at)`);
+
+  // MusterChat group chats. A group's messages reuse dm_messages with convo_key
+  // = 'g:<groupId>' (recipient_kind 'group'), so no message-schema change — just
+  // the group + membership tables here.
+  await q(`CREATE TABLE IF NOT EXISTS chat_groups (
+    id          VARCHAR(64) PRIMARY KEY,
+    name        VARCHAR(255) NOT NULL,
+    created_by  VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS chat_group_members (
+    group_id    VARCHAR(64) NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+    account_id  VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, account_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_group_members_acct ON chat_group_members(account_id)`);
+
+  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages, dm_messages, call_signals, chat_groups");
   warmUpModel(); // preload the chat model so the first question isn't a cold start
 }
 
@@ -852,7 +889,7 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   const tripId = req.query.tripId;
   const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
-  const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
+  const cols = `id, name, company, role, industry, "coachId" AS coach_id, status, vip, qr_code`;
   const r = tripUuid
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
@@ -1757,9 +1794,29 @@ function convoKey(meAcctId, peerKind, peerId) {
   return `a:${lo}|a:${hi}`;
 }
 
-const MSG_KINDS = new Set(["text", "video", "doc", "call"]);
+const MSG_KINDS = new Set(["text", "video", "doc", "call", "sticker"]);
 const MAX_BODY = 8000;                 // chars of text / caption
 const MAX_MEDIA = 12 * 1024 * 1024;    // ~12MB base64 (short clips / small docs)
+
+// Shape a dm_messages row for the client. A soft-deleted message keeps its slot
+// (for ordering) but its content is blanked so it can never leak — the client
+// shows "This message was deleted" from the `deleted` flag. `edited` tags edits.
+function mapMessageRow(me) {
+  return (m) => {
+    const deleted = !!m.deleted_at;
+    return {
+      id: m.id,
+      kind: m.kind,
+      body: deleted ? null : m.body,
+      media: deleted ? null : m.media,
+      at: m.created_at,
+      mine: m.sender_id === me,
+      read: !!m.read_at,
+      edited: !!m.edited_at,
+      deleted,
+    };
+  };
+}
 
 // Restriction point: staff are always contactable; delegate contacts require
 // the same delegate visibility the rest of the app gates on. Tighten here.
@@ -1781,6 +1838,8 @@ async function resolvePeer(peerKind, peerId, account) {
 
 const previewOf = (m) =>
   !m ? null
+  : m.deleted_at ? "🚫 Message deleted"
+  : m.kind === "sticker" ? "💟 Sticker"
   : m.kind === "video" ? "📹 Video message"
   : m.kind === "doc" ? "📄 Document"
   : m.kind === "call" ? (m.body || "📞 Call")
@@ -1809,7 +1868,7 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
 
   // All my messages, oldest→newest, so the last write per convo wins the preview.
   const mine = (await q(
-    `SELECT convo_key, sender_id, recipient_kind, recipient_id, kind, body, created_at, read_at
+    `SELECT convo_key, sender_id, recipient_kind, recipient_id, kind, body, created_at, read_at, deleted_at
        FROM dm_messages
       WHERE sender_id = $1 OR (recipient_kind = 'account' AND recipient_id = $1)
       ORDER BY created_at`, [me]
@@ -1866,16 +1925,13 @@ router.get("/api/messages/thread", requireAuth(), wrap(async (req, res) => {
           [key, me]);
 
   const rows = (await q(
-    `SELECT id, sender_id, kind, body, media, created_at, read_at
+    `SELECT id, sender_id, kind, body, media, created_at, read_at, edited_at, deleted_at
        FROM dm_messages WHERE convo_key = $1 ORDER BY created_at`, [key]
   )).rows;
 
   res.json({
     peer: { kind: peerKind, id: peerId, name: peer.name || peer.username, subtitle: peer.company || null },
-    messages: rows.map((m) => ({
-      id: m.id, kind: m.kind, body: m.body, media: m.media,
-      at: m.created_at, mine: m.sender_id === me, read: !!m.read_at,
-    })),
+    messages: rows.map(mapMessageRow(me)),
   });
 }));
 
@@ -1888,7 +1944,7 @@ router.post("/api/messages/thread", requireAuth(), express.json({ limit: "16mb" 
   if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
   if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
   if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE", message: "That attachment is too large — keep clips short." });
-  if (kind === "text" && !String(body || "").trim()) return res.status(400).json({ error: "EMPTY" });
+  if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
 
   const peer = await resolvePeer(peerKind, peerId, req.account);
   if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
@@ -1910,7 +1966,7 @@ router.get("/api/messages/updates", requireAuth(), wrap(async (req, res) => {
   const me = req.account.id;
   const since = req.query.since ? new Date(req.query.since.toString()) : new Date(Date.now() - 60000);
   const rows = (await q(
-    `SELECT id, convo_key, sender_id, kind, body, created_at
+    `SELECT id, convo_key, sender_id, kind, body, created_at, deleted_at
        FROM dm_messages
       WHERE recipient_kind = 'account' AND recipient_id = $1 AND created_at > $2
       ORDER BY created_at`, [me, since.toISOString()]
@@ -1936,6 +1992,178 @@ router.post("/api/messages/read", requireAuth(), express.json(), wrap(async (req
   await q(`UPDATE dm_messages SET read_at = now()
             WHERE convo_key = $1 AND recipient_kind = 'account' AND recipient_id = $2 AND read_at IS NULL`, [key, me]);
   res.json({ ok: true });
+}));
+
+// PATCH /api/messages/:id — edit your OWN text message (DMs or groups; keyed by
+// message id, so one endpoint covers both). Stamps `edited_at`.
+router.patch("/api/messages/:id", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const id = req.params.id;
+  const body = (req.body?.body ?? "").toString();
+  const row = (await q(`SELECT sender_id, kind, deleted_at FROM dm_messages WHERE id = $1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: "NO_MESSAGE" });
+  if (row.sender_id !== me) return res.status(403).json({ error: "NOT_YOURS", message: "You can only edit your own messages." });
+  if (row.deleted_at) return res.status(409).json({ error: "DELETED", message: "That message was deleted." });
+  if (row.kind !== "text") return res.status(400).json({ error: "NOT_EDITABLE", message: "Only text messages can be edited." });
+  if (!body.trim()) return res.status(400).json({ error: "EMPTY" });
+  if (body.length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
+  await q(`UPDATE dm_messages SET body = $1, edited_at = now() WHERE id = $2`, [body, id]);
+  res.json({ ok: true, id, body, edited: true });
+}));
+
+// DELETE /api/messages/:id — soft-delete your OWN message (any kind). The row
+// stays for ordering but body/media are wiped so the content is truly gone.
+router.delete("/api/messages/:id", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const id = req.params.id;
+  const row = (await q(`SELECT sender_id FROM dm_messages WHERE id = $1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: "NO_MESSAGE" });
+  if (row.sender_id !== me) return res.status(403).json({ error: "NOT_YOURS", message: "You can only delete your own messages." });
+  await q(`UPDATE dm_messages SET deleted_at = now(), body = NULL, media = NULL WHERE id = $1`, [id]);
+  res.json({ ok: true, id, deleted: true });
+}));
+
+/* =============================================================================
+ *  MUSTERCHAT CALLING — WebRTC signaling relay (staff↔staff). The two peers
+ *  exchange invite / offer / answer / ICE / hangup through these rows, polled
+ *  by the client, so a real peer-to-peer audio/video call connects with just a
+ *  public STUN server — no dedicated signaling server needed.
+ * ========================================================================== */
+// 1:1 kinds + group-mesh kinds (ginvite = ring a member into a group call;
+// gjoin/gpresence = mesh roster discovery; gleave = a member left the room).
+const CALL_SIGNAL_KINDS = new Set([
+  "invite", "offer", "answer", "ice", "accept", "reject", "hangup", "busy",
+  "ginvite", "gjoin", "gpresence", "gleave",
+]);
+
+// POST /api/calls/signal — relay one signal to a peer (another staff account).
+router.post("/api/calls/signal", requireAuth(), express.json({ limit: "1mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const { callId, toId, kind, payload = null, mode = null } = req.body || {};
+  if (!callId || !toId || !CALL_SIGNAL_KINDS.has(kind)) return res.status(400).json({ error: "BAD_SIGNAL" });
+  const peer = (await q(`SELECT id FROM accounts WHERE id = $1`, [toId])).rows[0];
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That teammate isn't reachable." });
+  await q(
+    `INSERT INTO call_signals (id, call_id, from_id, from_name, to_id, kind, payload, mode)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [randomUUID(), callId, req.account.id, req.account.name || req.account.username, toId, kind, payload ? JSON.stringify(payload) : null, mode]
+  );
+  res.json({ ok: true });
+}));
+
+// GET /api/calls/poll?since=ISO — signals addressed to me since a timestamp.
+router.get("/api/calls/poll", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const since = req.query.since ? new Date(req.query.since.toString()) : new Date(Date.now() - 20000);
+  const rows = (await q(
+    `SELECT id, call_id, from_id, from_name, kind, payload, mode, created_at
+       FROM call_signals WHERE to_id = $1 AND created_at > $2 ORDER BY created_at`,
+    [req.account.id, since.toISOString()]
+  )).rows;
+  // Opportunistic cleanup so the relay table never grows unbounded.
+  q(`DELETE FROM call_signals WHERE created_at < now() - interval '5 minutes'`).catch(() => {});
+  res.json({
+    now: new Date().toISOString(),
+    meId: req.account.id, // lets the client know its own id (needed to order WebRTC mesh offers)
+    signals: rows.map((r) => ({
+      id: r.id, callId: r.call_id, fromId: r.from_id, fromName: r.from_name,
+      kind: r.kind, payload: r.payload ? JSON.parse(r.payload) : null, mode: r.mode, at: r.created_at,
+    })),
+  });
+}));
+
+/* =============================================================================
+ *  MUSTERCHAT GROUPS — group chats. Messages reuse dm_messages with
+ *  convo_key = 'g:<groupId>' (recipient_kind 'group'), so all the media/kind
+ *  handling is shared; only membership lives in its own tables.
+ * ========================================================================== */
+async function isGroupMember(groupId, accountId) {
+  return (await q(`SELECT 1 FROM chat_group_members WHERE group_id = $1 AND account_id = $2`, [groupId, accountId])).rows.length > 0;
+}
+
+// POST /api/groups — create a group (creator + chosen staff members).
+router.post("/api/groups", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const name = (req.body?.name || "").toString().trim();
+  const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds : [];
+  if (!name) return res.status(400).json({ error: "NO_NAME", message: "Give the group a name." });
+  const ids = Array.from(new Set([me, ...memberIds])).filter(Boolean);
+  const valid = (await q(`SELECT id FROM accounts WHERE id = ANY($1)`, [ids])).rows.map((r) => r.id);
+  if (valid.length < 2) return res.status(400).json({ error: "TOO_FEW", message: "Add at least one other member." });
+  const id = randomUUID();
+  await q(`INSERT INTO chat_groups (id, name, created_by) VALUES ($1,$2,$3)`, [id, name, me]);
+  for (const aid of valid) await q(`INSERT INTO chat_group_members (group_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [id, aid]);
+  res.json({ group: { id, name, memberCount: valid.length } });
+}));
+
+// GET /api/groups — groups I'm in, with member count + last-message preview.
+router.get("/api/groups", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const groups = (await q(
+    `SELECT g.id, g.name,
+            (SELECT COUNT(*)::int FROM chat_group_members m WHERE m.group_id = g.id) AS member_count
+       FROM chat_groups g
+       JOIN chat_group_members mine ON mine.group_id = g.id AND mine.account_id = $1
+      ORDER BY g.created_at DESC`, [me]
+  )).rows;
+  const out = [];
+  for (const g of groups) {
+    const last = (await q(`SELECT sender_id, kind, body, created_at, deleted_at FROM dm_messages WHERE convo_key = $1 ORDER BY created_at DESC LIMIT 1`, [`g:${g.id}`])).rows[0];
+    out.push({
+      id: g.id, name: g.name, memberCount: g.member_count,
+      lastMessage: last ? previewOf(last) : null, lastAt: last?.created_at || null,
+      lastMine: last ? last.sender_id === me : false,
+    });
+  }
+  out.sort((a, b) => (a.lastAt && b.lastAt) ? new Date(b.lastAt) - new Date(a.lastAt) : a.lastAt ? -1 : b.lastAt ? 1 : a.name.localeCompare(b.name));
+  res.json({ groups: out });
+}));
+
+// GET /api/groups/:id/thread — messages with sender names.
+router.get("/api/groups/:id/thread", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id, gid = req.params.id;
+  if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const g = (await q(`SELECT id, name FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+  if (!g) return res.status(404).json({ error: "NO_GROUP" });
+  const rows = (await q(
+    `SELECT d.id, d.sender_id, a.name AS sender_name, d.kind, d.body, d.media, d.created_at, d.read_at, d.edited_at, d.deleted_at
+       FROM dm_messages d LEFT JOIN accounts a ON a.id = d.sender_id
+      WHERE d.convo_key = $1 ORDER BY d.created_at`, [`g:${gid}`]
+  )).rows;
+  const mapRow = mapMessageRow(me);
+  res.json({
+    group: { id: g.id, name: g.name },
+    messages: rows.map((m) => ({ ...mapRow(m), sender: m.sender_name || "?" })),
+  });
+}));
+
+// POST /api/groups/:id/messages — send to the group.
+router.post("/api/groups/:id/messages", requireAuth(), express.json({ limit: "16mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id, gid = req.params.id;
+  if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const { kind = "text", body = null, media = null } = req.body || {};
+  if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
+  if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
+  if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE" });
+  const id = randomUUID();
+  await q(`INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
+           VALUES ($1,$2,$3,'group',$4,$5,$6,$7)`, [id, `g:${gid}`, me, gid, kind, body, media]);
+  res.json({ message: { id, kind, body, media, at: new Date().toISOString(), mine: true, sender: req.account.name || req.account.username } });
+}));
+
+// GET /api/groups/:id/members
+router.get("/api/groups/:id/members", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const gid = req.params.id;
+  if (!(await isGroupMember(gid, req.account.id))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const rows = (await q(`SELECT a.id, a.name, a.username FROM chat_group_members m JOIN accounts a ON a.id = m.account_id WHERE m.group_id = $1 ORDER BY a.name`, [gid])).rows;
+  res.json({ members: rows.map((r) => ({ id: r.id, name: r.name || r.username })) });
 }));
 
 export default router;

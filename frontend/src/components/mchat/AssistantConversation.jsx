@@ -178,12 +178,15 @@ export default function AssistantConversation() {
     } catch { /* ignore */ }
   }
 
-  async function newChat() {
+  function newChat() {
+    // Always reset to a fresh, blank chat. Don't eagerly create an empty
+    // session — that made the "New" button feel dead when already on a blank
+    // chat, and littered History with "New chat · 0 messages" rows. The session
+    // is created by send() on the first message instead.
     setShowHistory(false);
-    if (currentId && messages.length === 0) return;
-    setDraft(""); setMessages([]);
-    try { const created = await apiPost("/chat/sessions", {}); setCurrentId(created.id); await loadSessions(); }
-    catch { setCurrentId(null); }
+    setDraft("");
+    setMessages([]);
+    setCurrentId(null);
   }
 
   async function removeSession(id, e) {
@@ -290,11 +293,16 @@ export default function AssistantConversation() {
 
       {/* History popover */}
       {showHistory && (
-        <div className="card" style={{ position: "absolute", top: 56, right: 12, width: 280, maxHeight: 420, overflowY: "auto", padding: 12, zIndex: 20, boxShadow: "0 12px 32px rgba(0,0,0,0.16)" }}>
-          <div style={{ position: "relative", marginBottom: 10 }}>
-            <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
-            <input className="input" placeholder={t("Search chats…")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ paddingLeft: 32, padding: "8px 8px 8px 32px" }} />
+        <div className="card" style={{ position: "absolute", top: 56, right: 12, width: 280, maxHeight: 440, display: "flex", flexDirection: "column", padding: 0, zIndex: 20, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", overflow: "hidden" }}>
+          {/* Pinned search header — stays put while the list below scrolls */}
+          <div style={{ padding: "12px 12px 10px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
+            <div style={{ position: "relative" }}>
+              <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
+              <input className="input" placeholder={t("Search chats…")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ paddingLeft: 32, padding: "8px 8px 8px 32px" }} />
+            </div>
           </div>
+          {/* Scrollable list (minHeight:0 lets this flex child actually scroll) */}
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 12 }}>
           {visible.length === 0 && <div className="muted" style={{ fontSize: 12, padding: "4px 8px" }}>{t("No saved chats yet. Ask something to start one.")}</div>}
           {groupByDay(visible).map(([group, items]) => (
             <div key={group} style={{ marginBottom: 8 }}>
@@ -321,6 +329,7 @@ export default function AssistantConversation() {
               })}
             </div>
           ))}
+          </div>
         </div>
       )}
 

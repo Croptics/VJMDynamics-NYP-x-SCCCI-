@@ -12,15 +12,20 @@ the two-line TEAMMATE-ZONE mount, `auth.js`, `permissions.js`) and edits no
 teammate feature files. Everything lives in:
 
 ```
-backend/routes/vance.js                    ← all APIs (parsing, boarding passes, assistant)
+backend/routes/vance.js                    ← all APIs (parsing, boarding passes, assistant, MusterChat messaging/calls/groups)
 frontend/src/lib/claudeParse.js            ← parse / confirm / badges / check-in bridge
+frontend/src/lib/messagesApi.js            ← MusterChat client (contacts / thread / send / edit / delete / groups)
+frontend/src/lib/callManager.js            ← real WebRTC call engine (1:1 + group mesh) over the signaling relay
 frontend/src/pages/OnboardingPage.jsx      ← Screen 4 (2 tabs: parse / boarding passes)
-frontend/src/pages/BoardingPassesView.jsx  ← pass desk: search/filter, per-coach list, view/print a pass
-frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6, now "MusterChat" inbox (AI assistant + human messaging)
-frontend/src/lib/messagesApi.js            ← MusterChat client (contacts / thread / send / poll / read)
+frontend/src/pages/BoardingPassesView.jsx  ← pass desk: search/filter, per-coach list, branded QR + company badge
+frontend/src/pages/ChatAssistantPage.jsx   ← Screen 6 "MusterChat" — hosts the shared inbox component
+frontend/src/components/ChatBubble.jsx      ← global floating launcher + incoming-call listener (needs a 1-line Layout mount from JQ)
+frontend/src/components/mchat/MusterChatInbox.jsx ← the shared inbox (contact rail + conversation pane); used by the page AND the bubble
 frontend/src/components/mchat/AssistantConversation.jsx ← the AI assistant, as the pinned first chat
-frontend/src/components/mchat/HumanThread.jsx           ← staff↔staff / staff→delegate conversation
-frontend/src/components/mchat/VideoCallOverlay.jsx      ← live-camera call screen (remote simulated)
+frontend/src/components/mchat/HumanThread.jsx           ← staff↔staff / staff→delegate conversation (text, stickers, docs, video, calls, edit/delete)
+frontend/src/components/mchat/GroupThread.jsx           ← group conversation (multi-sender; same features + group calls)
+frontend/src/components/mchat/VideoCallOverlay.jsx      ← real WebRTC call screen (1:1 + multi-party grid)
+frontend/src/components/mchat/StickerPicker.jsx         ← emoji + uploadable image sticker picker
 frontend/src/components/mchat/DocShareCard.jsx          ← parsed-doc card w/ "Add to trip"
 frontend/src/components/TripPulse.jsx       ← header status widget: onboarding progress (Onboarding tab) / ranked "what to watch" risks (Assistant)
 frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
@@ -28,30 +33,56 @@ frontend/src/pages/mobile/MobileAssistantPage.jsx ← mobile chat
 
 ## MusterChat — team messaging + video + doc-share (Screen 6 evolution)
 
-A WhatsApp-style inbox that folds the AI assistant and **person-to-person messaging**
-into one contact rail (AI pinned on top, staff + delegates below). Only staff
-accounts authenticate, so the sender is always an account; the peer is another
-account (fully two-way) or a delegate (a staff→delegate log). Persisted in a new
-`dm_messages` table (additive migration in `ensureReady()`); near-real-time via
-polling. Video calls use the **real local camera** (`getUserMedia`) with the
-remote party simulated — demoable on one laptop, no signaling server. A 📎 in the
-composer parses a document inline and shares it as a card with a one-tap
-**Add to trip** (reuses the onboarding confirm — the document-reader bridge).
+A WhatsApp-style inbox that folds the AI assistant, **person-to-person messaging**,
+**group chats**, and **live video/voice calls** into one contact rail (AI pinned on
+top, then groups, then staff + delegates). Only staff accounts authenticate, so the
+sender is always an account; a 1:1 peer is another account (fully two-way) or a
+delegate (a staff→delegate log). Persisted in `dm_messages` (additive migration in
+`ensureReady()`); near-real-time via polling (1.5s). Messages support **text,
+stickers (emoji + uploaded image), inline document parse-&-share, video clips**, and
+**edit / delete of your own messages** (soft-delete → "This message was deleted").
+A 📎 parses a document inline and shares it as a card with a one-tap **Add to trip**
+(reuses the onboarding confirm — the document-reader bridge).
+
+The inbox body is one shared component (`MusterChatInbox`) rendered by both the
+`/assistant` page **and** the global floating `ChatBubble`, so they stay in sync.
+`ChatBubble` (and `MusterChatInbox`) also start the incoming-call poll, so a call
+rings on any page once the bubble is mounted — **JQ adds one line to `Layout.jsx`:**
+`import ChatBubble from "./ChatBubble.jsx";` then `<ChatBubble />` after `</main>`.
+
+**Calling is REAL WebRTC** (not simulated). `callManager` (a singleton) runs one
+call at a time — **1:1** or a **group mesh** (every participant holds a peer
+connection to every other; a video grid shows everyone). Signaling is a DB relay
+(`/api/calls/signal` + `/api/calls/poll`, backed by `call_signals`) plus a public
+Google STUN server — **no dedicated media/signaling server**. Group mesh discovery:
+the initiator rings each member (`ginvite`); a member who accepts broadcasts `gjoin`
+and existing participants reply `gpresence`, so everyone learns everyone; for each
+pair the **smaller account id creates the offer** (deterministic → no glare), keyed
+on `meId` from `/api/calls/poll`. Calls are **staff↔staff only** (delegates have no
+login). Live 2-peer media needs two real browsers + cameras to fully exercise.
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/messages/contacts` | signed-in | Staff + delegates w/ last-message preview, unread, presence |
 | GET | `/api/messages/thread` | signed-in | Full history with one peer (auto-marks read) |
-| POST | `/api/messages/thread` | signed-in | Send `text` / `video` clip / `doc` share / `call` log |
+| POST | `/api/messages/thread` | signed-in | Send `text` / `sticker` / `video` / `doc` / `call` |
+| PATCH | `/api/messages/:id` | signed-in | Edit your own text message (sender-only; sets `edited`) |
+| DELETE | `/api/messages/:id` | signed-in | Soft-delete your own message (sender-only; blanks content) |
 | GET | `/api/messages/updates` | signed-in | New incoming since a timestamp + total unread (polling) |
 | POST | `/api/messages/read` | signed-in | Mark a thread read |
+| POST/GET | `/api/calls/signal` · `/api/calls/poll` | signed-in | WebRTC signaling relay (1:1 + group mesh); poll returns `meId` |
+| POST/GET | `/api/groups` · `/api/groups/:id/thread` · `/api/groups/:id/messages` · `/api/groups/:id/members` | signed-in | Create/list groups; group thread, send, members |
+
+`/api/messages/:id` edit/delete are keyed by **message id**, so one pair of
+endpoints covers both DMs and groups. Group messages reuse `dm_messages` with
+`convo_key = 'g:<groupId>'`, so all media/kind/edit/delete handling is shared.
 
 Restriction point: `canSeeDelegates()` gates delegate contacts behind the same
 delegate-visibility perms as the rest of the app; staff are always contactable.
 Conversation pairing (`convoKey`) is unit-tested in `tests/vance/messaging.test.js`.
 
 Dependencies added by this module: `unpdf` (backend PDF text extraction) and
-`qrcode` (frontend QR-pass generation).
+`qrcode` (frontend QR-pass generation). Calling uses only built-in `RTCPeerConnection`.
 
 ## API endpoints
 
@@ -100,6 +131,16 @@ Dependencies added by this module: `unpdf` (backend PDF text extraction) and
   `qrCheckin()` are load-bearing for the scanner: do not remove them.**
   (There is no separate "scan" tab on the Onboarding screen — the real scanner is
   the shared check-in page; Onboarding only *issues* the passes.)
+- **Company identity on the badge (Feature 4).** Each delegate carries a `company`
+  and `industry` (from the parser). `BoardingPassesView` turns the pass into a
+  **conference badge**: a company **logo chip** (a monogram on a colour hashed
+  deterministically from the company name — no image assets needed; a real uploaded
+  `logo_url` overrides it when present) + the industry tag, and a **branded QR** with
+  that logo drawn into its centre (`errorCorrectionLevel: "H"` so the overlay never
+  breaks scannability). The QR still encodes the same plain `qr_code`, so the scanner
+  contract is unchanged — the branding is purely a visual identity layer. All of this
+  is client-side in `BoardingPassesView.jsx`; the only backend change was adding
+  `industry` to the `/api/onboarding/badges` payload.
 - **The chatbot reads a live snapshot assembled from everyone's data:** delegate
   roster + coach counts (JQ/Desmond), open exception tickets (Jayden), check-in
   method breakdown (`check_in_logs`), and today's itinerary (Desmond). Every

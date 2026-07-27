@@ -107,11 +107,16 @@ delegate that lacks one. Auth: `signed-in`. Query: `?tripId=<id>`.
 ```json
 {
   "delegates": [ { "id": "...", "name": "Chew Kam Swee", "company": "K.S. Chew & Co",
+                   "role": "Director", "industry": "Finance & Insurance",
                    "coach_id": "c1", "status": "PRESENT", "vip": false, "qr_code": "MG-86B620A4" } ],
   "coaches": [ { "id": "c1", "name": "Coach 1", "city": "Beijing" } ],
   "total": 33, "present": 8
 }
 ```
+The **branded QR** (company monogram in the QR centre) and the company **logo chip /
+industry tag** on the badge are generated **client-side** in `BoardingPassesView.jsx`
+from `company` + `industry` — no extra endpoint. `role`/`industry` were added to this
+payload to drive the badge.
 
 ### `POST /api/onboarding/checkin` ⭐
 Resolve a scanned `qr_code` → mark the delegate `PRESENT` (+coach), log the scan.
@@ -179,6 +184,53 @@ Drops the last assistant reply and re-answers the same question **via the model*
 | `DELETE` | `/api/chat/sessions/:id` | — | `{ deleted: true }` | `404 NOT_FOUND` |
 | `GET` | `/api/assistant/roster` | — | `{ delegates:[{name,company,role,industry,status,vip,coach,coach_city}] }` | — |
 | `GET` | `/api/assistant/pulse` | — | `{ trip:{name,dayOf,totalDays,departsIn}, kpis:{total,present,missing,unassigned}, risk:[{level,text}], asOf }` — powers the live header widget | — |
+
+---
+
+## 4. MusterChat — messaging, calls & groups
+
+WhatsApp-style inbox beside the assistant. All `signed-in`. Messages persist in
+`dm_messages`; near-real-time via polling. See
+[database-schema.md](database-schema.md) for the tables.
+
+### Messaging
+| Method | Path | Body / Query | Response |
+| --- | --- | --- | --- |
+| `GET` | `/api/messages/contacts` | — | `{ me, contacts:[{kind,id,name,online,lastMessage,lastAt,lastMine,unread,subtitle}] }` |
+| `GET` | `/api/messages/thread` | `?peerKind=&peerId=` | `{ peer, messages:[{id,kind,body,media,at,mine,read,edited,deleted}] }` (auto-marks read) |
+| `POST` | `/api/messages/thread` | `{ peerKind, peerId, kind, body?, media? }` | `{ message }` — `kind` ∈ `text\|sticker\|video\|doc\|call` |
+| `PATCH` | `/api/messages/:id` | `{ body }` | `{ ok, id, body, edited:true }` — **sender-only** text edit |
+| `DELETE` | `/api/messages/:id` | — | `{ ok, id, deleted:true }` — **sender-only** soft-delete (blanks `body`/`media`) |
+| `GET` | `/api/messages/updates` | `?since=ISO` | `{ now, unread, incoming:[{id,convoKey,senderId,kind,preview,at}] }` |
+| `POST` | `/api/messages/read` | `{ peerKind, peerId }` | `{ ok }` |
+
+`edit`/`delete` are keyed by **message id**, so the same two endpoints serve DMs and
+groups. Errors: `403 NOT_YOURS` (not the sender), `404 NO_MESSAGE`, `400 NOT_EDITABLE`
+(non-text edit), `409 DELETED` (editing a deleted message).
+
+### Calls — WebRTC signaling relay (staff↔staff)
+Real peer-to-peer audio/video (1:1 **and** group mesh) over a DB relay + public STUN;
+no media server. `callManager` (frontend) drives it; `VideoCallOverlay` renders it.
+
+| Method | Path | Body / Query | Response |
+| --- | --- | --- | --- |
+| `POST` | `/api/calls/signal` | `{ callId, toId, kind, payload?, mode? }` | `{ ok }` — `kind` ∈ `invite\|offer\|answer\|ice\|reject\|hangup\|busy` (1:1) or `ginvite\|gjoin\|gpresence\|gleave` (group mesh) |
+| `GET` | `/api/calls/poll` | `?since=ISO` | `{ now, meId, signals:[{id,callId,fromId,fromName,kind,payload,mode,at}] }` |
+
+`meId` (your account id) is returned so the client can order mesh offers
+deterministically (smaller id offers → no glare). Errors: `400 BAD_SIGNAL`, `404 NO_PEER`.
+
+### Groups
+| Method | Path | Body | Response |
+| --- | --- | --- | --- |
+| `POST` | `/api/groups` | `{ name, memberIds:[] }` | `{ group:{id,name,memberCount} }` — creator auto-added; needs ≥2 members |
+| `GET` | `/api/groups` | — | `{ groups:[{id,name,memberCount,lastMessage,lastAt,lastMine}] }` |
+| `GET` | `/api/groups/:id/thread` | — | `{ group, messages:[{...,sender}] }` (403 `NOT_MEMBER`) |
+| `POST` | `/api/groups/:id/messages` | `{ kind, body?, media? }` | `{ message }` |
+| `GET` | `/api/groups/:id/members` | — | `{ members:[{id,name}] }` |
+
+Group messages reuse `dm_messages` with `convo_key = 'g:<id>'`. Errors:
+`400 NO_NAME`/`TOO_FEW`, `403 NOT_MEMBER`, `404 NO_GROUP`.
 
 ---
 

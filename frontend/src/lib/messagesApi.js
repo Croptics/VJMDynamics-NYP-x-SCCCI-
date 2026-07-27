@@ -3,7 +3,7 @@
  *  beside the AI Trip Assistant in one inbox). Thin wrappers over the
  *  /api/messages/* routes in backend/routes/vance.js.
  * ============================================================================= */
-import { apiGet, apiPost } from "./api.js";
+import { apiGet, apiPost, apiPatch, apiDelete } from "./api.js";
 
 /** Everyone I can message (staff + delegates), with last-message preview,
  *  unread count and presence; most-recent conversations first. */
@@ -25,3 +25,15 @@ export const pollUpdates = (sinceIso) =>
 /** Mark a whole thread read. */
 export const markThreadRead = (peerKind, peerId) =>
   apiPost("/messages/read", { peerKind, peerId });
+
+/** Edit / delete a message by id (works for DMs and groups; sender-only). */
+export const editMessage = (id, body) => apiPatch(`/messages/${id}`, { body });
+export const deleteMessage = (id) => apiDelete(`/messages/${id}`);
+
+/* ---- Group chats -------------------------------------------------------- */
+export const listGroups = () => apiGet("/groups");
+export const createGroup = (name, memberIds) => apiPost("/groups", { name, memberIds });
+export const getGroupThread = (id) => apiGet(`/groups/${id}/thread`);
+export const sendGroupMessage = (id, { kind = "text", body = null, media = null }) =>
+  apiPost(`/groups/${id}/messages`, { kind, body, media });
+export const getGroupMembers = (id) => apiGet(`/groups/${id}/members`);

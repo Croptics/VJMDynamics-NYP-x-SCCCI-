@@ -4,8 +4,9 @@ Screens 4 (Document Parsing / Onboarding) and 6 (Trip Assistant). PostgreSQL,
 accessed with the `pg` driver against the shared team Neon database.
 
 My feature is **additive**: it adds columns to the shared `delegates` table and
-owns two new tables (`chat_sessions`, `chat_messages`). It never alters the base
-tables owned by teammates — those are shown here only to make the relationships
+owns the assistant tables (`chat_sessions`, `chat_messages`) and the MusterChat
+tables (`dm_messages`, `call_signals`, `chat_groups`, `chat_group_members`). It
+never alters the base tables owned by teammates — those are shown here only to make the relationships
 clear. All my DDL is created lazily and idempotently by `ensureReady()` in
 `backend/routes/vance.js` (`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT
 EXISTS`), so it is safe to run on every startup.
@@ -142,6 +143,44 @@ lists a user's chats newest-first.
 Index: `idx_chat_messages_sess ON chat_messages(session_id, created_at)` — loads
 a conversation in order. Deleting a session cascades to its messages; deleting an
 account cascades to its sessions and their messages.
+
+## MusterChat tables (messaging, calls, groups)
+
+### `dm_messages` — every MusterChat message (1:1 **and** group)
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `VARCHAR(64)` PK | |
+| `convo_key` | `VARCHAR(200)` | Order-independent pairing: 1:1 = `a:<x>|a:<y>` (sorted) or `a:<acct>|d:<delegate>`; group = `g:<groupId>`. Unit-tested in `messaging.test.js`. |
+| `sender_id` | `VARCHAR(64)` | FK → `accounts(id)` **ON DELETE CASCADE** |
+| `recipient_kind` | `VARCHAR(16)` | `account` \| `delegate` \| `group` |
+| `recipient_id` | `VARCHAR(64)` | peer account/delegate id, or the group id |
+| `kind` | `VARCHAR(16)` | `text` \| `sticker` \| `video` \| `doc` \| `call` |
+| `body` | `TEXT` | text / caption / emoji sticker / call summary |
+| `media` | `TEXT` | data URL (video / image sticker) or JSON (doc share) |
+| `created_at` | `TIMESTAMPTZ` | default `now()` |
+| `read_at` | `TIMESTAMPTZ` | set when the recipient opens the thread |
+| `edited_at` | `TIMESTAMPTZ` | ★ set on edit (surfaces an "edited" tag) |
+| `deleted_at` | `TIMESTAMPTZ` | ★ soft-delete; `body`/`media` are blanked so content is truly gone |
+
+Indexes: `idx_dm_convo(convo_key, created_at)`, `idx_dm_inbox(recipient_kind,
+recipient_id, read_at)`, `idx_dm_sender(sender_id, created_at)`.
+
+### `call_signals` — WebRTC signaling relay (short-lived)
+
+Two staff exchange offer/answer/ICE (and group `ginvite`/`gjoin`/`gpresence`/
+`gleave`) through polled rows, so a real peer-to-peer call connects with just a
+public STUN server. `id` PK, `call_id` (the room), `from_id`, `from_name`, `to_id`,
+`kind` `VARCHAR(16)`, `payload` `TEXT` (JSON), `mode` `VARCHAR(8)`, `created_at`.
+Rows are opportunistically deleted after 5 minutes. Index: `idx_call_signals_to(to_id, created_at)`.
+
+### `chat_groups` / `chat_group_members` — group chats
+
+`chat_groups`: `id` PK, `name`, `created_by` FK → `accounts(id)` CASCADE, `created_at`.
+`chat_group_members`: `group_id` FK → `chat_groups(id)` CASCADE, `account_id` FK →
+`accounts(id)` CASCADE, PRIMARY KEY `(group_id, account_id)`; index `idx_group_members_acct`.
+A group's messages live in `dm_messages` (`convo_key = 'g:<id>'`) — no separate
+message table, so media/kind/edit/delete are shared with 1:1.
 
 ## Tables I read but do not own
 
