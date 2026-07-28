@@ -52,11 +52,34 @@ function companyBrand(company) {
   return { initials, bg, fg: "#fff" };
 }
 
-/** A company logo chip — real uploaded logo if given, else the monogram. */
-function CompanyLogo({ company, logoUrl, size = 34, radius }) {
+/** Normalise a company website into a bare domain (for the logo lookup). */
+function domainOf(website) {
+  if (!website) return null;
+  let w = String(website).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "");
+  w = w.split(/[/?#\s]/)[0];
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(w) ? w : null;
+}
+
+/** A company logo chip. Prefers a REAL logo — an explicit uploaded `logoUrl`,
+ *  else the company's brand logo resolved from its website domain via unavatar.io
+ *  (`fallback=false` → it 404s when no logo exists) — and falls back to the
+ *  generated monogram when there's no logo / we're offline (so it degrades
+ *  gracefully in the China / Great-Firewall scenario). */
+function CompanyLogo({ company, logoUrl, website, size = 34, radius }) {
   const b = companyBrand(company);
   const r = radius ?? Math.round(size * 0.28);
-  if (logoUrl) return <img src={logoUrl} alt={company || ""} width={size} height={size} style={{ borderRadius: r, objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />;
+  const domain = domainOf(website);
+  const sources = [];
+  if (logoUrl) sources.push(logoUrl);
+  if (domain) sources.push(`https://unavatar.io/${domain}?fallback=false`);
+  const [step, setStep] = useState(0);
+  useEffect(() => { setStep(0); }, [logoUrl, domain]);
+  const src = sources[step];
+  if (src) {
+    return <img src={src} alt={company || ""} width={size} height={size}
+      onError={() => setStep((s) => s + 1)}
+      style={{ borderRadius: r, objectFit: "contain", background: "#fff", flexShrink: 0, border: "1px solid var(--line)" }} />;
+  }
   return (
     <span style={{ width: size, height: size, borderRadius: r, background: b.bg, color: b.fg, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: size * 0.4, letterSpacing: -0.5 }}>
       {b.initials}
@@ -285,7 +308,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                       {d.vip && <Star size={13} fill="#e0a800" color="#e0a800" />}
                     </div>
                     <div className="muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
-                      <CompanyLogo company={d.company} logoUrl={d.logo_url} size={18} />
+                      <CompanyLogo company={d.company} logoUrl={d.logo_url} website={d.website} size={18} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {d.company || "—"}{d.industry ? ` · ${d.industry}` : ""}
                       </span>
@@ -322,7 +345,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             </div>
             {/* Company identity band — the "who they represent" line of the badge */}
             <div className="row" style={{ gap: 10, alignItems: "center", padding: "12px 18px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)" }}>
-              <CompanyLogo company={open.company} logoUrl={open.logo_url} size={40} />
+              <CompanyLogo company={open.company} logoUrl={open.logo_url} website={open.website} size={40} />
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{open.company || t("No company")}</div>
                 {open.industry && <div className="muted" style={{ fontSize: 11.5, marginTop: 1 }}>{open.industry}</div>}
@@ -356,7 +379,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             {qr[d.id] && <img src={qr[d.id]} alt="" width={150} height={150} />}
             <div className="mg-pass-name">{d.name}</div>
             {d.role && <div className="mg-pass-sub">{d.role}</div>}
-            <div className="mg-pass-company"><CompanyLogo company={d.company} logoUrl={d.logo_url} size={16} /> <span>{d.company || ""}</span></div>
+            <div className="mg-pass-company"><CompanyLogo company={d.company} logoUrl={d.logo_url} website={d.website} size={16} /> <span>{d.company || ""}</span></div>
             {d.industry && <div className="mg-pass-sub">{d.industry}</div>}
             <div className="mg-pass-sub">{coachLabel(coachOf(d.coach_id))}</div>
             <div className="mg-pass-code">{d.qr_code}</div>
