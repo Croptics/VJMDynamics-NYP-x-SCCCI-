@@ -56,6 +56,10 @@ export default function DocShareCard({ doc, onAddToTrip, adding, added, mine }) 
           </button>
         </div>
       )}
+      {/* Local copy of the spinner keyframes (integration patch 2026-07-27) —
+          previously only defined inside MusterChatInbox's inline <style>, so
+          the spinner silently froze if this card ever rendered outside it. */}
+      <style>{`.mc-spin{animation:mc-spin 1s linear infinite}@keyframes mc-spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }

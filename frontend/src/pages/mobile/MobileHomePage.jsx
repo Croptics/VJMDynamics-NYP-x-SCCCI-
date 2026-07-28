@@ -1,19 +1,38 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle } from "lucide-react";
-import { apiGet } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, ChevronRight, ScanFace, Bell } from "lucide-react";
+import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
+import { getMobileTripId, setMobileTripId } from "../../lib/mobileTrip.js";
 
-const TRIP_ID = "t-1";
+/** "Good morning" / "Good afternoon" / "Good evening", by local hour. */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
 
 /**
  * Mobile Home — pulls the same live summary as the desktop Dashboard
- * (GET /api/trips/:id/dashboard), condensed for a phone screen.
- *
- * Each KPI tile is a shortcut into the Attendance sheet pre-filtered to that
- * status (e.g. tapping "20 missing" opens the roster already filtered to
- * MISSING), so the tiles double as both an at-a-glance summary and
- * navigation — no separate "who, specifically" list needed here anymore.
+ * (GET /api/trips/:id/dashboard), condensed for a phone screen: a
+ * personalized greeting header, a live Active Trip panel, a glanceable KPI
+ * strip, an expandable Issues section (below), and a Coach status card.
+ *   - The KPI strip is Missing/Present/Late (3 cards) — Unassigned stays
+ *     reachable via the Attendance page's own filter chips, and Late gets
+ *     the dedicated tile instead since it's the higher-risk operational
+ *     number during a live trip. Total isn't a card here at all — it's a
+ *     small text line under the page title instead, keeping the main tile
+ *     row dedicated to actionable/at-risk statuses rather than a plain count.
+ *   - The whole "Coach status" card is ONE tap target that jumps straight to
+ *     the Attendance page pre-filtered to Missing. Each KPI tile is its own
+ *     shortcut into Attendance, pre-filtered to that status.
+ *   - Issues: an actionable card under the metric cards links to the
+ *     dedicated /mobile/issues page (MobileIssuesPage.jsx). Was briefly an
+ *     inline expandable accordion right here (2026-07-20, "Mobile UI
+ *     Consolidation" Option A); moved to its own route the same day — the
+ *     full log-a-ticket form + open-tickets list reads better as its own
+ *     screen than squeezed into an accordion on a small viewport. This card
+ *     just fetches the open-critical count for its badge and navigates.
  */
 export default function MobileHomePage() {
   const { t, lang } = useLang();
@@ -21,6 +40,43 @@ export default function MobileHomePage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Trip Announcements (2026-07-25) — read-only here; posting/deleting stays
+  // a desktop-only admin action (DashboardPage.jsx).
+  const [announcements, setAnnouncements] = useState([]);
+  const [announcementsExpanded, setAnnouncementsExpanded] = useState(false);
+
+  // Trip switcher — restricted to "In progress" trips only (a Planning or
+  // Completed trip has no live attendance to track on a phone, so switching
+  // to one would just show an empty/stale board). Persists across every
+  // mobile page via lib/mobileTrip.js, not just this one.
+  const [tripId, setTripIdState] = useState(getMobileTripId);
+  const [inProgressTrips, setInProgressTrips] = useState([]);
+  function pickTrip(id) {
+    setTripIdState(id);
+    setMobileTripId(id);
+  }
+  useEffect(() => {
+    apiGet("/all-trips").then((r) => {
+      const list = (r.trips || []).filter((tr) => tr.status === "In progress");
+      setInProgressTrips(list);
+      // The previously-picked trip is no longer in progress (wrapped up, or
+      // never was) — fall back to the first in-progress one instead of
+      // silently showing an empty/stale board for a trip that isn't live.
+      if (list.length > 0 && !list.some((tr) => tr.id === tripId)) pickTrip(list[0].id);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Issues card badge — open-critical count only; the form/list themselves
+  // live on the dedicated /mobile/issues page now.
+  const [openIssueCount, setOpenIssueCount] = useState(0);
+
+  useEffect(() => {
+    getCriticalOpenCount().then(setOpenIssueCount).catch(() => {});
+    // Was 2s, slowed to 8s (2026-07-24, Neon egress reduction).
+    const id = setInterval(() => { getCriticalOpenCount().then(setOpenIssueCount).catch(() => {}); }, 8000);
+    return () => clearInterval(id);
+  }, []);
 
   // Guards against overlapping polls (a slow response still in flight when
   // the next tick fires) — same pattern as the desktop Dashboard.
@@ -28,11 +84,13 @@ export default function MobileHomePage() {
 
   useEffect(() => {
     load();
-    // 2s auto-refresh so a change made by another signed-in staff member
-    // shows up here without needing to tap the manual Refresh button.
-    const id = setInterval(load, 2000);
+    // Auto-refresh so a change made by another signed-in staff member shows
+    // up here without needing to tap the manual Refresh button. Was 2s,
+    // slowed to 8s (2026-07-24, Neon egress reduction).
+    const id = setInterval(load, 8000);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId]);
 
   async function load() {
     if (loadingRef.current) return;
@@ -40,7 +98,8 @@ export default function MobileHomePage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/trips/${TRIP_ID}/dashboard`));
+      setData(await apiGet(`/trips/${tripId}/dashboard`));
+      apiGet(`/trips/${tripId}/announcements`).then((r) => setAnnouncements(r.announcements || [])).catch(() => {});
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -51,23 +110,21 @@ export default function MobileHomePage() {
 
   const trip = data?.trip;
   const k = data?.kpis;
-  const goToAttendance = (status) => navigate(`/mobile/attendance?status=${status}`);
+  const staffName = getUser()?.name || getUser()?.staffId || t("Staff");
+  const goToAttendance = (status, coachId) =>
+    navigate(`/mobile/attendance?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 4 }}>
         <div>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("Home")}
-          </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{trip ? trip.name : "MusterGo"}</h1>
-          {trip && (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {lang === "zh"
-                ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
-                : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime}`}
-            </p>
-          )}
+          <div className="muted" style={{ fontSize: 13 }}>{t(greeting())}</div>
+          <h1 style={{ fontSize: 22, margin: "2px 0 4px" }}>{staffName}</h1>
+          {/* Total moved here (small subheader under the page title) — it's
+              no longer one of the main KPI cards, which now surface Late
+              instead so the actionable statuses keep the prime real estate. */}
+          {k && <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>{t("Total delegates")}: {k.total}</div>}
+          <span className="badge badge-present">● {t("Online · synced")}</span>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
@@ -75,7 +132,7 @@ export default function MobileHomePage() {
       </div>
 
       {error && (
-        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
+        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)", marginTop: 14 }}>
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={16} /> {t("Couldn't reach the backend")}
           </div>
@@ -83,29 +140,192 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {loading && !data && <div className="muted">{t("Loading…")}</div>}
+      {loading && !data && <div className="muted" style={{ marginTop: 14 }}>{t("Loading…")}</div>}
 
-      {k && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-          <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
-          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("PRESENT")} />
-          <Stat label={t("Unassigned")} value={k.unassigned} tone="unassigned" onClick={() => goToAttendance("UNASSIGNED")} />
-          <Stat label={t("Total")} value={k.total} tone="neutral" onClick={() => goToAttendance("ALL")} />
+      {/* Trip switcher (2026-07-23) — restricted to "In progress" trips only,
+          since a Planning/Completed trip has no live attendance worth
+          tracking from a phone. Only shown when there's an actual choice. */}
+      {inProgressTrips.length > 1 && (
+        <select
+          className="input"
+          style={{ width: "100%", marginTop: 14 }}
+          value={tripId}
+          onChange={(e) => pickTrip(e.target.value)}
+        >
+          {inProgressTrips.map((tr) => (
+            <option key={tr.id} value={tr.id}>{tr.name}</option>
+          ))}
+        </select>
+      )}
+
+      {/* Active trip — live tracking panel, same visual language as the
+          Check-in screen's own trip card. */}
+      {trip && (
+        <div
+          style={{
+            background: "var(--scc-red)", color: "#fff",
+            borderRadius: "var(--r-lg)", padding: 16, marginTop: 18,
+            boxShadow: "var(--shadow-md)",
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.85 }}>
+            {t("Active trip")}
+          </div>
+          <div style={{ fontWeight: 700, fontSize: 17, marginTop: 4 }}>{trip.name}</div>
+          <div style={{ opacity: 0.9, fontSize: 13, marginTop: 2 }}>
+            {lang === "zh"
+              ? `第 ${trip.dayOf}/${trip.totalDays} 天${trip.localTime ? ` · 当地时间 ${trip.localTime}` : ""}`
+              : `Day ${trip.dayOf} of ${trip.totalDays}${trip.localTime ? ` · ${trip.localTime} local` : ""}`}
+          </div>
+          {trip.departsIn && (
+            <span className="badge" style={{ background: "rgba(255,255,255,.22)", color: "#fff", marginTop: 10, display: "inline-block" }}>
+              {t("Departure in")} {trip.departsIn}
+            </span>
+          )}
         </div>
       )}
 
+      {/* Trip Announcements (2026-07-25) — read-only card; tapping expands
+          the full list inline (no separate page/tab, to keep mobile nav
+          light — the desktop Dashboard is where an admin actually posts). */}
+      {announcements.length > 0 && (
+        <div className="mobile-card" style={{ marginTop: 14, cursor: "pointer" }} onClick={() => setAnnouncementsExpanded((v) => !v)}>
+          <div className="row between" style={{ gap: 8 }}>
+            <div className="row" style={{ gap: 8, alignItems: "center", minWidth: 0 }}>
+              <Bell size={16} color="var(--scc-red)" style={{ flexShrink: 0 }} />
+              {!announcementsExpanded ? (
+                <div style={{ minWidth: 0 }}>
+                  <strong style={{ fontSize: 13.5 }}>{announcements[0].title}</strong>
+                  <div className="muted" style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {announcements[0].message}
+                  </div>
+                </div>
+              ) : (
+                <strong style={{ fontSize: 13.5 }}>{t("Trip Announcements")}</strong>
+              )}
+            </div>
+            {announcements.length > 1 && !announcementsExpanded && (
+              <span className="muted" style={{ fontSize: 12, flexShrink: 0 }}>+{announcements.length - 1} {t("more")}</span>
+            )}
+          </div>
+          {announcementsExpanded && (
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+              {announcements.map((a) => (
+                <div key={a.id} style={{ paddingTop: 8, borderTop: "1px solid var(--line)" }}>
+                  <strong style={{ fontSize: 13.5 }}>{a.title}</strong>
+                  <p style={{ fontSize: 13, marginTop: 2, whiteSpace: "pre-wrap" }}>{a.message}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Glanceable metrics — Missing / Late / Assigned / Present, each a
+          shortcut into the Attendance page pre-filtered to that status. Total
+          moved out of this row (see the subheader under the page title
+          above) so these stay dedicated to actionable, at-risk statuses.
+          Order: the two "needs attention" statuses (Missing, Late) lead
+          together, ahead of Assigned then the calmer Present count — mirrors
+          desktop DashboardPage.jsx's KPI tile order. */}
+      {k && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
+          <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
+          <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
+          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
+          <Stat label={t("Assigned")} value={k.assigned ?? 0} tone="assigned" onClick={() => goToAttendance("ASSIGNED")} />
+        </div>
+      )}
+
+      {/* Scanner — quick shortcut into the mobile Face/QR/Manual scanner for
+          a staff member already signed into the app. Gated behind
+          viewMobileScanner so an admin can hide it per-account, same as
+          every other mobile tile. */}
+      {getPermissions().viewMobileScanner && (
+        <button
+          className="mobile-card row between"
+          onClick={() => navigate("/mobile/scanner")}
+          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
+        >
+          <div className="row" style={{ gap: 10 }}>
+            <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+              <ScanFace size={16} />
+            </span>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Scanner")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("Face + QR scan")}</div>
+            </div>
+          </div>
+          <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+        </button>
+      )}
+
+      {/* Issues — actionable card under the metric cards; navigates to the
+          dedicated /mobile/issues page rather than expanding inline. Gated
+          behind viewMobileIssues so an admin can hide it per-account. */}
+      {getPermissions().viewMobileIssues && (
+        <button
+          className="mobile-card row between"
+          onClick={() => navigate("/mobile/issues")}
+          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
+        >
+          <div className="row" style={{ gap: 10 }}>
+            <span className="avatar" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
+              <AlertTriangle size={16} />
+            </span>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Issues")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("Report or view exceptions")}</div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+            {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
+            <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
+          </div>
+        </button>
+      )}
+
+      {/* Coach status — header links to the full missing list across every
+          coach; each per-coach row is its OWN link, straight to that coach's
+          missing delegates only (was previously one whole-card tap target
+          that always went to the generic all-coaches list regardless of
+          which row you tapped). */}
       {data?.coaches && (
-        <div className="mobile-card">
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>{t("Coach status")}</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="mobile-card" style={{ border: "1px solid var(--line)", background: "var(--surface)", marginTop: 18 }}>
+          <button
+            onClick={() => goToAttendance("MISSING")}
+            className="row between"
+            style={{ width: "100%", background: "none", border: "none", padding: 0, marginBottom: 12, cursor: "pointer", textAlign: "left", color: "inherit", font: "inherit" }}
+          >
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Coach status")}</div>
+            <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {data.coaches.map((c) => (
-              <div key={c.id} className="row between" style={{ fontSize: 13 }}>
+              <button
+                key={c.id}
+                // Badge now counts MISSING+LATE combined, and Attendance has
+                // no single-status filter for that pair — land on the coach's
+                // full roster (ALL) instead of a status that could be empty.
+                onClick={() => goToAttendance("ALL", c.id)}
+                className="row between"
+                style={{
+                  width: "100%", background: "none", border: "none", padding: "8px 4px",
+                  borderRadius: "var(--r-sm)", cursor: "pointer", textAlign: "left",
+                  color: "inherit", font: "inherit", fontSize: 13,
+                }}
+              >
                 <span>{[c.name, c.city].filter(Boolean).join(" · ")}</span>
-                <span className={c.missing > 0 ? "badge badge-missing" : "badge badge-present"}>
-                  {c.missing > 0 ? `${c.missing} ${t("missing")}` : t("All in")}
+                {/* Simplified two-state badge (mirrors desktop CoachBar):
+                    Late folds into Missing, no separate Late badge here. */}
+                <span className={(c.missing || 0) + (c.late || 0) > 0 ? "badge badge-missing" : "badge badge-present"}>
+                  {(c.missing || 0) + (c.late || 0) > 0 ? `${(c.missing || 0) + (c.late || 0)} ${t("missing")}` : t("Arrived")}
                 </span>
-              </div>
+              </button>
             ))}
+          </div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 10, textAlign: "center" }}>
+            {t("Tap a coach to see who's missing")}
           </div>
         </div>
       )}

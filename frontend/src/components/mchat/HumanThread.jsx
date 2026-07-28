@@ -15,8 +15,11 @@ import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 import callManager from "../../lib/callManager.js";
+// Shared trip id constant (integration patch 2026-07-27) — was a duplicated
+// local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
+// exactly that duplication.
+import { TRIP_ID } from "../../lib/exceptionsApi.js";
 
-const TRIP_ID = "t-1";
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024; // ~8MB clip → ~11MB base64 (under backend cap)
 
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
@@ -282,7 +285,7 @@ export default function HumanThread({ peer, onActivity, onBack }) {
             return (
               <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
-                  {m.media
+                  {m.media && m.media.startsWith("data:image/")
                     ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} />
                     : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
                   {canDelete && (
@@ -313,7 +316,7 @@ export default function HumanThread({ peer, onActivity, onBack }) {
                 <div style={bubble}>
                   {m.kind === "text" && m.body}
                   {m.kind === "video" && (
-                    m.media
+                    m.media && m.media.startsWith("data:video/")
                       ? <video src={m.media} controls playsInline style={{ width: 240, maxWidth: "100%", borderRadius: 10, display: "block" }} />
                       : <span style={{ padding: "8px 12px", display: "inline-block" }}>{m.uploading ? "Uploading clip…" : (m.body || "Video")}</span>
                   )}

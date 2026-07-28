@@ -1,7 +1,7 @@
 /* =============================================================================
  *  OWNED BY:  Jayden — Exception Logging & QR Fallback
  * ============================================================================= */
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   X, UserX, BadgeX, BatteryLow, Accessibility, ScanLine, MoreHorizontal,
 } from "lucide-react";
@@ -43,6 +43,11 @@ export default function LogExceptionModal({ onClose, onCreated }) {
   const [priority, setPriority] = useState("NORMAL");   // used when not critical
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  // Only dismiss if the WHOLE click gesture (mousedown AND click) started on
+  // the backdrop itself — not wherever the mouse was released after a drag
+  // that began in e.g. the notes textarea (native "click" fires on the
+  // mouseup target regardless of where the drag started).
+  const downOnBackdrop = useRef(false);
 
   useEffect(() => {
     getDelegates().then(setDelegates).catch(() => setDelegates([]));
@@ -80,7 +85,10 @@ export default function LogExceptionModal({ onClose, onCreated }) {
   }
 
   return (
-    <div className="exc-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label={t("Log exception")}>
+    <div className="exc-overlay"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
+      role="dialog" aria-modal="true" aria-label={t("Log exception")}>
       <div className="exc-modal" onClick={(e) => e.stopPropagation()}>
         <div className="exc-modal__head">
           <h2>{t("Log exception")}</h2>

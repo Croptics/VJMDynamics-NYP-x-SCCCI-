@@ -21,7 +21,20 @@
 import { apiGet, apiPost, getToken } from "./api.js";
 import { sendMessage, getGroupMembers, sendGroupMessage } from "./messagesApi.js";
 
-const RTC_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+// ICE servers are env-configurable (integration patch 2026-07-27): set
+// VITE_ICE_SERVERS to a JSON array (e.g. to add a TURN server so calls work
+// across symmetric NAT / strict firewalls). Falls back to Google's public
+// STUN, which is enough for same-network and most home-NAT cases but will
+// leave a call stuck on "Connecting…" behind corporate/carrier NAT.
+const RTC_CONFIG = {
+  iceServers: (() => {
+    try {
+      const env = import.meta.env.VITE_ICE_SERVERS;
+      if (env) return JSON.parse(env);
+    } catch { /* malformed env — use the default below */ }
+    return [{ urls: "stun:stun.l.google.com:19302" }];
+  })(),
+};
 const uuid = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `c-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 export const fmtCallDuration = (s) => `${Math.floor(s / 60)}:${String(Math.max(0, s) % 60).padStart(2, "0")}`;
 

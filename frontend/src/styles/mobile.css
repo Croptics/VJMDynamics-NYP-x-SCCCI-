@@ -6,7 +6,21 @@
    ========================================================================== */
 
 .mobile-shell {
-  min-height: 100vh;
+  /* The shell owns the scroll (not the document body). Why: the fixed
+     bottom tab bar is positioned against the viewport, so when the BODY
+     gained a scrollbar on tall pages (the Attendance roster) but not on
+     short ones (Home), the bar's right edge moved by the scrollbar width
+     and its evenly-spaced tabs visibly shifted between pages. With the
+     shell as the scroll container the body never scrolls (its width is
+     constant), and `scrollbar-gutter: stable` reserves the shell's own
+     scrollbar gutter on EVERY mobile view — so both the tab bar and the
+     page content stay pixel-static across Home / Attendance / Trips /
+     Profile / Issues. Scoped to .mobile-shell so desktop is untouched
+     (mobile.css is imported app-wide via App.jsx). */
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -27,7 +41,7 @@
 .mobile-page {
   flex: 1;
   padding: 16px;
-  padding-bottom: 84px; /* clear the fixed tab bar */
+  padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px)); /* clear the floating dock */
   max-width: 560px;
   width: 100%;
   margin: 0 auto;
@@ -51,16 +65,28 @@
   width: 100%;
 }
 
+/* Floating glassmorphic dock — a frosted, rounded pill lifted off the bottom
+   edge instead of a flat full-width bar, so the mobile app reads as a native
+   enterprise app rather than a web wrapper. Falls back to a solid surface on
+   browsers without backdrop-filter/color-mix (the solid `background` below is
+   overridden by the translucent one only where color-mix is supported). */
 .mobile-tabbar {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   z-index: 20;
   display: flex;
+  gap: 4px;
+  width: min(440px, calc(100% - 24px));
+  padding: 7px;
+  border-radius: 999px;
   background: var(--surface);
-  border-top: 1px solid var(--line);
-  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
 }
 
 .mobile-tab {
@@ -68,13 +94,88 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 4px;
-  border-radius: var(--r-sm);
+  gap: 3px;
+  padding: 8px 4px;
+  border-radius: 999px;
   color: var(--ink-3);
   text-decoration: none;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.2s ease, background 0.2s ease, transform 0.12s ease;
+}
+.mobile-tab:active { transform: scale(0.9); }
+
+/* Active tab: a soft brand-tinted pill with a glow on the icon so staff can
+   see where they are at a glance, even in a bright coach bay. */
+.mobile-tab.active {
+  color: var(--scc-red);
+  background: var(--scc-red-tint);
+}
+.mobile-tab.active svg {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--scc-red) 55%, transparent));
+  animation: mobile-tab-pop 0.24s ease-out;
+}
+@keyframes mobile-tab-pop {
+  0% { transform: scale(0.82); }
+  60% { transform: scale(1.12); }
+  100% { transform: scale(1); }
 }
 
-.mobile-tab.active { color: var(--scc-red); }
+/* Icon wrapper — anchors the live notification badge to the icon's top-right. */
+.mobile-tab-icon { position: relative; display: inline-flex; }
+.mobile-tab-badge {
+  position: absolute;
+  top: -7px;
+  left: 100%;
+  transform: translateX(-45%);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--scc-red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  border: 2px solid var(--surface);
+  box-sizing: content-box;
+}
+
+/* Topbar connectivity + trip-context chips (native-app status header). */
+.mobile-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-body); /* topbar forces the serif display font otherwise */
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.mobile-trip-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.mobile-trip-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mobile-sync-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
+.mobile-sync-dot.pulse { animation: mobile-sync-pulse 1.8s ease-in-out infinite; }
+@keyframes mobile-sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-tab, .mobile-tab.active svg, .mobile-sync-dot.pulse { animation: none; transition: none; }
+}

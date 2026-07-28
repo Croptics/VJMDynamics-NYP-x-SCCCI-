@@ -6,55 +6,102 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useState } from "react";
-import { ClipboardCheck, Eye, EyeOff, Smartphone, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
+import { useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
+import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
 
 // One-time cleanup: earlier builds stored the plaintext password in
-// localStorage (under these two keys, across two iterations of the "Remember
-// password" feature) to prefill the login form. "Remember password" is now
-// secure/token-based instead — see the checkbox's onChange below — so any
-// value left under either old key is purged on load rather than kept around
-// or silently reused. This runs for every returning visitor exactly once
-// (removeItem is a no-op once the key's gone), cleaning up whatever a prior
-// build already wrote to their browser.
+// localStorage under these two keys, across two iterations of a since-removed
+// "Remember password" feature. Purged unconditionally for any returning
+// visitor (removeItem is a no-op once the key's gone) before the CURRENT
+// "Remember password" (see REMEMBER_KEY below) has a chance to write its own
+// — the two are unrelated, this just clears whatever a prior build left
+// behind under the old names.
 try {
   localStorage.removeItem("mg_remember");
   localStorage.removeItem("mg_remember_v2");
 } catch { /* ignore */ }
+
+// "Remember password" (2026-07-21): stores { staffId, password } in
+// localStorage in plain JSON so the form can prefill itself on a later
+// visit. This is a DELIBERATE, requested trade-off, not an oversight — the
+// project had previously and intentionally avoided this exact pattern (see
+// the cleanup above), because Chrome's own native "Save password?" prompt
+// never reliably fires for this SPA (confirmed via diagnostic logging:
+// navigator.credentials.store() resolves without error, isSecureContext is
+// true, PasswordCredential exists, yet nothing is actually persisted to
+// Chrome's own password manager). Given the browser-native path is a dead
+// end in practice, this trades a small amount of security (the password
+// sits in this browser's local storage, readable by anyone with access to
+// the device/browser profile — not sent anywhere, but not OS-keychain-
+// encrypted like a real password manager either) for a login flow that
+// reliably prefills every time. Unticking "Remember password" on a
+// subsequent login clears it immediately.
+//
+// ENVIRONMENT-GATED (2026-07-21): `import.meta.env.DEV` is Vite's own
+// dev-vs-production flag — true only under `vite dev` (a local `npm run
+// dev`), false in whatever `vite build` produces, regardless of which host
+// that build ends up deployed to. That's the right switch here: this
+// trade-off is acceptable for local dev on a trusted team's own machines,
+// but must NOT be reachable once this app is built and put on the public
+// internet. When REMEMBER_ENABLED is false these three functions are
+// no-ops — there is no code path in a production build that reads or
+// writes a plaintext password. The "Remember password" checkbox itself
+// stays visible either way, since it also controls the harmless, separate
+// "keep me signed in" behavior (session token in localStorage vs.
+// sessionStorage, via setToken(token, keep) below) — only the
+// plaintext-password half of the feature is disabled in production.
+const REMEMBER_ENABLED = import.meta.env.DEV;
+const REMEMBER_KEY = "mg_remembered_login";
+function loadRemembered() {
+  if (!REMEMBER_ENABLED) return null;
+  try {
+    const raw = localStorage.getItem(REMEMBER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveRemembered(staffId, password) {
+  if (!REMEMBER_ENABLED) return;
+  try { localStorage.setItem(REMEMBER_KEY, JSON.stringify({ staffId, password })); } catch { /* ignore */ }
+}
+function clearRemembered() {
+  if (!REMEMBER_ENABLED) return;
+  try { localStorage.removeItem(REMEMBER_KEY); } catch { /* ignore */ }
+}
 
 /**
  * Screen 1 — Login / Authentication (shared across team; Vance leads).
  * Split layout: SCCCI-Red brand panel + sign-in form.
  *
  * Login validates against the backend (POST /api/auth/login) using accounts
- * managed on the Account control page. "Remember password" is secure and
- * token-based: it does NOT store your password anywhere — ticking it just
- * puts the signed JWT session token in localStorage (survives closing the
- * browser) instead of sessionStorage (cleared when the tab/browser closes),
- * via setToken(token, keep) below. No plaintext credential of any kind is
- * ever written to disk. (An earlier build did store the raw password to
- * prefill the form — see the cleanup at the top of this file, which purges
- * that from any browser that still has it.)
+ * managed on the Account control page. "Remember password" (see the
+ * REMEMBER_KEY note above) both keeps the session token in localStorage
+ * (survives closing the browser, via setToken(token, keep) below) AND
+ * prefills the Staff ID/password fields on a later visit.
  *
- * Which UI you land in (desktop or mobile) is now an explicit choice — "Sign
- * in" vs "Login for Mobile" — instead of guessed from screen width, so
- * onSignIn is called with "desktop" or "mobile" (see App.jsx's handleSignIn).
+ * Which UI you land in (desktop or mobile) is no longer chosen here — there's
+ * a single "Sign in" button. App.jsx's handleSignIn figures out desktop vs.
+ * mobile automatically from the account's own permissions (mobile-only perms
+ * -> mobile UI, desktop-only -> desktop UI, a single allowed page -> straight
+ * to that page, both -> current viewport width decides).
  */
 export default function LoginPage({ onSignIn }) {
+  const navigate = useNavigate();
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
-  const [staffId, setStaffId] = useState("");
-  const [password, setPassword] = useState("");
+  const remembered = loadRemembered();
+  const [staffId, setStaffId] = useState(remembered?.staffId || "");
+  const [password, setPassword] = useState(remembered?.password || "");
   const [showPw, setShowPw] = useState(false);
-  const [keep, setKeep] = useState(false); // "Remember password" — see the token-based note above
+  const [keep, setKeep] = useState(!!remembered); // "Remember password" — see REMEMBER_KEY note above
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
 
-  async function submit(mode) {
+  async function submit() {
     setError("");
 
     if (!staffId.trim() || !password) {
@@ -71,8 +118,13 @@ export default function LoginPage({ onSignIn }) {
       if (token) {
         setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
+        // See REMEMBER_KEY note at the top of this file for why this stores
+        // the actual password (a deliberate, requested trade-off) rather
+        // than relying on the browser's own save-password prompt.
+        if (keep) saveRemembered(staffId.trim(), password);
+        else clearRemembered();
       }
-      onSignIn?.(mode); // success -> enter the app
+      onSignIn?.(); // success -> enter the app; App.jsx picks desktop/mobile automatically
     } catch (e) {
       // e.status comes from lib/api.js's toError; message-text matching broke
       // once the backend started sending real messages instead of bare codes.
@@ -82,6 +134,10 @@ export default function LoginPage({ onSignIn }) {
         setError("Too many attempts. Please wait a few minutes and try again.");
       } else if (e?.status === 400) {
         setError("Please enter your Staff ID and password.");
+      } else if (e?.code === "ACCOUNT_PENDING") {
+        setError("Your account is awaiting admin approval.");
+      } else if (e?.code === "ACCOUNT_REJECTED") {
+        setError("Your registration was not approved. Contact an admin.");
       } else {
         setError("Can't reach the server. Make sure the backend is running.");
       }
@@ -91,7 +147,7 @@ export default function LoginPage({ onSignIn }) {
   }
 
   function onKeyDown(e) {
-    if (e.key === "Enter") submit("desktop");
+    if (e.key === "Enter") submit();
   }
 
   return (
@@ -121,8 +177,16 @@ export default function LoginPage({ onSignIn }) {
           <p style={S.brandFoot}>{t("A Singapore Chinese Chamber of Commerce & Industry initiative")}</p>
         </div>
 
-        {/* Form panel */}
-        <div className="login-panel" style={S.form}>
+        {/* Form panel — a real <form> with autoComplete hints so the browser's
+            own "save password?" prompt fires on submit (it never does for
+            bare onClick-handled inputs with no name/autoComplete, which is
+            what this used to be). preventDefault + submit() keeps our
+            existing token-based "keep me signed in" logic unchanged. */}
+        <form
+          className="login-panel"
+          style={S.form}
+          onSubmit={(e) => { e.preventDefault(); submit(); }}
+        >
           <h1 style={{ fontSize: 26 }}>{t("Sign in")}</h1>
           <p className="muted" style={{ marginTop: 4, marginBottom: 24, fontSize: 14 }}>
             {t("SCCCI secretariat & on-ground staff")}
@@ -131,23 +195,25 @@ export default function LoginPage({ onSignIn }) {
           <label className="field-label" htmlFor="staffId">{t("Staff ID")}</label>
           <input
             id="staffId"
+            name="username"
+            autoComplete="username"
             className="input"
             placeholder="e.g. SCCCI132"
             value={staffId}
             onChange={(e) => setStaffId(e.target.value)}
-            onKeyDown={onKeyDown}
           />
 
           <label className="field-label" htmlFor="pw" style={{ marginTop: 16 }}>{t("Password")}</label>
           <div style={{ position: "relative" }}>
             <input
               id="pw"
+              name="password"
+              autoComplete="current-password"
               className="input"
               type={showPw ? "text" : "password"}
               placeholder="............"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={onKeyDown}
               style={{ paddingRight: 42 }}
             />
             <button
@@ -183,17 +249,44 @@ export default function LoginPage({ onSignIn }) {
             </button>
           </div>
 
-          <button className="btn btn-primary btn-block" onClick={() => submit("desktop")} disabled={submitting}>
+          <button type="submit" className="btn btn-primary btn-block" disabled={submitting}>
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
-          <button className="btn btn-ghost btn-block" style={{ marginTop: 10 }} onClick={() => submit("mobile")} disabled={submitting}>
-            <Smartphone size={18} color="var(--scc-red)" /> {t("Login for Mobile")}
+
+          {/* Quick Scanner Access — DELIBERATELY passwordless, per the
+              user's explicit request ("Allow any user to open and load the
+              scanner interface... without entering a password"). Plain
+              client-side navigation to /kiosk-scan, NOT submit() — it never
+              touches the Staff ID/password fields or the login API at all.
+              Safe because the destination itself is a hard-locked sandbox
+              (KioskScannerPage.jsx: no nav chrome, no route out except
+              "Back to Login", and its own short-lived kiosk token grants
+              ONLY the two camera check-in endpoints server-side — see
+              auth.js's requireKioskOrAuth). This button does not set
+              `submitting` and isn't disabled by it, since it bypasses the
+              login flow entirely. */}
+          <button type="button" className="btn btn-dark btn-block" style={{ marginTop: 10 }} onClick={() => navigate("/kiosk-scan")}>
+            <ScanLine size={18} /> {t("Quick Scanner Access")}
           </button>
 
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
             {t("By signing in, you accept the SCCCI data handling policy.")}
           </p>
-        </div>
+
+          {/* Self-service registration (2026-07-24) — new accounts start
+              "pending" and need an admin's approval before they can sign
+              in, see RegisterPage.jsx / Account control. */}
+          <p className="muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
+            {t("New staff?")}{" "}
+            <button
+              type="button"
+              onClick={() => navigate("/register")}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 13, fontWeight: 600 }}
+            >
+              {t("Create an account")}
+            </button>
+          </p>
+        </form>
       </div>
 
       {forgotOpen && <ForgotPasswordModal onClose={() => setForgotOpen(false)} />}
@@ -227,6 +320,10 @@ function ForgotPasswordModal({ onClose }) {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select text in a
+  // password field.
+  const downOnBackdrop = useRef(false);
 
   async function handleSubmit() {
     setError("");
@@ -254,7 +351,9 @@ function ForgotPasswordModal({ onClose }) {
   }
 
   return (
-    <div style={S.overlay} onClick={() => !submitting && onClose()}>
+    <div style={S.overlay}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (!submitting && downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div className="row between" style={{ marginBottom: 18 }}>
           <h2 style={{ fontSize: 18 }}>{t("Reset password")}</h2>

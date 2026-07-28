@@ -16,14 +16,39 @@
  * ============================================================================= */
 
 import { useState, useMemo, useRef } from "react";
-import { Search, CheckCircle2, UserCheck, ShieldAlert, PencilLine } from "lucide-react";
+import { Search, CheckCircle2, UserCheck, ShieldAlert, PencilLine, Undo2 } from "lucide-react";
 import { getPermissions } from "../lib/api.js";
-import { manualOverride } from "../lib/exceptionsApi.js";
+import { manualOverride, undoManualOverride } from "../lib/exceptionsApi.js";
 
 const initialsOf = (name = "?") =>
   name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
-export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) {
+// Same 5-status vocabulary the desktop Dashboard shows (ARRIVED shown as
+// "Arrived", PRESENT is its legacy alias). The subtitle used to fall back to
+// the backend's "No status" lastSeen placeholder, which hid the delegate's
+// REAL status — a delegate ASSIGNED to this coach but not yet checked in read
+// "No status" here while the Dashboard correctly called them "Assigned". Now
+// the row mirrors the delegate's actual status straight from d.status.
+const STATUS_LABEL = {
+  ARRIVED: "Arrived",
+  PRESENT: "Arrived",
+  ASSIGNED: "Assigned",
+  LATE: "Late",
+  MISSING: "Missing",
+  UNASSIGNED: "Unassigned",
+};
+// Colour token per status, matching the Dashboard's badge palette so the two
+// surfaces read the same at a glance.
+const STATUS_TONE = {
+  ARRIVED: "var(--st-present)",
+  PRESENT: "var(--st-present)",
+  ASSIGNED: "var(--st-assigned)",
+  LATE: "var(--st-late)",
+  MISSING: "var(--st-missing)",
+  UNASSIGNED: "var(--st-unassigned)",
+};
+
+export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn, tripId }) {
   const canEdit = getPermissions().manageExceptions;
   const [query, setQuery] = useState("");
   const [justMarked, setJustMarked] = useState(() => new Set()); // optimistic PRESENT
@@ -39,17 +64,24 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
   };
 
   const roster = (coach && coach.delegates) ? coach.delegates : [];
-  const statusOf = (d) => (justMarked.has(d.delegateId) ? "PRESENT" : d.status);
+  // ARRIVED is the current 5-status value (PRESENT was the legacy name); accept
+  // both so already-arrived delegates loaded from the API still show correctly.
+  const statusOf = (d) => (justMarked.has(d.delegateId) ? "ARRIVED" : d.status);
+  const isPresent = (s) => s === "ARRIVED" || s === "PRESENT";
 
+  // Sort order mirrors the Dashboard's sense of urgency: still-missing first,
+  // then late, then assigned/unassigned (on a coach but not checked in), and
+  // finally the already-present at the bottom — so the people a staff member
+  // still needs to act on stay at the top of the list.
+  const SORT_RANK = { MISSING: 0, LATE: 1, ASSIGNED: 2, UNASSIGNED: 3, ARRIVED: 4, PRESENT: 4 };
   const filtered = useMemo(() => {
     const qq = query.trim().toLowerCase();
     const list = qq ? roster.filter((d) => d.name.toLowerCase().includes(qq)) : roster;
-    // Missing first (the ones needing action), then present.
-    return [...list].sort((a, b) => (statusOf(a) === "MISSING" ? 0 : 1) - (statusOf(b) === "MISSING" ? 0 : 1));
+    return [...list].sort((a, b) => (SORT_RANK[statusOf(a)] ?? 3) - (SORT_RANK[statusOf(b)] ?? 3));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roster, query, justMarked]);
 
-  const presentCount = roster.filter((d) => statusOf(d) === "PRESENT").length;
+  const presentCount = roster.filter((d) => isPresent(statusOf(d))).length;
 
   async function markPresent(d) {
     if (!canEdit) return;
@@ -58,7 +90,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
     // optimistic
     setJustMarked((prev) => new Set(prev).add(d.delegateId));
     try {
-      await manualOverride(d.delegateId);
+      await manualOverride(d.delegateId, tripId);
       flash(`${d.name} marked present`);
       onCheckedIn?.();
     } catch (e) {
@@ -69,6 +101,27 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
           ? "You need the ‘Manage exceptions’ permission for manual overrides."
           : e.message || "Could not mark present. Try again."
       );
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // Only offered right next to a delegate THIS panel just marked present —
+  // the accidental-click case, not a general "un-arrive anyone" control.
+  // Reverts to whatever status they actually had before (e.g. Late), not a
+  // blanket ASSIGNED — see undoManualOverride()'s own comment. Removes the
+  // log row markPresent() just wrote.
+  async function undoPresent(d) {
+    if (!canEdit) return;
+    setBusyId(d.delegateId);
+    setError("");
+    try {
+      await undoManualOverride(d.delegateId, tripId);
+      setJustMarked((prev) => { const n = new Set(prev); n.delete(d.delegateId); return n; });
+      flash(`${d.name} reverted`);
+      onCheckedIn?.();
+    } catch (e) {
+      setError(e.message || "Could not undo — try again.");
     } finally {
       setBusyId(null);
     }
@@ -134,7 +187,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
       <div style={S.list}>
         {filtered.map((d) => {
           const status = statusOf(d);
-          const present = status === "PRESENT";
+          const present = isPresent(status);
           return (
             <div key={d.delegateId} style={S.row}>
               <span style={S.avatar(d.vip)}>{d.initials || initialsOf(d.name)}</span>
@@ -142,22 +195,50 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
                 <div style={{ fontWeight: 600, fontSize: 13.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {d.name}{d.vip ? " · VIP" : ""}
                 </div>
-                <div className="muted" style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {present ? "Present" : (d.lastSeen || "Missing")}
+                {/* Real delegate status (from d.status), colour-matched to
+                    the Dashboard's badge palette — replaces the old "No
+                    status" placeholder that ignored the actual status. When
+                    there's a real lastSeen note (e.g. "QR check-in · 21:36")
+                    it's appended after the status label for extra context. */}
+                <div style={{ fontSize: 11.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <span style={{ color: STATUS_TONE[status] || "var(--ink-3)", fontWeight: 600 }}>
+                    {STATUS_LABEL[status] || "No status"}
+                  </span>
+                  {d.lastSeen && d.lastSeen !== "No status" && (
+                    <span className="muted"> · {d.lastSeen}</span>
+                  )}
                 </div>
               </div>
               {present ? (
-                <span className="badge badge-present" style={{ flexShrink: 0 }}>
-                  <CheckCircle2 size={13} style={{ verticalAlign: -2, marginRight: 3 }} />In
-                </span>
-              ) : (
+                <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                  <span className="badge badge-present">
+                    <CheckCircle2 size={13} style={{ verticalAlign: -2, marginRight: 3 }} />In
+                  </span>
+                  {/* Undo — only next to a delegate THIS panel just marked
+                      present (justMarked), for the accidental-click case;
+                      delegates already ARRIVED from an earlier session/scan
+                      don't get one (nothing to "undo" here). Hidden entirely
+                      without canEdit (2026-07-24) — a disabled-but-visible
+                      action button read as broken rather than as "you don't
+                      have permission", same fix already applied on mobile. */}
+                  {canEdit && justMarked.has(d.delegateId) && (
+                    <button
+                      className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12 }}
+                      onClick={() => undoPresent(d)} disabled={busyId === d.delegateId}
+                      title="Undo — revert to Assigned"
+                    >
+                      {busyId === d.delegateId ? "…" : (<><Undo2 size={13} /> Undo</>)}
+                    </button>
+                  )}
+                </div>
+              ) : canEdit ? (
                 <button
                   className="btn btn-dark" style={{ padding: "7px 12px", fontSize: 12.5, flexShrink: 0 }}
-                  onClick={() => markPresent(d)} disabled={!canEdit || busyId === d.delegateId}
+                  onClick={() => markPresent(d)} disabled={busyId === d.delegateId}
                 >
                   {busyId === d.delegateId ? "…" : (<><UserCheck size={14} /> Mark present</>)}
                 </button>
-              )}
+              ) : null}
             </div>
           );
         })}

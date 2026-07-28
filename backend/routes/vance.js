@@ -37,10 +37,11 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
-  accountPermissions,
   COACHES,
+  accountPermissions,
+  getVisibleCoachIds,
 } from "../data.js";
-import { requireAuth, requirePermission } from "../auth.js";
+import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -136,6 +137,8 @@ async function init() {
   // that sits beside it in the same inbox. `convo_key` is an order-independent
   // key for the pair so A→B and B→A share one thread. `media` holds a data URL
   // for a video clip, or JSON for a doc-share / call summary.
+  // (Integrated from Vance's v2 branch 2026-07-27 — tables are all-additive,
+  // CREATE/ALTER IF NOT EXISTS only, no existing table is touched.)
   await q(`CREATE TABLE IF NOT EXISTS dm_messages (
     id             VARCHAR(64) PRIMARY KEY,
     convo_key      VARCHAR(200) NOT NULL,
@@ -670,7 +673,7 @@ async function runParseJob(job, buf, mediaType, isPdf) {
 
 router.post(
   "/api/documents/parse-async",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.raw({ type: () => true, limit: "25mb" }),
   wrap(async (req, res) => {
     await ensureReady();
@@ -724,7 +727,7 @@ router.get("/api/onboarding/context", requireAuth(), wrap(async (req, res) => {
 
 router.post(
   "/api/documents/parse",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.raw({ type: () => true, limit: "25mb" }),
   wrap(async (req, res) => {
     await ensureReady();
@@ -815,7 +818,7 @@ function isPlausibleDelegate(r) {
 
 router.post(
   "/api/trips/:id/onboarding/confirm",
-  requirePermission("manageDelegates"),
+  requirePermission("manageDocuments"), // carved out of manageDelegates 2026-07-21 — see permissions.js
   express.json(),
   wrap(async (req, res) => {
     await ensureReady();
@@ -839,6 +842,13 @@ router.post(
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
       const coachId = r.coachId || null;
+      // tripUuid passed directly now (2026-07-24) — this used to call
+      // createDelegate() with none, then patch trip_id on with a separate
+      // UPDATE below, which meant logActivity() (fired inside createDelegate)
+      // always recorded trip_id NULL for every onboarded delegate, so the
+      // Dashboard's per-trip History tracker never showed onboarding activity
+      // at all. The UPDATE below still runs but is now a harmless no-op on
+      // trip_id (COALESCE keeps whatever's already there).
       const delegate = await createDelegate({
         name,
         status: coachId ? "MISSING" : "UNASSIGNED",
@@ -901,7 +911,11 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
 
 // Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
 // the scan. This is what the on-site scanner calls.
-router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async (req, res) => {
+// requireKioskOrPermission("manageScanner"): a signed-in user with the
+// "Manage scanner" permission, OR the passwordless kiosk token (the
+// /kiosk-scan entrance scanner's QR mode — unaffected by the permission,
+// by design). See auth.js.
+router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner"), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const code = (req.body?.code || "").toString().trim();
   const requestedTripId = (req.body?.tripId || "t-1").toString();
@@ -924,6 +938,37 @@ router.post("/api/onboarding/checkin", requireAuth(), express.json(), wrap(async
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
   const tripId = del.trip_str || requestedTripId;
+
+  // Cross-coach guard: a scanner scoped to one coach (coachOverride, from the
+  // scan panel's own coach picker) must NOT be able to silently reassign a
+  // delegate who is already assigned to a DIFFERENT coach — that used to
+  // happen here (coachOverride unconditionally won in the COALESCE below),
+  // so scanning a Coach 5 delegate on a Coach 1 scanner quietly moved them
+  // onto Coach 1 and checked them in there. An UNASSIGNED delegate (no
+  // coach_id yet) is still fine to assign on first scan — that's the
+  // legitimate "muster onto whichever coach is scanning" case.
+  if (coachOverride && del.coach_id && del.coach_id !== coachOverride) {
+    const dash = await getDashboard();
+    const assignedCoach = (dash.coaches || []).find((c) => c.id === del.coach_id);
+    const scannerCoach = (dash.coaches || []).find((c) => c.id === coachOverride);
+    const assignedLabel = assignedCoach?.label || assignedCoach?.name || del.coach_id;
+    const scannerLabel = scannerCoach?.label || scannerCoach?.name || coachOverride;
+    return res.status(409).json({
+      error: "COACH_MISMATCH",
+      message: `${del.name} is assigned to ${assignedLabel}, not ${scannerLabel}.`,
+      delegateId: del.id,
+      delegateName: del.name,
+      assignedCoachId: del.coach_id,
+      assignedCoachLabel: assignedLabel,
+      scannerCoachId: coachOverride,
+    });
+  }
+
+  // ARRIVED is the current 5-status value; PRESENT is the legacy alias this
+  // endpoint itself still writes below. Checking only PRESENT here missed a
+  // delegate who'd already boarded via face scan or manual override (both
+  // write ARRIVED), so a re-scan of their QR code would report
+  // alreadyBoarded:false instead of the correct duplicate-check-in notice.
   const alreadyBoarded = del.status === "PRESENT" || del.status === "ARRIVED";
   const coachId = coachOverride || del.coach_id || null;
   const nowStr = new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -976,7 +1021,7 @@ async function buildSnapshot() {
   // once and scope every read to it, so the snapshot never mixes trips — JQ's
   // getTrip/getDashboard/getMissing otherwise default to an arbitrary "LIMIT 1"
   // (no ORDER BY) trip, which made the assistant + pulse show a different trip
-  // and counts than the dashboard.
+  // and counts than the dashboard. (Vance's fix, integrated 2026-07-27.)
   const tripUuid = await resolveTripUuid("t-1");
   const [trip, dashboard] = await Promise.all([
     getTrip(tripUuid), getDashboard(tripUuid),
@@ -1005,7 +1050,8 @@ async function buildSnapshot() {
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
 
-  /* 5-status-aware, SINGLE-SOURCE KPIs + lists. Every delegate is exactly one of:
+  /* 5-status-aware, SINGLE-SOURCE KPIs + lists (Vance's fix, integrated
+   * 2026-07-27). Every delegate is exactly one of:
    *   boarded    = PRESENT / ARRIVED
    *   missing    = on a coach, not boarded
    *   unassigned = no coach, not boarded
@@ -1795,6 +1841,20 @@ function convoKey(meAcctId, peerKind, peerId) {
 }
 
 const MSG_KINDS = new Set(["text", "video", "doc", "call", "sticker"]);
+
+// Media allowlist (JQ, added at integration time 2026-07-27): `media` is
+// rendered straight into <img>/<video> src on the client, so only inline data:
+// payloads of the right type (or JSON for doc/call cards) are accepted — a
+// remote http(s) URL stored here would beacon every viewer's IP to whoever
+// sent it.
+function validMedia(kind, media) {
+  if (media === null || media === undefined || media === "") return true;
+  const s = String(media);
+  if (kind === "video") return s.startsWith("data:video/");
+  if (kind === "sticker") return s.startsWith("data:image/");
+  if (kind === "doc" || kind === "call") { try { JSON.parse(s); return true; } catch { return false; } }
+  return false; // plain text messages carry no media
+}
 const MAX_BODY = 8000;                 // chars of text / caption
 const MAX_MEDIA = 12 * 1024 * 1024;    // ~12MB base64 (short clips / small docs)
 
@@ -1861,9 +1921,16 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
   if (canSeeDelegates(req.account)) {
     const tripUuid = await resolveTripUuid("t-1");
     delegates = (await q(
-      `SELECT id, name, company FROM delegates
+      `SELECT id, name, company, "coachId" FROM delegates
         WHERE ($1::uuid IS NULL OR trip_id = $1) ORDER BY name`, [tripUuid]
     )).rows;
+    // Coach-captain Staff scoping (JQ, added at integration time 2026-07-27):
+    // the delegate CONTACTS list respects the same visibility rule as every
+    // other delegate-reading route — a scoped Staff account only sees (and can
+    // only message) delegates on coaches they captain. Admin sees everyone.
+    const visibleCoachIds = tripUuid ? await getVisibleCoachIds(tripUuid, req.account) : null;
+    if (visibleCoachIds) delegates = delegates.filter((d) => d.coachId && visibleCoachIds.has(d.coachId));
+    delegates = delegates.map(({ coachId, ...rest }) => rest);
   }
 
   // All my messages, oldest→newest, so the last write per convo wins the preview.
@@ -1944,6 +2011,7 @@ router.post("/api/messages/thread", requireAuth(), express.json({ limit: "16mb" 
   if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
   if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
   if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE", message: "That attachment is too large — keep clips short." });
+  if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
   if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
 
   const peer = await resolvePeer(peerKind, peerId, req.account);
@@ -2151,6 +2219,7 @@ router.post("/api/groups/:id/messages", requireAuth(), express.json({ limit: "16
   if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
   if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
   if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE" });
+  if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
   const id = randomUUID();
   await q(`INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
            VALUES ($1,$2,$3,'group',$4,$5,$6,$7)`, [id, `g:${gid}`, me, gid, kind, body, media]);

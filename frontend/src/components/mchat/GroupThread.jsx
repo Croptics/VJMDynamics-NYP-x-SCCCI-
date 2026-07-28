@@ -12,8 +12,11 @@ import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 import callManager from "../../lib/callManager.js";
+// Shared trip id constant (integration patch 2026-07-27) — was a duplicated
+// local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
+// exactly that duplication.
+import { TRIP_ID } from "../../lib/exceptionsApi.js";
 
-const TRIP_ID = "t-1";
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024;
 
 const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
@@ -220,7 +223,7 @@ export default function GroupThread({ group, onActivity }) {
                 {!mine && <div className="muted" style={{ fontSize: 11, fontWeight: 600, padding: "0 8px", color: "var(--scc-red)" }}>{m.sender}</div>}
                 <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
                   {m.media
-                    ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} />
+                    ? (m.media.startsWith("data:image/") ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} /> : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>)
                     : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
                   {canDelete && <span className="mc-actions"><button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button></span>}
                 </div>
@@ -245,7 +248,7 @@ export default function GroupThread({ group, onActivity }) {
                   {m.kind === "text" && m.body}
                   {m.kind === "video" && (
                     m.media
-                      ? <video src={m.media} controls playsInline style={{ width: 240, maxWidth: "100%", borderRadius: 10, display: "block" }} />
+                      ? (m.media.startsWith("data:video/") ? <video src={m.media} controls playsInline style={{ width: 240, maxWidth: "100%", borderRadius: 10, display: "block" }} /> : <span style={{ padding: "8px 12px", display: "inline-block" }}>{m.body || "Video"}</span>)
                       : <span style={{ padding: "8px 12px", display: "inline-block" }}>{m.uploading ? "Uploading clip…" : (m.body || "Video")}</span>
                   )}
                   {m.kind === "doc" && (
