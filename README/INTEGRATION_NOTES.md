@@ -71,6 +71,81 @@ JQ integrated Vance's `v2DocuSync-AI-(Vance)` branch (from the local
   for later work, not bugs.
 - Vance's unit tests live in `tests/vance/` (run from repo root:
   `node --test tests/vance/*.test.js` — 82 tests, all passing post-merge).
+- **`docs/vance/` and `ai/vance/` were removed 2026-07-28** (his use cases, API
+  doc, DB schema, demo script and AI reflection). This repo keeps only the docs
+  JQ maintains; for MusterChat, treat the "Vance v2 integration" section above
+  plus `routes/vance.js` itself as authoritative. Recoverable via
+  `git show cfa0e3d:docs/vance/<file>` if ever needed, and still present on
+  Vance's own branch — expect them back if he merges.
+
+**Post-integration pen-test (2026-07-28).** JQ attack-tested the merged
+messaging/calling code with two deliberately low-privilege Staff accounts.
+**Held up with no changes needed:** authentication (401 on every endpoint
+without a token; forged and `alg=none` JWTs rejected; a pending/unapproved
+account can't sign in at all), SQL injection (every query is parameterised —
+injection in `peerId`/group id just 404s), DM thread IDOR (`convo_key` is
+derived server-side from the caller's own id, so a thread can't be addressed
+on someone else's behalf), group isolation (non-member gets `NOT_MEMBER` on
+read/post/members, `GET /api/groups` lists only your own, group ids can't be
+hijacked by POSTing an existing id), message ownership (edit/delete of
+someone else's message → `NOT_YOURS`), and delegate PII (a Staff account with
+the delegate view permissions off sees **zero** delegate contacts, and can't
+reach a delegate thread directly either).
+
+**Four real issues found and fixed** (all in `routes/vance.js` unless noted):
+1. `POST /api/calls/signal` relayed group-call signals (`ginvite`/`gjoin`/
+   `gpresence`/`gleave`) with **no group-membership check** — any account could
+   ring any other into a fabricated group and choose the group NAME shown on
+   the ring. Now verifies membership via `isGroupMember` and **overwrites
+   `payload.groupName` with the real name from the DB**.
+2. The same endpoint accepted an arbitrary 1MB JSON `payload`, making
+   `call_signals` usable as a covert account-to-account data store. Now capped
+   at 64KB (real SDP/ICE is a few KB). Also rejects calling yourself.
+3. **No rate limiting on sends** — 50 rapid messages were all accepted, each
+   able to carry ~12MB of base64 media. Added a per-account sliding window
+   (`throttleSend`: 25 messages / 10s, of which 5 may carry media) returning
+   429; verified normal conversation pace is unaffected.
+4. The media allowlist was a bare `startsWith("data:video/")` prefix test, so
+   junk like `data:video/..%2f..` passed. Now a proper data-URL regex, and
+   `data:image/svg+xml` is explicitly refused for stickers (SVG is the one
+   image type that can carry script).
+
+**Three further issues found by a code-review pass** (attack-verified, then fixed):
+5. **Coach scoping was enforced on the contacts LIST but not on the delegate
+   lookup** (`resolvePeer`) — so a coach-scoped Staff account could still read
+   any delegate's name/company, and open a thread against them, by asking for
+   the id directly (`?peerKind=delegate&peerId=d-3`). Delegate ids are
+   sequential `d-N`, so the whole roster was walkable despite the UI hiding it.
+   `resolvePeer` now applies `getVisibleCoachIds` at the point the record is
+   read; verified an out-of-coach id now returns `NO_PEER` for both read and
+   write, while in-coach delegates still work.
+6. **`GET /api/assistant/roster` had no scoping at all** — it returned EVERY
+   delegate including **email** to any signed-in account. This was the widest
+   delegate-PII surface in the app (pre-existing, not new to this merge). Now
+   trip-scoped (t-1, same as the snapshot) and coach-scoped like every other
+   delegate route: a c1 captain sees their 5, an admin sees all 10.
+7. `POST /api/groups/:id/messages` never enforced `MAX_BODY` (the DM and edit
+   paths did) — a group member could store a ~16MB text body. Now 413s.
+
+**⚠️ Policy decision left OPEN (not a bug — JQ's deliberate earlier design).**
+`getVisibleCoachIds` (`db/dashboard.js`) returns `null` — meaning "no
+restriction" — for BOTH an admin AND a Staff account that captains zero
+coaches on the trip. That fallback was chosen on purpose so a staffer who
+hasn't been assigned a coach yet isn't locked out of the app. The consequence
+is that such an account sees the FULL delegate roster (dashboard, delegates
+list, history, export, and now message contacts). Making it strict is a
+one-line change (return an empty `Set` instead of `null` for non-captain
+staff), but it changes behaviour app-wide for every teammate's surfaces too,
+so it's a product call rather than a patch. Verified live: a default-permission
+Staff account captaining nothing currently gets all 10 delegates.
+
+Also fixed while testing: an over-limit upload returned a misleading
+`500 SERVER_ERROR` — `server.js`'s error handler now maps `entity.too.large`
+to **413** and malformed JSON to **400**; and the chat client showed a failed
+send with no reason, so `HumanThread`/`GroupThread` now surface the server's
+message (e.g. the 429 "slow down"). Every fix was re-tested, legitimate
+group calls / uploads / conversation still work, and all 82 of Vance's unit
+tests still pass.
 
 ## ⚠️ CRITICAL — known gap: no offline support (2026-07-25)
 
@@ -518,6 +593,16 @@ Three things in one module:
   `/api/checkins/qr`, and it's the same endpoint the passwordless kiosk
   scanner and the mobile scanner's QR mode both call (see "Updates since
   initial merge" below).
+  > **⚠️ Cross-team contract — do not remove these three.** `delegates.qr_code`,
+  > `POST /api/onboarding/checkin`, and `qrCheckin()` in
+  > `frontend/src/lib/claudeParse.js` are load-bearing for the scanner: Jayden
+  > dropped his original JSON badge format to standardise on this plain code, so
+  > his `QRScannerPanel.jsx` scans `qr_code` and registers it through that one
+  > endpoint, which flips the delegate to boarded (+coach) and writes a
+  > `check_in_logs` row — which is in turn what Desmond's coach board and JQ's
+  > head-count both count. Renaming or deleting any of the three silently breaks
+  > on-site boarding for the whole team. (Carried over from Vance's own
+  > integration notes when that duplicate file was deleted, 2026-07-28.)
 
 ### Files
 

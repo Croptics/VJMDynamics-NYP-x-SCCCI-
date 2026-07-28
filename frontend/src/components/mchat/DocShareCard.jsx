@@ -6,7 +6,7 @@
  * ============================================================================= */
 import { FileText, UserPlus, Check, Loader2 } from "lucide-react";
 
-export default function DocShareCard({ doc, onAddToTrip, adding, added, mine }) {
+export default function DocShareCard({ doc, onAddToTrip, adding, added }) {
   const rows = Array.isArray(doc?.rows) ? doc.rows : [];
   const shown = rows.slice(0, 6);
   const more = rows.length - shown.length;

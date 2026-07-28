@@ -41,7 +41,7 @@ const BRAND_COLORS = ["#1f6feb", "#8250df", "#0f766e", "#b91c1c", "#b45309", "#0
 const STOPWORDS = new Set(["pte", "ltd", "llp", "inc", "co", "corp", "corporation", "the", "and", "services", "service", "group", "holdings", "solutions", "consulting", "international"]);
 function companyBrand(company) {
   const name = (company || "").trim();
-  if (!name) return { initials: "—", bg: "#94a3b8", fg: "#fff", empty: true };
+  if (!name) return { initials: "—", bg: "#94a3b8", fg: "#fff" };
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   const bg = BRAND_COLORS[h % BRAND_COLORS.length];
@@ -53,9 +53,9 @@ function companyBrand(company) {
 }
 
 /** A company logo chip — real uploaded logo if given, else the monogram. */
-function CompanyLogo({ company, logoUrl, size = 34, radius }) {
+function CompanyLogo({ company, logoUrl, size = 34 }) {
   const b = companyBrand(company);
-  const r = radius ?? Math.round(size * 0.28);
+  const r = Math.round(size * 0.28);
   if (logoUrl) return <img src={logoUrl} alt={company || ""} width={size} height={size} style={{ borderRadius: r, objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />;
   return (
     <span style={{ width: size, height: size, borderRadius: r, background: b.bg, color: b.fg, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: size * 0.4, letterSpacing: -0.5 }}>

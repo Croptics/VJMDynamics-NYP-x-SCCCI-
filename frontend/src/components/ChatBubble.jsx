@@ -66,12 +66,12 @@ export default function ChatBubble() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  // Always visible (2026-07-28 — "can you unhide the chat?"). The old
-  // scroll-triggered auto-hide (fade in only while scrolling, fade out 5s
-  // after) made the chat undiscoverable now that it's also the doorway to
-  // MusterChat messaging. Drag-to-corner still works for moving it off
-  // anything it covers.
-  const visible = true;
+  // The bubble is ALWAYS visible (2026-07-28 — "can you unhide the chat?").
+  // The old scroll-triggered auto-hide (fade in only while scrolling, fade out
+  // 5s after) made the chat undiscoverable now that it's also the doorway to
+  // MusterChat messaging, so the whole visibility state was removed rather
+  // than left as an always-true flag. Drag-to-corner still works for moving it
+  // off anything it covers.
 
   /* ---- drag-to-corner (pointer events cover mouse + touch uniformly) --- */
   const onPointerDown = (e) => {
@@ -160,13 +160,7 @@ export default function ChatBubble() {
 
       <button
         className="mg-chatbubble-fab"
-        style={{
-          ...fabPosStyle,
-          opacity: visible ? 1 : 0,
-          pointerEvents: visible ? "auto" : "none",
-          transform: visible ? "scale(1)" : "scale(0.7)",
-          touchAction: "none",
-        }}
+        style={{ ...fabPosStyle, touchAction: "none" }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

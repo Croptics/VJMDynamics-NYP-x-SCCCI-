@@ -49,9 +49,9 @@ const OPTIONAL_COLUMNS = [
   { key: "email", label: "Email" },
   { key: "phone", label: "Phone" },
   { key: "website", label: "Website" },
-  { key: "passportNumber", label: "Passport", mono: true },
+  { key: "passportNumber", label: "Passport" },
   { key: "nationality", label: "Nationality" },
-  { key: "passportExpiry", label: "Expiry", type: "date", mono: true },
+  { key: "passportExpiry", label: "Expiry", type: "date" },
 ];
 
 const LS_JOB = "mg_parse_job";

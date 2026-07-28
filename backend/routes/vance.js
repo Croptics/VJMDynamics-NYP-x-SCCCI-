@@ -1793,13 +1793,27 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
 /* Delegate roster with details — powers clickable delegate cards in the chat. */
 router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
+  // Coach-captain scoping added 2026-07-28 (audit finding): this returned EVERY
+  // delegate — including their email — to any signed-in account, with no
+  // scoping at all, which made it the widest delegate-PII surface in the app.
+  // Now scoped to the assistant's own trip (t-1, same as buildSnapshot) and to
+  // the coaches the caller can actually see, matching every other
+  // delegate-reading route.
+  const tripUuid = await resolveTripUuid("t-1");
   const r = await q(`
     SELECT d.name, d.company, d.role, d.industry, d.status, d.vip, d.email,
+           d."coachId" AS coach_id,
            c.name AS coach, c.city AS coach_city
       FROM delegates d
       LEFT JOIN coaches c ON c.id = d."coachId"
-     ORDER BY d.name`);
-  res.json({ delegates: r.rows });
+     WHERE ($1::uuid IS NULL OR d.trip_id = $1)
+     ORDER BY d.name`, [tripUuid]);
+  const visibleCoachIds = tripUuid ? await getVisibleCoachIds(tripUuid, req.account) : null;
+  const rows = visibleCoachIds
+    ? r.rows.filter((d) => d.coach_id && visibleCoachIds.has(d.coach_id))
+    : r.rows;
+  // coach_id was only needed for the filter — not part of the public shape.
+  res.json({ delegates: rows.map(({ coach_id, ...rest }) => rest) });
 }));
 
 /* Compact live "trip pulse" for the page headers (Onboarding + Assistant):
@@ -1847,13 +1861,46 @@ const MSG_KINDS = new Set(["text", "video", "doc", "call", "sticker"]);
 // payloads of the right type (or JSON for doc/call cards) are accepted — a
 // remote http(s) URL stored here would beacon every viewer's IP to whoever
 // sent it.
+// Tightened 2026-07-28 after pen-testing: a bare startsWith("data:video/")
+// prefix check also accepted junk like "data:video/..%2f..%2fetc". Require a
+// real, well-formed inline data URL — subtype of safe chars, then the
+// base64/comma separator — so only something a browser would actually decode
+// as media can be stored.
+const DATA_VIDEO_RE = /^data:video\/[a-z0-9][a-z0-9.+-]*(;[a-z0-9-]+=[^,;]*)*(;base64)?,/i;
+const DATA_IMAGE_RE = /^data:image\/[a-z0-9][a-z0-9.+-]*(;[a-z0-9-]+=[^,;]*)*(;base64)?,/i;
 function validMedia(kind, media) {
   if (media === null || media === undefined || media === "") return true;
   const s = String(media);
-  if (kind === "video") return s.startsWith("data:video/");
-  if (kind === "sticker") return s.startsWith("data:image/");
+  if (kind === "video") return DATA_VIDEO_RE.test(s);
+  // SVG is excluded deliberately: it's the one image type that can carry
+  // script, and nothing here needs it.
+  if (kind === "sticker") return DATA_IMAGE_RE.test(s) && !/^data:image\/svg/i.test(s);
   if (kind === "doc" || kind === "call") { try { JSON.parse(s); return true; } catch { return false; } }
   return false; // plain text messages carry no media
+}
+
+/* Per-account send throttle (JQ, 2026-07-28 pen-test finding: 50 rapid sends
+ * were all accepted, and each may carry ~12MB of base64 media — that's a
+ * trivial way for one signed-in account to flood the shared DB). In-memory
+ * sliding window: fine for this single-process app, and it fails OPEN on
+ * restart rather than locking anyone out. Generous enough that real
+ * conversation never hits it. */
+const SEND_WINDOW_MS = 10_000;
+const SEND_MAX_TEXT = 25;   // messages per window per account
+const SEND_MAX_MEDIA = 5;   // of which, at most this many carrying media
+const sendLog = new Map();  // accountId -> [{ at, media }]
+function throttleSend(accountId, hasMedia) {
+  const now = Date.now();
+  const recent = (sendLog.get(accountId) || []).filter((e) => now - e.at < SEND_WINDOW_MS);
+  if (recent.length >= SEND_MAX_TEXT) return false;
+  if (hasMedia && recent.filter((e) => e.media).length >= SEND_MAX_MEDIA) return false;
+  recent.push({ at: now, media: hasMedia });
+  sendLog.set(accountId, recent);
+  // Keep the map from growing forever on a long-running server.
+  if (sendLog.size > 500) {
+    for (const [k, v] of sendLog) if (!v.some((e) => now - e.at < SEND_WINDOW_MS)) sendLog.delete(k);
+  }
+  return true;
 }
 const MAX_BODY = 8000;                 // chars of text / caption
 const MAX_MEDIA = 12 * 1024 * 1024;    // ~12MB base64 (short clips / small docs)
@@ -1891,7 +1938,19 @@ async function resolvePeer(peerKind, peerId, account) {
   }
   if (peerKind === "delegate") {
     if (!canSeeDelegates(account)) return null;
-    return (await q(`SELECT id, name, company FROM delegates WHERE id = $1`, [peerId])).rows[0] || null;
+    const row = (await q(`SELECT id, name, company, trip_id, "coachId" FROM delegates WHERE id = $1`, [peerId])).rows[0];
+    if (!row) return null;
+    // Coach-captain scoping (JQ, 2026-07-28 pen-test finding). The CONTACTS
+    // list was already scoped, but this lookup wasn't — so a scoped Staff
+    // account could still read any delegate's name/company, and open a thread
+    // against them, just by asking for the id directly (ids are sequential
+    // "d-N", so the whole roster was walkable). Same rule, enforced at the
+    // point the record is actually read.
+    if (row.trip_id) {
+      const visibleCoachIds = await getVisibleCoachIds(row.trip_id, account);
+      if (visibleCoachIds && !(row.coachId && visibleCoachIds.has(row.coachId))) return null;
+    }
+    return { id: row.id, name: row.name, company: row.company };
   }
   return null;
 }
@@ -2013,6 +2072,7 @@ router.post("/api/messages/thread", requireAuth(), express.json({ limit: "16mb" 
   if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE", message: "That attachment is too large — keep clips short." });
   if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
   if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
+  if (!throttleSend(me, !!media)) return res.status(429).json({ error: "TOO_FAST", message: "Slow down a moment — too many messages at once." });
 
   const peer = await resolvePeer(peerKind, peerId, req.account);
   if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
@@ -2102,7 +2162,9 @@ router.delete("/api/messages/:id", requireAuth(), wrap(async (req, res) => {
 // 1:1 kinds + group-mesh kinds (ginvite = ring a member into a group call;
 // gjoin/gpresence = mesh roster discovery; gleave = a member left the room).
 const CALL_SIGNAL_KINDS = new Set([
-  "invite", "offer", "answer", "ice", "accept", "reject", "hangup", "busy",
+  // "accept" was in this allowlist but is never sent or handled — accepting a
+  // call emits "answer" (see callManager.accept). Dropped 2026-07-28.
+  "invite", "offer", "answer", "ice", "reject", "hangup", "busy",
   "ginvite", "gjoin", "gpresence", "gleave",
 ]);
 
@@ -2111,12 +2173,38 @@ router.post("/api/calls/signal", requireAuth(), express.json({ limit: "1mb" }), 
   await ensureReady();
   const { callId, toId, kind, payload = null, mode = null } = req.body || {};
   if (!callId || !toId || !CALL_SIGNAL_KINDS.has(kind)) return res.status(400).json({ error: "BAD_SIGNAL" });
+  if (toId === req.account.id) return res.status(400).json({ error: "BAD_SIGNAL", message: "You can't call yourself." });
   const peer = (await q(`SELECT id FROM accounts WHERE id = $1`, [toId])).rows[0];
   if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That teammate isn't reachable." });
+
+  // Group-call signals must come from an ACTUAL member of that group (JQ,
+  // 2026-07-28 pen-test finding): `ginvite`/`gjoin`/`gpresence`/`gleave` carry
+  // a groupId in the payload and were relayed with no membership check at all,
+  // so any account could ring anyone into a fabricated "group" and pick its
+  // display name. The group-call callId is the groupId (see callManager's
+  // startGroupCall), so verify against whichever the client supplied.
+  if (kind.startsWith("g")) {
+    const gid = payload?.groupId || callId;
+    if (!gid || !(await isGroupMember(gid, req.account.id))) {
+      return res.status(403).json({ error: "NOT_MEMBER", message: "You're not in that group." });
+    }
+    // Never trust a client-supplied group NAME — read the real one, so a ring
+    // can't be labelled with attacker-chosen text.
+    const g = (await q(`SELECT name FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+    if (g && payload && typeof payload === "object") payload.groupName = g.name;
+  }
+
+  // Cap the relayed payload. It's WebRTC SDP/ICE (a few KB at most); without a
+  // bound, `call_signals` doubles as a 1MB-per-row scratch store any two
+  // accounts could stuff arbitrary data into.
+  const payloadText = payload ? JSON.stringify(payload) : null;
+  if (payloadText && payloadText.length > 64 * 1024) {
+    return res.status(413).json({ error: "PAYLOAD_TOO_LARGE", message: "Signal payload too large." });
+  }
   await q(
     `INSERT INTO call_signals (id, call_id, from_id, from_name, to_id, kind, payload, mode)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [randomUUID(), callId, req.account.id, req.account.name || req.account.username, toId, kind, payload ? JSON.stringify(payload) : null, mode]
+    [randomUUID(), callId, req.account.id, req.account.name || req.account.username, toId, kind, payloadText, mode]
   );
   res.json({ ok: true });
 }));
@@ -2218,8 +2306,13 @@ router.post("/api/groups/:id/messages", requireAuth(), express.json({ limit: "16
   const { kind = "text", body = null, media = null } = req.body || {};
   if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
   if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
+  // MAX_BODY was enforced on the DM path and the edit path but NOT here
+  // (2026-07-28 audit) — a group member could store a ~16MB text body, capped
+  // only by the express JSON limit.
+  if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
   if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE" });
   if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
+  if (!throttleSend(me, !!media)) return res.status(429).json({ error: "TOO_FAST", message: "Slow down a moment — too many messages at once." });
   const id = randomUUID();
   await q(`INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
            VALUES ($1,$2,$3,'group',$4,$5,$6,$7)`, [id, `g:${gid}`, me, gid, kind, body, media]);

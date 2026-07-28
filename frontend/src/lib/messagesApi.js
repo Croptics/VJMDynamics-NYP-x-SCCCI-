@@ -22,9 +22,12 @@ export const sendMessage = (peerKind, peerId, { kind = "text", body = null, medi
 export const pollUpdates = (sinceIso) =>
   apiGet(`/messages/updates${sinceIso ? `?since=${encodeURIComponent(sinceIso)}` : ""}`);
 
-/** Mark a whole thread read. */
-export const markThreadRead = (peerKind, peerId) =>
-  apiPost("/messages/read", { peerKind, peerId });
+// NOTE: there is no markThreadRead() wrapper here on purpose (removed
+// 2026-07-28 dead-code audit). Nothing called it — opening a thread via
+// GET /messages/thread already marks it read server-side, so the separate
+// POST /messages/read route it wrapped is redundant. The route still exists
+// (it's in Vance's published API docs); add a wrapper back if a client ever
+// needs to mark a thread read WITHOUT loading it.
 
 /** Edit / delete a message by id (works for DMs and groups; sender-only). */
 export const editMessage = (id, body) => apiPatch(`/messages/${id}`, { body });

@@ -86,7 +86,11 @@ export default function GroupThread({ group, onActivity }) {
     try {
       const { message } = await sendGroupMessage(group.id, { kind: "text", body });
       settle(opt.id, message); onActivity?.();
-    } catch { fail(opt.id); }
+    } catch (err) {
+      // Show WHY (2026-07-28) — e.g. a 429 send-throttle or 413 too-large.
+      fail(opt.id);
+      setError(err?.message || "Couldn't send that message.");
+    }
     finally { setSending(false); }
   }, [draft, sending, group.id, onActivity, pushOptimistic]);
 
@@ -97,7 +101,7 @@ export default function GroupThread({ group, onActivity }) {
     try {
       const { message } = await sendGroupMessage(group.id, { kind: "sticker", body: payload.body || null, media: payload.media || null });
       settle(opt.id, message); onActivity?.();
-    } catch { fail(opt.id); }
+    } catch (err) { fail(opt.id); setError(err?.message || "Couldn't send that sticker."); }
   }
 
   async function saveEdit() {
@@ -254,7 +258,7 @@ export default function GroupThread({ group, onActivity }) {
                   {m.kind === "doc" && (
                     m.parsing
                       ? <div style={{ padding: "10px 14px", fontSize: 13 }}>📄 Reading {m.body}…</div>
-                      : <DocShareCard doc={parseDoc(m)} mine={mine} onAddToTrip={() => addDocToTrip(m)} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />
+                      : <DocShareCard doc={parseDoc(m)} onAddToTrip={() => addDocToTrip(m)} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />
                   )}
                 </div>
                 {(canEdit || canDelete) && m.kind !== "doc" && (

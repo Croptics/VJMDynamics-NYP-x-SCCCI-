@@ -76,7 +76,7 @@ class CallManager {
     return {
       status: this.status, peer: this.peer, mode: this.mode,
       micOn: this.micOn, camOn: this.camOn, error: this.error,
-      startedAt: this.startedAt, isInitiator: this.isInitiator,
+      startedAt: this.startedAt,
       localStream: this.localStream, remoteStream: this.remoteStream,
       isGroup: this.isGroup, groupName: this.groupName,
       participants: [...this.participants.values()].map((p) => ({ id: p.id, name: p.name, stream: p.stream })),

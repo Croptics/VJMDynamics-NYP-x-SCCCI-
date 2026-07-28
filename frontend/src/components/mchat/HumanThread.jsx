@@ -7,7 +7,7 @@
  * ============================================================================= */
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  Send, Paperclip, Phone, Video, FileText, Film, Check, CheckCheck, X, ArrowLeft,
+  Send, Paperclip, Phone, Video, FileText, Film, Check, CheckCheck, X,
   Smile, Pencil, Trash2, Ban,
 } from "lucide-react";
 import { getThread, sendMessage, editMessage, deleteMessage } from "../../lib/messagesApi.js";
@@ -32,7 +32,10 @@ const fileToDataUrl = (file) => new Promise((resolve, reject) => {
 });
 const parseDoc = (m) => { try { return JSON.parse(m.media || "{}"); } catch { return {}; } };
 
-export default function HumanThread({ peer, onActivity, onBack }) {
+// No `onBack` prop: the inbox always renders the rail beside the thread, so
+// nothing ever passed one (dead branch removed 2026-07-28). If the inbox gains
+// a narrow/mobile single-column mode, re-add it here with the rail's toggle.
+export default function HumanThread({ peer, onActivity }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
@@ -107,7 +110,13 @@ export default function HumanThread({ peer, onActivity, onBack }) {
     try {
       const { message } = await sendMessage(peer.kind, peer.id, { kind: "text", body });
       settle(opt.id, message); onActivity?.();
-    } catch { fail(opt.id); }
+    } catch (err) {
+      // Surface WHY it failed (2026-07-28) — the server can answer 429
+      // "slow down" or 413 "too large", and a bare "failed" marker with no
+      // reason reads as the app being broken.
+      fail(opt.id);
+      setError(err?.message || "Couldn't send that message.");
+    }
     finally { setSending(false); }
   }
 
@@ -118,7 +127,7 @@ export default function HumanThread({ peer, onActivity, onBack }) {
     try {
       const { message } = await sendMessage(peer.kind, peer.id, { kind: "sticker", body: payload.body || null, media: payload.media || null });
       settle(opt.id, message); onActivity?.();
-    } catch { fail(opt.id); }
+    } catch (err) { fail(opt.id); setError(err?.message || "Couldn't send that sticker."); }
   }
 
   async function saveEdit() {
@@ -191,9 +200,6 @@ export default function HumanThread({ peer, onActivity, onBack }) {
     <div className="card" style={{ display: "flex", flexDirection: "column", height: 560, position: "relative", overflow: "hidden" }}>
       {/* Header */}
       <div className="row" style={{ gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--line)", alignItems: "center" }}>
-        {onBack && (
-          <button className="btn btn-ghost" style={{ padding: 6 }} onClick={onBack}><ArrowLeft size={16} /></button>
-        )}
         <span className="avatar" style={{ background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", flexShrink: 0 }}>
           {initialsOf(peer.name)}
         </span>
@@ -325,7 +331,6 @@ export default function HumanThread({ peer, onActivity, onBack }) {
                       ? <div style={{ padding: "10px 14px", fontSize: 13 }}>📄 Reading {m.body}…</div>
                       : <DocShareCard
                           doc={parseDoc(m)}
-                          mine={mine}
                           onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined}
                           adding={added[m.id] === "adding"}
                           added={added[m.id] === "added"}

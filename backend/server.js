@@ -132,6 +132,18 @@ app.use(vimalRouter);
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {
+  // An over-limit request body is a CLIENT error — express.json() throws
+  // PayloadTooLargeError, which used to fall through to the generic 500 below
+  // (found while pen-testing the MusterChat upload path, 2026-07-28: a 20MB
+  // attachment reported "Something went wrong on the server", so the client
+  // couldn't tell a too-big file from a real outage). Answer 413 honestly.
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({ error: "PAYLOAD_TOO_LARGE", message: "That upload is too large." });
+  }
+  // Malformed JSON is likewise the caller's fault, not ours.
+  if (err?.type === "entity.parse.failed" || (err instanceof SyntaxError && err?.status === 400)) {
+    return res.status(400).json({ error: "BAD_JSON", message: "Request body isn't valid JSON." });
+  }
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "SERVER_ERROR", message: "Something went wrong on the server." });
 });

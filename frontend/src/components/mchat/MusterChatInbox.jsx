@@ -194,8 +194,6 @@ export default function MusterChatInbox({ railWidth = 300 }) {
 
       {/* Live call screen (ringing / in-call) — fixed overlay, renders above all */}
       <VideoCallOverlay />
-
-      <style>{`@keyframes mc-spin{to{transform:rotate(360deg)}} .mc-spin{animation:mc-spin 0.9s linear infinite}`}</style>
     </div>
   );
 }
