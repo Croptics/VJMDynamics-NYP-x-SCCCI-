@@ -29,11 +29,9 @@ export default function MobileProfilePage() {
   const activePerms = Object.entries(perms).filter(([, v]) => v);
 
   return (
-    <div>
-      <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 4 }}>
-        {t("Profile")}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 16px" }}>{displayName}</h1>
+    <div className="m-fade-in">
+      <div className="m-eyebrow">{t("Profile")}</div>
+      <h1 className="m-page-title" style={{ marginBottom: 16 }}>{displayName}</h1>
 
       <div className="mobile-card row" style={{ gap: 12 }}>
         <span className="avatar" style={{ width: 44, height: 44, background: "var(--scc-red-tint)", color: "var(--scc-red)", fontSize: 15 }}>
