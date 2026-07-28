@@ -1,7 +1,17 @@
 import { useState, useEffect, useRef } from "react";
-import { MessageCircle, X } from "lucide-react";
+import { MessageCircle, X, MessageSquare } from "lucide-react";
 import MobileAssistantPage from "./MobileAssistantPage.jsx";
+import QuickChat from "../../components/mchat/QuickChat.jsx";
 import { useLang } from "../../lib/i18n.jsx";
+import { getToken } from "../../lib/api.js";
+import { pollUpdates } from "../../lib/messagesApi.js";
+
+// Segmented "Assistant | Messages" tab button.
+const tabBtnStyle = (active) => ({
+  border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, padding: "6px 14px", borderRadius: 7,
+  background: active ? "var(--surface, #fff)" : "transparent", color: active ? "var(--scc-red)" : "var(--ink-2)",
+  boxShadow: active ? "0 1px 2px rgba(0,0,0,0.1)" : "none", display: "inline-flex", alignItems: "center",
+});
 
 // Same reasoning as ChatBubble.jsx (desktop): hidden by default regardless
 // of scroll position, fades in only while actively scrolling, fades back
@@ -30,6 +40,8 @@ const CORNERS = {
 export default function MobileChatBubble() {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState("assistant"); // "assistant" (AI) | "messages" (quick chat)
+  const [unread, setUnread] = useState(0);
   // Only dismiss if the WHOLE click gesture started on the backdrop itself,
   // not wherever the mouse was released after dragging to select chat text.
   const downOnBackdrop = useRef(false);
@@ -52,7 +64,19 @@ export default function MobileChatBubble() {
     return () => { window.removeEventListener("scroll", bumpActivity); clearTimeout(hideTimer.current); };
   }, []);
 
-  const visible = recentlyActive || open || !!dragPos;
+  // Poll unread team messages for the Messages-tab badge.
+  useEffect(() => {
+    if (!getToken()) return;
+    let alive = true;
+    const tick = async () => { try { const r = await pollUpdates(); if (alive) setUnread(r.unread || 0); } catch { /* transient */ } };
+    tick();
+    const id = setInterval(tick, 6000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  // Always visible (2026-07-28 — parity with the desktop bubble; the bubble is
+  // now also the doorway to quick chat, so hiding it hid the messaging feature).
+  const visible = true;
 
   const onPointerDown = (e) => {
     dragRef.current = { startX: e.clientX, startY: e.clientY, moved: false };
@@ -95,15 +119,29 @@ export default function MobileChatBubble() {
           onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
           onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setOpen(false); }}>
           <div className="mg-mobile-chat-sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="row between" style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Trip assistant")}</div>
+            {/* Assistant | Messages tabs — AI chatbot by default, simplified
+                quick-chat for incoming team DMs (space-optimized for mobile). */}
+            <div className="row between" style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: 3, background: "var(--surface-2)", borderRadius: 9, padding: 3 }}>
+                <button onClick={() => setTab("assistant")} style={tabBtnStyle(tab === "assistant")}>{t("Assistant")}</button>
+                <button onClick={() => setTab("messages")} style={tabBtnStyle(tab === "messages")}>
+                  <MessageSquare size={13} style={{ marginRight: 5 }} /> {t("Messages")}
+                  {unread > 0 && <span style={{ marginLeft: 6, background: "var(--scc-red)", color: "#fff", fontSize: 10, fontWeight: 800, borderRadius: 9, padding: "1px 6px" }}>{unread > 99 ? "99+" : unread}</span>}
+                </button>
+              </div>
               <button onClick={() => setOpen(false)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
                 <X size={20} />
               </button>
             </div>
-            <div style={{ flex: 1, minHeight: 0, padding: 12 }}>
-              <MobileAssistantPage embedded />
-            </div>
+            {tab === "assistant" ? (
+              <div style={{ flex: 1, minHeight: 0, padding: 12 }}>
+                <MobileAssistantPage embedded />
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <QuickChat />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -123,6 +161,7 @@ export default function MobileChatBubble() {
         aria-label={open ? t("Close") : t("Trip assistant")}
       >
         {open ? <X size={22} /> : <MessageCircle size={22} />}
+        {!open && unread > 0 && <span className="mg-mobile-chat-badge">{unread > 99 ? "99+" : unread}</span>}
       </button>
 
       <style>{`
@@ -133,6 +172,12 @@ export default function MobileChatBubble() {
           display: flex; align-items: center; justify-content: center;
           box-shadow: var(--shadow-lg); cursor: pointer;
           transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+        .mg-mobile-chat-badge {
+          position: absolute; top: -3px; right: -3px; min-width: 19px; height: 19px; padding: 0 5px;
+          border-radius: 10px; background: #fff; color: var(--scc-red);
+          font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center;
+          border: 2px solid var(--scc-red);
         }
         .mg-mobile-chat-overlay {
           position: fixed; inset: 0; z-index: 60;
