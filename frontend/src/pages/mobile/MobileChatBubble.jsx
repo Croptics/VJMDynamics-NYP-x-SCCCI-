@@ -25,8 +25,8 @@ const MARGIN_SIDE = 16;
 // clear of the safe-area inset (no tab bar up there).
 const CORNER_KEY = "mg_mobile_chat_corner";
 const CORNERS = {
-  br: { bottom: "calc(78px + env(safe-area-inset-bottom, 0px))", right: MARGIN_SIDE },
-  bl: { bottom: "calc(78px + env(safe-area-inset-bottom, 0px))", left: MARGIN_SIDE },
+  br: { bottom: "calc(104px + env(safe-area-inset-bottom, 0px))", right: MARGIN_SIDE },
+  bl: { bottom: "calc(104px + env(safe-area-inset-bottom, 0px))", left: MARGIN_SIDE },
   tr: { top: "calc(16px + env(safe-area-inset-top, 0px))", right: MARGIN_SIDE },
   tl: { top: "calc(16px + env(safe-area-inset-top, 0px))", left: MARGIN_SIDE },
 };

@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo base — chat shell (hosts Vance's MusterChat assistant)
  * ============================================================================= */
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { MessageCircle, X, MessageSquare } from "lucide-react";
 import { useLang } from "../lib/i18n.jsx";
 import { getToken } from "../lib/api.js";
@@ -47,6 +47,7 @@ const CORNERS = {
 export default function ChatBubble() {
   const { t } = useLang();
   const navigate = useNavigate();
+  const location = useLocation();
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("assistant"); // "assistant" (AI) | "messages" (quick chat)
   const [unread, setUnread] = useState(0);
@@ -112,6 +113,9 @@ export default function ChatBubble() {
   };
 
   if (!getToken()) return null; // hidden on the login screen
+  // Redundant on the full MusterChat page (/assistant) — that page IS the inbox
+  // and mounts its own call overlay + poll, so hide the floating bubble there.
+  if (location.pathname === "/assistant") return null;
 
   const goMessages = () => { setOpen(false); navigate("/assistant"); };
 
