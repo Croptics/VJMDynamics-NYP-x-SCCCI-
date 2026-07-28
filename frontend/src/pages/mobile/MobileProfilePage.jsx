@@ -1,14 +1,16 @@
 import { useOutletContext, useNavigate } from "react-router-dom";
-import { LogOut, ShieldCheck, HelpCircle, ChevronRight } from "lucide-react";
+import { LogOut, ShieldCheck, HelpCircle, ChevronRight, Settings, Moon, Sun, Languages } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { useTheme } from "../../lib/theme.jsx";
 
 /**
  * Mobile Profile — signed-in user info + logout, mirroring the account
  * block in the desktop Sidebar but as its own page.
  */
 export default function MobileProfilePage() {
-  const { t } = useLang();
+  const { t, lang, toggleLang } = useLang();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { onLogout } = useOutletContext() || {};
   const user = getUser() || {};
@@ -57,6 +59,32 @@ export default function MobileProfilePage() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* Preferences — appearance + language (moved here from the topbar). */}
+      <div className="mobile-card">
+        <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+          <Settings size={16} color="var(--ink-3)" />
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t("Preferences")}</span>
+        </div>
+        <button className="m-row" onClick={toggleTheme} aria-label={t("Toggle appearance")}>
+          <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+            {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
+          </span>
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>{t("Appearance")}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--scc-red)" }}>
+            {theme === "dark" ? t("Dark") : t("Light")}
+          </span>
+        </button>
+        <button className="m-row" onClick={toggleLang} aria-label={t("Toggle language")}>
+          <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+            <Languages size={15} />
+          </span>
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>{t("Language")}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--scc-red)" }}>
+            {lang === "en" ? "English" : "中文"}
+          </span>
+        </button>
       </div>
 
       <button

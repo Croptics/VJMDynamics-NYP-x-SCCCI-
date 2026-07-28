@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { Home, ClipboardList, User, Languages, Moon, Sun, Bus, ScanFace, QrCode } from "lucide-react";
+import { Home, ClipboardList, User, Bus, ScanFace, QrCode } from "lucide-react";
 import { getPermissions, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
-import { useTheme } from "../../lib/theme.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "./MobileChatBubble.jsx";
 import "../../styles/mobile.css";
@@ -34,8 +33,7 @@ const buzz = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } c
  * of cleanly logging out.
  */
 export default function MobileLayout({ onLogout }) {
-  const { lang, toggleLang, t } = useLang();
-  const { theme, toggleTheme } = useTheme();
+  const { t } = useLang();
 
   useSessionGuard(onLogout);
   const perms = getPermissions();
@@ -107,32 +105,22 @@ export default function MobileLayout({ onLogout }) {
       <div className="mobile-topbar">
         <div className="row between">
           <span>MusterGo</span>
-          <div className="row" style={{ gap: 10 }}>
+          {/* Theme + language toggles moved to the Profile ("Me") page —
+              the topbar stays a clean brand + sync-status header. */}
+          <span
+            className="mobile-sync-chip"
+            style={{
+              background: online ? "var(--st-present-bg)" : "var(--st-missing-bg)",
+              color: online ? "var(--st-present)" : "var(--st-missing)",
+            }}
+            title={online ? t("Synced to cloud") : t("Offline — changes saved locally")}
+          >
             <span
-              className="mobile-sync-chip"
-              style={{
-                background: online ? "var(--st-present-bg)" : "var(--st-missing-bg)",
-                color: online ? "var(--st-present)" : "var(--st-missing)",
-              }}
-              title={online ? t("Synced to cloud") : t("Offline — changes saved locally")}
-            >
-              <span
-                className={"mobile-sync-dot" + (online ? " pulse" : "")}
-                style={{ background: online ? "var(--st-present)" : "var(--st-missing)" }}
-              />
-              {online ? t("Synced") : t("Offline")}
-            </span>
-            <button
-              onClick={() => { buzz(); toggleTheme(); }}
-              aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
-              style={{ background: "none", border: "none", color: "var(--scc-red)", display: "flex", alignItems: "center", padding: 0 }}
-            >
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-            <button onClick={() => { buzz(); toggleLang(); }} style={{ background: "none", border: "none", color: "var(--scc-red)", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700, padding: 0 }}>
-              <Languages size={14} /> {lang === "en" ? "中文" : "EN"}
-            </button>
-          </div>
+              className={"mobile-sync-dot" + (online ? " pulse" : "")}
+              style={{ background: online ? "var(--st-present)" : "var(--st-missing)" }}
+            />
+            {online ? t("Synced") : t("Offline")}
+          </span>
         </div>
         {tripContext && (
           <div className="mobile-trip-chip">

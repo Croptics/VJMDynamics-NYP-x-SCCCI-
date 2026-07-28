@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, ScanFace, Clock, Bus } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
@@ -132,47 +132,25 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {/* Glanceable metrics — Missing / Late lead (at-risk), then Present /
-          Assigned. Each tile is a shortcut into Attendance pre-filtered. */}
-      {k && (
-        <div className="m-stat-grid" style={{ marginTop: 14 }}>
-          <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
-          <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
-          <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
-          <Stat label={t("Assigned")} value={k.assigned ?? 0} tone="assigned" onClick={() => goToAttendance("ASSIGNED")} />
-        </div>
-      )}
-
-      {/* Quick actions */}
-      {(getPermissions().viewMobileScanner || getPermissions().viewMobileIssues) && (
+      {/* Quick actions — the at-a-glance KPI numbers live on the Ops page, so
+          Home stays focused on the trip hero, jump-ins, and coach status. */}
+      {getPermissions().viewMobileIssues && (
         <div className="m-section">
           <div className="m-section-head"><span className="m-eyebrow">{t("Quick actions")}</span></div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {getPermissions().viewMobileScanner && (
-              <button className="m-tile" onClick={() => navigate("/mobile/scanner")}>
-                <span className="m-tile-ic"><ScanFace size={18} /></span>
-                <div className="m-tile-body">
-                  <div className="m-tile-title">{t("Scanner")}</div>
-                  <div className="m-tile-sub">{t("Face + QR scan")}</div>
-                </div>
-                <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
-              </button>
-            )}
-            {getPermissions().viewMobileIssues && (
-              <button className="m-tile" onClick={() => navigate("/mobile/issues")}>
-                <span className="m-tile-ic" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
-                  <AlertTriangle size={18} />
-                </span>
-                <div className="m-tile-body">
-                  <div className="m-tile-title">{t("Issues")}</div>
-                  <div className="m-tile-sub">{t("Report or view exceptions")}</div>
-                </div>
-                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                  {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
-                  <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
-                </div>
-              </button>
-            )}
+            <button className="m-tile" onClick={() => navigate("/mobile/issues")}>
+              <span className="m-tile-ic" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
+                <AlertTriangle size={18} />
+              </span>
+              <div className="m-tile-body">
+                <div className="m-tile-title">{t("Issues")}</div>
+                <div className="m-tile-sub">{t("Report or view exceptions")}</div>
+              </div>
+              <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
+                <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
+              </div>
+            </button>
           </div>
         </div>
       )}
@@ -211,14 +189,5 @@ export default function MobileHomePage() {
         </div>
       )}
     </div>
-  );
-}
-
-function Stat({ label, value, tone, onClick }) {
-  return (
-    <button className="m-stat" onClick={onClick}>
-      <span className="m-stat-label">{label}</span>
-      <span className="m-stat-value mono" style={{ color: `var(--st-${tone})` }}>{value}</span>
-    </button>
   );
 }
