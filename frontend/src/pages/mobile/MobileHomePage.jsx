@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
@@ -134,10 +134,18 @@ export default function MobileHomePage() {
 
       {/* Quick actions — the at-a-glance KPI numbers live on the Ops page, so
           Home stays focused on the trip hero, jump-ins, and coach status. */}
-      {getPermissions().viewMobileIssues && (
-        <div className="m-section">
-          <div className="m-section-head"><span className="m-eyebrow">{t("Quick actions")}</span></div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div className="m-section">
+        <div className="m-section-head"><span className="m-eyebrow">{t("Quick actions")}</span></div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <button className="m-tile" onClick={() => navigate("/mobile/announcements")}>
+            <span className="m-tile-ic"><Megaphone size={18} /></span>
+            <div className="m-tile-body">
+              <div className="m-tile-title">{t("Announcements")}</div>
+              <div className="m-tile-sub">{t("Trip updates for staff")}</div>
+            </div>
+            <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+          </button>
+          {getPermissions().viewMobileIssues && (
             <button className="m-tile" onClick={() => navigate("/mobile/issues")}>
               <span className="m-tile-ic" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
                 <AlertTriangle size={18} />
@@ -151,9 +159,9 @@ export default function MobileHomePage() {
                 <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
               </div>
             </button>
-          </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Coach status — header links to all-missing; each row jumps to that
           coach's roster. */}

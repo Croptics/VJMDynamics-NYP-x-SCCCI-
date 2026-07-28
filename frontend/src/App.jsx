@@ -28,6 +28,7 @@ import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
+import MobileAnnouncementsPage from "./pages/mobile/MobileAnnouncementsPage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
@@ -346,6 +347,9 @@ export default function App() {
             instead, so it gets the normal mobile topbar + tab bar. Ungated,
             same as /guide — a help resource open to any signed-in account. */}
         <Route path="/mobile-user-guide" element={<MobileUserGuidePage />} />
+        {/* Announcements — trip-wide notices, reached from a Home tile.
+            Ungated (open to any signed-in account), like the User Guide. */}
+        <Route path="/mobile/announcements" element={<MobileAnnouncementsPage />} />
       </Route>
     </Routes>
   );
