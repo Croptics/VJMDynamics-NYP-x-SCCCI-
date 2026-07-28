@@ -71,6 +71,18 @@ function readConfig() {
 
 const q = (text, params) => pool.query(text, params);
 
+/* ---- Shared vocabulary ---------------------------------------------------- *
+ * Kept as constants so the enum definition, the request validation and the
+ * column width can never drift apart. The frontend mirrors these in
+ * lib/exceptionsApi.js.
+ * -------------------------------------------------------------------------- */
+export const TYPE_OTHER_MAX = 20;                       // max chars for a custom label
+const VALID_TYPES = [
+  "MISSING_PERSON", "LOST_BADGE", "FACE_MATCH_FAILED",
+  "DEAD_PHONE", "VIP_REQUEST", "OTHER",
+];
+const VALID_PRIORITIES = ["CRITICAL", "NORMAL", "LOW"];
+
 /** Create this feature's tables. Safe to run on every boot. */
 export async function initExceptions() {
   pool = new Pool(readConfig());
@@ -78,8 +90,8 @@ export async function initExceptions() {
   // Enum types from HLD §2. CREATE TYPE has no IF NOT EXISTS, so guard it.
   const enums = [
     ["checkin_method", "'QR','MANUAL'"],
-    ["exception_type", "'MISSING_PERSON','LOST_BADGE','FACE_MATCH_FAILED','DEAD_PHONE','VIP_REQUEST','OTHER'"],
-    ["exception_priority", "'CRITICAL','NORMAL','LOW'"],
+    ["exception_type", VALID_TYPES.map((t) => `'${t}'`).join(",")],
+    ["exception_priority", VALID_PRIORITIES.map((p) => `'${p}'`).join(",")],
     ["exception_status", "'OPEN','RESOLVED'"],
   ];
   for (const [name, vals] of enums) {
@@ -130,6 +142,11 @@ export async function initExceptions() {
   await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_trip ON exception_tickets(trip_id, status)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_pri  ON exception_tickets(trip_id, priority) WHERE status = 'OPEN'`);
 
+  // Free-text label for type='OTHER' ("Others" tile in the log form). Additive,
+  // so an already-deployed database picks it up on the next boot without a
+  // migration. Capped in the column as well as the UI — never trust the client.
+  await q(`ALTER TABLE exception_tickets ADD COLUMN IF NOT EXISTS type_other VARCHAR(${TYPE_OTHER_MAX})`);
+
   console.log("  Exception module ready -> exception_tickets, check_in_logs");
 }
 
@@ -163,7 +180,7 @@ router.get("/api/exceptions/stream", requireAuth(), (req, res) => {
 
 /* ---- Shaping ------------------------------------------------------------- */
 const SELECT_TICKETS = `
-  SELECT x.id, x.type, x.priority, x.status, x.note, x.created_at, x.resolved_at,
+  SELECT x.id, x.type, x.type_other, x.priority, x.status, x.note, x.created_at, x.resolved_at,
          x.delegate_id,
          d.name  AS delegate_name, d.vip AS delegate_vip,
          c.name  AS coach_name,
@@ -179,6 +196,7 @@ const SELECT_TICKETS = `
 const shape = (r) => ({
   id: r.id,
   type: r.type,
+  typeOther: r.type_other || null,   // custom label when type === 'OTHER'
   priority: r.priority,
   status: r.status,
   note: r.note,
@@ -249,8 +267,30 @@ router.get("/api/exceptions/:id", requireAuth(), wrap(async (req, res) => {
 
 /** POST /api/trips/:id/exceptions — raise a ticket; CRITICAL pushes to devices. Needs manageExceptions. */
 router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), wrap(async (req, res) => {
-  const { delegateId, coachId, type, priority, note, clientEventId } = req.body || {};
+  const { delegateId, coachId, type, typeOther, priority, note, clientEventId } = req.body || {};
   if (!type) return res.status(400).json({ error: "TYPE_REQUIRED", message: "An issue type is required." });
+
+  // Validate against the enum ourselves: an unknown value would otherwise reach
+  // Postgres and surface as an opaque 500 instead of a useful 400.
+  if (!VALID_TYPES.includes(type)) {
+    return res.status(400).json({ error: "INVALID_TYPE", message: `Unknown issue type "${type}".` });
+  }
+
+  // "Others" carries a free-text label. Required when chosen, trimmed, and
+  // hard-capped here as well as in the UI — the client is never trusted.
+  let otherLabel = null;
+  if (type === "OTHER") {
+    otherLabel = typeof typeOther === "string" ? typeOther.trim() : "";
+    if (!otherLabel) {
+      return res.status(400).json({ error: "TYPE_OTHER_REQUIRED", message: "Describe the issue type." });
+    }
+    if (otherLabel.length > TYPE_OTHER_MAX) {
+      return res.status(400).json({
+        error: "TYPE_OTHER_TOO_LONG",
+        message: `Keep the issue type to ${TYPE_OTHER_MAX} characters or fewer.`,
+      });
+    }
+  }
 
   // Idempotency (offline outbox may retry the same event).
   const eventId = clientEventId || randomUUID();
@@ -268,12 +308,12 @@ router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), 
   }
 
   const id = randomUUID();
-  const pri = ["CRITICAL", "NORMAL", "LOW"].includes(priority) ? priority : "NORMAL";
+  const pri = VALID_PRIORITIES.includes(priority) ? priority : "NORMAL";
   await q(
     `INSERT INTO exception_tickets
-       (id, trip_id, delegate_id, coach_id, type, priority, status, note, raised_by, client_event_id, is_offline_origin)
-     VALUES ($1,$2,$3,$4,$5,$6,'OPEN',$7,$8,$9,$10)`,
-    [id, req.params.id, delegateId || null, coach, type, pri, note || null,
+       (id, trip_id, delegate_id, coach_id, type, type_other, priority, status, note, raised_by, client_event_id, is_offline_origin)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN',$8,$9,$10,$11)`,
+    [id, req.params.id, delegateId || null, coach, type, otherLabel, pri, note || null,
      req.account.id, eventId, !!req.body?.isOfflineOrigin]
   );
 
@@ -303,7 +343,12 @@ router.patch("/api/exceptions/:id", requirePermission("manageExceptions"), wrap(
   } else {
     const sets = [];
     const params = [];
-    if (priority !== undefined) { params.push(priority); sets.push(`priority = $${params.length}`); }
+    if (priority !== undefined) {
+      if (!VALID_PRIORITIES.includes(priority)) {
+        return res.status(400).json({ error: "INVALID_PRIORITY", message: `Unknown priority "${priority}".` });
+      }
+      params.push(priority); sets.push(`priority = $${params.length}`);
+    }
     if (note !== undefined)     { params.push(note);     sets.push(`note = $${params.length}`); }
     if (!sets.length) return res.status(400).json({ error: "NO_FIELDS", message: "Nothing to update." });
     params.push(req.params.id);
@@ -344,7 +389,7 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
 
   const eventId = clientEventId || randomUUID();
   const dup = await q("SELECT id FROM check_in_logs WHERE client_event_id = $1", [eventId]);
-  if (dup.rows.length) return res.json({ id: dup.rows[0].id, delegateId, status: "PRESENT", duplicate: true });
+  if (dup.rows.length) return res.json({ id: dup.rows[0].id, delegateId, status: "ARRIVED", duplicate: true });
 
   const id = randomUUID();
   await q(
@@ -355,12 +400,91 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
      !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
   );
 
-  // Reflect the override on the delegate so the dashboard head-count agrees.
-  await q(`UPDATE delegates SET status='PRESENT', "lastSeen"=$1 WHERE id=$2`,
+  // ARRIVED — the 5-status value (was the legacy PRESENT literal). Reflect
+  // the override on the delegate so the dashboard head-count agrees.
+  await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`Manual override · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL" });
-  res.status(201).json({ id, delegateId, status: "PRESENT", duplicate: false, method: "MANUAL" });
+  res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
+}));
+
+/* ---- Undo a manual attendance override ------------------------------------
+ * The revert half of the Manual panel's "Mark present" — for the accidental-
+ * click case ("Undo" shown right next to a just-marked delegate). Same
+ * manageExceptions gate as the mark-present action itself, so whoever can do
+ * one can do the other. Sets the delegate back to ASSIGNED (not MISSING —
+ * matches the spec's explicit target status; a delegate whose real-world
+ * whereabouts is unknown again is "assigned to a coach, not yet checked in",
+ * not automatically re-flagged as missing) and removes the MANUAL check-in
+ * log row this override created, so the audit trail doesn't keep a phantom
+ * check-in for a status that was immediately undone. Best-effort on the log
+ * delete (only ever removes the single most recent MANUAL row for this
+ * delegate, so it can't accidentally wipe an earlier, real check-in). */
+router.post("/api/checkins/manual/undo", requirePermission("manageExceptions"), wrap(async (req, res) => {
+  const { delegateId } = req.body || {};
+  if (!delegateId) return res.status(400).json({ error: "MISSING_FIELDS", message: "delegateId is required." });
+
+  const d = await q('SELECT id, name FROM delegates WHERE id = $1', [delegateId]);
+  if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
+
+  await q(
+    `DELETE FROM check_in_logs WHERE id = (
+       SELECT id FROM check_in_logs
+        WHERE delegate_id = $1 AND method = 'MANUAL'
+        ORDER BY client_ts DESC NULLS LAST LIMIT 1
+     )`,
+    [delegateId]
+  );
+  await q(`UPDATE delegates SET status='ASSIGNED', "lastSeen"=NULL WHERE id=$1`, [delegateId]);
+
+  broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL_UNDO" });
+  res.json({ delegateId, status: "ASSIGNED" });
+}));
+
+/* ---------------------------------------------------------------------------
+ * POST /api/checkins/qr
+ * The QR half of HLD §3.5 (check_in_logs). A delegate badge scanned in the
+ * /checkin screen posts here; we write a method='QR' row and flip the delegate
+ * to PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
+ *
+ * Gated on requireAuth() (any signed-in staff), NOT on manageExceptions — a QR
+ * scan is a primary field check-in, exactly like Vimal's face scan, so it uses
+ * the same auth level rather than the elevated manual-override permission.
+ * Idempotent on client_event_id so an offline retry can't double-insert.
+ * Body: { tripId, delegateId, coachId?, clientEventId?, clientTs? }
+ * ------------------------------------------------------------------------- */
+router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
+  const { tripId, delegateId, clientEventId, clientTs } = req.body || {};
+  if (!tripId || !delegateId) {
+    return res.status(400).json({ error: "MISSING_FIELDS", message: "tripId and delegateId are required." });
+  }
+  const d = await q('SELECT id, name, "coachId", status FROM delegates WHERE id = $1', [delegateId]);
+  if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
+
+  const eventId = clientEventId || randomUUID();
+  const dup = await q("SELECT id FROM check_in_logs WHERE client_event_id = $1", [eventId]);
+  if (dup.rows.length) {
+    return res.json({ id: dup.rows[0].id, delegateId, name: d.rows[0].name, status: "ARRIVED", method: "QR", duplicate: true });
+  }
+
+  // Log against the badge's own coach (fall back to the scoped coach hint).
+  const coachId = d.rows[0].coachId || (req.body && req.body.coachId) || null;
+  const id = randomUUID();
+  await q(
+    `INSERT INTO check_in_logs
+       (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts)
+     VALUES ($1,$2,$3,$4,'QR',$5,$6,$7,$8)`,
+    [id, delegateId, tripId, coachId, req.account.id, eventId,
+     !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
+  );
+
+  // ARRIVED — the 5-status value (was the legacy PRESENT literal).
+  await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
+    [`QR check-in · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
+
+  broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "QR" });
+  res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "ARRIVED", duplicate: false, method: "QR" });
 }));
 
 export default router;

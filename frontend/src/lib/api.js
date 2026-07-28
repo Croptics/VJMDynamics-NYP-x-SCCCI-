@@ -10,7 +10,7 @@
  * Minimal API client. Reads the JWT from storage and attaches it.
  * Swap BASE_URL for your deployed Express origin.
  */
-import { DEFAULT_PERMISSIONS } from "../../../permissions.js";
+import { DEFAULT_PERMISSIONS, PERM_KEYS } from "../../../permissions.js";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "/api";
 const TOKEN_KEY = "mg_token";
@@ -40,15 +40,22 @@ export function getUser() {
 
 /**
  * Effective permissions for the signed-in user. Reads the permissions saved at
- * login; if an older session only has a role, derive sensible defaults so the
- * UI still gates correctly without forcing an immediate re-login. Always
- * includes every known key (from the shared permissions.js).
+ * login; if an older session only has a role (no permissions field yet), derive
+ * sensible defaults so the UI still gates correctly without forcing an
+ * immediate re-login. Always includes every known key (from permissions.js).
+ *
+ * Two roles only: "admin" bypasses every check (mirrors accountPermissions()
+ * in backend/data.js — every key true), "staff" defaults to just
+ * manageDelegates (the Delegate tab). The retired "main" role is treated as
+ * admin here too, so a stale cached session from before the RBAC
+ * simplification doesn't get silently downgraded.
  */
 export function getPermissions() {
   const u = getUser() || {};
   if (u.permissions) return { ...DEFAULT_PERMISSIONS, ...u.permissions };
-  if (u.role === "main") return { ...DEFAULT_PERMISSIONS, manageDelegates: true, exportData: true, manageAccounts: true };
-  if (u.role === "admin") return { ...DEFAULT_PERMISSIONS, manageDelegates: true, exportData: true };
+  if (u.role === "admin" || u.role === "main") {
+    return Object.fromEntries(PERM_KEYS.map((k) => [k, true]));
+  }
   return { ...DEFAULT_PERMISSIONS, manageDelegates: true };
 }
 

@@ -6,20 +6,18 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Outlet, useLocation } from "react-router-dom";
+import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
-import { apiGet, getUser, getPermissions } from "../lib/api.js";
-import { translate } from "../lib/i18n.jsx";
+import ChatBubble from "./ChatBubble.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
-
-// How often (ms) to re-check whether an admin changed our own account while
-// we're logged in. Also re-checks immediately whenever the tab regains focus,
-// so switching back to the tab catches a change without waiting for the timer.
-const SESSION_CHECK_INTERVAL_MS = 15000;
+import { useSessionGuard } from "../lib/useSessionGuard.js";
+import { useLang } from "../lib/i18n.jsx";
+import { getPermissions } from "../lib/api.js";
 
 // How often (ms) to refresh the sidebar's critical-exception badge. Kept
-// separate from the session-check interval since it's unrelated data.
+// separate from the session-guard's own interval since it's unrelated data.
 const EXCEPTION_BADGE_INTERVAL_MS = 15000;
 
 /**
@@ -28,14 +26,26 @@ const EXCEPTION_BADGE_INTERVAL_MS = 15000;
  * `exceptionCount` is the live count of unresolved CRITICAL tickets from
  * Jayden's exception module (GET /api/trips/:id/exceptions/critical-count).
  *
- * This also polls GET /api/auth/session so that if another account with the
- * "manageAccounts" permission edits or deletes YOUR account while you're
- * logged in, you're logged out automatically instead of the UI silently
- * carrying on with stale, out-of-date permissions.
+ * useSessionGuard() (shared with MobileLayout.jsx) polls GET /api/auth/
+ * session so a stale/invalidated token — an admin edited/deleted this
+ * account, or someone logged into it elsewhere, which invalidates this
+ * token server-side — force-logs-out instead of the UI silently carrying on
+ * with a broken session.
  */
 export default function Layout({ onLogout }) {
+  const { t } = useLang();
   const [openExceptions, setOpenExceptions] = useState(0);
-  const checkingRef = useRef(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const location = useLocation();
+
+  useSessionGuard(onLogout);
+
+  // Close the drawer automatically on every navigation (tablet/narrow
+  // screens only — CSS keeps the sidebar always-visible on desktop widths
+  // regardless of this state, see tokens.css's collapsible-sidebar block).
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,55 +63,32 @@ export default function Layout({ onLogout }) {
     return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
-  useEffect(() => {
-    async function checkSession() {
-      if (checkingRef.current) return; // avoid overlapping checks
-      checkingRef.current = true;
-      try {
-        const fresh = await apiGet("/auth/session");
-        const before = getUser() || {};
-        const beforePerms = getPermissions();
-        const changed =
-          fresh.username !== before.username ||
-          JSON.stringify(fresh.permissions) !== JSON.stringify(beforePerms);
-        if (changed) {
-          forceLogout("Your account access was updated. Please sign in again.");
-        }
-      } catch (e) {
-        // 401 means the token no longer resolves to any account — it was
-        // renamed or deleted by an admin. Any other error (e.g. the backend
-        // being briefly unreachable) is ignored; we just try again next tick.
-        if (e.status === 401) {
-          forceLogout("Your account is no longer valid. Please sign in again.");
-        }
-      } finally {
-        checkingRef.current = false;
-      }
-    }
-
-    function forceLogout(message) {
-      window.alert(translate(message));
-      onLogout?.(); // clears the token and returns to /login (see App.jsx)
-    }
-
-    const interval = setInterval(checkSession, SESSION_CHECK_INTERVAL_MS);
-    const onFocus = () => checkSession();
-    window.addEventListener("focus", onFocus);
-    checkSession(); // also check once on mount
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   return (
     <div className="app-shell">
-      <Sidebar exceptionCount={openExceptions} onLogout={onLogout} />
+      {/* Hamburger topbar — hidden on desktop widths via CSS, only rendered
+         visibly at tablet/narrow widths where the sidebar collapses into an
+         off-canvas drawer instead of staying pinned open. */}
+      <div className="app-topbar-collapsed">
+        <button
+          className="app-hamburger"
+          onClick={() => setSidebarOpen((v) => !v)}
+          aria-label={t("Toggle navigation")}
+          aria-expanded={sidebarOpen}
+        >
+          <Menu size={20} />
+        </button>
+        <span className="app-topbar-brand wordmark">
+          <ClipboardCheck size={18} strokeWidth={2.4} /> MusterGo
+        </span>
+      </div>
+
+      {sidebarOpen && <div className="app-sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+
+      <Sidebar exceptionCount={openExceptions} onLogout={onLogout} open={sidebarOpen} />
       <main className="main">
         <Outlet />
       </main>
+      {getPermissions().viewChatbot && <ChatBubble />}
     </div>
   );
 }

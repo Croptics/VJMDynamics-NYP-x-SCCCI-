@@ -14,43 +14,34 @@
  *   npm run dev        # http://localhost:4000  (needs DATABASE_URL in .env — PostgreSQL)
  *
  * The data layer (data.js) talks to PostgreSQL and is asynchronous, so the route
- * handlers below are async and `await` it. The server only starts listening
- * AFTER the database connection + schema are ready (see the bottom of the file).
+ * handlers are async and `await` it. The server only starts listening AFTER the
+ * database connection + schema are ready (see the bottom of the file).
+ *
+ * This file is deliberately just Express bootstrap + middleware + mounting
+ * (2026-07-21 split, mirroring the earlier data.js -> db/*.js split). JQ's own
+ * base routes now live in backend/routes/{auth,accounts,dashboard,delegates,
+ * history}.js — see the TEAMMATE ZONE below for where feature routers mount.
  */
 
 import "dotenv/config"; // loads backend/.env into process.env — MUST be first
 import express from "express";
 import cors from "cors";
-import ExcelJS from "exceljs";
-import {
-  initDb,
-  getTrip,
-  getDashboard,
-  getMissing,
-  getDelegates,
-  listDelegates,
-  getDelegateById,
-  createDelegate,
-  updateDelegate,
-  deleteDelegate,
-  deleteAllDelegates,
-  getAccountByUsername,
-  accountPermissions,
-  listAccounts,
-  createAccount,
-  updateAccount,
-  deleteAccount,
-  verifyPassword,
-  upgradePasswordIfNeeded,
-  startNewSession,
-} from "./data.js";
-import { makeToken, accountFromReq, requireAuth, requirePermission } from "./auth.js";
+import { initDb, applyLateCutoff } from "./data.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Allow the frontend origin. In production set FRONTEND_URL (e.g. the Vercel URL);
-// locally, no origin means "allow all", which is fine for the Vite dev proxy.
+// Allow the frontend origin. In production set FRONTEND_URL (e.g. the Vercel
+// URL) so only your own site can call the API with credentials. Without it we
+// fall back to reflecting any origin, which is fine for the local Vite dev
+// proxy but NOT safe to leave that way in production — warn loudly so it isn't
+// forgotten (mirrors the JWT_SECRET warning in auth.js).
+if (!process.env.FRONTEND_URL) {
+  console.warn(
+    "  WARNING: FRONTEND_URL is not set in backend/.env — CORS will allow ANY origin.\n" +
+    "  Set FRONTEND_URL to your deployed frontend URL before deploying anywhere public.\n"
+  );
+}
 app.use(cors({ origin: process.env.FRONTEND_URL || true, credentials: true }));
 app.use(express.json());
 
@@ -59,213 +50,27 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Wrap async handlers so a rejected promise becomes an Express error (500)
-// instead of crashing the process.
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
 /* ---- Health ------------------------------------------------------------- */
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "mustergo-backend" }));
 
-/* ---- Auth --------------------------------------------------------------- *
- * Login validates against the `accounts` table (see data.js). Accounts are
- * managed by users with the "manageAccounts" permission on the Account control
- * page. The seeded first login is staff_194 / password123!.
- *
- * Passwords are bcrypt-hashed (see data.js) and the session token is a
- * signed JWT (see auth.js) — set JWT_SECRET in backend/.env for production.
+/* ---- JQ's base routes ----------------------------------------------------
+ * Auth, Account control, Trips/Dashboard reads, Delegate CRUD (+ photo),
+ * and the History tracker. See backend/routes/*.js for each domain.
  * ------------------------------------------------------------------------- */
+import authRouter from "./routes/auth.js";
+app.use(authRouter);
 
-app.post("/api/auth/login", wrap(async (req, res) => {
-  const { staffId, password } = req.body || {};
+import accountsRouter from "./routes/accounts.js";
+app.use(accountsRouter);
 
-  if (!staffId || !password) {
-    return res.status(400).json({ error: "MISSING_FIELDS", message: "Staff ID and password are required." });
-  }
+import dashboardRouter from "./routes/dashboard.js";
+app.use(dashboardRouter);
 
-  const acc = await getAccountByUsername(staffId);
-  if (!acc || !(await verifyPassword(password, acc.password))) {
-    return res.status(401).json({ error: "INVALID_CREDENTIALS", message: "Incorrect Staff ID or password." });
-  }
-  await upgradePasswordIfNeeded(acc, password);
+import delegatesRouter from "./routes/delegates.js";
+app.use(delegatesRouter);
 
-  // Start a fresh session — invalidates any token held by an older browser.
-  const tokenVersion = await startNewSession(acc.id);
-
-  res.json({
-    token: makeToken(acc.username, tokenVersion),
-    role: acc.role,
-    name: acc.name,
-    username: acc.username,
-    permissions: accountPermissions(acc),
-  });
-}));
-
-/**
- * GET /api/auth/session — returns the CURRENT permissions/details for the
- * signed-in account, straight from the database (never cached). The frontend
- * polls this so that if someone with "manageAccounts" changes YOUR account
- * (permissions, username, or deletes it) while you're logged in elsewhere, you
- * get logged out automatically instead of carrying on with stale access shown
- * in the UI. Returns 401 if the account was renamed or deleted (the old token
- * no longer resolves to anyone).
- */
-app.get("/api/auth/session", wrap(async (req, res) => {
-  const acc = await accountFromReq(req);
-  if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Your session is no longer valid." });
-  res.json({
-    username: acc.username,
-    name: acc.name,
-    role: acc.role,
-    permissions: accountPermissions(acc),
-  });
-}));
-
-/* ---- Accounts (requires manageAccounts) --------------------------------- */
-app.get("/api/accounts", requirePermission("manageAccounts"), wrap(async (_req, res) => {
-  res.json({ accounts: await listAccounts() });
-}));
-
-app.post("/api/accounts", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await createAccount(req.body || {});
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  res.status(201).json(result.account);
-}));
-
-app.patch("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await updateAccount(req.params.id, req.body || {});
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  // If you edited your OWN account, hand back a fresh token for the (possibly
-  // new) username so the client can keep working without re-logging in. Reuse
-  // the current token_version (editing your account is not a new login, so it
-  // must not invalidate this very browser's session).
-  const isSelf = req.account && req.account.id === req.params.id;
-  res.json({
-    account: result.account,
-    self: !!isSelf,
-    token: isSelf ? makeToken(result.account.username, req.account.token_version ?? 0) : undefined,
-  });
-}));
-
-app.delete("/api/accounts/:id", requirePermission("manageAccounts"), wrap(async (req, res) => {
-  const result = await deleteAccount(req.params.id);
-  if (result.error) return res.status(accountErrStatus(result.error)).json(result);
-  res.json(result);
-}));
-
-function accountErrStatus(code) {
-  if (code === "NOT_FOUND") return 404;
-  if (code === "USERNAME_TAKEN") return 409;
-  if (code === "LAST_MAIN") return 409;
-  return 400; // USERNAME_REQUIRED / PASSWORD_REQUIRED / WEAK_PASSWORD
-}
-
-/* ---- Trips -------------------------------------------------------------- *
- * Read-only, but still requires a signed-in account (any account — no
- * specific permission) so attendance/delegate data can't be pulled by
- * anyone who merely finds the API URL.
- * ------------------------------------------------------------------------- */
-app.get("/api/trips", requireAuth(), wrap(async (_req, res) => res.json([await getTrip()])));
-app.get("/api/trips/:id", requireAuth(), wrap(async (_req, res) => res.json(await getTrip())));
-
-/* ---- Dashboard read views ----------------------------------------------- */
-app.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (_req, res) => res.json(await getDashboard())));
-app.get("/api/trips/:id/missing", requireAuth(), wrap(async (_req, res) => res.json({ missing: await getMissing() })));
-
-/* ---- Delegate CRUD ------------------------------------------------------ */
-app.get("/api/trips/:id/delegates", requireAuth(), wrap(async (_req, res) => res.json({ delegates: await listDelegates() })));
-
-// DELETE all delegates (dashboard "Delete all" button)
-app.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (_req, res) => {
-  const deleted = await deleteAllDelegates();
-  res.json({ deleted });
-}));
-
-app.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const body = req.body || {};
-  if (!body.name || !body.name.trim()) {
-    return res.status(400).json({ error: "NAME_REQUIRED", message: "A name is required." });
-  }
-  // A coach is required unless the delegate is explicitly Unassigned.
-  if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
-    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
-  }
-  const delegate = await createDelegate(body);
-  res.status(201).json(delegate);
-}));
-
-app.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const patch = req.body || {};
-  const existing = await getDelegateById(req.params.id);
-  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
-  // Validate against the RESULT of applying this patch, not just the patch
-  // alone — e.g. changing only the status on an already-unassigned delegate
-  // still needs a coach if the new status isn't Unassigned.
-  const nextStatus = patch.status !== undefined ? patch.status : existing.status;
-  const nextCoachId = patch.coachId !== undefined ? patch.coachId : existing.coachId;
-  if (nextStatus !== "UNASSIGNED" && !nextCoachId) {
-    return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
-  }
-  const updated = await updateDelegate(req.params.id, patch);
-  if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
-  res.json(updated);
-}));
-
-app.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const ok = await deleteDelegate(req.params.id);
-  if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
-  res.json({ deleted: true });
-}));
-
-/* ---- Excel export --------------------------------------------------------
- * Matches the frontend's "exportData" permission gate on the Export button —
- * previously this route had no server-side check at all, so the gate was
- * cosmetic only.
- * ------------------------------------------------------------------------- */
-app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_req, res) => {
-  const trip = await getTrip();
-  const delegates = await getDelegates();
-  const { coaches } = await getDashboard();
-
-  const wb = new ExcelJS.Workbook();
-  wb.creator = "MusterGo";
-  wb.created = new Date();
-
-  const ws = wb.addWorksheet("Attendance");
-  ws.mergeCells("A1:E1");
-  ws.getCell("A1").value = `${trip.name} — Attendance Report`;
-  ws.getCell("A1").font = { size: 14, bold: true };
-  ws.mergeCells("A2:E2");
-  ws.getCell("A2").value = `${trip.dateRange} · Day ${trip.dayOf} of ${trip.totalDays} · Lead: ${trip.lead}`;
-  ws.getCell("A2").font = { size: 10, color: { argb: "FF6B7280" } };
-
-  ws.addRow([]);
-  ws.addRow(["#", "Name", "Coach", "Status", "Last seen"]);
-  const head = ws.getRow(4);
-  head.font = { bold: true, color: { argb: "FFFFFFFF" } };
-  head.eachCell((cell) => {
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE1232A" } };
-    cell.alignment = { vertical: "middle" };
-  });
-
-  // Look up live from the coaches table (a hardcoded c1-c4 map here used to
-  // export any newer coach's delegates as "Unassigned").
-  const coachName = (id) => {
-    const c = coaches.find((x) => x.id === id);
-    return c ? [c.name, c.city].filter(Boolean).join(" · ") : "Unassigned";
-  };
-
-  delegates.forEach((d, i) => {
-    ws.addRow([i + 1, d.name, coachName(d.coachId), d.status, d.lastSeen || "—"]);
-  });
-
-  ws.columns = [{ width: 5 }, { width: 22 }, { width: 20 }, { width: 14 }, { width: 24 }];
-
-  const fileName = `attendance_${trip.name.replace(/\s+/g, "_").toLowerCase()}_day${trip.dayOf}.xlsx`;
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-  await wb.xlsx.write(res);
-  res.end();
-}));
+import historyRouter from "./routes/history.js";
+app.use(historyRouter);
 
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
@@ -289,11 +94,20 @@ app.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (_r
 import insightsRouter from "./routes/insights.js";
 app.use(insightsRouter);
 
+import exportRouter from "./routes/export.js";
+app.use(exportRouter);
+
+import mediaRouter from "./routes/media.js";
+app.use(mediaRouter);
+
 import desmondRouter from "./routes/desmond.js";
 app.use(desmondRouter);
 
 import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
 app.use(exceptionsRouter);
+
+import vanceRouter from "./routes/vance.js";
+app.use(vanceRouter);
 
 import vimalRouter from "./routes/vimal.js";
 app.use(vimalRouter);
@@ -305,6 +119,21 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "SERVER_ERROR", message: "Something went wrong on the server." });
 });
 
+// Late-status auto-transition: any delegate still ASSIGNED (expected, not
+// yet checked in) once it's past the 10:00 AM cutoff (local server time)
+// gets flipped to LATE — see applyLateCutoff() in data.js. Runs as a real
+// background interval (not piggybacked on request polling, which would
+// mean every open tab's 2s auto-refresh re-running this) so it fires
+// exactly once per minute regardless of traffic. Started only after the
+// DB is confirmed ready, same as the HTTP server itself below.
+const LATE_CUTOFF_CHECK_MS = 60000;
+function startLateCutoffScheduler() {
+  applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+  setInterval(() => {
+    applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+  }, LATE_CUTOFF_CHECK_MS);
+}
+
 /* ---- Start (only after the database is ready) --------------------------- */
 initDb()
   .then(initExceptions) // creates exception_tickets/check_in_logs after the base schema exists
@@ -313,6 +142,7 @@ initDb()
       console.log(`\n  MusterGo backend running -> http://localhost:${PORT}`);
       console.log(`  Login: staff_194 / password123!\n`);
     });
+    startLateCutoffScheduler();
   })
   .catch((err) => {
     console.error("\n  Could not connect to PostgreSQL. Is your database reachable?");

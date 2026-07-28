@@ -1,11 +1,13 @@
-import { useMemo, useState } from "react";
-import { BarChart3, Eye, EyeOff, Sparkles } from "lucide-react";
+import { useMemo, useState, useSyncExternalStore } from "react";
+import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area,
 } from "recharts";
-import { apiPost, getUser } from "../lib/api.js";
+import { getUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
+import { subscribe as subscribeInsights, getSnapshot as getInsightsSnapshot, generateInsights as runGenerateInsights } from "../lib/insightsStore.js";
 
 /**
  * Analytics panel — the "Analytics" tab inside the Dashboard page.
@@ -31,16 +33,24 @@ const WIDGETS = [
   { key: "breakdown", label: "Attendance breakdown" },
   { key: "coachLoad", label: "Coach load" },
   { key: "vipMissing", label: "VIP vs. non-VIP missing" },
+  { key: "onboardingTrend", label: "Delegates onboarded over time" },
 ];
 
 /** Split the AI-generated insights text into individual points, stripping
  *  whatever numbering/bullet marker the model used (we render our own via
- *  an <ol>, so "1. ", "- ", "• " etc. at the start of a line are redundant). */
+ *  an <ol>, so "1. ", "- ", "• " etc. at the start of a line are redundant).
+ *  Each point is expected to lead with a "Label: " prefix (Overall/Missing/
+ *  Advice, per backend/routes/insights.js's buildPrompt) — split that off so
+ *  it can be rendered bold, separate from the rest of the sentence. */
 function splitInsightPoints(text) {
   return String(text || "")
     .split(/\r?\n/)
     .map((line) => line.replace(/^\s*(?:\d+[.)]|[-•*])\s*/, "").trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((line) => {
+      const m = line.match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+      return m ? { label: m[1].trim(), body: m[2].trim() } : { label: null, body: line };
+    });
 }
 
 function prefsKey() {
@@ -57,35 +67,25 @@ function loadPrefs() {
   }
 }
 
-export default function AnalyticsPanel({ data, missing }) {
+export default function AnalyticsPanel({ data, missing, delegates = [] }) {
   const { t, lang } = useLang();
   const [visible, setVisible] = useState(loadPrefs);
   const [panelOpen, setPanelOpen] = useState(false);
-  const [insights, setInsights] = useState(null);
-  const [insightsAsOf, setInsightsAsOf] = useState(null);
-  const [insightsSource, setInsightsSource] = useState(null);
-  const [insightsLoading, setInsightsLoading] = useState(false);
-  const [insightsError, setInsightsError] = useState(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [coachFilter, setCoachFilter] = useState("ALL");
+  const [coachSort, setCoachSort] = useState("name"); // name | boarded | remaining | missing
 
-  async function generateInsights() {
-    setInsightsLoading(true);
-    setInsightsError(null);
-    try {
-      const { insights: text, asOf, source } = await apiPost(`/trips/${TRIP_ID}/insights`, { lang });
-      setInsights(text);
-      setInsightsAsOf(asOf);
-      setInsightsSource(source);
-    } catch (e) {
-      // Use our own copy of the message (not the backend's e.message) so the
-      // dictionary can translate it.
-      setInsightsError(
-        e.code === "AI_NOT_CONFIGURED"
-          ? "Install Ollama locally (free) or ask an admin to set ANTHROPIC_API_KEY in backend/.env."
-          : "AI insights are temporarily unavailable."
-      );
-    } finally {
-      setInsightsLoading(false);
-    }
+  // Backed by insightsStore.js, a module-level store OUTSIDE this component
+  // — not useState — specifically so "Generate Insights" survives switching
+  // Dashboard tabs (which unmounts this panel) or navigating away entirely
+  // (user report: it used to silently reset because the request's result
+  // had nowhere left to land once this component was gone).
+  const { loading: insightsLoading, insights, asOf: insightsAsOf, source: insightsSource, error: insightsError } =
+    useSyncExternalStore(subscribeInsights, () => getInsightsSnapshot(TRIP_ID));
+
+  function generateInsights() {
+    runGenerateInsights(TRIP_ID, lang);
   }
 
   function toggle(key) {
@@ -106,29 +106,78 @@ export default function AnalyticsPanel({ data, missing }) {
     ].filter((d) => d.value > 0);
   }, [data, t]);
 
+  // "Filter" scopes both this chart and VIP-missing to one coach; "Sort"
+  // reorders this chart's bars. Both are UI-only reads over the same data
+  // DashboardPage already fetched — no new endpoint or params.
   const coachLoad = useMemo(() => {
     if (!data) return [];
-    return (data.coaches || []).map((c) => ({
-      name: c.label,
-      boarded: c.boarded,
-      remaining: Math.max(c.capacity - c.boarded, 0),
-    }));
-  }, [data]);
+    const missingByCoach = new Map();
+    missing.forEach((m) => missingByCoach.set(m.coachId, (missingByCoach.get(m.coachId) || 0) + 1));
+    const rows = (data.coaches || [])
+      .filter((c) => coachFilter === "ALL" || c.id === coachFilter)
+      .map((c) => ({
+        id: c.id,
+        name: c.label,
+        boarded: c.boarded,
+        remaining: Math.max(c.capacity - c.boarded, 0),
+        missingCount: missingByCoach.get(c.id) || 0,
+      }));
+    const sorters = {
+      name: (a, b) => a.name.localeCompare(b.name),
+      boarded: (a, b) => b.boarded - a.boarded,
+      remaining: (a, b) => b.remaining - a.remaining,
+      missing: (a, b) => b.missingCount - a.missingCount,
+    };
+    return rows.sort(sorters[coachSort] || sorters.name);
+  }, [data, missing, coachFilter, coachSort]);
 
   const vipMissing = useMemo(() => {
-    const vip = missing.filter((m) => m.vip).length;
-    const nonVip = missing.length - vip;
+    const scoped = coachFilter === "ALL" ? missing : missing.filter((m) => m.coachId === coachFilter);
+    const vip = scoped.filter((m) => m.vip).length;
+    const nonVip = scoped.length - vip;
     return [
       { name: "VIP", value: vip, color: COLORS.vip },
       { name: t("Non-VIP"), value: nonVip, color: COLORS.nonVip },
     ];
-  }, [missing, t]);
+  }, [missing, coachFilter, t]);
+
+  // Cumulative headcount over time, from each delegate's real createdAt
+  // (upload timestamp) — no separate tracking needed, this is the same
+  // column that already drives the "Uploaded" column on "All delegates".
+  // Bucketed by day; a day with zero uploads carries the running total
+  // forward flat rather than dropping to zero, so the line reads as "team
+  // size over time" rather than "uploads per day".
+  const onboardingTrend = useMemo(() => {
+    const withDates = delegates
+      .filter((d) => d.createdAt)
+      .map((d) => new Date(d.createdAt))
+      .filter((d) => !isNaN(d))
+      .sort((a, b) => a - b);
+    if (withDates.length === 0) return [];
+    const dayKey = (d) => d.toLocaleDateString([], { day: "2-digit", month: "short" });
+    const counts = new Map();
+    withDates.forEach((d) => {
+      const k = dayKey(d);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    });
+    let running = 0;
+    return [...counts.entries()].map(([date, added]) => {
+      running += added;
+      return { date, total: running };
+    });
+  }, [delegates]);
 
   return (
     <div>
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16, marginBottom: 4 }}>
         <p className="page-sub" style={{ margin: 0 }}>{t("Attendance breakdown, coach load, and VIP visibility — live from the trip data.")}</p>
         <div className="row" style={{ gap: 10 }}>
+          <button className="btn btn-ghost" onClick={() => setFilterOpen((v) => !v)}>
+            <Filter size={16} /> {t("Filter")}
+          </button>
+          <button className="btn btn-ghost" onClick={() => setSortOpen((v) => !v)}>
+            <ArrowUpDown size={16} /> {t("Sort")}
+          </button>
           <button className="btn btn-ghost" onClick={() => setPanelOpen((v) => !v)}>
             <BarChart3 size={16} /> {t("Customize")}
           </button>
@@ -161,11 +210,25 @@ export default function AnalyticsPanel({ data, missing }) {
           </div>
         )}
 
-        {insights && !insightsError && (
+        {insightsLoading && (
+          <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="skeleton-line" style={{
+                height: 14, borderRadius: 4, marginBottom: i < 2 ? 10 : 0,
+                width: i === 2 ? "60%" : "100%",
+              }} />
+            ))}
+          </div>
+        )}
+
+        {insights && !insightsError && !insightsLoading && (
           <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
             <ol style={{ margin: 0, paddingLeft: 20, fontSize: 14, lineHeight: 1.7 }}>
               {splitInsightPoints(insights).map((point, i) => (
-                <li key={i} style={{ marginBottom: 4 }}>{point}</li>
+                <li key={i} style={{ marginBottom: 4 }}>
+                  {point.label && <strong>{point.label}: </strong>}
+                  {point.body}
+                </li>
               ))}
             </ol>
             {insightsAsOf && (
@@ -178,6 +241,43 @@ export default function AnalyticsPanel({ data, missing }) {
           </div>
         )}
       </div>
+
+      {filterOpen && (
+        <div className="card" style={{ marginTop: 16, padding: 16 }}>
+          <div className="page-eyebrow" style={{ marginBottom: 10 }}>{t("Filter by coach")}</div>
+          <select
+            className="select"
+            style={{ maxWidth: 260 }}
+            value={coachFilter}
+            onChange={(e) => setCoachFilter(e.target.value)}
+          >
+            <option value="ALL">{t("All coaches")}</option>
+            {(data?.coaches || []).map((c) => (
+              <option key={c.id} value={c.id}>{c.label}</option>
+            ))}
+          </select>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+            {t('Scopes "Coach load" and "VIP vs. non-VIP missing" to the selected coach.')}
+          </div>
+        </div>
+      )}
+
+      {sortOpen && (
+        <div className="card" style={{ marginTop: 16, padding: 16 }}>
+          <div className="page-eyebrow" style={{ marginBottom: 10 }}>{t("Sort coach load by")}</div>
+          <select
+            className="select"
+            style={{ maxWidth: 260 }}
+            value={coachSort}
+            onChange={(e) => setCoachSort(e.target.value)}
+          >
+            <option value="name">{t("Coach name")}</option>
+            <option value="boarded">{t("Most boarded")}</option>
+            <option value="remaining">{t("Most remaining capacity")}</option>
+            <option value="missing">{t("Most missing")}</option>
+          </select>
+        </div>
+      )}
 
       {panelOpen && (
         <div className="card" style={{ marginTop: 16, padding: 16 }}>
@@ -213,7 +313,10 @@ export default function AnalyticsPanel({ data, missing }) {
 
           {visible.coachLoad && (
             <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Coach load")}</h2>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>
+                {t("Coach load")}
+                {coachFilter !== "ALL" && coachLoad[0] && ` — ${coachLoad[0].name}`}
+              </h2>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={coachLoad}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -242,6 +345,31 @@ export default function AnalyticsPanel({ data, missing }) {
                     <Tooltip />
                     <Legend />
                   </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+
+          {visible.onboardingTrend && (
+            <div className="card" style={{ padding: 20 }}>
+              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Delegates onboarded over time")}</h2>
+              {onboardingTrend.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No upload history yet.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={onboardingTrend}>
+                    <defs>
+                      <linearGradient id="mgTrendFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--scc-red)" stopOpacity={0.28} />
+                        <stop offset="100%" stopColor="var(--scc-red)" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="date" fontSize={12} />
+                    <YAxis fontSize={12} allowDecimals={false} />
+                    <Tooltip formatter={(v) => [v, t("Total delegates")]} />
+                    <Area type="monotone" dataKey="total" stroke="var(--scc-red)" strokeWidth={2} fill="url(#mgTrendFill)" name={t("Total delegates")} />
+                  </AreaChart>
                 </ResponsiveContainer>
               )}
             </div>

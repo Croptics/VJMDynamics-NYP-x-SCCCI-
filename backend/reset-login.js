@@ -15,7 +15,7 @@
  *      cd backend && npm run reset:login
  *
  *  It force-sets staff_194 back to password123! (bcrypt-hashed) with full
- *  "main" permissions — creating the row if it's missing. Safe to re-run.
+ *  "admin" permissions — creating the row if it's missing. Safe to re-run.
  *
  *  Override the target with env vars if you ever need a different account:
  *      RESET_USER=someone RESET_PASS=NewPass123 npm run reset:login
@@ -32,9 +32,9 @@ const USERNAME = process.env.RESET_USER || "staff_194";
 const PASSWORD = process.env.RESET_PASS || "password123!";
 const NAME = process.env.RESET_NAME || "Staff 194";
 
-// A full "main" admin — every permission on, so this account can reach the
+// The "admin" role — every permission on, so this account can reach the
 // whole app (dashboard, trips, exceptions, export, account control).
-const MAIN_PERMS = Object.fromEntries(Object.keys(DEFAULT_PERMISSIONS).map((k) => [k, true]));
+const ADMIN_PERMS = Object.fromEntries(Object.keys(DEFAULT_PERMISSIONS).map((k) => [k, true]));
 
 function readConfig() {
   const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
@@ -59,26 +59,26 @@ async function main() {
   await initDb(); // make sure the accounts table (+ token_version column) exists
   const pool = new Pool(readConfig());
   const hash = await hashPassword(PASSWORD);
-  const permsJson = JSON.stringify(MAIN_PERMS);
+  const permsJson = JSON.stringify(ADMIN_PERMS);
 
   const existing = await pool.query("SELECT id FROM accounts WHERE username = $1", [USERNAME]);
   if (existing.rows.length) {
     // Also reset token_version to 0 so any lingering "single active session"
     // token elsewhere is invalidated — a clean slate.
     await pool.query(
-      `UPDATE accounts SET password = $1, role = 'main', permissions = $2, token_version = 0 WHERE username = $3`,
+      `UPDATE accounts SET password = $1, role = 'admin', permissions = $2, token_version = 0 WHERE username = $3`,
       [hash, permsJson, USERNAME]
     );
-    console.log(`\n  Reset existing account "${USERNAME}" -> password "${PASSWORD}" (full main access).`);
+    console.log(`\n  Reset existing account "${USERNAME}" -> password "${PASSWORD}" (full admin access).`);
   } else {
     const idRow = await pool.query(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts`);
     const id = `u-${Number(idRow.rows[0].m) + 1}`;
     await pool.query(
       `INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt")
-       VALUES ($1,$2,$3,$4,'main',$5,$6)`,
+       VALUES ($1,$2,$3,$4,'admin',$5,$6)`,
       [id, USERNAME, NAME, hash, permsJson, new Date().toISOString()]
     );
-    console.log(`\n  Created account "${USERNAME}" -> password "${PASSWORD}" (full main access).`);
+    console.log(`\n  Created account "${USERNAME}" -> password "${PASSWORD}" (full admin access).`);
   }
 
   await pool.end();
