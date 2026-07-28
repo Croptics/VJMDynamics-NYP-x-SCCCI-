@@ -174,13 +174,11 @@ export default function MobileAttendancePage() {
   };
 
   return (
-    <div>
+    <div className="m-fade-in">
       <div className="row between" style={{ alignItems: "flex-start", marginBottom: 18 }}>
         <div>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("Attendance sheet")}
-          </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{delegates.length} {t("delegates")}</h1>
+          <div className="m-eyebrow">{t("Attendance sheet")}</div>
+          <h1 className="m-page-title">{delegates.length} {t("delegates")}</h1>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
@@ -260,8 +258,14 @@ export default function MobileAttendancePage() {
       {loading && delegates.length === 0 && !error && <div className="muted">{t("Loading…")}</div>}
 
       {!loading && visible.length === 0 && !error && (
-        <div className="mobile-card muted" style={{ textAlign: "center" }}>
-          {delegates.length === 0 ? t("No delegates yet.") : t("No delegates match your filters.")}
+        <div className="m-empty">
+          <span className="m-empty-ic"><Search size={20} /></span>
+          <div style={{ fontWeight: 700, color: "var(--ink)" }}>
+            {delegates.length === 0 ? t("No delegates yet") : t("No matches")}
+          </div>
+          <div style={{ fontSize: 12.5 }}>
+            {delegates.length === 0 ? t("Delegates will appear here once added.") : t("Try a different status or coach filter.")}
+          </div>
         </div>
       )}
 

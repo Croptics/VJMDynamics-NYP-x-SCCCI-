@@ -197,7 +197,7 @@ function TripDetail({ tripId, onBack }) {
   const shownStops = mode === "live" ? stops.filter((s) => s.dayNumber === currentDay) : stops;
 
   return (
-    <div>
+    <div className="m-fade-in">
       <button className="btn btn-ghost" onClick={onBack} style={{ padding: "6px 10px", marginBottom: 10 }}>
         <ArrowLeft size={15} /> {t("Trips")}
       </button>
@@ -321,7 +321,6 @@ function TripDetail({ tripId, onBack }) {
           onChanged={load}
         />
       )}
-      <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
@@ -350,9 +349,9 @@ export default function MobileTripsPage() {
   if (selected) return <TripDetail tripId={selected} onBack={() => { setSelected(null); load(); }} />;
 
   return (
-    <div>
-      <div className="muted" style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>{t("Trip management")}</div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 12px" }}>{t("Trips")}</h1>
+    <div className="m-fade-in">
+      <div className="m-eyebrow">{t("Trip management")}</div>
+      <h1 className="m-page-title" style={{ marginBottom: 12 }}>{t("Trips")}</h1>
 
       {error && <div className="mobile-card" style={{ color: "var(--st-missing)", borderColor: "var(--st-missing)" }}>{t("Couldn't reach the backend")} — {error}</div>}
       {!trips && !error && <div className="muted">{t("Loading…")}</div>}
