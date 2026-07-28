@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, ScanFace } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, ScanFace, Clock, Bus } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
@@ -86,24 +86,24 @@ export default function MobileHomePage() {
     navigate(`/mobile/attendance?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
 
   return (
-    <div>
-      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 4 }}>
-        <div>
+    <div className="m-fade-in">
+      {/* Greeting header */}
+      <div className="row between" style={{ alignItems: "flex-start" }}>
+        <div style={{ minWidth: 0 }}>
           <div className="muted" style={{ fontSize: 13 }}>{t(greeting())}</div>
-          <h1 style={{ fontSize: 22, margin: "2px 0 4px" }}>{staffName}</h1>
-          {/* Total moved here (small subheader under the page title) — it's
-              no longer one of the main KPI cards, which now surface Late
-              instead so the actionable statuses keep the prime real estate. */}
-          {k && <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>{t("Total delegates")}: {k.total}</div>}
-          <span className="badge badge-present">● {t("Online · synced")}</span>
+          <h1 className="m-page-title">{staffName}</h1>
+          <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+            <span className="badge badge-present">● {t("Online · synced")}</span>
+            {k && <span className="muted" style={{ fontSize: 12.5 }}>{t("Total delegates")}: {k.total}</span>}
+          </div>
         </div>
-        <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
+        <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8, flexShrink: 0 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
         </button>
       </div>
 
       {error && (
-        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)", marginTop: 14 }}>
+        <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)", marginTop: 16 }}>
           <div className="row" style={{ gap: 8, color: "var(--st-missing)", fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={16} /> {t("Couldn't reach the backend")}
           </div>
@@ -111,44 +111,31 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {loading && !data && <div className="muted" style={{ marginTop: 14 }}>{t("Loading…")}</div>}
+      {loading && !data && <div className="muted" style={{ marginTop: 16 }}>{t("Loading…")}</div>}
 
-      {/* Active trip — live tracking panel, same visual language as the
-          Check-in screen's own trip card. */}
+      {/* Active trip — signature red hero. */}
       {trip && (
-        <div
-          style={{
-            background: "var(--scc-red)", color: "#fff",
-            borderRadius: "var(--r-lg)", padding: 16, marginTop: 18,
-            boxShadow: "var(--shadow-md)",
-          }}
-        >
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.85 }}>
-            {t("Active trip")}
-          </div>
-          <div style={{ fontWeight: 700, fontSize: 17, marginTop: 4 }}>{trip.name}</div>
-          <div style={{ opacity: 0.9, fontSize: 13, marginTop: 2 }}>
+        <div className="m-hero" style={{ marginTop: 18 }}>
+          <div className="m-hero-glow" />
+          <div className="m-hero-eyebrow">{t("Active trip")}</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 19, marginTop: 4, position: "relative" }}>{trip.name}</div>
+          <div style={{ opacity: 0.9, fontSize: 13, marginTop: 2, position: "relative" }}>
             {lang === "zh"
               ? `第 ${trip.dayOf}/${trip.totalDays} 天 · 当地时间 ${trip.localTime}`
               : `Day ${trip.dayOf} of ${trip.totalDays} · ${trip.localTime} local`}
           </div>
           {trip.departsIn && (
-            <span className="badge" style={{ background: "rgba(255,255,255,.22)", color: "#fff", marginTop: 10, display: "inline-block" }}>
-              {t("Departure in")} {trip.departsIn}
+            <span className="m-hero-pill" style={{ marginTop: 12 }}>
+              <Clock size={13} /> {t("Departure in")} {trip.departsIn}
             </span>
           )}
         </div>
       )}
 
-      {/* Glanceable metrics — Missing / Late / Assigned / Present, each a
-          shortcut into the Attendance page pre-filtered to that status. Total
-          moved out of this row (see the subheader under the page title
-          above) so these stay dedicated to actionable, at-risk statuses.
-          Order: the two "needs attention" statuses (Missing, Late) lead
-          together, ahead of Assigned then the calmer Present count — mirrors
-          desktop DashboardPage.jsx's KPI tile order. */}
+      {/* Glanceable metrics — Missing / Late lead (at-risk), then Present /
+          Assigned. Each tile is a shortcut into Attendance pre-filtered. */}
       {k && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
+        <div className="m-stat-grid" style={{ marginTop: 14 }}>
           <Stat label={t("Missing")} value={k.missing} tone="missing" onClick={() => goToAttendance("MISSING")} />
           <Stat label={t("Late")} value={k.late ?? 0} tone="late" onClick={() => goToAttendance("LATE")} />
           <Stat label={t("Present")} value={k.present} tone="present" onClick={() => goToAttendance("ARRIVED")} />
@@ -156,113 +143,82 @@ export default function MobileHomePage() {
         </div>
       )}
 
-      {/* Scanner — quick shortcut into the mobile Face/QR/Manual scanner for
-          a staff member already signed into the app. Gated behind
-          viewMobileScanner so an admin can hide it per-account, same as
-          every other mobile tile. */}
-      {getPermissions().viewMobileScanner && (
-        <button
-          className="mobile-card row between"
-          onClick={() => navigate("/mobile/scanner")}
-          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
-        >
-          <div className="row" style={{ gap: 10 }}>
-            <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
-              <ScanFace size={16} />
-            </span>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Scanner")}</div>
-              <div className="muted" style={{ fontSize: 12 }}>{t("Face + QR scan")}</div>
-            </div>
-          </div>
-          <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
-        </button>
-      )}
-
-      {/* Issues — actionable card under the metric cards; navigates to the
-          dedicated /mobile/issues page rather than expanding inline. Gated
-          behind viewMobileIssues so an admin can hide it per-account. */}
-      {getPermissions().viewMobileIssues && (
-        <button
-          className="mobile-card row between"
-          onClick={() => navigate("/mobile/issues")}
-          style={{ width: "100%", marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", textAlign: "left" }}
-        >
-          <div className="row" style={{ gap: 10 }}>
-            <span className="avatar" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
-              <AlertTriangle size={16} />
-            </span>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Issues")}</div>
-              <div className="muted" style={{ fontSize: 12 }}>{t("Report or view exceptions")}</div>
-            </div>
-          </div>
-          <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-            {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
-            <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
-          </div>
-        </button>
-      )}
-
-      {/* Coach status — header links to the full missing list across every
-          coach; each per-coach row is its OWN link, straight to that coach's
-          missing delegates only (was previously one whole-card tap target
-          that always went to the generic all-coaches list regardless of
-          which row you tapped). */}
-      {data?.coaches && (
-        <div className="mobile-card" style={{ border: "1px solid var(--line)", background: "var(--surface)", marginTop: 18 }}>
-          <button
-            onClick={() => goToAttendance("MISSING")}
-            className="row between"
-            style={{ width: "100%", background: "none", border: "none", padding: 0, marginBottom: 12, cursor: "pointer", textAlign: "left", color: "inherit", font: "inherit" }}
-          >
-            <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Coach status")}</div>
-            <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
-          </button>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {data.coaches.map((c) => (
-              <button
-                key={c.id}
-                // Badge now counts MISSING+LATE combined, and Attendance has
-                // no single-status filter for that pair — land on the coach's
-                // full roster (ALL) instead of a status that could be empty.
-                onClick={() => goToAttendance("ALL", c.id)}
-                className="row between"
-                style={{
-                  width: "100%", background: "none", border: "none", padding: "8px 4px",
-                  borderRadius: "var(--r-sm)", cursor: "pointer", textAlign: "left",
-                  color: "inherit", font: "inherit", fontSize: 13,
-                }}
-              >
-                <span>{[c.name, c.city].filter(Boolean).join(" · ")}</span>
-                {/* Simplified two-state badge (mirrors desktop CoachBar):
-                    Late folds into Missing, no separate Late badge here. */}
-                <span className={(c.missing || 0) + (c.late || 0) > 0 ? "badge badge-missing" : "badge badge-present"}>
-                  {(c.missing || 0) + (c.late || 0) > 0 ? `${(c.missing || 0) + (c.late || 0)} ${t("missing")}` : t("Arrived")}
-                </span>
+      {/* Quick actions */}
+      {(getPermissions().viewMobileScanner || getPermissions().viewMobileIssues) && (
+        <div className="m-section">
+          <div className="m-section-head"><span className="m-eyebrow">{t("Quick actions")}</span></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {getPermissions().viewMobileScanner && (
+              <button className="m-tile" onClick={() => navigate("/mobile/scanner")}>
+                <span className="m-tile-ic"><ScanFace size={18} /></span>
+                <div className="m-tile-body">
+                  <div className="m-tile-title">{t("Scanner")}</div>
+                  <div className="m-tile-sub">{t("Face + QR scan")}</div>
+                </div>
+                <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
               </button>
-            ))}
-          </div>
-          <div className="muted" style={{ fontSize: 12, marginTop: 10, textAlign: "center" }}>
-            {t("Tap a coach to see who's missing")}
+            )}
+            {getPermissions().viewMobileIssues && (
+              <button className="m-tile" onClick={() => navigate("/mobile/issues")}>
+                <span className="m-tile-ic" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
+                  <AlertTriangle size={18} />
+                </span>
+                <div className="m-tile-body">
+                  <div className="m-tile-title">{t("Issues")}</div>
+                  <div className="m-tile-sub">{t("Report or view exceptions")}</div>
+                </div>
+                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                  {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
+                  <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
+                </div>
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>
+      {/* Coach status — header links to all-missing; each row jumps to that
+          coach's roster. */}
+      {data?.coaches && (
+        <div className="m-section">
+          <div className="m-section-head">
+            <span className="m-eyebrow">{t("Coach status")}</span>
+            <button
+              onClick={() => goToAttendance("MISSING")}
+              className="row" style={{ gap: 3, background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 12.5, fontWeight: 700 }}
+            >
+              {t("See all missing")} <ChevronRight size={14} />
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {data.coaches.map((c) => {
+              const attn = (c.missing || 0) + (c.late || 0);
+              return (
+                <button key={c.id} className="m-row" onClick={() => goToAttendance("ALL", c.id)}>
+                  <span className="avatar" style={{ background: attn > 0 ? "var(--st-missing-bg)" : "var(--st-present-bg)", color: attn > 0 ? "var(--st-missing)" : "var(--st-present)" }}>
+                    <Bus size={15} />
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {[c.name, c.city].filter(Boolean).join(" · ")}
+                  </span>
+                  <span className={attn > 0 ? "badge badge-missing" : "badge badge-present"}>
+                    {attn > 0 ? `${attn} ${t("missing")}` : t("Arrived")}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function Stat({ label, value, tone, onClick }) {
   return (
-    <button
-      className="mobile-card"
-      onClick={onClick}
-      style={{ margin: 0, textAlign: "center", cursor: "pointer", border: "1px solid var(--line)" }}
-    >
-      <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
-      <div className="mono" style={{ fontSize: 26, fontWeight: 700, color: `var(--st-${tone})`, lineHeight: 1.3 }}>{value}</div>
+    <button className="m-stat" onClick={onClick}>
+      <span className="m-stat-label">{label}</span>
+      <span className="m-stat-value mono" style={{ color: `var(--st-${tone})` }}>{value}</span>
     </button>
   );
 }
