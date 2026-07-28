@@ -219,7 +219,30 @@ export async function updateDelegate(id, patch, actor = null) {
   for (const key of Object.keys(before)) {
     if (String(before[key] ?? "") !== String(after[key] ?? "")) changes[key] = { from: before[key], to: after[key] };
   }
-  await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
+  // A coach reassignment (Trips board drag-and-drop or "Move to coach") was
+  // always logged here already — logActivity() fires unconditionally below
+  // regardless of which fields changed — but with a generic "<name> updated"
+  // text, so it read the same as any other edit (2026-07-27 — "since right
+  // now i already remove the coach changeable from my page... can you link
+  // if the delegate is moved to another coach in trip page, so in history
+  // log can track that"). Build a specific "moved from X to Y" message when
+  // coachId is the field that changed, same "derive fresh, don't store a
+  // stale snapshot" approach used elsewhere (e.g. HistoryLogPage's own coach
+  // badge) — one small extra query, only when actually needed.
+  let text = `${merged.name} updated`;
+  if (changes.coachId) {
+    const ids = [changes.coachId.from, changes.coachId.to].filter(Boolean);
+    const rows = ids.length ? await all(`SELECT id, COALESCE(name, label) AS label FROM coaches WHERE id = ANY($1)`, [ids]) : [];
+    const labelFor = (cid) => rows.find((r) => r.id === cid)?.label || cid;
+    if (changes.coachId.from && changes.coachId.to) {
+      text = `${merged.name} moved from ${labelFor(changes.coachId.from)} to ${labelFor(changes.coachId.to)}`;
+    } else if (changes.coachId.to) {
+      text = `${merged.name} assigned to ${labelFor(changes.coachId.to)}`;
+    } else if (changes.coachId.from) {
+      text = `${merged.name} unassigned from ${labelFor(changes.coachId.from)}`;
+    }
+  }
+  await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
   return {
     ...merged, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,

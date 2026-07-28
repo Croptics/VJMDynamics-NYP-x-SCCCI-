@@ -19,6 +19,8 @@ import {
   ScanFace,
   HelpCircle,
   Megaphone,
+  Settings,
+  MessageSquare,
 } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -55,17 +57,22 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
     ...(perms.viewTrips ? [{ to: "/trips", label: "Trips", icon: MapPin }] : []),
     ...(perms.viewDocuments ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
     // Desktop entrance-kiosk scanner (Face + QR + Manual).
-    ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
+    // Temporarily hidden from the sidebar (2026-07-27, "hide this page for
+    // now, don't show it on frontend") — the route/page itself is untouched,
+    // just not linked from nav. Restore by un-commenting the line below.
+    // ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
     // Biometric enrolment — feeds the scanner above (a delegate can only be
     // face/voice matched once they're enrolled), so it sits next to it.
     ...(perms.viewScanner ? [{ to: "/enrolment", label: "Enrolment", icon: UserPlus }] : []),
     ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),
-    // Announcements sits after the action-oriented tools above (2026-07-26 —
-    // "top section purpose is for the stuff/admin purpose, announcement is
-    // just a add-on") — it's a read/broadcast page, not a live-trip workflow
-    // step, so it's grouped with the lower-frequency items at the tail
-    // instead of competing with Trips/Scanner/Enrolment for top billing.
-    ...(perms.viewAnnouncements ? [{ to: "/announcements", label: "Announcements", icon: Megaphone, badge: announcementCount }] : []),
+    // MusterChat — Vance's inbox (AI assistant + team messaging + calls),
+    // promoted to a real nav destination (2026-07-28 — "can you put the chat
+    // in the sidebar"). The floating bubble stays as the quick-access AI chat;
+    // this is the full messaging workspace.
+    ...(perms.viewChatbot ? [{ to: "/assistant", label: "MusterChat", icon: MessageSquare }] : []),
+    // Announcements is NOT in this nav list — it's its own box in the footer,
+    // beside the language toggle (2026-07-27 — "add another box beside the
+    // translation button for announcement"). See the footer JSX below.
     // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
     // Layout.jsx on every route) instead of a dedicated destination.
     // NOTE: "User guide" is intentionally NOT here — it's a help/reference
@@ -125,14 +132,66 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
 
       {/* Account + logout, pinned to the bottom */}
       <div style={S.footer}>
-        <button className="btn btn-ghost btn-block" onClick={toggleLang} title={t("Switch language")}>
-          <Languages size={16} /> {lang === "en" ? "中文" : "English"}
-        </button>
+        {/* All 4 utility icons together in their OWN row (2026-07-27 —
+            "should you move the translation, dark theme to beside
+            announcement?") — previously split across two rows (User
+            guide/Announcements alone on top, Language/Theme crammed beside
+            the avatar below), which read as lopsided. Giving this row its
+            own space — instead of squeezing icons in NEXT TO the avatar,
+            which is what caused the original cramped/broken look — means
+            the avatar block below gets its full width back too. Stretched
+            to fill the row evenly (2026-07-27 — "adjust so there no gap for
+            dark theme button and the end... or enlarge the button") — was
+            fixed-size + left-aligned, leaving a lopsided empty gap after the
+            last (Theme) icon; each button now grows equally (flex:1) so all
+            4 fill the full width with no leftover space, instead of
+            clustering as a smaller group with padding on either side. */}
+        <div className="row" style={{ gap: 6 }}>
+          <NavLink
+            to="/guide"
+            className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
+            style={{ ...S.themeBtn, flex: 1 }}
+            title={t("User guide")}
+            aria-label={t("User guide")}
+          >
+            <HelpCircle size={16} />
+          </NavLink>
+          {perms.viewAnnouncements && (
+            <NavLink
+              to="/announcements"
+              className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
+              style={{ ...S.themeBtn, flex: 1, position: "relative" }}
+              title={t("Announcements")}
+              aria-label={t("Announcements")}
+            >
+              <Megaphone size={16} />
+              {announcementCount > 0 && <span style={S.footerBadge}>{announcementCount}</span>}
+            </NavLink>
+          )}
+          <button
+            className="btn btn-ghost"
+            style={{ ...S.themeBtn, flex: 1 }}
+            onClick={toggleLang}
+            title={t("Switch language")}
+            aria-label={t("Switch language")}
+          >
+            <Languages size={16} />
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ ...S.themeBtn, flex: 1 }}
+            onClick={toggleTheme}
+            title={t(theme === "dark" ? "Light mode" : "Dark mode")}
+            aria-label={t(theme === "dark" ? "Light mode" : "Dark mode")}
+          >
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
+        </div>
         <div style={{ ...S.account, marginTop: 8 }}>
           <NavLink
             to="/settings"
             className={({ isActive }) => "sidebar-account" + (isActive ? " active" : "")}
-            style={S.accountLink}
+            style={{ ...S.accountLink, flex: 1 }}
             title={t("Settings")}
           >
             {user.photoUrl ? (
@@ -140,36 +199,17 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
             ) : (
               <span className="avatar" style={S.avatar}>{initials}</span>
             )}
-            <div style={{ minWidth: 0 }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <div style={S.name}>{displayName}</div>
               <div className="muted" style={{ fontSize: 11 }}>{roleLabel}</div>
             </div>
+            {/* Settings gear (2026-07-27 — "add like a setting icon beside
+                staff 194, cause right now maybe user don't know that for
+                setting") — the whole block already linked to /settings, but
+                nothing visually signalled that; a gear icon is the
+                conventional cue. */}
+            <Settings size={16} color="var(--ink-3)" style={{ flexShrink: 0 }} />
           </NavLink>
-          {/* Help/User guide + theme toggle — grouped and explicitly pinned
-              to the far right edge (marginLeft: auto) rather than relying on
-              accountLink's flex:1 alone to push them there (2026-07-24 —
-              "align the dark theme button and user guide button to
-              right"). */}
-          <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexShrink: 0 }}>
-            <NavLink
-              to="/guide"
-              className={({ isActive }) => "btn btn-ghost" + (isActive ? " active" : "")}
-              style={S.themeBtn}
-              title={t("User guide")}
-              aria-label={t("User guide")}
-            >
-              <HelpCircle size={16} />
-            </NavLink>
-            <button
-              className="btn btn-ghost"
-              style={S.themeBtn}
-              onClick={toggleTheme}
-              title={t(theme === "dark" ? "Light mode" : "Dark mode")}
-              aria-label={t(theme === "dark" ? "Light mode" : "Dark mode")}
-            >
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-          </div>
         </div>
         <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={handleLogout}>
           <LogOut size={16} /> {t("Log out")}
@@ -199,6 +239,11 @@ const S = {
     textDecoration: "none",
   },
   themeBtn: { padding: 8, flexShrink: 0 },
+  footerBadge: {
+    position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, padding: "0 3px",
+    borderRadius: 999, background: "var(--scc-red)", color: "#fff", fontSize: 10, fontWeight: 700,
+    display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+  },
   avatar: { width: 34, height: 34, background: "var(--scc-red-tint)", color: "var(--scc-red)" },
   name: {
     fontSize: 13,

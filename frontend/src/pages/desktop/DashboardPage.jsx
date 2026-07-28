@@ -19,6 +19,9 @@ import {
   Crown,
   Plus,
   Minus,
+  Sparkles,
+  History,
+  ChevronUp,
   Pencil,
   Trash2,
   X,
@@ -31,7 +34,6 @@ import {
   ChevronLeft,
   ChevronDown,
   Phone,
-  Eye,
   Briefcase,
   Globe2,
   BadgeCheck,
@@ -87,7 +89,13 @@ function saveSelectedTripId(id) {
 }
 
 const EMPTY_FORM = {
-  name: "", coachId: "", status: "ARRIVED", vip: false, cancelled: false, cancelReason: "", lastSeen: "", lastLocation: "",
+  // status defaults to UNASSIGNED, not ARRIVED (2026-07-27 — "remove the
+  // assigned to coach, cause that my teammate feature") — coach assignment
+  // now happens on the Trips board (Desmond's drag-and-drop), not this
+  // Dashboard modal; a NEW delegate created here starts Unassigned so it
+  // never hits the backend's "coach required unless Unassigned" rule with
+  // no coach picker left to satisfy it.
+  name: "", coachId: "", status: "UNASSIGNED", vip: false, cancelled: false, cancelReason: "", lastSeen: "", lastLocation: "",
   company: "", role: "", industry: "", email: "", phone: "", website: "",
   passportNumber: "", nationality: "", passportExpiry: "", accessibilityNotes: "", notes: "",
   hotelName: "", roomNumber: "",
@@ -95,14 +103,14 @@ const EMPTY_FORM = {
 
 export default function DashboardPage() {
   const perms = getPermissions();
-  // Two-role RBAC: Admin sees every tab (bypasses every permission check —
-  // accountPermissions() returns all-true for role="admin"). Staff sees the
-  // Analytics tab based on the viewAnalytics permission (2026-07-21 — was
-  // hardcoded role==="admin" only; now a real per-account toggle, defaulting
-  // closed since it's a genuinely new capability being unlocked, not one
-  // being narrowed). Staff operations stays gated on manageAccounts, which
-  // perms.manageAccounts only carries for admins now (see permissions.js's
-  // adminOnly doc — Staff can never be individually granted it).
+  // Two-role RBAC (simplified 2026-07-27 — "staff can view delegate +
+  // checkpoint, admin views all, regardless of account control"): Staff sees
+  // only the Delegate and Checkpoint history tabs; Room Management, Analytics
+  // and Staff operations are admin-only, keyed off manageAccounts (which only
+  // admins ever carry — see permissions.js's adminOnly doc). The old
+  // per-account viewAnalytics toggle was removed from permissions.js the same
+  // day, so Analytics is back to role-based, not grantable.
+  const isAdmin = !!perms.manageAccounts;
   const { t, lang } = useLang();
   const navigate = useNavigate();
   const location = useLocation();
@@ -137,19 +145,18 @@ export default function DashboardPage() {
     window.scrollTo(0, 0);
   }, []);
 
-  // Default to the first tab this account can actually see — viewDelegates
-  // gates the Delegate tab the same way Analytics is gated on viewAnalytics
-  // and Staff operations on manageAccounts (see the tab buttons below); an
-  // account with none of the three still needs SOME initial value, so it
-  // falls back to "delegate" (its content block is itself gated, so nothing
-  // renders — same "no visible tabs" edge case the desktop/mobile route
-  // fallbacks in App.jsx already accept).
+  // Default to the first tab this account can actually see, in the same
+  // left-to-right order as the tab bar below; an account with none of them
+  // still needs SOME initial value, so it falls back to "delegate" (its
+  // content block is itself gated, so nothing renders — same "no visible
+  // tabs" edge case the desktop/mobile route fallbacks in App.jsx already
+  // accept).
   const [tab, setTab] = useState(() => {
     if (perms.viewDelegates) return "delegate";
-    if (perms.viewAnalytics) return "analytics";
-    if (perms.manageAccounts) return "staffops";
+    if (perms.viewHistory) return "checkpointHistory";
+    if (isAdmin) return "rooms";
     return "delegate";
-  }); // "delegate" | "analytics" | "headcount" | "staffops"
+  }); // "delegate" | "checkpointHistory" | "rooms" | "analytics" | "staffops"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
   const [delegates, setDelegates] = useState([]);
@@ -174,7 +181,7 @@ export default function DashboardPage() {
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
-  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId> | UNASSIGNED
+  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId> — "Unassigned" lives on statusFilter only now
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
   // Pagination (2026-07-24 — replaced a "Show all" toggle that dumped every
   // matching delegate into the DOM at once; unusable once a trip had 100+).
@@ -225,6 +232,14 @@ export default function DashboardPage() {
   // (2026-07-24 — multiple trips' add/edit/remove events were piling into
   // one unreadable list together).
   const [historyScope, setHistoryScope] = useState("trip");
+  // Default the compact History tracker card to TODAY's entries only
+  // (2026-07-27 — "the history tracker section should display only today
+  // stuff, then click to view more like ytd, 2 days before etc") — a click
+  // reveals everything else already loaded (yesterday and earlier); the
+  // full History Log page (`/history`) still has real per-day grouping and
+  // filters for anything beyond what's already fetched here.
+  const [historyShowAll, setHistoryShowAll] = useState(false);
+  useEffect(() => { setHistoryShowAll(false); }, [selectedTripId, historyScope]);
   const [exportOpen, setExportOpen] = useState(false);
   const delegateTableRef = useRef(null);
 
@@ -889,13 +904,15 @@ export default function DashboardPage() {
       // filtered separately here rather than through effectiveStatus().
       if (statusFilter === "CANCELLED") { if (!d.cancelled) return false; }
       else if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
-      // Coach filter: a real coach id matches that coach; "UNASSIGNED" matches
-      // delegates with no coach (coachId null/empty).
-      if (coachFilter === "UNASSIGNED") {
-        if (d.coachId) return false;
-      } else if (coachFilter !== "ALL" && d.coachId !== coachFilter) {
-        return false;
-      }
+      // Coach filter is real-coaches-only now (2026-07-27 — "currently both
+      // filter have unassigned, combine both in one filter") — Status
+      // already has its own "Unassigned" option, and status===UNASSIGNED is
+      // always exactly equivalent to coachId being empty (the backend
+      // requires a coach for every OTHER status), so the two dropdowns were
+      // offering the same filter twice. Picking Status: Unassigned still
+      // shows exactly the same delegates a coach-side "Unassigned" option
+      // used to.
+      if (coachFilter !== "ALL" && d.coachId !== coachFilter) return false;
       if (query) {
         const hay = `${d.name || ""} ${d.company || ""}`.toLowerCase();
         if (!hay.includes(query)) return false;
@@ -975,9 +992,11 @@ export default function DashboardPage() {
   // pagination) — the "select all" checkbox scopes to exactly this set,
   // matching the same convention as the Trips/Onboarding pages.
   const rowsShown = visibleDelegates.slice(clampedPage * delegatePageSize, (clampedPage + 1) * delegatePageSize);
-  // Auto-hide columns that are empty across every row on THIS page — Last
-  // seen/Created by are almost always "—" once a trip has real volume.
-  const showLastSeenCol = rowsShown.some((d) => d.status === "MISSING" && d.lastSeen);
+  // Auto-hide Created-by when it's empty across every row on THIS page —
+  // almost always "—" once a trip has real volume. Last-seen column removed
+  // entirely (2026-07-27 — "i think no need last seen section, look a lot
+  // of stuff") — the same info is still visible on the delegate's own
+  // profile panel, just not duplicated as a table column.
   const showCreatedByCol = rowsShown.some((d) => d.createdBy);
 
   // Staff operations' Active sessions list — search + role filter, applied
@@ -1105,20 +1124,20 @@ export default function DashboardPage() {
             {t("Delegate")}
           </button>
         )}
-        {perms.viewAnalytics && (
+        {perms.viewHistory && (
           <button
             className="btn"
-            onClick={() => setTab("analytics")}
+            onClick={() => setTab("checkpointHistory")}
             style={{
-              background: tab === "analytics" ? "var(--scc-red-tint)" : "transparent",
-              color: tab === "analytics" ? "var(--scc-red)" : "var(--ink-2)",
-              border: `1px solid ${tab === "analytics" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+              background: tab === "checkpointHistory" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "checkpointHistory" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "checkpointHistory" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
             }}
           >
-            <BarChart3 size={16} /> {t("Analytics")}
+            <History size={16} /> {t("Checkpoint history")}
           </button>
         )}
-        {perms.manageDelegates && (
+        {isAdmin && (
           <button
             className="btn"
             onClick={() => setTab("rooms")}
@@ -1131,7 +1150,20 @@ export default function DashboardPage() {
             <BedDouble size={16} /> {t("Room Management")}
           </button>
         )}
-        {perms.manageAccounts && (
+        {isAdmin && (
+          <button
+            className="btn"
+            onClick={() => setTab("analytics")}
+            style={{
+              background: tab === "analytics" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "analytics" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "analytics" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+            }}
+          >
+            <BarChart3 size={16} /> {t("Analytics")}
+          </button>
+        )}
+        {isAdmin && (
           <button
             className="btn"
             onClick={() => setTab("staffops")}
@@ -1165,7 +1197,7 @@ export default function DashboardPage() {
         <div className="muted" style={{ marginTop: 24 }}>{t("Loading…")}</div>
       )}
 
-      {tab === "analytics" && perms.viewAnalytics && (
+      {tab === "analytics" && isAdmin && (
         <div style={{ marginTop: 20 }}>
           <AnalyticsPanel data={data} missing={missing} delegates={delegates} tripId={selectedTripId} />
         </div>
@@ -1346,8 +1378,12 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {tab === "rooms" && perms.manageDelegates && (
-        <RoomManagementTab delegates={delegates} coaches={coaches} coachName={coachName} onSaved={load} t={t} lang={lang} />
+      {tab === "rooms" && isAdmin && (
+        <RoomManagementTab delegates={delegates} coaches={coaches} coachName={coachName} onSaved={load} t={t} lang={lang} tripId={selectedTripId} />
+      )}
+
+      {tab === "checkpointHistory" && perms.viewHistory && (
+        <CheckpointHistoryTab delegates={delegates} coaches={coaches} coachName={coachName} t={t} />
       )}
 
       {tab === "staffops" && perms.manageAccounts && (
@@ -1575,9 +1611,17 @@ export default function DashboardPage() {
               <div className="muted" style={{ fontSize: 13 }}>
                 {t("No activity yet. Add or update a delegate to see events here.")}
               </div>
-            ) : (
+            ) : (() => {
+              const todayStr = new Date().toDateString();
+              const todayEntries = history.filter((a) => a.createdAt && new Date(a.createdAt).toDateString() === todayStr);
+              const shown = historyShowAll ? history : todayEntries;
+              const earlierCount = history.length - todayEntries.length;
+              return (
               <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: 360, overflowY: "auto", paddingRight: 4 }}>
-                {history.map((a) => (
+                {shown.length === 0 && (
+                  <div className="muted" style={{ fontSize: 13 }}>{t("Nothing today yet.")}</div>
+                )}
+                {shown.map((a) => (
                   <div key={a.id} className="row between" style={{ gap: 12, alignItems: "flex-start", flexShrink: 0 }}>
                     <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
                       <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
@@ -1593,8 +1637,19 @@ export default function DashboardPage() {
                     )}
                   </div>
                 ))}
+                {!historyShowAll && earlierCount > 0 && (
+                  <button className="btn btn-ghost" style={{ fontSize: 12.5, alignSelf: "flex-start", flexShrink: 0 }} onClick={() => setHistoryShowAll(true)}>
+                    {t("Show")} {earlierCount} {t("earlier")}
+                  </button>
+                )}
+                {historyShowAll && earlierCount > 0 && (
+                  <button className="btn btn-ghost" style={{ fontSize: 12.5, alignSelf: "flex-start", flexShrink: 0 }} onClick={() => setHistoryShowAll(false)}>
+                    {t("Show today only")}
+                  </button>
+                )}
               </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}
@@ -1668,13 +1723,6 @@ export default function DashboardPage() {
                     <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
                   ))}
                 </optgroup>
-                {/* Not a coach — grouped apart so it doesn't read as one
-                    more entry in the same list as the real coaches above
-                    (2026-07-24, same treatment as the status filter's
-                    "Cancelled" grouping). */}
-                <optgroup label={t("Other")}>
-                  <option value="UNASSIGNED">{t("Unassigned")}</option>
-                </optgroup>
               </select>
               <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
                 <option value="name">{t("Sort: Name")}</option>
@@ -1720,7 +1768,6 @@ export default function DashboardPage() {
                     </th>
                   )}
                   <th>{t("Delegate")}</th><th>{t("Coach")}</th><th>{t("Status")}</th>
-                  {showLastSeenCol && <th>{t("Last seen")}</th>}
                   <th>{t("Uploaded")}</th>
                   {showCreatedByCol && <th>{t("Created by")}</th>}
                   <th style={{ width: 90 }} />
@@ -1767,18 +1814,17 @@ export default function DashboardPage() {
                         )}
                       </div>
                     </td>
-                    {showLastSeenCol && <td className="muted">{d.status === "MISSING" ? (d.lastSeen || "—") : "—"}</td>}
                     <td className="muted">{fmtUploadDate(d.createdAt)}</td>
                     {showCreatedByCol && <td className="muted">{d.createdBy || "—"}</td>}
                     <td>
                       <div className="row" style={{ gap: 6 }}>
-                        <button
-                          onClick={() => openProfile(d)}
-                          aria-label={`${t("View profile")} — ${d.name}`}
-                          title={t("View profile")}
-                          style={S.iconBtn}>
-                          <Eye size={16} />
-                        </button>
+                        {/* Standalone "View profile" (Eye) button removed
+                            (2026-07-27, advised) — clicking the delegate's
+                            NAME cell already calls the exact same
+                            openProfile(d), so the icon button was a fully
+                            redundant second control for the same action;
+                            Edit has no other entry point in this row, so it
+                            stays. */}
                         {perms.manageDelegates && (
                           <>
                             <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
@@ -1797,7 +1843,7 @@ export default function DashboardPage() {
                 ))}
                 {visibleDelegates.length === 0 && (
                   <tr>
-                    <td colSpan={(perms.manageDelegates ? 1 : 0) + 4 + (showLastSeenCol ? 1 : 0) + (showCreatedByCol ? 1 : 0) + 1} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                    <td colSpan={(perms.manageDelegates ? 1 : 0) + 4 + (showCreatedByCol ? 1 : 0) + 1} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
                       {t("No delegates match your filters.")}
                     </td>
                   </tr>
@@ -1915,17 +1961,15 @@ export default function DashboardPage() {
               <option value="MISSING">{t("Missing")}</option>
             </select>
 
-            <label className="field-label" style={{ marginTop: 14 }}>
-              {t("Coach")} {form.status !== "UNASSIGNED" && <span className="muted">({t("required")})</span>}
-            </label>
-            <select className="select" value={form.coachId}
-              disabled={form.status === "UNASSIGNED"}
-              onChange={(e) => setForm({ ...form, coachId: e.target.value })}>
-              <option value="">{form.status === "UNASSIGNED" ? t("No coach (unassigned)") : t("Select a coach…")}</option>
-              {coaches.map((c) => (
-                <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
-              ))}
-            </select>
+            {/* Coach field removed from this modal (2026-07-27 — "remove the
+                assigned to coach, cause that my teammate feature") — coach
+                assignment is Desmond's Trips board (drag-and-drop), not this
+                Dashboard form. An existing delegate's coachId is still
+                preserved untouched via openEdit()/form state above; this
+                modal just no longer offers a control to change it. Setting
+                Status to "Unassigned" still correctly clears it (see the
+                submit payload below), so releasing someone from their coach
+                is still possible here — assigning one just isn't. */}
 
             {form.status === "MISSING" && (
               <>
@@ -3014,12 +3058,25 @@ function bumpRoomNumber(value, delta) {
   return prefix + String(next).padStart(digits.length, "0") + suffix;
 }
 
-function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) {
+function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tripId }) {
   const [query, setQuery] = useState("");
   const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId>
   const [sortMode, setSortMode] = useState("name"); // name | coach | room
   const [edits, setEdits] = useState({}); // { [delegateId]: { hotelName, roomNumber } }
   const [savingId, setSavingId] = useState(null);
+  // AI room assignment (2026-07-27 — "add like an ai feature so either i can
+  // type it out and it will update the delegate room status, but give user
+  // the confirmation before update the changes") — "Suggest" only ever
+  // merges into `edits` (the SAME pending-edit state a manual keystroke
+  // produces), never writes directly. That reuses every existing dirty-row/
+  // Save affordance for free, so the human still has to explicitly click
+  // Save (or "Save all suggested" below) before anything is persisted —
+  // matching the "give user confirmation before update" requirement exactly.
+  const [aiRequest, setAiRequest] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiErr, setAiErr] = useState(null);
+  const [aiSuggestedIds, setAiSuggestedIds] = useState(new Set());
+  const [savingAll, setSavingAll] = useState(false);
   // Pagination (2026-07-27 — "make sure to add something in all delegate
   // section, so when there alot of delegate") — mirrors the main "All
   // delegates" table's own Rows-per-page/Prev/Next pattern, own local state
@@ -3055,12 +3112,83 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) 
     try {
       await apiPatch(`/delegates/${d.id}`, { hotelName: hotelName.trim(), roomNumber: roomNumber.trim() });
       setEdits((prev) => { const next = { ...prev }; delete next[d.id]; return next; });
+      setAiSuggestedIds((prev) => { if (!prev.has(d.id)) return prev; const next = new Set(prev); next.delete(d.id); return next; });
       onSaved();
     } catch {
       /* leave the local edit in place so nothing typed is lost — the row's
          "Save" stays clickable to retry */
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function askAi() {
+    const request = aiRequest.trim();
+    if (!request) return;
+    setAiBusy(true);
+    setAiErr(null);
+    try {
+      const res = await apiPost(`/trips/${tripId}/rooms/ai-suggest`, { request });
+      const suggestions = res.suggestions || [];
+      if (suggestions.length === 0) {
+        setAiErr(t("Nothing to suggest — try naming a delegate, hotel, or room number."));
+        return;
+      }
+      setEdits((prev) => {
+        const next = { ...prev };
+        for (const s of suggestions) next[s.delegateId] = { hotelName: s.hotelName, roomNumber: s.roomNumber };
+        return next;
+      });
+      setAiSuggestedIds(new Set(suggestions.map((s) => s.delegateId)));
+      setAiRequest("");
+    } catch (e) {
+      setAiErr(e.message || t("Could not reach the AI right now."));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function saveAllSuggested() {
+    const ids = [...aiSuggestedIds].filter((id) => edits[id]);
+    if (ids.length === 0) return;
+    setSavingAll(true);
+    try {
+      const updates = ids.map((id) => ({ delegateId: id, ...edits[id] }));
+      await apiPost(`/trips/${tripId}/rooms/ai-apply`, { updates });
+      setEdits((prev) => {
+        const next = { ...prev };
+        for (const id of ids) delete next[id];
+        return next;
+      });
+      setAiSuggestedIds(new Set());
+      onSaved();
+    } catch {
+      /* leave the pending edits in place so nothing typed is lost */
+    } finally {
+      setSavingAll(false);
+    }
+  }
+
+  // General "save every pending edit at once" (2026-07-27 — "give me button
+  // to save all instead of saving one by one") — covers manual keystrokes AND
+  // AI suggestions alike, since both live in the same `edits` state. Reuses
+  // the rooms/ai-apply endpoint (despite the name it's just a bulk
+  // hotel/room write that re-validates every delegateId against the real
+  // roster server-side) so this is ONE request, not N.
+  async function saveAllEdits() {
+    const ids = Object.keys(edits);
+    if (ids.length === 0) return;
+    setSavingAll(true);
+    try {
+      const updates = ids.map((id) => ({ delegateId: id, ...edits[id] }));
+      await apiPost(`/trips/${tripId}/rooms/ai-apply`, { updates });
+      setEdits({});
+      setAiSuggestedIds(new Set());
+      onSaved();
+    } catch {
+      /* leave the pending edits in place so nothing typed is lost */
+    } finally {
+      setSavingAll(false);
     }
   }
 
@@ -3103,6 +3231,44 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) 
         {t("Assign or reassign hotel/room per delegate — handy for an end-of-day pass.")}
       </p>
 
+      {/* ---- AI room assignment (2026-07-27) -------------------------------
+       * Bounded + transparent, same pattern as the Excel export's AI-filter:
+       * "Suggest" only ever populates the pending-edit state below (the SAME
+       * dirty-row/Save affordance a manual keystroke produces) — nothing is
+       * written until a human clicks Save (per row, or "Save all suggested"
+       * here), and every suggested delegateId is re-validated server-side
+       * against the real roster before either the suggest OR apply step. */}
+      <div className="card" style={{ padding: 14, marginBottom: 16 }}>
+        <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <Sparkles size={16} color="var(--scc-red)" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{t("Ask AI to assign rooms")}</span>
+          <input
+            className="input" style={{ flex: "1 1 260px", fontSize: 13 }}
+            placeholder={t("e.g. Put all VIPs in Grand Hyatt room 501")}
+            value={aiRequest} onChange={(e) => setAiRequest(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !aiBusy) askAi(); }}
+          />
+          <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 12px" }}
+            onClick={askAi} disabled={aiBusy || !aiRequest.trim()}>
+            {aiBusy ? t("Thinking…") : t("Suggest")}
+          </button>
+        </div>
+        <p className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+          {t("This only fills in the fields below — nothing saves until you review and click Save.")}
+        </p>
+        {aiErr && <div style={{ color: "var(--st-missing)", fontSize: 12.5, marginTop: 6 }}>{aiErr}</div>}
+        {aiSuggestedIds.size > 0 && (
+          <div className="row between" style={{ marginTop: 10, padding: "8px 12px", background: "var(--st-assigned-bg)", borderRadius: "var(--r-sm)", flexWrap: "wrap", gap: 8 }}>
+            <span style={{ fontSize: 12.5 }}>
+              {t("AI suggested changes for")} {aiSuggestedIds.size} {aiSuggestedIds.size === 1 ? t("delegate") : t("delegates")} — {t("review the highlighted rows below")}.
+            </span>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={saveAllSuggested} disabled={savingAll}>
+              {savingAll ? t("Saving…") : t("Save all suggested")}
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* ---- Bulk "everyone's in this hotel" ------------------------------ */}
       <div className="card" style={{ padding: 14, marginBottom: 16, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <BedDouble size={16} color="var(--ink-3)" style={{ flexShrink: 0 }} />
@@ -3143,6 +3309,22 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) 
         </select>
       </div>
 
+      {/* ---- Save-all bar (2026-07-27 — "give me button to save all instead
+       * of saving one by one") — appears whenever ANY row has a pending edit,
+       * manual or AI-suggested; the per-row Save buttons stay for saving just
+       * one delegate while still deciding on the rest. */}
+      {Object.keys(edits).length > 0 && (
+        <div className="row between" style={{ marginBottom: 14, padding: "10px 14px", background: "var(--st-assigned-bg)", borderRadius: "var(--r-sm)", flexWrap: "wrap", gap: 8 }}>
+          <span style={{ fontSize: 13 }}>
+            {Object.keys(edits).length} {Object.keys(edits).length === 1 ? t("unsaved change") : t("unsaved changes")}
+          </span>
+          <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 14px" }}
+            onClick={saveAllEdits} disabled={savingAll}>
+            {savingAll ? t("Saving…") : `${t("Save all")} (${Object.keys(edits).length})`}
+          </button>
+        </div>
+      )}
+
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
           <thead>
@@ -3158,9 +3340,10 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) 
             {rowsShown.map((d) => {
               const f = fieldFor(d);
               const dirty = edits[d.id] !== undefined;
+              const aiSuggested = aiSuggestedIds.has(d.id);
               return (
-                <tr key={d.id}>
-                  <td>{d.name}</td>
+                <tr key={d.id} style={aiSuggested ? { background: "var(--st-assigned-bg)" } : undefined}>
+                  <td>{d.name}{aiSuggested && <Sparkles size={12} color="var(--scc-red)" style={{ marginLeft: 6, verticalAlign: "middle" }} />}</td>
                   <td className="muted">{coachName(d.coachId)}</td>
                   <td>
                     <input className="input" style={{ fontSize: 13 }} value={f.hotelName}
@@ -3236,6 +3419,130 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang }) 
   );
 }
 
+/** Checkpoint history — trip-wide "view past status of delegate" (2026-07-27
+ *  — "currently i not able to see the past itinerary, i want to be able to
+ *  view past status of delegate"). Previously only reachable one delegate at
+ *  a time (their profile panel's DelegateTimeline), buried inside each
+ *  individual record; this surfaces it as its own Dashboard tab instead. UI
+ *  deliberately styled as a simple search + flat list (2026-07-27 — "i quite
+ *  like [the Scanner's Manual tab's] simple list-style ui, just not the
+ *  override functionality itself") — a plain searchable list of delegates,
+ *  each expandable in place to show their real per-checkpoint history via
+ *  the EXISTING `GET /delegates/:id/checkpoint-timeline` endpoint (already
+ *  coach-scoped server-side, same as every other delegate read — nothing new
+ *  needed there). Fetched lazily per-delegate on first expand, not all
+ *  upfront, so opening this tab with a large roster doesn't fire N requests
+ *  before anyone's even clicked anything. */
+function CheckpointHistoryTab({ delegates, coaches, coachName, t }) {
+  const [query, setQuery] = useState("");
+  // Coach filter (2026-07-27 — "pls filter by coach") — same dropdown Room
+  // Management uses; "NONE" surfaces the unassigned delegates, which DO
+  // appear in this list (unlike Room Management, which excludes them).
+  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | NONE | <coachId>
+  const [expandedId, setExpandedId] = useState(null);
+  const [timelines, setTimelines] = useState({}); // { [delegateId]: {loading, error, items} }
+
+  const filtered = delegates
+    .filter((d) => !query.trim() || d.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .filter((d) => {
+      if (coachFilter === "ALL") return true;
+      if (coachFilter === "NONE") return !d.coachId;
+      return d.coachId === coachFilter;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  async function toggleExpand(d) {
+    if (expandedId === d.id) { setExpandedId(null); return; }
+    setExpandedId(d.id);
+    if (timelines[d.id]) return; // already fetched this session — don't refetch on every re-open
+    setTimelines((prev) => ({ ...prev, [d.id]: { loading: true, error: null, items: [] } }));
+    try {
+      const res = await apiGet(`/delegates/${d.id}/checkpoint-timeline`);
+      setTimelines((prev) => ({ ...prev, [d.id]: { loading: false, error: null, items: res.timeline || [] } }));
+    } catch (e) {
+      setTimelines((prev) => ({ ...prev, [d.id]: { loading: false, error: e.message || t("Could not load."), items: [] } }));
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <p className="page-sub" style={{ margin: "0 0 14px" }}>
+        {t("Every delegate's status at every past itinerary stop — click a name to see their full timeline.")}
+      </p>
+
+      <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", maxWidth: 260, flex: "1 1 200px" }}>
+          <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+          <input className="input" style={{ paddingLeft: 32 }} placeholder={t("Search name…")}
+            value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <select className="select" style={{ maxWidth: 190 }} value={coachFilter} onChange={(e) => setCoachFilter(e.target.value)}>
+          <option value="ALL">{t("All coaches")}</option>
+          <optgroup label={t("Coaches")}>
+            {coaches.map((c) => (
+              <option key={c.id} value={c.id}>{coachDisplayName(c)}</option>
+            ))}
+          </optgroup>
+          <optgroup label={t("Other")}>
+            <option value="NONE">{t("Unassigned")}</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <div className="card" style={{ overflow: "hidden" }}>
+        {filtered.length === 0 && (
+          <div className="muted" style={{ padding: 24, textAlign: "center", fontSize: 13.5 }}>{t("No delegates match your search.")}</div>
+        )}
+        {filtered.map((d, idx) => {
+          const isOpen = expandedId === d.id;
+          const tl = timelines[d.id];
+          return (
+            <div key={d.id} style={{ borderTop: idx === 0 ? "none" : "1px solid var(--line)" }}>
+              <button
+                onClick={() => toggleExpand(d)}
+                className="row between"
+                style={{ width: "100%", padding: "12px 16px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}
+              >
+                <div className="row" style={{ gap: 10, minWidth: 0 }}>
+                  <DelegateAvatar delegate={d} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 500 }}>{d.name}</div>
+                    <div className="muted" style={{ fontSize: 12 }}>{coachName(d.coachId)}</div>
+                  </div>
+                </div>
+                {isOpen ? <ChevronUp size={16} className="muted" /> : <ChevronDown size={16} className="muted" />}
+              </button>
+              {isOpen && (
+                <div style={{ padding: "0 16px 14px 52px" }}>
+                  {tl?.loading && <div className="muted" style={{ fontSize: 13 }}>{t("Loading…")}</div>}
+                  {tl?.error && <div style={{ color: "var(--st-missing)", fontSize: 13 }}>{tl.error}</div>}
+                  {tl && !tl.loading && !tl.error && tl.items.length === 0 && (
+                    <div className="muted" style={{ fontSize: 13 }}>{t("No checkpoint scans recorded yet.")}</div>
+                  )}
+                  {tl && !tl.loading && tl.items.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {tl.items.map((it) => (
+                        <div key={it.id} className="row between" style={{ gap: 10, fontSize: 13 }}>
+                          <div className="row" style={{ gap: 8, minWidth: 0 }}>
+                            <Clock size={13} color="var(--ink-3)" style={{ flexShrink: 0 }} />
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {t("Day")} {it.dayNumber} · {it.checkpointLabel}{it.scheduledTime ? ` · ${it.scheduledTime}` : ""}
+                            </span>
+                          </div>
+                          <StatusBadge state={it.status} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 /* ---- Local styles ------------------------------------------------------- */
 const S = {

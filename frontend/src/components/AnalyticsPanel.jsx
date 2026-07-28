@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo base — Dashboard Analytics (charts + AI)
  * ============================================================================= */
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2 } from "lucide-react";
+import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2, Download } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList,
@@ -75,6 +75,43 @@ function splitInsightPoints(text) {
     });
 }
 
+/** Download a chart's underlying data as a CSV file (2026-07-27 — "give
+ *  option to export into the csv for report or presentation"). Pure
+ *  client-side: the numbers are already in the browser (the same arrays the
+ *  charts render from), so no backend round-trip. The leading BOM makes
+ *  Excel open UTF-8 correctly — matters once the UI language is Chinese,
+ *  since the exported headers/labels come from t(). */
+function downloadCsv(filename, headers, rows) {
+  const esc = (v) => {
+    const s = String(v ?? "");
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\r\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Small per-chart "CSV" button, top-right of each chart card. */
+function ExportCsvBtn({ onExport, disabled, t }) {
+  return (
+    <button
+      className="btn btn-ghost"
+      style={{ fontSize: 12, padding: "4px 10px", flexShrink: 0 }}
+      onClick={onExport}
+      disabled={disabled}
+      title={t("Export this chart's data as CSV")}
+      aria-label={t("Export this chart's data as CSV")}
+    >
+      <Download size={13} /> CSV
+    </button>
+  );
+}
+
 function prefsKey() {
   const u = getUser() || {};
   return `mg_analytics_prefs_${u.username || "guest"}`;
@@ -91,10 +128,12 @@ function loadPrefs() {
 
 export default function AnalyticsPanel({ data, missing, delegates = [], tripId = "t-1" }) {
   const { t, lang } = useLang();
-  // Overview (the original 4 fixed widgets + AI Insights) vs Custom chart
-  // (the builder below) — split into tabs (2026-07-24) so picking your own
-  // chart doesn't sit buried under/alongside 4 other charts you didn't ask
-  // for; each tab shows only what's relevant to it.
+  // Overview (AI Insights + the fixed widgets) vs Custom chart (the builder)
+  // sub-tabs. Split 2026-07-24, briefly merged into one scrolling view
+  // 2026-07-27 ("can you merge the chart tgh?"), then restored the SAME day
+  // ("i don't like the current merge chart. i need to scroll down to see
+  // it") — the merge traded one click for a five-chart scroll, and the
+  // click won. Don't merge these again without checking first.
   const [analyticsTab, setAnalyticsTab] = useState("overview"); // overview | custom
   const [visible, setVisible] = useState(loadPrefs);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -396,6 +435,202 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
         )}
       </div>
 
+      {/* Filter/Sort/Customize each used to be their own full-width card
+          stacked one under another — with all 3 open at once that pushed
+          the actual charts way down the page. Side-by-side in one row
+          instead, each only as wide as it needs (2026-07-24). Styled
+          visually distinct from the chart cards below (tinted background +
+          dashed border + an icon matching the button that opened it) — as
+          plain "card"s they were indistinguishable from the data widgets,
+          which read as confusing (2026-07-24 feedback: "look the same as
+          the chart... can be confuse"). These are CONTROLS, not data. */}
+      {(filterOpen || sortOpen || panelOpen) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, marginTop: 16, alignItems: "stretch" }}>
+          {filterOpen && (
+            <div style={S.controlCard}>
+              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
+                <Filter size={13} color="var(--ink-3)" />
+                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Filter by coach")}</div>
+              </div>
+              <select
+                className="select"
+                style={{ maxWidth: 260 }}
+                value={coachFilter}
+                onChange={(e) => setCoachFilter(e.target.value)}
+              >
+                <option value="ALL">{t("All coaches")}</option>
+                {(data?.coaches || []).map((c) => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
+                ))}
+              </select>
+              <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                {t('Scopes "Coach load" and "VIP vs. non-VIP missing" to the selected coach.')}
+              </div>
+            </div>
+          )}
+
+          {sortOpen && (
+            <div style={S.controlCard}>
+              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
+                <ArrowUpDown size={13} color="var(--ink-3)" />
+                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Sort coach load by")}</div>
+              </div>
+              <select
+                className="select"
+                style={{ maxWidth: 260 }}
+                value={coachSort}
+                onChange={(e) => setCoachSort(e.target.value)}
+              >
+                <option value="name">{t("Coach name")}</option>
+                <option value="boarded">{t("Most boarded")}</option>
+                <option value="remaining">{t("Most remaining capacity")}</option>
+                <option value="missing">{t("Most missing")}</option>
+              </select>
+            </div>
+          )}
+
+          {panelOpen && (
+            <div style={S.controlCard}>
+              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
+                <BarChart3 size={13} color="var(--ink-3)" />
+                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Visible widgets")}</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {WIDGETS.map((w) => (
+                  <label key={w.key} className="row" style={{ gap: 10, fontSize: 14, cursor: "pointer" }}>
+                    {visible[w.key] ? <Eye size={16} /> : <EyeOff size={16} className="muted" />}
+                    <input type="checkbox" checked={visible[w.key]} onChange={() => toggle(w.key)} />
+                    {t(w.label)}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {data && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 20 }}>
+          {visible.breakdown && (
+            <div className="card" style={{ padding: 20 }}>
+              <div className="row between" style={{ marginBottom: 12 }}>
+                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Attendance breakdown")}</h2>
+                <ExportCsvBtn t={t} disabled={breakdown.length === 0}
+                  onExport={() => downloadCsv("attendance-breakdown.csv", [t("Status"), t("Count")], breakdown.map((d) => [d.name, d.value]))} />
+              </div>
+              <ResponsiveContainer width="100%" height={240}>
+                <PieChart>
+                  <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
+                    {breakdown.map((d) => <Cell key={d.name} fill={d.color} />)}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {visible.coachLoad && (
+            <div className="card" style={{ padding: 20 }}>
+              <div className="row between" style={{ marginBottom: 12 }}>
+                <h2 style={{ fontSize: 16, margin: 0 }}>
+                  {t("Coach load")}
+                  {coachFilter !== "ALL" && coachLoad[0] && ` — ${coachLoad[0].name}`}
+                </h2>
+                <ExportCsvBtn t={t} disabled={coachLoad.length === 0}
+                  onExport={() => downloadCsv("coach-load.csv", [t("Coach"), t("Boarded"), t("Remaining capacity"), t("Missing")], coachLoad.map((c) => [c.name, c.boarded, c.remaining, c.missingCount]))} />
+              </div>
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={coachLoad}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="name" fontSize={12} />
+                  <YAxis fontSize={12} allowDecimals={false} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="boarded" stackId="a" fill={COLORS.present} name={t("Boarded")} />
+                  <Bar dataKey="remaining" stackId="a" fill="#e6e8eb" name={t("Remaining capacity")} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {visible.vipMissing && (
+            <div className="card" style={{ padding: 20 }}>
+              <div className="row between" style={{ marginBottom: 12 }}>
+                <h2 style={{ fontSize: 16, margin: 0 }}>{t("VIP vs. non-VIP missing")}</h2>
+                <ExportCsvBtn t={t} disabled={missing.length === 0}
+                  onExport={() => downloadCsv("vip-missing.csv", [t("Group"), t("Missing")], vipMissing.map((d) => [d.name, d.value]))} />
+              </div>
+              {missing.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("Nobody's missing right now.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <PieChart>
+                    <Pie data={vipMissing} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
+                      {vipMissing.map((d) => <Cell key={d.name} fill={d.color} />)}
+                    </Pie>
+                    <Tooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+
+          {visible.checkpointBreakdown && (
+            <div className="card" style={{ padding: 20 }}>
+              <div className="row between" style={{ marginBottom: 12 }}>
+                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Attendance by itinerary stop")}</h2>
+                <ExportCsvBtn t={t} disabled={checkpointChartData.length === 0}
+                  onExport={() => downloadCsv("attendance-by-stop.csv", [t("Itinerary stop"), t("Arrived"), t("Late"), t("Missing")], checkpointChartData.map((s) => [s.stopLabel, s[t("Arrived")], s[t("Late")], s[t("Missing")]]))} />
+              </div>
+              {checkpointChartData.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={checkpointChartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }} barCategoryGap="20%">
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="time" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis fontSize={12} allowDecimals={false} width={28} />
+                    <Tooltip labelFormatter={(_, p) => p?.[0]?.payload?.stopLabel || ""} />
+                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
+                    <Bar dataKey={t("Arrived")} fill={COLORS.present} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey={t("Late")} fill={COLORS.late} radius={[3, 3, 0, 0]} />
+                    <Bar dataKey={t("Missing")} fill={COLORS.missing} radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+
+          {visible.boardingByDay && (
+            <div className="card" style={{ padding: 20 }}>
+              <div className="row between" style={{ marginBottom: 12 }}>
+                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Boarding over the trip")}</h2>
+                <ExportCsvBtn t={t} disabled={boardingByDayData.length === 0}
+                  onExport={() => downloadCsv("boarding-by-day.csv", [t("Day"), t("Onboard"), t("Missing")], boardingByDayData.map((d) => [d.day, d.onboard, d.missing]))} />
+              </div>
+              {boardingByDayData.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={boardingByDayData} margin={{ top: 20, right: 8, left: 0, bottom: 4 }} barCategoryGap="30%">
+                    <XAxis dataKey="day" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis hide allowDecimals={false} />
+                    <Tooltip />
+                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
+                    <Bar dataKey="onboard" name={t("Onboard")} stackId="board" fill={COLORS.present} radius={[0, 0, 0, 0]}>
+                      <LabelList dataKey="onboard" position="top" style={{ fontWeight: 700, fontSize: 13 }} />
+                    </Bar>
+                    <Bar dataKey="missing" name={t("Missing")} stackId="board" fill={COLORS.missing} radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       </>
       )}
 
@@ -405,12 +640,16 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
          request. Renders live from the same `delegates` list every fixed
          widget already reads. */
       <div className="card" style={{ padding: 20 }}>
-        <div className="row" style={{ gap: 10, marginBottom: 14 }}>
-          <BarChart3 size={18} color="var(--ink-3)" />
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Custom chart")}</div>
-            <div className="muted" style={{ fontSize: 12 }}>{t("Pick your own chart type and grouping.")}</div>
+        <div className="row between" style={{ marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+          <div className="row" style={{ gap: 10 }}>
+            <BarChart3 size={18} color="var(--ink-3)" />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Custom chart")}</div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("Pick your own chart type and grouping.")}</div>
+            </div>
           </div>
+          <ExportCsvBtn t={t} disabled={customChartData.length === 0}
+            onExport={() => downloadCsv(`custom-chart-${customGroupBy}.csv`, [CUSTOM_GROUP_BY.find(([k]) => k === customGroupBy)?.[1] || customGroupBy, t("Count")], customChartData.map((d) => [d.name, d.value]))} />
         </div>
 
         <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
@@ -499,186 +738,6 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
           </ResponsiveContainer>
         )}
       </div>
-      )}
-
-      {analyticsTab === "overview" && (
-      <>
-      {/* Filter/Sort/Customize each used to be their own full-width card
-          stacked one under another — with all 3 open at once that pushed
-          the actual charts way down the page. Side-by-side in one row
-          instead, each only as wide as it needs (2026-07-24). Styled
-          visually distinct from the chart cards below (tinted background +
-          dashed border + an icon matching the button that opened it) — as
-          plain "card"s they were indistinguishable from the data widgets,
-          which read as confusing (2026-07-24 feedback: "look the same as
-          the chart... can be confuse"). These are CONTROLS, not data. */}
-      {(filterOpen || sortOpen || panelOpen) && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, marginTop: 16, alignItems: "stretch" }}>
-          {filterOpen && (
-            <div style={S.controlCard}>
-              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
-                <Filter size={13} color="var(--ink-3)" />
-                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Filter by coach")}</div>
-              </div>
-              <select
-                className="select"
-                style={{ maxWidth: 260 }}
-                value={coachFilter}
-                onChange={(e) => setCoachFilter(e.target.value)}
-              >
-                <option value="ALL">{t("All coaches")}</option>
-                {(data?.coaches || []).map((c) => (
-                  <option key={c.id} value={c.id}>{c.label}</option>
-                ))}
-              </select>
-              <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                {t('Scopes "Coach load" and "VIP vs. non-VIP missing" to the selected coach.')}
-              </div>
-            </div>
-          )}
-
-          {sortOpen && (
-            <div style={S.controlCard}>
-              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
-                <ArrowUpDown size={13} color="var(--ink-3)" />
-                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Sort coach load by")}</div>
-              </div>
-              <select
-                className="select"
-                style={{ maxWidth: 260 }}
-                value={coachSort}
-                onChange={(e) => setCoachSort(e.target.value)}
-              >
-                <option value="name">{t("Coach name")}</option>
-                <option value="boarded">{t("Most boarded")}</option>
-                <option value="remaining">{t("Most remaining capacity")}</option>
-                <option value="missing">{t("Most missing")}</option>
-              </select>
-            </div>
-          )}
-
-          {panelOpen && (
-            <div style={S.controlCard}>
-              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
-                <BarChart3 size={13} color="var(--ink-3)" />
-                <div className="page-eyebrow" style={{ margin: 0 }}>{t("Visible widgets")}</div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {WIDGETS.map((w) => (
-                  <label key={w.key} className="row" style={{ gap: 10, fontSize: 14, cursor: "pointer" }}>
-                    {visible[w.key] ? <Eye size={16} /> : <EyeOff size={16} className="muted" />}
-                    <input type="checkbox" checked={visible[w.key]} onChange={() => toggle(w.key)} />
-                    {t(w.label)}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {data && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 20 }}>
-          {visible.breakdown && (
-            <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Attendance breakdown")}</h2>
-              <ResponsiveContainer width="100%" height={240}>
-                <PieChart>
-                  <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
-                    {breakdown.map((d) => <Cell key={d.name} fill={d.color} />)}
-                  </Pie>
-                  <Tooltip />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {visible.coachLoad && (
-            <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>
-                {t("Coach load")}
-                {coachFilter !== "ALL" && coachLoad[0] && ` — ${coachLoad[0].name}`}
-              </h2>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={coachLoad}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" fontSize={12} />
-                  <YAxis fontSize={12} allowDecimals={false} />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="boarded" stackId="a" fill={COLORS.present} name={t("Boarded")} />
-                  <Bar dataKey="remaining" stackId="a" fill="#e6e8eb" name={t("Remaining capacity")} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {visible.vipMissing && (
-            <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("VIP vs. non-VIP missing")}</h2>
-              {missing.length === 0 ? (
-                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("Nobody's missing right now.")}</div>
-              ) : (
-                <ResponsiveContainer width="100%" height={240}>
-                  <PieChart>
-                    <Pie data={vipMissing} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
-                      {vipMissing.map((d) => <Cell key={d.name} fill={d.color} />)}
-                    </Pie>
-                    <Tooltip />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          )}
-
-          {visible.checkpointBreakdown && (
-            <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Attendance by itinerary stop")}</h2>
-              {checkpointChartData.length === 0 ? (
-                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
-              ) : (
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart data={checkpointChartData} margin={{ top: 4, right: 8, left: 0, bottom: 4 }} barCategoryGap="20%">
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="time" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis fontSize={12} allowDecimals={false} width={28} />
-                    <Tooltip labelFormatter={(_, p) => p?.[0]?.payload?.stopLabel || ""} />
-                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
-                    <Bar dataKey={t("Arrived")} fill={COLORS.present} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey={t("Late")} fill={COLORS.late} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey={t("Missing")} fill={COLORS.missing} radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          )}
-
-          {visible.boardingByDay && (
-            <div className="card" style={{ padding: 20 }}>
-              <h2 style={{ fontSize: 16, marginBottom: 12 }}>{t("Boarding over the trip")}</h2>
-              {boardingByDayData.length === 0 ? (
-                <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
-              ) : (
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart data={boardingByDayData} margin={{ top: 20, right: 8, left: 0, bottom: 4 }} barCategoryGap="30%">
-                    <XAxis dataKey="day" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis hide allowDecimals={false} />
-                    <Tooltip />
-                    <Legend verticalAlign="top" align="right" height={28} wrapperStyle={{ fontSize: 12.5 }} />
-                    <Bar dataKey="onboard" name={t("Onboard")} stackId="board" fill={COLORS.present} radius={[0, 0, 0, 0]}>
-                      <LabelList dataKey="onboard" position="top" style={{ fontWeight: 700, fontSize: 13 }} />
-                    </Bar>
-                    <Bar dataKey="missing" name={t("Missing")} stackId="board" fill={COLORS.missing} radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-      </>
       )}
 
       <style>{`.spin{animation:mg-spin 0.9s linear infinite}@keyframes mg-spin{to{transform:rotate(360deg)}}`}</style>

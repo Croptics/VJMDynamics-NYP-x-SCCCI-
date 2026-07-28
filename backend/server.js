@@ -86,6 +86,9 @@ app.use(announcementsRouter);
 import guideVideoRouter from "./routes/guideVideo.js";
 app.use(guideVideoRouter);
 
+import roomAssignRouter from "./routes/roomAssign.js";
+app.use(roomAssignRouter);
+
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
  *

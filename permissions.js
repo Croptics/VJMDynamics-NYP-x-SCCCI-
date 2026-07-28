@@ -174,19 +174,13 @@ export const PERMISSIONS = [
     group: "desktopView",
     parent: "viewDashboard",
   },
-  {
-    key: "viewAnalytics",
-    label: "Analytics",
-    desc: "See the Dashboard's Analytics tab (charts + AI insights)",
-    chip: "Analytics",
-    // Was hardcoded role==="admin" only, never a toggle at all — this is a
-    // genuinely NEW capability being made grantable to Staff, so (unlike
-    // manageDocuments/manageScanner above) default FALSE is correct here:
-    // nothing regresses, an admin opts specific staff IN.
-    default: false,
-    group: "desktopView",
-    parent: "viewDashboard",
-  },
+  // NOTE: "viewAnalytics" was removed 2026-07-27 ("staff can view delegate +
+  // checkpoint, admin views all, regardless of account control — so remove
+  // analytics from permission"). The Dashboard's Analytics / Room Management /
+  // Staff operations tabs are now role-based (admin only), not per-account
+  // toggles. cleanPermissions() below only keeps keys listed here, so any
+  // stored viewAnalytics value is silently dropped on next read — no
+  // migration needed.
   {
     key: "viewTrips",
     label: "Trips",

@@ -53,7 +53,6 @@ like plain Vercel functions isn't a great fit for the backend specifically
   fly secrets set ANTHROPIC_API_KEY=sk-ant-...
   ```
 
-
 Whichever host is used, the pattern is the same: paste the raw key into that
 platform's environment-variable UI, exactly like `DATABASE_URL`, `JWT_SECRET`,
 and the `CLOUDINARY_*` keys are already meant to be set per

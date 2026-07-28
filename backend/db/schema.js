@@ -450,7 +450,7 @@ export async function seed() {
         manageDelegates: true, manageScanner: true,
         manageDocuments: false, exportData: false, manageTrips: false, manageExceptions: false,
         viewDashboard: true, viewDelegates: true, viewTrips: true, viewScanner: true, viewChatbot: true, viewHistory: true,
-        viewAnalytics: false, viewDocuments: false, viewExceptions: false,
+        viewDocuments: false, viewExceptions: false,
         viewMobileHome: true, viewMobileScanner: true, viewMobileIssues: true,
         viewMobileAttendance: true, viewMobileTrips: true, viewMobileChatbot: true,
         viewMobileAllTrips: false,

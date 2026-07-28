@@ -39,6 +39,39 @@ belong to any one Feature section.
 
 ---
 
+## Vance v2 integration (2026-07-28) — what was merged and what was deliberately kept
+
+JQ integrated Vance's `v2DocuSync-AI-(Vance)` branch (from the local
+`integration/` checkout) into main. Cross-teammate facts everyone should know:
+
+- **New endpoints/tables in `backend/routes/vance.js`** — MusterChat messaging
+  (`/api/messages/*`), groups (`/api/groups/*`), WebRTC call signaling
+  (`/api/calls/*`); tables `dm_messages`, `call_signals`, `chat_groups`,
+  `chat_group_members` (all `CREATE IF NOT EXISTS`, purely additive — no
+  existing table touched).
+- **Vance's branch was based on a stale main.** His copies of already-fixed
+  lines were NOT taken: main keeps `requirePermission("manageDocuments")` on
+  the document routes, `requireKioskOrPermission("manageScanner")` + the
+  cross-coach guard on `/api/onboarding/checkin`, and the tripUuid
+  `createDelegate` history fix. If Vance rebases, he should take MAIN's
+  versions of those lines.
+- **`/assistant` route is back** (his MusterChat inbox page, gated
+  `viewChatbot`); the floating ChatBubble kept JQ's drag/auto-hide shell but
+  hosts Vance's AI conversation + unread badge + call overlay.
+- **Coach-captain Staff scoping now also applies to message contacts** — a
+  scoped Staff account only sees/messages delegates on coaches they captain,
+  consistent with every other delegate-reading route.
+- **Message media is allowlisted server-side** (`data:video/`/`data:image/`
+  or JSON for doc/call cards) — don't relax this; an arbitrary URL stored in
+  `media` would beacon every viewer.
+- **Known trade-offs accepted at integration time**: the inbox polls hard
+  (~1.5s per open thread + 5s contacts + a permanent ~1.5s global call poll
+  once the bubble has mounted), and the assistant/contacts are hardcoded to
+  trip `t-1` (Vance's design — `resolveTripUuid("t-1")`). Both are candidates
+  for later work, not bugs.
+- Vance's unit tests live in `tests/vance/` (run from repo root:
+  `node --test tests/vance/*.test.js` — 82 tests, all passing post-merge).
+
 ## ⚠️ CRITICAL — known gap: no offline support (2026-07-25)
 
 **Read this before doing any more work on attendance/check-in features.**

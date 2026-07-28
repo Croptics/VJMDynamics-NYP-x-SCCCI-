@@ -18,6 +18,7 @@ import AccountControlPage from "./pages/desktop/AccountControlPage.jsx";
 import SettingsPage from "./pages/desktop/SettingsPage.jsx";
 import HistoryLogPage from "./pages/desktop/HistoryLogPage.jsx";
 import UserGuidePage from "./pages/desktop/UserGuidePage.jsx";
+import ChatAssistantPage from "./pages/desktop/ChatAssistantPage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
@@ -269,8 +270,13 @@ export default function App() {
         />
 
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
-            page hosting all three real check-in paths on one screen. */}
-        <Route path="/scanner" element={<ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>} />
+            page hosting all three real check-in paths on one screen.
+            Temporarily hidden (2026-07-27, "hide this page for now, don't
+            show it on frontend") — redirects to the dashboard instead of
+            rendering, so even a direct /scanner visit doesn't show it while
+            the sidebar link is also commented out (Sidebar.jsx). Restore by
+            swapping this back to <ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>. */}
+        <Route path="/scanner" element={<Navigate to="/dashboard" replace />} />
 
         {/* Account control — needs the manage-accounts permission. Kept on
             manageAccounts (an action permission), NOT folded into the
@@ -294,6 +300,12 @@ export default function App() {
         {/* History log — standalone audit trail (date-grouped activity_log),
             reached from the Dashboard's History tracker card */}
         <Route path="/history" element={<ViewGate perm="viewHistory"><HistoryLogPage /></ViewGate>} />
+
+        {/* MusterChat — Vance's full inbox (AI assistant + team messaging +
+            video calls), integrated 2026-07-27. Not in the sidebar: the
+            floating ChatBubble's unread badge/"open Messages" bar links here.
+            Gated on the same viewChatbot permission that gates the bubble. */}
+        <Route path="/assistant" element={<ViewGate perm="viewChatbot"><ChatAssistantPage /></ViewGate>} />
 
         {/* Settings — signed-in account info + theme/language preferences */}
         <Route path="/settings" element={<SettingsPage />} />

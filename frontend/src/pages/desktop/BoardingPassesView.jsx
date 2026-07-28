@@ -16,17 +16,95 @@ import { useLang } from "../../lib/i18n.jsx";
  * report" (counts folded into the header, no stat-card row), Jayden's filter
  * tabs, and Vimal's per-coach grouping.
  */
+// PRESENT (legacy) and ARRIVED (the team's 5-status value) both mean "boarded";
+// ASSIGNED/LATE are the newer "expected but not boarded yet" values.
+// (Vance's v2, integrated 2026-07-27.)
 const STATUS_META = {
   PRESENT: { label: "Boarded", color: "var(--st-present)" },
+  ARRIVED: { label: "Boarded", color: "var(--st-present)" },
+  ASSIGNED: { label: "Not boarded", color: "var(--st-review)" },
+  LATE: { label: "Not boarded", color: "var(--st-review)" },
   MISSING: { label: "Not boarded", color: "var(--st-review)" },
   UNASSIGNED: { label: "No coach", color: "var(--ink-3)" },
 };
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
+/* ---------------------------------------------------------------------------
+ *  Company identity (Vance's v2, integrated 2026-07-27). The directory gives
+ *  each delegate a company (e.g. "CTES Consulting Pte Ltd") but no logo image.
+ *  We synthesise a stable, branded "logo" from the company name — a monogram on
+ *  a colour hashed from the name — so every company reads as its own brand
+ *  across the pass, the badge and the QR. `logoUrl` (an uploaded real logo)
+ *  overrides the monogram when present.
+ * ------------------------------------------------------------------------- */
+const BRAND_COLORS = ["#1f6feb", "#8250df", "#0f766e", "#b91c1c", "#b45309", "#0e7490", "#4d7c0f", "#9d174d", "#3f3f9e", "#7c3aed"];
+const STOPWORDS = new Set(["pte", "ltd", "llp", "inc", "co", "corp", "corporation", "the", "and", "services", "service", "group", "holdings", "solutions", "consulting", "international"]);
+function companyBrand(company) {
+  const name = (company || "").trim();
+  if (!name) return { initials: "—", bg: "#94a3b8", fg: "#fff", empty: true };
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const bg = BRAND_COLORS[h % BRAND_COLORS.length];
+  const words = name.split(/\s+/).map((w) => w.replace(/[^\p{L}\p{N}]/gu, "")).filter(Boolean);
+  const significant = words.filter((w) => !STOPWORDS.has(w.toLowerCase()));
+  const pick = (significant.length ? significant : words).slice(0, 2);
+  const initials = (pick.map((w) => w[0]).join("") || name[0]).toUpperCase();
+  return { initials, bg, fg: "#fff" };
+}
+
+/** A company logo chip — real uploaded logo if given, else the monogram. */
+function CompanyLogo({ company, logoUrl, size = 34, radius }) {
+  const b = companyBrand(company);
+  const r = radius ?? Math.round(size * 0.28);
+  if (logoUrl) return <img src={logoUrl} alt={company || ""} width={size} height={size} style={{ borderRadius: r, objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />;
+  return (
+    <span style={{ width: size, height: size, borderRadius: r, background: b.bg, color: b.fg, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: size * 0.4, letterSpacing: -0.5 }}>
+      {b.initials}
+    </span>
+  );
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/** Generate a QR with the company monogram in its centre (high error-correction
+ *  so the logo overlay never breaks scannability). Falls back to a plain QR. */
+async function brandedQrDataUrl(code, company, size = 280) {
+  try {
+    const canvas = document.createElement("canvas");
+    await QRCode.toCanvas(canvas, code, { width: size, margin: 1, errorCorrectionLevel: "H", color: { dark: "#111111", light: "#ffffff" } });
+    const ctx = canvas.getContext("2d");
+    const s = canvas.width;
+    const b = companyBrand(company);
+    const box = Math.round(s * 0.22);         // logo diameter
+    const pad = box + Math.round(s * 0.05);   // white plate behind it
+    const cx = s / 2, cy = s / 2;
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, Math.round(pad * 0.24));
+    ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.fillStyle = b.bg; ctx.fill();
+    ctx.fillStyle = b.fg;
+    ctx.font = `700 ${Math.round(box * 0.42)}px system-ui, -apple-system, Segoe UI, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(b.initials, cx, cy + 1);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return QRCode.toDataURL(code, { width: size, margin: 1 });
+  }
+}
+
 export default function BoardingPassesView({ tripId, onKpiChange }) {
   const { t } = useLang();
   const [data, setData] = useState({ delegates: [], coaches: [], total: 0, present: 0 });
   const [qr, setQr] = useState({});           // delegateId -> QR data URL
+  const qrRef = useRef({});                    // authoritative QR cache (survives polls)
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
@@ -44,19 +122,29 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   useEffect(() => { getTrips().then(setTrips).catch(() => {}); }, []);
   useEffect(() => { setSelectedTrip(tripId || "t-1"); }, [tripId]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await getBadges(selectedTrip || "t-1");
       setData(res);
-      const entries = await Promise.all(
-        res.delegates.map(async (d) => [d.id, d.qr_code ? await QRCode.toDataURL(d.qr_code, { width: 260, margin: 1 }) : null])
-      );
-      setQr(Object.fromEntries(entries));
-    } catch { /* ignore */ } finally { setLoading(false); }
+      // Generate QR data URLs only for delegates we haven't rendered yet — cheap
+      // on every poll, and it scales to large trips (no full re-render each time).
+      const need = res.delegates.filter((d) => d.qr_code && !qrRef.current[d.id]);
+      if (need.length) {
+        const entries = await Promise.all(need.map(async (d) => [d.id, await brandedQrDataUrl(d.qr_code, d.company)]));
+        qrRef.current = { ...qrRef.current, ...Object.fromEntries(entries) };
+        setQr(qrRef.current);
+      }
+    } catch { /* ignore */ } finally { if (!silent) setLoading(false); }
   }, [selectedTrip]);
 
-  useEffect(() => { load(); }, [load]);
+  // Load once, then poll silently so boarding counts/statuses stay live during
+  // muster without a manual Refresh (the "watch people board" use case).
+  useEffect(() => {
+    load();
+    const id = setInterval(() => load(true), 5000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const coachOf = useCallback((id) => data.coaches.find((c) => c.id === id) || null, [data.coaches]);
   const coachLabel = (c) => (c ? `${c.name}${c.city ? ` · ${c.city}` : ""}` : t("No coach assigned"));
@@ -67,8 +155,9 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const visible = useMemo(() => {
     const s = search.trim().toLowerCase();
     return data.delegates.filter((d) => {
-      if (filter === "boarded" && d.status !== "PRESENT") return false;
-      if (filter === "pending" && d.status === "PRESENT") return false;
+      const boarded = d.status === "PRESENT" || d.status === "ARRIVED";
+      if (filter === "boarded" && !boarded) return false;
+      if (filter === "pending" && boarded) return false;
       if (!s) return true;
       return [d.name, d.company, d.qr_code].some((v) => (v || "").toLowerCase().includes(s));
     });
@@ -144,7 +233,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
               </option>
             ))}
           </select>
-          <button className="btn btn-ghost" onClick={load}><RefreshCw size={15} /> {t("Refresh")}</button>
+          <button className="btn btn-ghost" onClick={() => load()}><RefreshCw size={15} /> {t("Refresh")}</button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
             <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
           </button>
@@ -195,8 +284,11 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                       {d.name}
                       {d.vip && <Star size={13} fill="#e0a800" color="#e0a800" />}
                     </div>
-                    <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {d.company || "—"}
+                    <div className="muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+                      <CompanyLogo company={d.company} logoUrl={d.logo_url} size={18} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {d.company || "—"}{d.industry ? ` · ${d.industry}` : ""}
+                      </span>
                     </div>
                   </div>
                   <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)", flexShrink: 0 }}>{d.qr_code}</span>
@@ -224,9 +316,17 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                 <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                   {open.name} {open.vip && <Star size={14} fill="#e0a800" color="#e0a800" />}
                 </div>
-                <div className="muted" style={{ fontSize: 12 }}>{open.company || "—"}</div>
+                <div className="muted" style={{ fontSize: 12 }}>{open.role || t("Delegate")}</div>
               </div>
               <span role="button" onClick={() => setOpen(null)} style={{ cursor: "pointer", color: "var(--ink-3)", display: "flex" }}><X size={18} /></span>
+            </div>
+            {/* Company identity band — the "who they represent" line of the badge */}
+            <div className="row" style={{ gap: 10, alignItems: "center", padding: "12px 18px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)" }}>
+              <CompanyLogo company={open.company} logoUrl={open.logo_url} size={40} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{open.company || t("No company")}</div>
+                {open.industry && <div className="muted" style={{ fontSize: 11.5, marginTop: 1 }}>{open.industry}</div>}
+              </div>
             </div>
             <div style={{ padding: 18, textAlign: "center" }}>
               {qr[open.id]
@@ -255,7 +355,9 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           <div key={d.id} className="mg-pass">
             {qr[d.id] && <img src={qr[d.id]} alt="" width={150} height={150} />}
             <div className="mg-pass-name">{d.name}</div>
-            <div className="mg-pass-sub">{d.company || ""}</div>
+            {d.role && <div className="mg-pass-sub">{d.role}</div>}
+            <div className="mg-pass-company"><CompanyLogo company={d.company} logoUrl={d.logo_url} size={16} /> <span>{d.company || ""}</span></div>
+            {d.industry && <div className="mg-pass-sub">{d.industry}</div>}
             <div className="mg-pass-sub">{coachLabel(coachOf(d.coach_id))}</div>
             <div className="mg-pass-code">{d.qr_code}</div>
           </div>
@@ -269,11 +371,13 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
         .mg-print-sheet{display:none}
+        .mg-pass-company{display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;font-weight:600;margin-top:5px}
         @media print {
           body * { visibility: hidden !important; }
           .mg-print-sheet, .mg-print-sheet * { visibility: visible !important; }
           .mg-print-sheet{display:grid !important;position:absolute;left:0;top:0;width:100%;
-            grid-template-columns:repeat(3,1fr);gap:10px}
+            grid-template-columns:repeat(3,1fr);gap:10px;
+            -webkit-print-color-adjust:exact;print-color-adjust:exact}
           .mg-pass{break-inside:avoid;border:1px solid #bbb;border-radius:8px;padding:10px;text-align:center}
           .mg-pass-name{font-weight:700;font-size:13px;margin-top:6px}
           .mg-pass-sub{font-size:11px;color:#555}
