@@ -29,8 +29,8 @@ export default function MobileUserGuidePage() {
   const navigate = useNavigate();
 
   return (
-    <div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 4 }}>
+    <div className="m-fade-in">
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 2 }}>
         <button
           onClick={() => navigate(-1)}
           aria-label={t("Back")}
@@ -38,11 +38,9 @@ export default function MobileUserGuidePage() {
         >
           <ChevronLeft size={20} />
         </button>
-        <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-          {t("Getting started")}
-        </div>
+        <div className="m-eyebrow">{t("Getting started")}</div>
       </div>
-      <h1 style={{ fontSize: 22, margin: "2px 0 4px" }}>{t("User guide")}</h1>
+      <h1 className="m-page-title">{t("User guide")}</h1>
       <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
         {t("A quick tour of what each tab on your phone does.")}
       </p>
@@ -95,11 +93,8 @@ export default function MobileUserGuidePage() {
 function GuideCard({ icon: Icon, title, children }) {
   return (
     <div className="mobile-card" style={{ marginTop: 12 }}>
-      <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
-        <span style={{
-          width: 32, height: 32, borderRadius: "var(--r-sm)", flexShrink: 0, display: "flex",
-          alignItems: "center", justifyContent: "center", background: "var(--scc-red-tint)", color: "var(--scc-red)",
-        }}>
+      <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+        <span className="m-tile-ic" style={{ width: 34, height: 34 }}>
           <Icon size={16} />
         </span>
         <div style={{ minWidth: 0 }}>

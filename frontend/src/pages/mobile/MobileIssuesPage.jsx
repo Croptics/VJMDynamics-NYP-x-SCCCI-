@@ -40,18 +40,21 @@ export default function MobileIssuesPage() {
   useEffect(() => { loadDelegates(); }, [loadDelegates]);
 
   return (
-    <div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 4 }}>
+    <div className="m-fade-in">
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 6 }}>
         <button
           className="btn btn-ghost" onClick={() => navigate("/mobile")}
-          aria-label={t("Back to Home")} style={{ padding: 8 }}
+          aria-label={t("Back to Home")} style={{ padding: 8, flexShrink: 0 }}
         >
           <ArrowLeft size={18} />
         </button>
-        <h1 style={{ fontSize: 20 }}>{t("Issues")}</h1>
+        <div>
+          <div className="m-eyebrow">{t("Support")}</div>
+          <h1 style={{ fontSize: 20, margin: "1px 0 0" }}>{t("Issues")}</h1>
+        </div>
       </div>
 
-      <div style={{ marginTop: 10 }}>
+      <div style={{ marginTop: 12 }}>
         <IssuesPanel tripId={TRIP_ID} coach={{ delegates }} onLogged={loadDelegates} />
       </div>
     </div>
