@@ -1,14 +1,17 @@
-import { useOutletContext } from "react-router-dom";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { useOutletContext, useNavigate } from "react-router-dom";
+import { LogOut, ShieldCheck, HelpCircle, ChevronRight, Settings, Moon, Sun, Languages } from "lucide-react";
 import { getUser, getPermissions, clearToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { useTheme } from "../../lib/theme.jsx";
 
 /**
  * Mobile Profile — signed-in user info + logout, mirroring the account
  * block in the desktop Sidebar but as its own page.
  */
 export default function MobileProfilePage() {
-  const { t } = useLang();
+  const { t, lang, toggleLang } = useLang();
+  const { theme, toggleTheme } = useTheme();
+  const navigate = useNavigate();
   const { onLogout } = useOutletContext() || {};
   const user = getUser() || {};
   const perms = getPermissions();
@@ -26,11 +29,9 @@ export default function MobileProfilePage() {
   const activePerms = Object.entries(perms).filter(([, v]) => v);
 
   return (
-    <div>
-      <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 4 }}>
-        {t("Profile")}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 16px" }}>{displayName}</h1>
+    <div className="m-fade-in">
+      <div className="m-eyebrow">{t("Profile")}</div>
+      <h1 className="m-page-title" style={{ marginBottom: 16 }}>{displayName}</h1>
 
       <div className="mobile-card row" style={{ gap: 12 }}>
         <span className="avatar" style={{ width: 44, height: 44, background: "var(--scc-red-tint)", color: "var(--scc-red)", fontSize: 15 }}>
@@ -57,6 +58,44 @@ export default function MobileProfilePage() {
           </div>
         )}
       </div>
+
+      {/* Preferences — appearance + language (moved here from the topbar). */}
+      <div className="mobile-card">
+        <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+          <Settings size={16} color="var(--ink-3)" />
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t("Preferences")}</span>
+        </div>
+        <button className="m-row" onClick={toggleTheme} aria-label={t("Toggle appearance")}>
+          <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+            {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
+          </span>
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>{t("Appearance")}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--scc-red)" }}>
+            {theme === "dark" ? t("Dark") : t("Light")}
+          </span>
+        </button>
+        <button className="m-row" onClick={toggleLang} aria-label={t("Toggle language")}>
+          <span className="avatar" style={{ background: "var(--scc-red-tint)", color: "var(--scc-red)" }}>
+            <Languages size={15} />
+          </span>
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>{t("Language")}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--scc-red)" }}>
+            {lang === "en" ? "English" : "中文"}
+          </span>
+        </button>
+      </div>
+
+      <button
+        className="mobile-card row between"
+        style={{ width: "100%", cursor: "pointer", border: "1px solid var(--line)" }}
+        onClick={() => navigate("/mobile-user-guide")}
+      >
+        <span className="row" style={{ gap: 10 }}>
+          <HelpCircle size={18} color="var(--ink-3)" />
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t("User guide")}</span>
+        </span>
+        <ChevronRight size={16} color="var(--ink-3)" />
+      </button>
 
       <button className="btn btn-ghost btn-block" onClick={handleLogout} style={{ marginTop: 8 }}>
         <LogOut size={16} /> {t("Log out")}

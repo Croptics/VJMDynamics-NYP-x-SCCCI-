@@ -6,7 +6,21 @@
    ========================================================================== */
 
 .mobile-shell {
-  min-height: 100vh;
+  /* The shell owns the scroll (not the document body). Why: the fixed
+     bottom tab bar is positioned against the viewport, so when the BODY
+     gained a scrollbar on tall pages (the Attendance roster) but not on
+     short ones (Home), the bar's right edge moved by the scrollbar width
+     and its evenly-spaced tabs visibly shifted between pages. With the
+     shell as the scroll container the body never scrolls (its width is
+     constant), and `scrollbar-gutter: stable` reserves the shell's own
+     scrollbar gutter on EVERY mobile view — so both the tab bar and the
+     page content stay pixel-static across Home / Attendance / Trips /
+     Profile / Issues. Scoped to .mobile-shell so desktop is untouched
+     (mobile.css is imported app-wide via App.jsx). */
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -27,7 +41,7 @@
 .mobile-page {
   flex: 1;
   padding: 16px;
-  padding-bottom: 84px; /* clear the fixed tab bar */
+  padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px)); /* clear the floating dock */
   max-width: 560px;
   width: 100%;
   margin: 0 auto;
@@ -41,18 +55,38 @@
   box-shadow: var(--shadow-sm);
   padding: 16px;
   margin-bottom: 12px;
+  /* .mobile-card is also used on <button> (e.g. the clickable Home KPI
+     tiles) — buttons don't inherit `color`/`font` from ancestors by default,
+     so without this they'd fall back to the UA default black button text
+     in dark mode instead of following the theme. Harmless on plain <div>s. */
+  color: inherit;
+  text-align: inherit;
+  font: inherit;
+  width: 100%;
 }
 
+/* Floating glassmorphic dock — a frosted, rounded pill lifted off the bottom
+   edge instead of a flat full-width bar, so the mobile app reads as a native
+   enterprise app rather than a web wrapper. Falls back to a solid surface on
+   browsers without backdrop-filter/color-mix (the solid `background` below is
+   overridden by the translucent one only where color-mix is supported). */
 .mobile-tabbar {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   z-index: 20;
   display: flex;
+  gap: 4px;
+  width: min(440px, calc(100% - 24px));
+  padding: 7px;
+  border-radius: 999px;
   background: var(--surface);
-  border-top: 1px solid var(--line);
-  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
 }
 
 .mobile-tab {
@@ -60,13 +94,227 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 6px 4px;
-  border-radius: var(--r-sm);
+  gap: 3px;
+  padding: 8px 4px;
+  border-radius: 999px;
   color: var(--ink-3);
   text-decoration: none;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.2s ease, background 0.2s ease, transform 0.12s ease;
+}
+.mobile-tab:active { transform: scale(0.9); }
+
+/* Active tab: a soft brand-tinted pill with a glow on the icon so staff can
+   see where they are at a glance, even in a bright coach bay. */
+.mobile-tab.active {
+  color: var(--scc-red);
+  background: var(--scc-red-tint);
+}
+.mobile-tab.active svg {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--scc-red) 55%, transparent));
+  animation: mobile-tab-pop 0.24s ease-out;
+}
+@keyframes mobile-tab-pop {
+  0% { transform: scale(0.82); }
+  60% { transform: scale(1.12); }
+  100% { transform: scale(1); }
 }
 
-.mobile-tab.active { color: var(--scc-red); }
+/* Primary (centre) tab — the main check-in action, raised out of the dock as a
+   brand-red disc so it reads as THE thing to tap, the way native apps treat a
+   centre action. Sits in normal flow (no absolute positioning) so the evenly
+   spaced tab widths — and the dock's own centring — stay intact. */
+.mobile-tab.primary .mobile-tab-icon {
+  width: 46px; height: 46px; margin-top: -16px; margin-bottom: 1px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--scc-red), var(--scc-red-700));
+  color: #fff;
+  align-items: center; justify-content: center;
+  border: 3px solid var(--surface);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--scc-red) 45%, transparent);
+  transition: transform 0.14s ease;
+}
+.mobile-tab.primary { color: var(--scc-red); }
+.mobile-tab.primary:active .mobile-tab-icon { transform: scale(0.92); }
+/* The raised disc already carries the brand colour, so the active pill behind
+   it would just muddy things — keep the label tinted instead. */
+.mobile-tab.primary.active { background: transparent; }
+.mobile-tab.primary.active svg { filter: none; }
+
+/* Icon wrapper — anchors the live notification badge to the icon's top-right. */
+.mobile-tab-icon { position: relative; display: inline-flex; }
+.mobile-tab-badge {
+  position: absolute;
+  top: -7px;
+  left: 100%;
+  transform: translateX(-45%);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--scc-red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  border: 2px solid var(--surface);
+  box-sizing: content-box;
+}
+
+/* Topbar connectivity + trip-context chips (native-app status header). */
+.mobile-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-body); /* topbar forces the serif display font otherwise */
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.mobile-trip-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+.mobile-trip-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mobile-sync-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
+.mobile-sync-dot.pulse { animation: mobile-sync-pulse 1.8s ease-in-out infinite; }
+@keyframes mobile-sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-tab, .mobile-tab.active svg, .mobile-sync-dot.pulse { animation: none; transition: none; }
+}
+
+/* ==========================================================================
+   Shared mobile primitives — one visual language across every /mobile/* page.
+   Built entirely on the existing SCCCI tokens (brand red, five-state status
+   colors, --surface/--line/--ink) so light + dark both work automatically.
+   Page files compose these instead of re-declaring inline styles, which is
+   what keeps Home / Ops / Trips / Issues / Profile / Guide feeling like one
+   designed app rather than several.
+   ========================================================================== */
+
+/* Section eyebrow + header row (uppercase label, optional trailing action). */
+.m-eyebrow {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.m-section { margin-top: 22px; }
+.m-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 10px;
+}
+.m-section-head .m-eyebrow { display: inline-flex; align-items: center; gap: 7px; }
+
+/* Page title block (serif display name + supporting line). */
+.m-page-title { font-family: var(--font-display); font-size: 23px; line-height: 1.15; margin: 2px 0; }
+
+/* Brand-red hero — the signature panel (active trip, page headers). A soft
+   radial glow lifts it off flat. Text is always white on this surface. */
+.m-hero {
+  position: relative; overflow: hidden; color: #fff;
+  border-radius: var(--r-lg); padding: 16px 18px;
+  background: linear-gradient(135deg, var(--scc-red) 0%, var(--scc-red-700) 100%);
+  box-shadow: var(--shadow-md);
+}
+.m-hero-glow {
+  position: absolute; top: -45%; right: -12%; width: 220px; height: 220px;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(255,255,255,0.22), transparent 70%);
+}
+.m-hero-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.85; position: relative; }
+.m-hero-pill { display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.20); color: #fff; font-size: 12px; font-weight: 700; padding: 5px 11px; border-radius: 999px; }
+
+/* Stat tile grid — glanceable KPI numbers, each optionally a tap target. */
+.m-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.m-stat {
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-sm);
+  padding: 13px 14px; width: 100%; text-align: left;
+  color: inherit; font: inherit; transition: transform .06s, border-color .15s;
+}
+.m-stat:active { transform: scale(0.98); }
+.m-stat-label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); }
+.m-stat-value { font-size: 27px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+
+/* Tappable nav/action tile — leading icon chip, title + sub, trailing chevron. */
+.m-tile {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-sm);
+  padding: 13px 14px; text-align: left; color: inherit; font: inherit;
+  transition: transform .06s, border-color .15s, background .15s;
+}
+.m-tile:active { transform: scale(0.985); }
+.m-tile-ic {
+  flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--scc-red-tint); color: var(--scc-red);
+}
+.m-tile-body { min-width: 0; flex: 1; }
+.m-tile-title { font-size: 14px; font-weight: 700; }
+.m-tile-sub { font-size: 12px; color: var(--ink-3); margin-top: 1px; }
+
+/* Rows inside a list card. */
+.m-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--surface-2); border: 1px solid var(--line);
+  text-align: left; color: inherit; font: inherit;
+  transition: transform .06s, background .15s;
+}
+.m-row:active { transform: scale(0.99); }
+.m-row + .m-row { margin-top: 6px; }
+
+/* Empty state — invitation, not an apology. */
+.m-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-align: center; padding: 30px 20px; color: var(--ink-3);
+}
+.m-empty-ic {
+  width: 46px; height: 46px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line);
+}
+
+/* Filter / segmented chips. */
+.m-chip-row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+.m-chip {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 13px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink-2); font-size: 12.5px; font-weight: 700;
+  white-space: nowrap; transition: background .15s, color .15s, border-color .15s;
+}
+.m-chip.active { background: var(--scc-red-tint); color: var(--scc-red); border-color: var(--scc-red-tint-2); }
+
+/* Thin progress bar. */
+.m-progress { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.m-progress > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--st-present), #34d399); transition: width .4s ease; }
+
+/* Spinner + subtle entrance, centralized (pages used to inline these). */
+.spin { animation: mg-spin 0.9s linear infinite; }
+@keyframes mg-spin { to { transform: rotate(360deg); } }
+.m-fade-in { animation: m-fade-in .28s ease-out both; }
+@keyframes m-fade-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .m-fade-in, .spin { animation: none; }
+  .m-stat, .m-tile, .m-row { transition: none; }
+}

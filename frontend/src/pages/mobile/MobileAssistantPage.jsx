@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Bot } from "lucide-react";
+import { Send, Bot, Sparkles } from "lucide-react";
 import { apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -8,7 +8,7 @@ import { useLang } from "../../lib/i18n.jsx";
  * POST /api/chat/messages endpoint used by the desktop ChatAssistantPage.
  * No backend changes needed; same auth, same route.
  */
-export default function MobileAssistantPage() {
+export default function MobileAssistantPage({ embedded = false }) {
   const { t } = useLang();
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -19,8 +19,8 @@ export default function MobileAssistantPage() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, sending]);
 
-  async function send() {
-    const text = draft.trim();
+  async function send(textArg) {
+    const text = (typeof textArg === "string" ? textArg : draft).trim();
     if (!text || sending) return;
     const history = [...messages, { role: "USER", content: text }];
     setMessages(history);
@@ -38,16 +38,33 @@ export default function MobileAssistantPage() {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)" }}>
-      <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 4 }}>
-        {t("Assistant")}
-      </div>
-      <h1 style={{ fontSize: 22, margin: "0 0 12px" }}>{t("Ask about the trip")}</h1>
+    <div className="m-fade-in" style={{ display: "flex", flexDirection: "column", height: embedded ? "100%" : "calc(100vh - 180px)" }}>
+      {!embedded && (<>
+        <div className="m-eyebrow">{t("Assistant")}</div>
+        <h1 className="m-page-title" style={{ marginBottom: 12 }}>{t("Ask about the trip")}</h1>
+      </>)}
 
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 8 }}>
         {messages.length === 0 && (
-          <div className="mobile-card muted" style={{ fontSize: 13 }}>
-            {t('Try: "Who is missing from Coach 2?" or "Generate an attendance report."')}
+          <div>
+            <div className="mobile-card" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
+              <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                {t("Ask me anything about this trip — headcounts, who's missing, or a quick report.")}
+              </div>
+            </div>
+            <div className="m-eyebrow" style={{ margin: "4px 2px 8px" }}>{t("Try asking")}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {[
+                t("Who is missing from Coach 2?"),
+                t("Generate an attendance report."),
+                t("How many delegates are late?"),
+              ].map((q) => (
+                <button key={q} className="m-row" onClick={() => send(q)} style={{ fontSize: 13, fontWeight: 600 }}>
+                  <Sparkles size={15} style={{ color: "var(--scc-red)", flexShrink: 0 }} /> {q}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m, i) =>
@@ -57,7 +74,7 @@ export default function MobileAssistantPage() {
             </div>
           ) : (
             <div key={i} className="row" style={{ alignItems: "flex-start", gap: 8, maxWidth: "90%" }}>
-              <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={14} /></span>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={14} /></span>
               <div style={{
                 background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)",
                 border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)",

@@ -1,0 +1,610 @@
+/* =============================================================================
+ * frontend/src/pages/TripCoachPage.css
+ * Owner: Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
+ *
+ * NEW FILE — scoped entirely to this feature. Everything in here is namespaced
+ * under .tf-root (every element TripCoachPage.jsx/TripsListPage.jsx render is
+ * wrapped in a <div className="tf-root">), so nothing here can leak onto or
+ * clash with tokens.css (owned by JQ, not touched) or any other page.
+ *
+ * Color system (per the original design brief):
+ *   blue = info · green = success · yellow = warning · red = critical
+ *   purple = VIP · grey = completed / neutral
+ *
+ * v4 — RESET TO REFERENCE. A concrete "Screen 3" mockup (flat, minimal,
+ * boxy — plain white cards, thin borders, no gradients, no dark mode, no
+ * glassmorphism) is now the actual target for this page, replacing the more
+ * "premium dashboard" direction v2/v3 took. This version:
+ *   - flattens every shared token (much lighter shadows, no gradient/glass
+ *     variables — nothing here needs them anymore),
+ *   - removes dark mode from the coach board itself (CoachBoardView never
+ *     applies .tf-dark — see TripCoachPage.jsx),
+ *   - rebuilds the hero, itinerary, fleet cards, and delegate cards to match
+ *     the reference layout (see TripCoachPage.jsx's header comment for the
+ *     full before/after per component).
+ *
+ * PORTED INTO THE INTEGRATION BRANCH (this copy): the standalone v4 build
+ * this came from never went through the JQ-branch integration pass, so two
+ * things had to be added back on top of the plain v4 file to avoid breaking
+ * TripsListPage.jsx (untouched, not part of this port):
+ *   - .tf-root.tf-dark — TripsListPage.jsx still runs its own dark-mode
+ *     toggle (mirrors the app-wide theme) and needs these variable
+ *     overrides; the coach board itself just never applies the class.
+ *   - .tf-topbar / .tf-status-chip — layout/pill classes TripsListPage.jsx
+ *     already relies on that plain v4 renamed or dropped for the board.
+ *
+ * Reassignment polish added on top of the v4 port (still flat/boxy, no new
+ * gradients or shadows beyond what v4 already uses):
+ *   - Drop-target feedback recolored from red to blue. Red is this file's
+ *     documented "critical" color; using it for an ordinary, valid drop
+ *     zone read as a warning instead of an invitation. Blue ("info") is
+ *     reserved for exactly this kind of neutral in-progress state.
+ *   - A coach already at/over capacity now flags itself in red ("Full")
+ *     while something is being dragged over it, instead of accepting the
+ *     drop silently — real signal for a reassignment decision, not just
+ *     decoration.
+ *   - Fleet cards get a small lift + ring shadow on drop-target/hover so the
+ *     drag target reads clearly against the flat, low-shadow v4 palette.
+ * ========================================================================== */
+
+.tf-root {
+  --tf-blue: #2563eb;      --tf-blue-bg: #eff6ff;      --tf-blue-line: #bfdbfe;
+  --tf-green: #15803d;     --tf-green-bg: #f0fdf4;     --tf-green-line: #bbf7d0;
+  --tf-yellow: #b45309;    --tf-yellow-bg: #fffbeb;    --tf-yellow-line: #fde68a;
+  --tf-red: #dc2626;       --tf-red-bg: #fef2f2;       --tf-red-line: #fecaca;
+  --tf-purple: #9333ea;    --tf-purple-bg: #faf5ff;    --tf-purple-line: #e9d5ff;
+  --tf-grey: #64748b;      --tf-grey-bg: #f1f5f9;      --tf-grey-line: #e2e8f0;
+  --tf-orange: #ea580c;    --tf-orange-bg: #fff7ed;    --tf-orange-line: #fed7aa; /* LATE status (5-status model) */
+
+  --tf-bg: #f6f7fb;
+  --tf-surface: #ffffff;
+  --tf-surface-2: #f6f7fa;
+  --tf-border: #e5e7eb;
+  --tf-text: #0f172a;
+  --tf-text-2: #475569;
+  --tf-text-3: #64748b;
+  --tf-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --tf-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.05);
+  --tf-shadow-lg: 0 16px 40px rgba(15, 23, 42, 0.16), 0 4px 12px rgba(15, 23, 42, 0.08);
+  --tf-radius-sm: 10px;
+  --tf-radius-md: 14px;
+  --tf-radius-lg: 16px;
+
+  color: var(--tf-text);
+  font-family: inherit;
+}
+
+/* Used by BOTH TripsListPage.jsx's and CoachBoardView's dark-mode toggle
+ * (mirrors the app-wide theme — see useTfTheme in TripsListPage.jsx; the
+ * board applies this class too as of 2026-07-23, previously never did — see
+ * TripCoachPage.jsx's header). Colors REFERENCE the same app-wide tokens.css
+ * variables (--bg/--surface/--ink/--line, flipped by :root[data-theme="dark"]
+ * in tokens.css) instead of a separately hand-picked palette, so this page's
+ * dark mode is guaranteed pixel-identical to the Dashboard/every other page's
+ * — no risk of the two drifting apart or looking like a slightly different
+ * shade of dark. */
+.tf-root.tf-dark {
+  --tf-bg: var(--bg);
+  --tf-surface: var(--surface);
+  --tf-surface-2: var(--surface-2);
+  --tf-border: var(--line);
+  --tf-text: var(--ink);
+  --tf-text-2: var(--ink-2);
+  --tf-text-3: var(--ink-3);
+  --tf-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --tf-shadow-md: 0 6px 24px rgba(0, 0, 0, 0.45);
+  --tf-shadow-lg: 0 24px 56px rgba(0, 0, 0, 0.55);
+
+  --tf-blue: #60a5fa;   --tf-blue-bg: rgba(96, 165, 250, 0.14);   --tf-blue-line: rgba(96, 165, 250, 0.3);
+  --tf-green: #4ade80;  --tf-green-bg: rgba(74, 222, 128, 0.14);  --tf-green-line: rgba(74, 222, 128, 0.3);
+  --tf-yellow: #fbbf24; --tf-yellow-bg: rgba(251, 191, 36, 0.14); --tf-yellow-line: rgba(251, 191, 36, 0.3);
+  --tf-red: #f87171;    --tf-red-bg: rgba(248, 113, 113, 0.14);   --tf-red-line: rgba(248, 113, 113, 0.3);
+  --tf-purple: #c084fc; --tf-purple-bg: rgba(192, 132, 252, 0.14); --tf-purple-line: rgba(192, 132, 252, 0.3);
+  --tf-grey: #94a3b8;   --tf-grey-bg: rgba(148, 163, 184, 0.14);  --tf-grey-line: rgba(148, 163, 184, 0.3);
+  --tf-orange: #fb923c; --tf-orange-bg: rgba(251, 146, 60, 0.14); --tf-orange-line: rgba(251, 146, 60, 0.3);
+}
+
+.tf-root { background: var(--tf-bg); }
+
+/* ---- base resets scoped to this feature only ------------------------------ */
+.tf-root, .tf-root * { box-sizing: border-box; }
+.tf-root button { font-family: inherit; }
+.tf-root :focus-visible {
+  outline: 2px solid var(--tf-blue);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tf-root * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+}
+
+/* ---- layout shell ---------------------------------------------------------- */
+.tf-page { padding: 28px 32px 60px; min-height: 100%; }
+@media (max-width: 860px) { .tf-page { padding: 16px 14px 90px; } }
+
+.tf-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+.tf-back-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+  border: 1px solid var(--tf-border); background: var(--tf-surface); color: var(--tf-text-2); border-radius: 999px;
+  cursor: pointer; transition: background 0.15s ease;
+}
+.tf-back-btn:hover { background: var(--tf-surface-2); }
+
+/* ---- Hero (plain contextual header — title + status pill + actions, one
+ * subtitle line below with date / fleet / delegate / lead — matches the
+ * reference exactly; no gradient, no LIVE badge, no clock, no progress bar,
+ * no KPI cards). ------------------------------------------------------------ */
+.tf-hero {
+  background: var(--tf-surface); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-lg);
+  padding: 22px 26px; margin-bottom: 20px; box-shadow: var(--tf-shadow-sm);
+}
+.tf-hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.tf-hero-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tf-hero-eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tf-text-3); }
+.tf-hero-title { font-size: 26px; font-weight: 800; line-height: 1.2; color: var(--tf-text); }
+@media (max-width: 640px) { .tf-hero-title { font-size: 21px; } .tf-hero { padding: 18px; } }
+.tf-hero-sub { font-size: 13.5px; color: var(--tf-text-2); margin-top: 8px; }
+.tf-hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.tf-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; font-size: 13px; font-weight: 700;
+  border-radius: 999px; border: 1px solid transparent; cursor: pointer; transition: background 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+.tf-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.tf-btn-solid { background: var(--tf-surface); color: var(--tf-text); border-color: var(--tf-border); }
+.tf-btn-solid:not(:disabled):hover { background: var(--tf-surface-2); }
+.tf-btn-primary { background: var(--tf-text); color: var(--tf-surface); }
+.tf-btn-primary:not(:disabled):hover { background: #000; }
+.tf-btn-ghost { background: transparent; color: var(--tf-text-2); border-color: var(--tf-border); }
+.tf-btn-ghost:not(:disabled):hover { background: var(--tf-surface-2); }
+.tf-btn-sm { padding: 6px 12px; font-size: 12px; }
+.tf-btn-icon-only { padding: 8px; border-radius: 999px; }
+
+/* ---- Cards / sections -------------------------------------------------------- */
+.tf-card {
+  background: var(--tf-surface); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-md);
+  box-shadow: var(--tf-shadow-sm); padding: 20px 22px; margin-bottom: 20px;
+}
+.tf-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.tf-section-title { font-size: 17px; font-weight: 800; display: flex; align-items: center; gap: 8px; color: var(--tf-text); }
+.tf-section-sub { font-size: 12.5px; color: var(--tf-text-3); margin-top: 3px; }
+.tf-section-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tf-text-3); margin-bottom: 2px; }
+
+/* ---- Journey timeline: plain arrow-chain of stop boxes (no route line, no
+ * animated bus, no coordinate math) — matches the reference's "08:00 Hotel
+ * breakfast → 09:30 ... → 14:30 NOW Forbidden City → ..." row. ---------------- */
+.tf-stop-chain { display: flex; align-items: stretch; gap: 8px; flex-wrap: nowrap; overflow-x: auto; padding: 2px; }
+@media (max-width: 720px) { .tf-stop-chain { flex-wrap: nowrap; } }
+.tf-stop-box {
+  flex: 1 1 150px; min-width: 128px; background: var(--tf-surface-2); border: 1px solid var(--tf-border);
+  border-radius: var(--tf-radius-sm); padding: 11px 13px;
+}
+.tf-stop-box.is-now { background: var(--tf-surface); border: 2px solid var(--tf-red); }
+.tf-stop-box.is-done { opacity: 0.6; }
+.tf-stop-box-time { font-size: 13.5px; font-weight: 800; color: var(--tf-text); display: flex; align-items: center; gap: 6px; }
+.tf-stop-box.is-now .tf-stop-box-time { color: var(--tf-red); }
+.tf-stop-now-text { font-size: 11px; font-weight: 800; letter-spacing: 0.04em; color: var(--tf-red); }
+.tf-stop-box-title { font-size: 12.5px; color: var(--tf-text-2); margin-top: 2px; }
+.tf-stop-arrow { display: flex; align-items: center; color: var(--tf-text-3); flex-shrink: 0; }
+
+/* Stop-box as a clickable div (edit mode: click body to open the live-status
+ * editor; the check button inside toggles "completed" via stopPropagation). */
+.tf-stop-box[role="button"] { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.tf-stop-box[role="button"]:hover { border-color: var(--tf-text-3); }
+.tf-stop-box.is-open { box-shadow: 0 0 0 2px var(--tf-blue-bg); border-color: var(--tf-blue); }
+
+/* Per-stop completion check-off → crossed out. */
+.tf-stop-check {
+  display: inline-flex; align-items: center; justify-content: center; padding: 0; margin-right: 2px;
+  background: none; border: none; cursor: pointer; color: var(--tf-text-3); flex-shrink: 0; border-radius: 999px;
+}
+.tf-stop-check:hover { color: var(--tf-green); }
+.tf-stop-box.is-completed { background: var(--tf-surface-2); border-color: var(--tf-border); }
+.tf-stop-box.is-completed .tf-stop-box-time { color: var(--tf-text-3); }
+.tf-stop-box.is-completed .tf-stop-box-title { text-decoration: line-through; color: var(--tf-text-3); }
+
+/* Live per-stop status (delayed / moved / cancelled). */
+.tf-stop-tag { font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 999px; letter-spacing: 0.02em; white-space: nowrap; }
+.tf-stop-box.is-delayed   { border-color: var(--tf-orange-line); }
+.tf-stop-box.is-delayed   .tf-stop-box-time { color: var(--tf-orange); }
+.tf-stop-box.is-moved     { border-color: var(--tf-blue-line); }
+.tf-stop-box.is-cancelled { border-color: var(--tf-red-line); background: var(--tf-red-bg); }
+.tf-stop-box.is-cancelled .tf-stop-box-title { text-decoration: line-through; color: var(--tf-text-3); }
+
+/* Inline live-status editor (appears below the chain when a stop is picked).
+ * Two grouped ideas: "Schedule status" (on time/delayed/moved/cancelled) and
+ * "Completed" (a manual tick), with delay/move revealing a second sub-row. */
+.tf-stop-status-editor {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 12px; padding: 10px 12px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-surface-2); border: 1px solid var(--tf-border);
+}
+.tf-editor-label { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--tf-text-3); }
+.tf-editor-divider { width: 1px; height: 20px; background: var(--tf-border); }
+.tf-editor-sub {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-top: 8px; border-top: 1px dashed var(--tf-border);
+}
+.tf-input.tf-num { width: 52px; padding: 5px 8px; text-align: center; }
+
+/* Schedule summary strip (Day X of Y · Now · Next · on-schedule/late pill). */
+.tf-schedule {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 4px 0 4px; font-size: 12.5px; color: var(--tf-text-2);
+}
+.tf-schedule-day { font-weight: 800; color: var(--tf-text); }
+.tf-schedule-part { color: var(--tf-text-2); }
+.tf-schedule-part strong { color: var(--tf-text-3); font-weight: 700; }
+.tf-schedule-sep { color: var(--tf-text-3); }
+.tf-schedule-spacer { flex: 1 1 auto; }
+.tf-schedule-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 800; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+
+/* Coach bus-arrival badge (cycles not-arrived → en-route → arrived when editable). */
+.tf-arrival-badge {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 6px;
+  font-size: 10.5px; font-weight: 800; padding: 3px 9px; border-radius: 999px;
+  border: none; white-space: nowrap; letter-spacing: 0.01em;
+}
+.tf-arrival-badge.is-clickable { cursor: pointer; transition: filter 0.12s ease, transform 0.12s ease; }
+.tf-arrival-badge.is-clickable:hover { filter: brightness(0.96); }
+.tf-arrival-badge.is-clickable:active { transform: scale(0.97); }
+
+/* ---- Planning / Completed itinerary overview (whole plan, grouped by day) --- */
+.tf-plan { display: flex; flex-direction: column; gap: 14px; }
+.tf-plan-day { }
+.tf-plan-day-label { font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--tf-text-3); margin-bottom: 6px; }
+.tf-plan-stops { display: flex; flex-direction: column; gap: 6px; }
+.tf-plan-stop {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-surface-2); border: 1px solid var(--tf-border); font-size: 13px;
+}
+.tf-plan-stop.is-completed .tf-plan-title { text-decoration: line-through; color: var(--tf-text-3); }
+.tf-plan-time { font-weight: 800; color: var(--tf-text); min-width: 44px; flex-shrink: 0; }
+.tf-plan-title { color: var(--tf-text-2); flex: 1; min-width: 0; }
+
+/* ---- Trip summary bar (readiness for Planning · results for Completed) ------ */
+.tf-summary-bar {
+  display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  background: var(--tf-surface); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-md);
+  box-shadow: var(--tf-shadow-sm); padding: 14px 20px; margin-bottom: 20px;
+}
+.tf-summary-eyebrow { font-size: 11px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; color: var(--tf-text-3); }
+.tf-summary-stat { display: flex; flex-direction: column; gap: 1px; }
+.tf-summary-stat-label { font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--tf-text-3); }
+.tf-summary-stat-value { font-size: 17px; font-weight: 800; color: var(--tf-text); }
+
+/* ---- Capacity planner (Planning) ------------------------------------------- */
+.tf-planner {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px; margin: 4px 0 14px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-surface-2); border: 1px dashed var(--tf-border);
+}
+.tf-planner-label { font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--tf-text-3); }
+.tf-planner-field { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.tf-planner-result { font-size: 13px; color: var(--tf-text-2); }
+.tf-planner-result strong { color: var(--tf-text); }
+.tf-planner-ok { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--tf-green); }
+
+/* ---- Fleet / coach assignments -----------------------------------------------
+ * Plain bordered columns, no shadow beyond the outer card, no progress bar,
+ * no driver/guide/ETA rows on the card face (still editable via the existing
+ * "Switch staff" modal — just not shown here, matching the reference).
+ *
+ * Reassignment polish: drop-target feedback is blue (info) by default, with
+ * a small lift + ring shadow so it reads clearly against the flat palette.
+ * It switches to red only when the hovered coach is already at/over
+ * capacity — a real "don't drop here" signal, not just decoration. --------- */
+.tf-fleet-scroll {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; padding: 4px 0 2px; align-items: start;
+}
+.tf-fleet-card {
+  position: relative; background: var(--tf-surface); border: 1px solid var(--tf-border);
+  border-radius: var(--tf-radius-md); padding: 15px; box-shadow: var(--tf-shadow-sm);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  display: flex; flex-direction: column;
+}
+.tf-fleet-card:hover { box-shadow: var(--tf-shadow-md); }
+.tf-fleet-card.is-drop-target { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg), var(--tf-shadow-md); transform: translateY(-2px); }
+.tf-fleet-card.is-drop-target.is-full { border-color: var(--tf-red); box-shadow: 0 0 0 3px var(--tf-red-bg), var(--tf-shadow-md); }
+.tf-fleet-card.is-unassigned { background: var(--tf-yellow-bg); border-style: dashed; box-shadow: none; }
+.tf-fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.tf-fleet-label { font-size: 16px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; color: var(--tf-text); display: flex; align-items: center; gap: 6px; letter-spacing: -0.01em; }
+.tf-fleet-label-ico { color: var(--tf-text-3); flex-shrink: 0; }
+.tf-fleet-sub { font-size: 12px; color: var(--tf-text-2); font-weight: 600; margin-top: 3px; }
+.tf-fleet-captain { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; color: var(--tf-text-2); margin-top: 6px; }
+.tf-fleet-captain svg { color: var(--tf-text-3); }
+.tf-fleet-drop-label { font-size: 12px; color: var(--tf-blue); font-weight: 700; margin-top: 3px; }
+.tf-fleet-drop-label.is-full { color: var(--tf-red); }
+.tf-badge-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 800; padding: 4px 11px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+/* Coach capacity / seat indicator */
+.tf-fleet-capacity { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.tf-fleet-cap-track { flex: 1; height: 10px; border-radius: 999px; background: var(--tf-grey-bg); overflow: hidden; box-shadow: inset 0 0 0 1px rgba(15,23,42,0.04); }
+.tf-fleet-cap-fill { display: block; height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+.tf-fleet-cap-label { font-size: 12.5px; font-weight: 800; white-space: nowrap; flex-shrink: 0; letter-spacing: -0.01em; }
+/* Per-delegate status pill on the card */
+.tf-del-status { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
+
+/* ---- Generic KPI summary cards (Trips overview, etc.) --------------------- */
+.tf-kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+.tf-kpi { display: flex; flex-direction: column; gap: 3px; padding: 14px 16px; border-radius: var(--tf-radius-md); border: 1px solid var(--tf-border); background: var(--tf-surface); box-shadow: var(--tf-shadow-sm); }
+.tf-kpi-n { font-size: 30px; font-weight: 800; line-height: 1; letter-spacing: -0.03em; color: var(--tf-text); }
+.tf-kpi-l { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tf-text-3); }
+.tf-kpi.is-green { border-top: 3px solid var(--tf-green); }
+.tf-kpi.is-green .tf-kpi-n { color: var(--tf-green); }
+.tf-kpi.is-blue { border-top: 3px solid var(--tf-blue); }
+.tf-kpi.is-blue .tf-kpi-n { color: var(--tf-blue); }
+.tf-kpi.is-grey { border-top: 3px solid var(--tf-grey); }
+.tf-kpi.is-ink { border-top: 3px solid var(--tf-text); }
+.tf-kpi.is-orange { border-top: 3px solid var(--tf-orange); }
+.tf-kpi.is-orange .tf-kpi-n { color: var(--tf-orange); }
+.tf-kpi.is-red { border-top: 3px solid var(--tf-red); }
+.tf-kpi.is-red .tf-kpi-n { color: var(--tf-red); }
+.tf-kpi.is-yellow { border-top: 3px solid var(--tf-yellow); }
+.tf-kpi.is-yellow .tf-kpi-n { color: var(--tf-yellow); }
+@media (max-width: 640px) { .tf-kpi-row, .tf-att-summary { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- Live command-centre KPI row (in-progress board) --------------------- */
+.tf-kpi-row-5 { grid-template-columns: repeat(5, 1fr); }
+@media (max-width: 760px) { .tf-kpi-row-5 { grid-template-columns: repeat(2, 1fr); } }
+
+/* Coach status accent rail */
+.tf-fleet-card.has-missing { border-left: 3px solid var(--tf-red); }
+.tf-fleet-card.all-in { border-left: 3px solid var(--tf-green); }
+.tf-badge-count {
+  width: 22px; height: 22px; border-radius: 999px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 800; flex-shrink: 0;
+}
+.tf-fleet-body { flex: 1; min-height: 40px; margin-top: 12px; }
+.tf-fleet-empty { font-size: 12px; color: var(--tf-text-3); text-align: center; padding: 14px 0; }
+.tf-fleet-more {
+  background: none; border: none; color: var(--tf-text-3); font-size: 12px; font-weight: 700; cursor: pointer;
+  padding: 4px 2px; text-align: left; width: 100%;
+}
+.tf-fleet-more:hover { color: var(--tf-blue); }
+.tf-add-fleet-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; min-height: 140px;
+  border: 1.5px dashed var(--tf-border); border-radius: var(--tf-radius-md); color: var(--tf-text-3);
+  background: transparent; cursor: pointer; font-size: 13px; font-weight: 700; transition: all 0.15s ease;
+}
+.tf-add-fleet-card:hover { color: var(--tf-blue); border-color: var(--tf-blue); background: var(--tf-blue-bg); }
+
+/* ---- Delegate cards ------------------------------------------------------------
+ * Trimmed to exactly what the reference shows: avatar + name + drag handle
+ * (on the RIGHT, matching the reference). Company/accessibility/notes still
+ * exist but only surface via the hover/focus tooltip (progressive
+ * disclosure) — kept because it's invisible until interacted with, so it
+ * doesn't change the resting look at all. ------------------------------------- */
+.tf-delegate-card {
+  position: relative;
+  display: flex; align-items: center; gap: 8px; padding: 8px 9px; border-radius: var(--tf-radius-sm);
+  border: 1px solid var(--tf-border); background: var(--tf-surface); margin-bottom: 7px; cursor: grab; user-select: none; touch-action: none;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.tf-delegate-card:hover { box-shadow: var(--tf-shadow-sm); }
+.tf-delegate-card.is-dragging { opacity: 0.3; }
+.tf-delegate-card.is-missing { background: var(--tf-red-bg); border-color: var(--tf-red-line); }
+.tf-delegate-card.is-vip { border-color: var(--tf-purple-line); }
+/* Wrong-coach ("UFO") flag — a delegate sitting on a coach not on this trip. */
+.tf-delegate-card.is-wrongcoach { border-color: var(--tf-red); box-shadow: 0 0 0 2px var(--tf-red-bg); }
+.tf-wrongcoach-tag {
+  display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 999px; color: var(--tf-red); background: var(--tf-red-bg);
+}
+.tf-wrongcoach-banner {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+  padding: 10px 13px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-red-bg); border: 1px solid var(--tf-red-line); color: var(--tf-red);
+  font-size: 12.5px; line-height: 1.4;
+}
+.tf-wrongcoach-banner svg { flex-shrink: 0; }
+.tf-wrongcoach-banner strong { font-weight: 800; }
+/* Scoped-view banner — a coach captain seeing only their own coach. */
+.tf-scope-banner {
+  display: flex; align-items: center; gap: 9px; margin-bottom: 14px;
+  padding: 10px 13px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-blue-bg); border: 1px solid var(--tf-blue-line); color: var(--tf-blue);
+  font-size: 12.5px; line-height: 1.4;
+}
+.tf-scope-banner svg { flex-shrink: 0; }
+.tf-scope-banner strong { font-weight: 800; }
+/* Change-history (audit) list — before → after per event. */
+.tf-audit-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.tf-audit-item { border: 1px solid var(--tf-border); border-radius: var(--tf-radius-sm); padding: 10px 12px; background: var(--tf-surface); }
+.tf-audit-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tf-audit-summary { font-size: 13.5px; font-weight: 800; color: var(--tf-text); }
+.tf-audit-meta { font-size: 11.5px; color: var(--tf-text-2); white-space: nowrap; }
+.tf-audit-diff { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.tf-audit-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.tf-audit-key { min-width: 92px; color: var(--tf-text-3); font-weight: 700; }
+.tf-audit-from { color: var(--tf-red); text-decoration: line-through; }
+.tf-audit-arrow { color: var(--tf-text-3); }
+.tf-audit-to { color: var(--tf-green); font-weight: 700; }
+/* ---- Per-event attendance modal ------------------------------------------- */
+/* Summary KPI row */
+.tf-att-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 18px; }
+.tf-att-kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border); background: var(--tf-surface-2); }
+.tf-att-kpi-n { font-size: 26px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.tf-att-kpi-l { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--tf-text-3); }
+.tf-att-kpi.is-green { background: var(--tf-green-bg); border-color: var(--tf-green-line); }
+.tf-att-kpi.is-green .tf-att-kpi-n { color: var(--tf-green); }
+.tf-att-kpi.is-orange { background: var(--tf-orange-bg); border-color: var(--tf-orange-line); }
+.tf-att-kpi.is-orange .tf-att-kpi-n { color: var(--tf-orange); }
+.tf-att-kpi.is-red { background: var(--tf-red-bg); border-color: var(--tf-red-line); }
+.tf-att-kpi.is-red .tf-att-kpi-n { color: var(--tf-red); }
+.tf-att-kpi.is-grey .tf-att-kpi-n { color: var(--tf-text); }
+
+/* Coach group */
+.tf-att-coach { margin-bottom: 18px; }
+.tf-att-coach-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.tf-att-coach-name { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 800; color: var(--tf-text); }
+.tf-att-coach-count { font-size: 12.5px; font-weight: 700; color: var(--tf-text-2); }
+.tf-att-coach-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--tf-grey-bg); overflow: hidden; }
+.tf-att-coach-bar > span { display: block; height: 100%; background: var(--tf-green); border-radius: 999px; transition: width 0.3s ease; }
+
+/* Delegate rows — taller, alternating tint, coloured left accent by status */
+.tf-att-row { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border); background: var(--tf-surface); margin-bottom: 7px; border-left-width: 3px; }
+.tf-att-row.is-green  { border-left-color: var(--tf-green); }
+.tf-att-row.is-orange { border-left-color: var(--tf-orange); }
+.tf-att-row.is-red    { border-left-color: var(--tf-red); }
+.tf-att-name { font-size: 14px; font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Segmented control — one connected group, filled/checked when active */
+.tf-segmented { display: inline-flex; flex-shrink: 0; border-radius: 9px; overflow: hidden; border: 1px solid var(--tf-border); }
+.tf-seg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; padding: 6px 11px; border: none; border-left: 1px solid var(--tf-border); background: var(--tf-surface); color: var(--tf-text-2); cursor: pointer; transition: background 0.12s ease, color 0.12s ease; }
+.tf-seg:first-child { border-left: none; }
+.tf-seg:hover { background: var(--tf-surface-2); }
+.tf-seg.is-active.is-green  { background: var(--tf-green);  color: #fff; }
+.tf-seg.is-active.is-orange { background: var(--tf-orange); color: #fff; }
+.tf-seg.is-active.is-red    { background: var(--tf-red);    color: #fff; }
+.tf-seg:disabled { opacity: 0.6; cursor: default; }
+
+/* History as a vertical timeline */
+.tf-att-history-title { font-size: 14px; font-weight: 800; margin: 20px 0 12px; padding-top: 16px; border-top: 1px solid var(--tf-border); }
+.tf-att-timeline { display: flex; flex-direction: column; max-height: 34vh; overflow-y: auto; }
+.tf-tl-item { display: flex; gap: 12px; padding-bottom: 14px; position: relative; }
+.tf-tl-item:not(:last-child)::before { content: ""; position: absolute; left: 13px; top: 26px; bottom: 0; width: 2px; background: var(--tf-border); }
+.tf-tl-dot { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 1; }
+.tf-tl-body { min-width: 0; }
+.tf-tl-line { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.tf-tl-line strong { font-weight: 800; }
+.tf-tl-meta { font-size: 12px; color: var(--tf-text-2); margin-top: 2px; }
+.tf-avatar {
+  width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 10.5px; font-weight: 800; flex-shrink: 0;
+}
+.tf-delegate-name { font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; color: var(--tf-text); }
+.tf-chip { display: inline-flex; align-items: center; gap: 3px; font-size: 9.5px; font-weight: 800; padding: 2px 6px; border-radius: 999px; }
+.tf-chip-vip { color: var(--tf-purple); background: var(--tf-purple-bg); }
+.tf-chip-access { color: var(--tf-blue); background: var(--tf-blue-bg); }
+.tf-drag-handle { color: var(--tf-text-3); flex-shrink: 0; }
+
+.tf-delegate-tooltip {
+  position: absolute; left: 4px; right: 4px; top: calc(100% + 4px); z-index: 20;
+  background: var(--tf-text); color: var(--tf-surface); border-radius: 8px; padding: 8px 10px;
+  font-size: 11.5px; line-height: 1.45; box-shadow: var(--tf-shadow-lg);
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  pointer-events: none;
+}
+.tf-delegate-tooltip div + div { margin-top: 4px; }
+.tf-delegate-tooltip strong { color: inherit; opacity: 0.75; font-weight: 700; }
+.tf-delegate-card:hover .tf-delegate-tooltip,
+.tf-delegate-card:focus-within .tf-delegate-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+
+/* ---- Search / filter bar (kept only where still used — the trip list page) --- */
+.tf-search {
+  flex: 1 1 220px; display: flex; align-items: center; gap: 8px; background: var(--tf-surface-2);
+  border: 1px solid var(--tf-border); border-radius: 999px; padding: 8px 14px;
+}
+.tf-search input { border: none; background: none; outline: none; font-size: 13px; flex: 1; color: var(--tf-text); }
+
+/* ---- Status pill (TripsListPage.jsx's per-trip status chip — same look as
+ * .tf-badge-pill, kept as its own class since that file isn't part of this
+ * port). --------------------------------------------------------------------- */
+.tf-status-chip { font-size: 10.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; white-space: nowrap; letter-spacing: 0.02em; }
+
+/* ---- Toasts (flattened) ------------------------------------------------------------ */
+.tf-toast-stack { position: fixed; top: 18px; right: 18px; z-index: 4000; display: flex; flex-direction: column; gap: 8px; width: 300px; max-width: calc(100vw - 32px); }
+.tf-toast {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border-radius: var(--tf-radius-sm);
+  background: var(--tf-surface); border: 1px solid var(--tf-border); box-shadow: var(--tf-shadow-md);
+  animation: tf-toast-in 0.18s ease-out;
+}
+@keyframes tf-toast-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+.tf-toast-icon { flex-shrink: 0; margin-top: 1px; }
+.tf-toast-msg { font-size: 12.5px; font-weight: 600; flex: 1; }
+.tf-toast-close { background: none; border: none; color: var(--tf-text-3); cursor: pointer; flex-shrink: 0; }
+
+/* ---- Skeletons ---------------------------------------------------------------------- */
+.tf-skeleton {
+  border-radius: 8px; background: linear-gradient(90deg, var(--tf-border) 25%, var(--tf-surface-2) 37%, var(--tf-border) 63%);
+  background-size: 400% 100%; animation: tf-shimmer 1.4s ease infinite;
+}
+@keyframes tf-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
+/* ---- Modals / confirm dialogs (flattened) -------------------------------------------- */
+.tf-modal-overlay {
+  position: fixed; inset: 0; background: rgba(17, 24, 39, 0.4);
+  display: flex; align-items: center; justify-content: center; z-index: 3000; padding: 20px;
+}
+/* ConfirmDialog reuses .tf-modal-overlay but must always render ABOVE any
+   other modal it's opened on top of (e.g. the delete confirm inside Edit
+   itinerary) — same z-index on both meant whichever modal came LATER in the
+   JSX painted on top by default DOM stacking order, hiding the confirm
+   dialog behind it instead of over it. 2026-07-23 fix. */
+.tf-modal-overlay--confirm { z-index: 3100; }
+.tf-modal-card {
+  background: var(--tf-surface); color: var(--tf-text); border-radius: var(--tf-radius-md); box-shadow: var(--tf-shadow-lg);
+  width: 100%; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--tf-border);
+}
+.tf-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px; border-bottom: 1px solid var(--tf-border); flex-shrink: 0; }
+.tf-modal-body { padding: 20px 22px; overflow-y: auto; }
+.tf-modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px; border-top: 1px solid var(--tf-border); background: var(--tf-surface-2); flex-shrink: 0; }
+.tf-field-label { display: block; font-size: 12.5px; font-weight: 800; color: var(--tf-text); margin-bottom: 6px; }
+.tf-req { color: var(--tf-red); font-weight: 800; }
+.tf-help { font-size: 12px; color: var(--tf-text-3); margin: 4px 0 14px; line-height: 1.4; }
+.tf-form-error { color: var(--tf-red); font-size: 13px; font-weight: 600; margin-top: 10px; }
+/* Grouped form section heading */
+.tf-form-section {
+  font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--tf-text-3);
+  margin: 6px 0 12px; padding-bottom: 7px; border-bottom: 1px solid var(--tf-border);
+}
+.tf-form-section:not(:first-child) { margin-top: 22px; }
+.tf-btn-lg { padding: 10px 18px; font-size: 14px; font-weight: 800; }
+.tf-input {
+  width: 100%; padding: 10px 12px; border-radius: var(--tf-radius-sm); border: 1px solid var(--tf-border);
+  background: var(--tf-surface); color: var(--tf-text); font-size: 14px; outline: none; transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.tf-input:focus { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg); }
+.tf-input[readonly] { background: var(--tf-surface-2); color: var(--tf-text-2); cursor: default; }
+
+/* ---- Slide-out delegate panel -------------------------------------------------------- */
+.tf-panel-overlay { position: fixed; inset: 0; background: rgba(17,24,39,0.3); z-index: 3000; }
+.tf-panel {
+  position: fixed; top: 0; right: 0; height: 100vh; width: 400px; max-width: 92vw; background: var(--tf-surface);
+  color: var(--tf-text); box-shadow: var(--tf-shadow-lg); z-index: 3001; padding: 26px; overflow-y: auto;
+  transition: transform 0.25s ease; border-left: 1px solid var(--tf-border);
+}
+
+/* ---- Floating action button (mobile) --------------------------------------------------- */
+.tf-fab-stack { position: fixed; right: 18px; bottom: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 900; }
+.tf-fab {
+  width: 50px; height: 50px; border-radius: 50%; background: var(--tf-text); color: #fff; border: none;
+  display: flex; align-items: center; justify-content: center; box-shadow: var(--tf-shadow-lg); cursor: pointer;
+}
+.tf-fab-mini { width: 40px; height: 40px; background: var(--tf-surface); color: var(--tf-text-2); border: 1px solid var(--tf-border); }
+
+/* ---- Trip list cards (TripsListPage) ---------------------------------------------------- */
+.tf-trip-progress-track { height: 5px; border-radius: 999px; background: var(--tf-border); overflow: hidden; margin-top: 3px; }
+.tf-trip-progress-fill { height: 100%; border-radius: 999px; background: var(--tf-blue); transition: width 0.4s ease; }
+.tf-trip-progress-fill.is-complete { background: var(--tf-grey); }
+.tf-trip-progress-label { font-size: 10.5px; color: var(--tf-text-3); font-weight: 700; margin-top: 4px; }
+
+.tf-empty-illustration {
+  width: 84px; height: 84px; margin: 0 auto 16px; border-radius: 50%; position: relative;
+  display: flex; align-items: center; justify-content: center; background: var(--tf-surface-2); border: 1px solid var(--tf-border);
+}
+.tf-empty-illustration svg:first-child { color: var(--tf-text-3); }
+.tf-empty-illustration .tf-empty-deco {
+  position: absolute; width: 24px; height: 24px; border-radius: 50%; background: var(--tf-surface);
+  border: 1px solid var(--tf-border); display: flex; align-items: center; justify-content: center;
+}
+
+/* ---- Responsive: mobile board layout ----------------------------------------------------- */
+@media (max-width: 720px) {
+  .tf-fleet-scroll { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; }
+  .tf-fleet-card { flex: 0 0 82%; scroll-snap-align: center; }
+  .tf-card { padding: 16px; }
+  .tf-panel { width: 100%; max-width: 100%; }
+}
+
+/* ---- Utility ---------------------------------------------------------------------------- */
+.tf-flex { display: flex; }
+.tf-between { display: flex; align-items: center; justify-content: space-between; }
+.tf-gap-6 { gap: 6px; } .tf-gap-8 { gap: 8px; } .tf-gap-10 { gap: 10px; } .tf-gap-12 { gap: 12px; }
+.tf-muted { color: var(--tf-text-3); }
+.tf-text-2 { color: var(--tf-text-2); }
+.tf-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }

@@ -8,68 +8,41 @@
  *     scanMode === "qr", so it never runs at the same time as Vimal's face
  *     camera. Nothing in his face / voice / low-light pipeline is touched.
  *   - It decodes with jsQR on an off-DOM canvas (no frame is persisted).
- *   - A valid MusterGo delegate badge is registered through Jayden's own
- *     backend route POST /api/checkins/qr (method = 'QR'); the delegate flips
- *     to PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
+ *   - A scanned badge is registered through Vance's boarding-pass endpoint
+ *     (POST /api/onboarding/checkin via qrCheckin()); the delegate flips to
+ *     PRESENT so JQ's dashboard head-count and the reverse-headcount agree.
  *   - Styling uses ONLY tokens.css variables; the one <style> block is
  *     namespaced `jayden-*` so it can't collide with Vimal's `vimal-*` rules.
  *
- *  TWO BADGE FORMATS ARE ACCEPTED:
- *
- *   1. Self-describing badge (the qr-test-codes/ pair) — carries the delegate
- *      inline, registered via Jayden's POST /api/checkins/qr:
- *        {"sys":"MUSTERGO","v":1,"typ":"DELEGATE_BADGE",
- *         "tripId":"t-1","delegateId":"d-1","name":"Lim Wei Jie","sig":"…"}
- *
- *   2. Boarding pass (Vance's Documents → Boarding passes) — encodes only the
- *      delegate's opaque qr_code, e.g. "MG-A1B2C3D4". The code is meaningless
- *      on its own, so it is resolved server-side by Vance's
- *      POST /api/onboarding/checkin, which owns the qr_code → delegate lookup.
- *
- *  Both paths end with the delegate flipped to PRESENT and a 'QR' row in
- *  check_in_logs. Anything else → "QR code invalid".
+ *  BADGE FORMAT: originally this scanner expected its own JSON payload
+ *  ({"sys":"MUSTERGO","typ":"DELEGATE_BADGE","delegateId":"d-1",…}), but
+ *  nothing in the app actually printed that shape — the only real badge
+ *  source is Vance's "Boarding passes" tab (OnboardingPage.jsx), which
+ *  encodes the delegate's plain `qr_code` string (e.g. "MG-86B620A4") from
+ *  the shared `delegates` table. Rather than keep two incompatible QR
+ *  systems, this scanner now reads that same plain code and resolves it via
+ *  qrCheckin() → POST /api/onboarding/checkin — see QR_BADGE_MISMATCH.md for
+ *  the history of why this changed. The old JSON badge / qr-test-codes/
+ *  images no longer scan successfully; re-print/re-share badges from
+ *  "Boarding passes" instead.
  * ============================================================================= */
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import jsQR from "jsqr";
 import { QrCode, CheckCircle2, AlertTriangle, Keyboard, RotateCcw } from "lucide-react";
-import { checkInByQR } from "../lib/exceptionsApi.js";
 import { qrCheckin } from "../lib/claudeParse.js";
 
 const RESULT_MS = 3200;          // how long a result card stays up
 const RESCAN_COOLDOWN_MS = 3500; // ignore the same code re-appearing this soon
 const SCAN_INTERVAL_MS = 200;    // decode cadence
 
-/* A boarding-pass code as minted by newQrCode() in backend/routes/vance.js:
- * "MG-" + 8 hex chars. Matched case-insensitively so a hand-typed code still
- * works; it is upper-cased before lookup because that is how it is stored. */
-const BADGE_CODE_RE = /^MG-[0-9A-F]{8}$/i;
-
-/* Validate a decoded string as a MusterGo delegate badge, in either accepted
- * format (see header). Pure + exported so it can be unit-tested independently
- * of the camera. `kind` tells register() which check-in route resolves it. */
+/* A "badge" is just the delegate's plain qr_code string (see the file banner
+ * above) — trimmed and non-empty is the only client-side shape check;
+ * whether it actually matches a delegate is resolved server-side. Kept as a
+ * named export (not inlined) so it stays independently testable like before. */
 export function parseBadge(raw) {
   if (typeof raw !== "string" || !raw.trim()) return { ok: false };
-  const text = raw.trim();
-
-  // Vance's boarding pass: the QR holds nothing but the delegate's qr_code.
-  if (BADGE_CODE_RE.test(text)) {
-    return { ok: true, kind: "BADGE_CODE", code: text.toUpperCase(), name: null };
-  }
-
-  let data;
-  try { data = JSON.parse(text); } catch { return { ok: false }; }
-  if (!data || typeof data !== "object") return { ok: false };
-  if (data.sys !== "MUSTERGO" || data.typ !== "DELEGATE_BADGE") return { ok: false };
-  if (typeof data.tripId !== "string" || !data.tripId) return { ok: false };
-  if (typeof data.delegateId !== "string" || !data.delegateId) return { ok: false };
-  return {
-    ok: true,
-    kind: "MUSTERGO",
-    tripId: data.tripId,
-    delegateId: data.delegateId,
-    name: typeof data.name === "string" ? data.name : null,
-  };
+  return { ok: true, code: raw.trim() };
 }
 
 /* Short confirmation / error tone via Web Audio — mirrors the scanner's audio
@@ -111,7 +84,7 @@ const JAYDEN_CSS = `
 }
 `;
 
-export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedIn }) {
+export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedIn, facingMode = "environment" }) {
   const [camState, setCamState] = useState("starting"); // starting | live | error
   const [result, setResult] = useState(null);           // { kind, title, sub }
   const [submitting, setSubmitting] = useState(false);
@@ -131,37 +104,36 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     resultTimerRef.current = setTimeout(() => setResult(null), RESULT_MS);
   }, []);
 
-  /* Register a valid badge, or surface a clear failure. */
+  /* Register a scanned/typed code, or surface a clear failure. */
   const register = useCallback(async (badge) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setSubmitting(true);
     try {
-      let name, duplicate;
-      if (badge.kind === "BADGE_CODE") {
-        // Opaque code — only Vance's route can map it to a delegate.
-        const res = await qrCheckin({ code: badge.code, tripId, coachId: coachId || undefined });
-        name = res.delegate?.name || badge.code;
-        duplicate = res.alreadyBoarded;
-      } else {
-        const res = await checkInByQR({ tripId, delegateId: badge.delegateId, coachId });
-        name = res.name || badge.name || badge.delegateId;
-        duplicate = res.duplicate;
-      }
+      const res = await qrCheckin({ code: badge.code, tripId, coachId });
       playTone(true);
       setResult({
         kind: "success",
         title: "Attendance registered",
-        sub: `${name}${duplicate ? " · already checked in" : " · marked present"}`,
+        sub: `${res.delegate?.name || badge.code}${res.alreadyBoarded ? " · already checked in" : " · marked present"}`,
       });
       onCheckedIn?.();
     } catch (e) {
       playTone(false);
+      // Log the exact bytes jsQR handed us — invaluable if a real badge is
+      // ever mis-scanned (partial read, wrong QR, stale/reprinted code, etc.).
+      console.debug("[QRScannerPanel] rejected scan:", JSON.stringify(badge.code));
+      // Coach mismatch (409) gets its own distinct title/tone — this is NOT
+      // "the badge is bad", it's "you're scanning under the wrong coach", a
+      // meaningfully different fix for field staff (switch coach, don't
+      // retry the same scan).
+      const isMismatch = e.status === 409 && e.code === "COACH_MISMATCH";
       const msg =
-        e.status === 404 ? "Badge not recognised on this trip."
+        isMismatch ? e.message
+        : e.status === 404 ? "That badge isn't recognised. Make sure it's from the Boarding passes tab."
         : e.status === 401 ? "Session expired — sign in again."
         : e.message || "Check-in failed — retry, or use Manual.";
-      setResult({ kind: "error", title: "Check-in failed", sub: msg });
+      setResult({ kind: "error", title: isMismatch ? "Coach mismatch" : "QR code invalid", sub: msg });
     } finally {
       setSubmitting(false);
       busyRef.current = false;
@@ -176,22 +148,9 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     lastScanRef.current = { value: raw, at: now };
 
     const badge = parseBadge(raw);
-    if (!badge.ok) {
-      playTone(false);
-      // Log the exact bytes jsQR handed us — invaluable if a real badge is
-      // ever mis-scanned (partial read, wrong QR, stale code, etc.).
-      console.debug("[QRScannerPanel] rejected scan:", JSON.stringify(raw));
-      const preview = raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
-      setResult({
-        kind: "error",
-        title: "QR code invalid",
-        sub: `Not a MusterGo delegate badge. Read: "${preview}"`,
-      });
-      clearResultSoon();
-      return;
-    }
+    if (!badge.ok) return; // empty scan noise — nothing worth showing an error for
     register(badge);
-  }, [register, clearResultSoon]);
+  }, [register]);
 
   /* Camera + decode loop. Runs only while this component is mounted (i.e. only
    * in QR mode), and fully tears down on unmount. */
@@ -201,10 +160,34 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
     async function start() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } }, audio: false,
+          // Ask for a sharp 720p+ stream. Without an explicit resolution the
+          // browser hands back a low default (often 640x480), which — scaled
+          // up to fill this tall viewport via objectFit:cover — looks soft/
+          // blurry and gives jsQR far fewer pixels to lock a QR onto (the
+          // "keeps blurring while scanning" report). `ideal` still gracefully
+          // falls back on webcams that can't do 720p.
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         streamRef.current = stream;
+
+        // Best-effort: nudge the camera into CONTINUOUS autofocus so a badge
+        // held close is kept sharp instead of the sensor hunting in and out.
+        // Silently ignored on devices/browsers that don't expose focusMode
+        // (most laptop webcams are fixed-focus and need no help anyway).
+        try {
+          const track = stream.getVideoTracks()[0];
+          const caps = track?.getCapabilities?.();
+          if (caps && Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+            await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+          }
+        } catch { /* focus control unsupported — the higher resolution still helps */ }
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
@@ -242,7 +225,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
       if (videoRef.current) videoRef.current.srcObject = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handleDecoded]);
+  }, [handleDecoded, facingMode]);
 
   const submitManual = () => {
     const v = manualText.trim();
@@ -254,7 +237,7 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
 
   const S = {
     root: { position: "absolute", inset: 0, overflow: "hidden", borderRadius: "inherit" },
-    video: { width: "100%", height: "100%", objectFit: "cover" },
+    video: { width: "100%", height: "100%", objectFit: "cover", transform: facingMode === "user" ? "scaleX(-1)" : "none" },
     hint: {
       position: "absolute", left: 0, right: 0, bottom: 0, padding: "26px 14px 14px",
       background: "linear-gradient(transparent, rgba(0,0,0,.62))",
@@ -344,10 +327,10 @@ export default function QRScannerPanel({ tripId, coachId, coachLabel, onCheckedI
       {/* Manual entry (also handy on a laptop with no webcam during a demo) */}
       {(showManual || camState === "error") && !result && (
         <div style={S.manualWrap}>
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter badge code or contents</div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Enter badge contents</div>
           <input
             className="input" autoFocus value={manualText}
-            placeholder='MG-A1B2C3D4  ·  or  {"sys":"MUSTERGO",…}'
+            placeholder="e.g. MG-86B620A4"
             onChange={(e) => setManualText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submitManual(); }}
           />

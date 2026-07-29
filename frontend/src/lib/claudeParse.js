@@ -126,7 +126,34 @@ export function getOnboardingContext(tripId) {
   return apiGet(`/onboarding/context${qs}`); // { existingNames, coaches }
 }
 
-/* ---- Boarding passes (QR) + on-site check-in ---------------------------- */
+/* Live "trip pulse" for the page headers — trip context, attendance KPIs, and
+ * the top ranked risks. Cheap (reuses the assistant's cached snapshot). */
+export function getTripPulse() {
+  return apiGet("/assistant/pulse"); // { trip, kpis, risk, asOf }
+}
+
+/* Real trips for the onboarding "Assign to trip" picker. Reads the shared
+ * all-trips list so the option values are the ACTUAL trip ids in the database.
+ * The old hardcoded t-1/t-2/t-3 list only matched the seed trip — the other two
+ * matched no row and silently orphaned every delegate onboarded to them. */
+// Restricted to "In progress" trips (2026-07-24) — a Planning/Completed trip
+// has no live delegates to onboard/print passes for. Same restriction
+// MobileHomePage.jsx already applies to its own trip picker. Both callers
+// (OnboardingPage.jsx, BoardingPassesView.jsx) already reset their selection
+// if the previously-picked trip id no longer appears in this list, so a trip
+// that finishes mid-session falls back cleanly instead of staying selected
+// with no rows to show.
+export async function getTrips() {
+  const data = await apiGet("/all-trips"); // { trips: [{ id, name, dateRange, status, ... }] }
+  const trips = Array.isArray(data?.trips) ? data.trips : [];
+  return trips.filter((t) => t.status === "In progress");
+}
+
+/* ---- Boarding passes (QR) + check-in ------------------------------------ *
+ * qrCheckin() is the badge contract consumed by the on-site scanner
+ * (Jayden's QRScannerPanel, mounted in the shared QR check-in screen) — it
+ * resolves a scanned `qr_code` and boards the delegate. Do not remove.
+ */
 export function getBadges(tripId) {
   return apiGet(`/onboarding/badges?tripId=${encodeURIComponent(tripId || "")}`); // { delegates, coaches, total, present }
 }

@@ -7,18 +7,23 @@
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
-    "seed:demo": "node seed-demo.js",
-    "reset:login": "node reset-login.js"
+    "seed:demo": "node scripts/seed-demo.js",
+    "reset:login": "node scripts/reset-login.js",
+    "seed:team": "node scripts/seed-team.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.10.0",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
+    "tesseract.js": "^7.0.0",
     "unpdf": "^1.6.2"
   }
 }
