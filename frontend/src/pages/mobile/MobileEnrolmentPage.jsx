@@ -10,7 +10,7 @@
 // GET /enroll/lookup (full roster + per-delegate enrolled status).
 
 import { useEffect, useState, useCallback } from "react";
-import { RefreshCw, AlertTriangle, ScanFace, Mic, Bus, ChevronRight, CheckCircle2, Mail, Send, Loader2, Eye } from "lucide-react";
+import { RefreshCw, AlertTriangle, ScanFace, Mic, Bus, ChevronRight, CheckCircle2, Mail, Send, Loader2, Eye, X, Copy, Check } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -33,6 +33,10 @@ export default function MobileEnrolmentPage() {
   const [filter, setFilter] = useState("all");
   const [inviting, setInviting] = useState("");      // delegateId currently sending, or "all"
   const [inviteMsg, setInviteMsg] = useState(null);  // { tone, text }
+  const [preview, setPreview] = useState(null);      // rendered invite being viewed
+  const [previewing, setPreviewing] = useState("");  // delegateId whose preview is loading
+  const [previewTab, setPreviewTab] = useState("html"); // html | text
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
@@ -70,6 +74,25 @@ export default function MobileEnrolmentPage() {
     } catch (e) {
       setInviteMsg({ tone: "missing", text: e.message || t("Could not send that invite.") });
     } finally { setInviting(""); }
+  }
+
+  /* Render the exact email a delegate would receive, without sending it. */
+  async function openPreview(d) {
+    setPreviewing(d.delegateId); setInviteMsg(null); setCopied(false); setPreviewTab("html");
+    try {
+      const r = await apiGet(`/enroll/invite/preview?delegateId=${encodeURIComponent(d.delegateId)}`);
+      setPreview({ ...r, delegate: d });
+    } catch (e) {
+      setInviteMsg({ tone: "missing", text: e.message || t("Could not render that preview.") });
+    } finally { setPreviewing(""); }
+  }
+
+  async function copyLink(link) {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard blocked — the link is on screen to copy by hand */ }
   }
 
   /* Bulk-invite everyone not yet enrolled who has an email on file. */
@@ -238,6 +261,15 @@ export default function MobileEnrolmentPage() {
                       {d.enrolled?.voice && <span className="badge badge-assigned" title={t("Voice enrolled")}><Mic size={11} /></span>}
                       {!done && <span className="badge badge-missing">{t("To do")}</span>}
                       <button
+                        onClick={() => openPreview(d)}
+                        disabled={previewing !== ""}
+                        aria-label={`${t("Preview invite email for")} ${d.name}`}
+                        title={t("Preview the invite email")}
+                        style={{ background: "none", border: "none", padding: 5, display: "flex", color: "var(--ink-3)" }}
+                      >
+                        {previewing === d.delegateId ? <Loader2 size={16} className="spin" /> : <Eye size={16} />}
+                      </button>
+                      <button
                         onClick={() => invite(d)}
                         disabled={inviting !== ""}
                         aria-label={`${t("Email enrolment invite to")} ${d.name}`}
@@ -254,6 +286,102 @@ export default function MobileEnrolmentPage() {
           </div>
         );
       })}
+
+      {/* ---- Email preview sheet -------------------------------------------
+          Renders the real invite in a sandboxed iframe, so it looks exactly
+          as the delegate would see it and its own <body> styles can't leak
+          into the app. */}
+      {preview && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 70 }}
+          onClick={() => setPreview(null)}
+        >
+          <div
+            className="card"
+            style={{ width: "100%", borderRadius: "16px 16px 0 0", maxHeight: "92vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* header */}
+            <div className="row between" style={{ padding: "14px 16px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
+              <div style={{ minWidth: 0 }}>
+                <div className="m-eyebrow">{t("Email preview")}</div>
+                <div style={{ fontWeight: 700, fontSize: 15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {preview.name}
+                </div>
+              </div>
+              <button onClick={() => setPreview(null)} aria-label={t("Close")}
+                style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, flexShrink: 0 }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* meta */}
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+              <MetaRow label={t("To")} value={preview.to || t("No email on file")} tone={preview.to ? null : "late"} />
+              <MetaRow label={t("Subject")} value={preview.subject} />
+              <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 2 }}>
+                <span className={"badge " + (preview.dryRun ? "badge-review" : "badge-present")}>
+                  {preview.dryRun ? t("Dry run — nothing will send") : t("Live — sending is enabled")}
+                </span>
+                {!preview.mailConfigured && <span className="badge badge-missing">{t("SMTP not configured")}</span>}
+              </div>
+            </div>
+
+            {/* html / text toggle */}
+            <div className="row" style={{ gap: 8, padding: "10px 16px", flexShrink: 0 }}>
+              {["html", "text"].map((tab) => (
+                <button key={tab} className={"m-chip" + (previewTab === tab ? " active" : "")} onClick={() => setPreviewTab(tab)}>
+                  {tab === "html" ? t("Rendered") : t("Plain text")}
+                </button>
+              ))}
+            </div>
+
+            {/* body */}
+            <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--surface-2)" }}>
+              {previewTab === "html" ? (
+                <iframe
+                  title={t("Email preview")}
+                  srcDoc={preview.html}
+                  sandbox=""
+                  style={{ width: "100%", height: 460, border: "none", display: "block", background: "#f4f5f7" }}
+                />
+              ) : (
+                <pre style={{ margin: 0, padding: 16, fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--ink-2)", fontFamily: "ui-monospace, monospace" }}>
+                  {preview.text}
+                </pre>
+              )}
+            </div>
+
+            {/* actions */}
+            <div style={{ padding: 14, borderTop: "1px solid var(--line)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+              <button className="btn btn-ghost btn-block" onClick={() => copyLink(preview.link)}>
+                {copied ? <><Check size={15} /> {t("Link copied")}</> : <><Copy size={15} /> {t("Copy enrolment link")}</>}
+              </button>
+              <button
+                className="btn btn-primary btn-block"
+                disabled={inviting !== ""}
+                onClick={async () => { const d = preview.delegate; setPreview(null); await invite(d); }}
+              >
+                {inviting ? <><Loader2 size={15} className="spin" /> {t("Sending…")}</>
+                  : <><Send size={15} /> {preview.dryRun ? t("Run send (dry run)") : t("Send this invite")}</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetaRow({ label, value, tone }) {
+  return (
+    <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+      <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--ink-3)", width: 54, flexShrink: 0, paddingTop: 1 }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 13, color: tone ? `var(--st-${tone})` : "var(--ink)", wordBreak: "break-word", minWidth: 0 }}>
+        {value}
+      </span>
     </div>
   );
 }
