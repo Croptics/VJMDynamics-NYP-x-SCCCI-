@@ -45,6 +45,26 @@ if (!process.env.FRONTEND_URL) {
   );
 }
 app.use(cors({ origin: process.env.FRONTEND_URL || true, credentials: true }));
+
+/* The Excel export can carry chart PNGs (2026-07-29 — charts are embedded as
+ * pictures on their own sheet; see routes/export.js's sanitizeChartImages), and
+ * a handful of base64 images comfortably exceeds express.json()'s 100kb
+ * default. Raised for THAT ONE ROUTE ONLY, deliberately: the global limit stays
+ * tight, because a large-body allowance is exactly the lever an attacker uses
+ * to exhaust memory, and every other endpoint in this app handles small JSON.
+ *
+ * Order matters — this must run BEFORE the global parser below. express.json()
+ * no-ops when a body has already been parsed (it checks `req._body`), so the
+ * general parser simply skips a request this one has handled; the reverse order
+ * would let the 100kb limit reject the request first. Matched on an exact path
+ * shape rather than a prefix so it can't be widened by a crafted URL. */
+const exportJson = express.json({ limit: "12mb" });
+app.use((req, res, next) => {
+  if (req.method === "POST" && /^\/api\/trips\/[^/]+\/export\/?$/.test(req.path)) {
+    return exportJson(req, res, next);
+  }
+  return next();
+});
 app.use(express.json());
 
 app.use((req, _res, next) => {
@@ -128,6 +148,12 @@ app.use(vanceRouter);
 
 import vimalRouter from "./routes/vimal.js";
 app.use(vimalRouter);
+
+// Passkey (WebAuthn) sign-in — Face ID / Touch ID / fingerprint / Windows
+// Hello, using the biometric the device already has. See routes/passkeys.js
+// for why this is NOT the same thing as FaceCheck's face matching.
+import passkeysRouter from "./routes/passkeys.js";
+app.use(passkeysRouter);
 
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));

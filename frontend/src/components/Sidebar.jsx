@@ -89,9 +89,15 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
 
   const user = getUser() || {};
   const displayName = user.name || user.staffId || t("Signed in");
-  const roleLabel = user.role
-    ? t(user.role.charAt(0).toUpperCase() + user.role.slice(1))
-    : user.staffId || t("Staff");
+  // 2026-07-30 — "change the jq part to either admin or staff": this read
+  // the raw Staff ID as a fallback whenever the cached session had no `role`
+  // field yet (an older session from before login started storing one) —
+  // which looks exactly like a role but isn't one, so it read as a bug
+  // rather than an intentional fallback. "Staff" is the safe default (every
+  // account without an explicit admin role IS staff), and useSessionGuard
+  // now also syncs `role` on its periodic check so a stale cached session
+  // corrects itself without a fresh login being required.
+  const roleLabel = t(user.role === "admin" ? "Admin" : "Staff");
   const initials = displayName
     .trim()
     .split(/\s+/)

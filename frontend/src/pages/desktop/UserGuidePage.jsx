@@ -382,7 +382,7 @@ function DashboardOverviewSub({ t }) {
         <Tip icon={Users} title={t("All delegates table")}>
           {t("Search by name, filter by status or coach, sort any column, and select rows for a batch delete. Clicking a delegate opens their full profile — phone, email, room, last known location, and checkpoint history.")}
         </Tip>
-        <Tip icon={History} title={t("History log")}>
+        <Tip icon={History} title={t("Delegate history log")}>
           {t("Every delegate change is recorded here with who did it and when — most edits can be rolled back with one click if something was changed by mistake. Reach the full log via \"View full log\" in the History tracker card, or its own page under the Delegate tab.")}
         </Tip>
         <Tip icon={FileText} title={t("Exporting a report")}>

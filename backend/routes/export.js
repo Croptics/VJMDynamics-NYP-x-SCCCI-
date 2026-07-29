@@ -60,7 +60,7 @@ const UNASSIGNED_KEY = "__unassigned";
  * someone else, or vice versa. */
 const T = {
   en: {
-    sheetSummary: "Summary", sheetDelegates: "Delegates", sheetCheckpoints: "Checkpoint history",
+    sheetSummary: "Summary", sheetDelegates: "Delegates", sheetCheckpoints: "Checkpoint history", sheetCharts: "Charts",
     title: (name) => `${name} — Attendance Export`,
     generated: (when, filters) => `Generated ${when} · Filters — ${filters}`,
     keyMetrics: "KEY METRICS", total: "Total", arrived: "Arrived", missing: "Missing", late: "Late", assigned: "Assigned",
@@ -83,7 +83,7 @@ const T = {
     noCheckpoints: "No checkpoint scans recorded for the selected delegates.",
   },
   zh: {
-    sheetSummary: "摘要", sheetDelegates: "代表名单", sheetCheckpoints: "打卡记录",
+    sheetSummary: "摘要", sheetDelegates: "代表名单", sheetCheckpoints: "打卡记录", sheetCharts: "图表",
     title: (name) => `${name} — 出席情况导出`,
     generated: (when, filters) => `生成于 ${when} · 筛选条件 — ${filters}`,
     keyMetrics: "关键指标", total: "总数", arrived: "已抵达", missing: "缺席", late: "迟到", assigned: "已分配",
@@ -213,7 +213,7 @@ async function loadCheckpointHistory(tripUuid) {
 }
 
 /* ---- workbook builder ---------------------------------------------------- */
-function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, checkpointHistory, lang }) {
+function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, checkpointHistory, chartImages, lang }) {
   const L = tt(lang);
   const coachName = makeCoachName(coaches, lang);
   const ctx = { coachName, tt: L };
@@ -439,6 +439,33 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
     if (!rows.length) cp.addRow([L.noCheckpoints]);
   }
 
+  /* ===== Sheet 4 — Charts (optional, opt-in) =====
+     PNGs of the live Analytics charts, composed client-side (title + chart +
+     legend on one canvas — see frontend/src/lib/chartCapture.js) and embedded
+     here as real pictures. Added 2026-07-29, replacing per-chart CSV
+     downloads: the point of this export is "for report or presentation", and
+     a column of numbers made whoever received it rebuild the chart by hand.
+
+     Images are placed on a gridless sheet, stacked vertically with a row gap
+     between them, sized from the dimensions the client measured so nothing is
+     squashed. `addImage`'s extents are in pixels via `ext`, which is
+     independent of row/column sizing — so the pictures can't be distorted by
+     someone later resizing a column. */
+  if (Array.isArray(chartImages) && chartImages.length) {
+    const cs = wb.addWorksheet(L.sheetCharts, { views: [{ showGridLines: false }] });
+    cs.getColumn(1).width = 4;
+    let topRow = 1;
+    for (const shot of chartImages) {
+      const imageId = wb.addImage({ base64: shot.base64, extension: "png" });
+      cs.addImage(imageId, {
+        tl: { col: 1, row: topRow - 1 },
+        ext: { width: shot.width, height: shot.height },
+      });
+      // ~20px per default row, plus 2 rows of breathing space between charts.
+      topRow += Math.ceil(shot.height / 20) + 2;
+    }
+  }
+
   return wb;
 }
 
@@ -615,7 +642,7 @@ async function handleExport(req, res, filters, options) {
     options.includeCheckpoints ? loadCheckpointHistory(tripUuid) : null,
   ]);
 
-  const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, checkpointHistory, lang });
+  const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, checkpointHistory, chartImages: options.chartImages, lang });
 
   // Filename stays plain-ASCII/English regardless of content language — a
   // Chinese filename can still round-trip through Content-Disposition fine
@@ -646,9 +673,43 @@ router.post("/api/trips/:id/export", requirePermission("exportData"), wrap(async
     // UI language, since they might need to hand a report in the other
     // language to someone else.
     lang: body.lang === "zh" ? "zh" : "en",
+    chartImages: sanitizeChartImages(body.charts),
   };
   await handleExport(req, res, filters, options);
 }));
+
+/* Chart PNGs arrive as client-rendered data: URLs (see the Charts sheet in
+ * buildWorkbook). They're the only client-supplied *binary* this API accepts,
+ * so they're validated tightly rather than trusted:
+ *   - must be a `data:image/png;base64,` URL — no other type, no remote URL
+ *     (a remote one would make the server fetch an attacker-chosen address)
+ *   - base64 must decode cleanly and be non-trivial
+ *   - hard caps on count and per-image size, so a crafted request can't use
+ *     the export endpoint as a memory-exhaustion lever
+ * Anything failing a check is DROPPED, not rejected: a malformed chart should
+ * cost you that one picture, not the whole workbook you were waiting for. */
+const CHART_PREFIX = "data:image/png;base64,";
+const MAX_CHARTS = 12;              // more than the panel can even render
+const MAX_CHART_BYTES = 4_000_000;  // ~4MB decoded; a real chart PNG is ~20-80KB
+function sanitizeChartImages(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  for (const item of input.slice(0, MAX_CHARTS)) {
+    if (!item || typeof item !== "object") continue;
+    const url = typeof item.dataUrl === "string" ? item.dataUrl : "";
+    if (!url.startsWith(CHART_PREFIX)) continue;
+    const base64 = url.slice(CHART_PREFIX.length);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) continue;
+    const bytes = Math.floor((base64.length * 3) / 4);
+    if (bytes < 64 || bytes > MAX_CHART_BYTES) continue;
+    // Clamp the client's measurements too — they only control layout here, but
+    // an absurd value would produce a corrupt/unopenable sheet.
+    const width = Math.min(Math.max(Number(item.width) || 640, 120), 2000);
+    const height = Math.min(Math.max(Number(item.height) || 360, 80), 2000);
+    out.push({ base64, width, height });
+  }
+  return out;
+}
 
 // Back-compat: unfiltered one-click (nothing constrains any dimension).
 router.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async (req, res) => {

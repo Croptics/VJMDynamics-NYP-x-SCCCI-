@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
 import { apiGet, apiPost, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 
 // Human-readable labels for the field-level diff shown under a rollback-
 // eligible entry — matches the patch-shape keys updateDelegate() (backend)
@@ -69,11 +70,10 @@ export default function HistoryLogPage() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 2000);
-    return () => clearInterval(id);
-  }, [load]);
+  // 2s is aggressive for a full 1000-row activity dump, so pausing while the
+  // tab is hidden matters more here than almost anywhere (2026-07-29) — see
+  // useVisiblePolling. Catches up on re-show, so the log is never stale.
+  useVisiblePolling(load, 2000, [load]);
 
   async function removeEntry(id) {
     try {
@@ -187,7 +187,7 @@ export default function HistoryLogPage() {
           </span>
           <div>
             <div className="page-eyebrow">{t("Audit log")}</div>
-            <h1 className="page-title" style={{ margin: 0 }}>{t("History log")}</h1>
+            <h1 className="page-title" style={{ margin: 0 }}>{t("Delegate history log")}</h1>
           </div>
         </div>
         {perms.manageDelegates && totalCount > 0 && (

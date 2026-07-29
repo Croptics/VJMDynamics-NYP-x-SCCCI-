@@ -83,8 +83,16 @@ async function brandedQrDataUrl(code, company, size = 280) {
     const ctx = canvas.getContext("2d");
     const s = canvas.width;
     const b = companyBrand(company);
-    const box = Math.round(s * 0.22);         // logo diameter
-    const pad = box + Math.round(s * 0.05);   // white plate behind it
+    // 2026-07-30 — "still having hard time scanning in the laptop... is the
+    // qr code not good enough?": the covered area (logo + white plate) sat
+    // right at ~27% of the code's width, close to the edge of what "H"-level
+    // error correction nominally allows (~30%) — and jsQR (the actual
+    // scanning library this app uses, on QRScannerPanel.jsx) doesn't realize
+    // that full theoretical margin in practice, especially stacked with a
+    // webcam's own resolution/focus limits. Shrunk for a real safety margin
+    // rather than living right at the edge of tolerance.
+    const box = Math.round(s * 0.15);         // logo diameter
+    const pad = box + Math.round(s * 0.04);   // white plate behind it
     const cx = s / 2, cy = s / 2;
     ctx.fillStyle = "#ffffff";
     roundRect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, Math.round(pad * 0.24));

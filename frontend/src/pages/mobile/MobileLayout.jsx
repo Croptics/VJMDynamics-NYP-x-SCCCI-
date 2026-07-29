@@ -21,6 +21,35 @@ import "../../styles/mobile.css";
 // desktop and iOS Safari (which don't implement the Vibration API).
 const buzz = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } catch { /* unsupported */ } };
 
+// trip.departsIn ("04:53") is a COUNTDOWN duration, not a clock time —
+// reformatted as "4h 53m" rather than a 12h clock ("4:53 AM" would be a lie
+// about what it means). 2026-07-30 — "do the same for these".
+function fmtDepartsIn(hhmm) {
+  if (!hhmm) return hhmm;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+// Genuine live countdown (2026-07-30 — "i see this one nvr change, is it
+// static?"). trip.departureAt is a real absolute instant computed
+// server-side (getTrip(), db/dashboard.js). No separate ticker needed here —
+// this component already re-fetches/re-renders every 5s (see the dashboard
+// poll below), which is plenty for a countdown with no seconds shown. Returns
+// null once departure has passed, so the chip disappears rather than
+// counting into negative numbers.
+function liveDepartsIn(departureAtIso) {
+  if (!departureAtIso) return null;
+  const diffMs = new Date(departureAtIso).getTime() - Date.now();
+  if (!(diffMs > 0)) return null;
+  const totalMin = Math.round(diffMs / 60000);
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
 /**
  * Mobile UI shell — bottom tab-bar layout for the responsive /mobile/* pages.
  * Parallel to (and independent of) the desktop Layout/Sidebar; touches no
@@ -80,13 +109,16 @@ export default function MobileLayout({ onLogout }) {
   // Same "mobileView" permission group as the /mobile/* route gates in
   // App.jsx — an account with a view unchecked doesn't see the tab either.
   // Profile stays ungated (account settings, not a feature view).
-  // Home is the admin overview dashboard. On-ground staff don't need it —
-  // their job starts at Operations (who's missing) and the scanners — so it's
-  // gated on the admin capability as well as its own view permission.
-  const isAdmin = !!perms.manageAccounts;
-
+  // Home used to also require the admin capability, on the theory that
+  // on-ground staff's job starts at Operations, not the overview dashboard.
+  // Reverted (2026-07-30 — "i assigned staff_3 to coach 1... but on mobile
+  // ui i can't see home page? i should still be able to see"): a captain
+  // assigned to a real coach needs their own Home just as much as an admin
+  // does — trip context, quick actions, their coach's status — none of that
+  // is admin-only information. Gated purely on `viewMobileHome`, the same as
+  // every other tab.
   const tabs = [
-    ...(isAdmin && perms.viewMobileHome
+    ...(perms.viewMobileHome
       ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
     ...(perms.viewMobileAttendance || perms.viewMobileTrips
@@ -106,11 +138,14 @@ export default function MobileLayout({ onLogout }) {
     { to: "/mobile/profile", label: "Me", icon: User },
   ];
 
+  const departsInDisplay = trip
+    ? liveDepartsIn(trip.departureAt) ?? (trip.departsIn ? fmtDepartsIn(trip.departsIn) : null)
+    : null;
   const tripContext = trip
     ? [
         trip.name,
         trip.dayOf ? `${t("Day")} ${trip.dayOf}${trip.totalDays ? `/${trip.totalDays}` : ""}` : null,
-        trip.departsIn ? `${t("dep")} ${trip.departsIn}` : null,
+        departsInDisplay ? `${t("dep")} ${departsInDisplay}` : null,
       ].filter(Boolean).join(" · ")
     : null;
 
@@ -156,11 +191,17 @@ export default function MobileLayout({ onLogout }) {
             onClick={() => buzz()}
             className={({ isActive }) => "mobile-tab" + (isActive ? " active" : "") + (primary ? " primary" : "")}
           >
-            <span className="mobile-tab-icon">
-              <Icon size={primary ? 22 : 20} />
-              {badge > 0 && <span className="mobile-tab-badge">{badge > 99 ? "99+" : badge}</span>}
+            {/* Inner wrapper added (2026-07-29 — "align the navigation") so the
+                active highlight can hug just the icon+label instead of the
+                whole flex:1 tab cell — see .mobile-tab-pill in mobile.css for
+                the reasoning. */}
+            <span className="mobile-tab-pill">
+              <span className="mobile-tab-icon">
+                <Icon size={primary ? 22 : 20} />
+                {badge > 0 && <span className="mobile-tab-badge">{badge > 99 ? "99+" : badge}</span>}
+              </span>
+              {t(label)}
             </span>
-            {t(label)}
           </NavLink>
         ))}
       </nav>

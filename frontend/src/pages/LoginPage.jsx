@@ -12,6 +12,7 @@ import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, Check
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
+import PasskeySignIn from "../components/PasskeySignIn.jsx";
 
 // One-time cleanup: earlier builds stored the plaintext password in
 // localStorage under these two keys, across two iterations of a since-removed
@@ -252,6 +253,12 @@ export default function LoginPage({ onSignIn }) {
           <button type="submit" className="btn btn-primary btn-block" disabled={submitting}>
             {submitting ? t("Signing in…") : t("Sign in")}
           </button>
+
+          {/* Passkey sign-in (Vimal) — Face ID / Touch ID / fingerprint /
+              Windows Hello. Self-contained in components/PasskeySignIn.jsx and
+              renders NOTHING unless the device supports it and a passkey is
+              registered, so this file stays otherwise untouched. */}
+          <PasskeySignIn staffId={staffId} keep={keep} t={t} onSignedIn={() => onSignIn?.()} />
 
           {/* Quick Scanner Access — DELIBERATELY passwordless, per the
               user's explicit request ("Allow any user to open and load the

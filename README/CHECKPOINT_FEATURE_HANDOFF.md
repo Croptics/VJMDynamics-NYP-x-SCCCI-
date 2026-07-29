@@ -317,6 +317,69 @@ doing and is your call on how.
 
 ## For Jayden — what changed in your files
 
+### 2026-07-29 — your v2 branch is merged; 3 things to know before you continue
+
+Your `SecureScan-Logs-(Jayden)` branch @ `85ff7af` is in main. Because you'd
+already rebased onto my build, this was the cleanest merge we've had — only 5
+files were actually yours and everything came over. **Please pull main before
+your next change**, or you'll re-introduce the three items below.
+
+1. **The `exc-live` "Live / Connecting…" pill is removed from
+   `ExceptionInboxPage.jsx`.** Your overhaul brought it back because your branch
+   predates the request to drop it (JQ asked for it gone on 2026-07-29). The
+   `live` state is still there and your SSE handler still sets it — only the
+   badge is gone, so the live refresh is unaffected. If you want a connection
+   indicator back, worth checking with JQ first rather than re-adding it.
+2. **`MobileExceptionsPage.jsx` is now routed at `/mobile/exceptions`**, gated on
+   the existing `viewMobileIssues`, with a tile on mobile Home to reach it. It
+   arrived with **no route and nothing linking to it**, so it was unreachable —
+   worth adding the route in the same commit as the page next time.
+   `/mobile/issues` (your `IssuesPanel` form) was deliberately left in place,
+   since your own file header says the two are different screens. Both Home
+   tiles were relabelled ("Report an issue" / "Exception inbox") because they
+   both read as "Issues" and were indistinguishable.
+3. **`lib/exceptionsApi.js` carries JQ's offline write-queue code** — the
+   try/catch in `manualOverride()` that queues a manual check-in when there's no
+   signal, plus `registerSender("checkins/manual", …)`. Your additions appended
+   cleanly below it (zero deletions, nothing lost). Please keep that block when
+   you next edit this file: it's the only thing making manual attendance work in
+   a dead zone, which is a hard client requirement.
+
+Your `delegateStatus` addition is a nice one and is fully wired — verified
+against the live DB that the Present-vs-Override branch resolves correctly for
+every real ticket.
+
+### 2026-07-29 — `QRScannerPanel.jsx`: a real bug, plus new optional props
+
+Two more changes to your QR scanner, both worth knowing about:
+
+1. **Fixed a genuine bug you'd want to know about even outside this merge.**
+   `register`'s `useCallback` depended on `onCheckedIn` — but every caller
+   passes that as an inline arrow function, so it's a NEW function every
+   parent render. Both pages poll in the background while this panel is
+   mounted, so the parent re-renders every few seconds regardless of scanning
+   activity — and that dependency chain reached all the way to the
+   camera-start `useEffect`, so the live `getUserMedia` stream was tearing
+   down and restarting on every poll tick. Occasionally that raced hard enough
+   to throw `NotReadableError`, which your own catch block turns into forcing
+   manual-entry open — reported as "the Cancel button doesn't work" because
+   the sheet you'd just closed came right back a moment later. Fixed by
+   reading `onCheckedIn` through a ref instead of the dependency array, so
+   `register` (and the camera effect) now only re-derives when `tripId`/
+   `coachId` actually change. If you pass a callback into a hook here again,
+   worth checking whether it's stable across renders before depending on it —
+   an inline arrow prop almost never is.
+2. **Two new OPTIONAL props: `manualOpen` / `onManualOpenChange`.** Omit both
+   and nothing changes — you keep your own internal toggle and your in-video
+   keyboard icon, exactly as before (that's what `UnifiedScannerPage` still
+   uses). Pass them and the CALLER owns the manual-entry toggle, and this
+   panel stops drawing its own icon over the video. `MobileScannerPage` uses
+   this to render "Enter code manually" as a labelled button BELOW the
+   viewport instead of a small icon competing with your scan-guide corners —
+   manual entry is the fallback staff reach for under time pressure, so it
+   needed to be findable rather than discoverable-by-accident. Full reasoning
+   is in the component's own doc comment above its export.
+
 **`backend/routes/exceptions.js` was edited directly** (2026-07-23) — the
 Manual attendance path (`POST /api/checkins/manual` and its
 `/checkins/manual/undo` counterpart):

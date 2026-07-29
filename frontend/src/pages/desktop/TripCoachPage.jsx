@@ -75,6 +75,7 @@ import {
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
 import "./TripCoachPage.css";
 
@@ -139,6 +140,44 @@ function shiftTime(hhmm, deltaMin) {
   let total = (h || 0) * 60 + (m || 0) + deltaMin;
   total = ((total % 1440) + 1440) % 1440;
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+// Display-only 12h formatting (2026-07-30 — "fix to 12 hr format"). The
+// underlying itinerary_items.startTime stays a raw 24h "HH:MM" string
+// everywhere else — toMinutes()/shiftTime()'s minute math, the sort-by-time
+// comparators, and the native <input type="time"> all need that exact shape —
+// this only prettifies what actually gets printed on screen.
+function fmt12h(hhmm) {
+  if (!hhmm) return hhmm;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${period}`;
+}
+// Live-derived date range (2026-07-30 — "make sure this one also follow", re
+// the itinerary-driven Total days fix): trip.dateRange is a STORED string,
+// only recomputed server-side when an itinerary write actually fires
+// syncTotalDaysToItinerary() (desmond.js) — a trip whose totalDays this page
+// already corrects on-render via displayTotalDays (below) would still show
+// the OLD stale dateRange until some future edit happens to re-trigger a
+// backend sync. Deriving it here the same way TripsListPage.jsx's
+// computeDateRange() does — from startDate + the ALREADY-live
+// displayTotalDays — means the two can never disagree on screen, regardless
+// of whether the backend has caught up yet. Falls back to the stored string
+// when startDate is missing (a trip nobody's set a real start date for yet).
+function formatDayMonthYear(y, m, d) {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })
+    .format(new Date(Date.UTC(y, m - 1, d)));
+}
+function liveDateRange(startDateStr, totalDays, fallback) {
+  if (!startDateStr) return fallback || "";
+  const [y, m, d] = startDateStr.split("-").map(Number);
+  const n = Math.max(1, Number(totalDays) || 1);
+  const startFmt = formatDayMonthYear(y, m, d);
+  if (n <= 1) return startFmt;
+  const end = new Date(Date.UTC(y, m - 1, d));
+  end.setUTCDate(end.getUTCDate() + (n - 1));
+  const endFmt = formatDayMonthYear(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate());
+  return `${startFmt} – ${endFmt}`;
 }
 
 /* =============================================================================
@@ -589,7 +628,7 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
   // When today's stops are exhausted, "Next" points to the following day, or —
   // on the final day — to unstructured "Free & easy" time, not a blank "End of day".
   const nextLabel = nextStop
-    ? `${nextStop.title} · ${nextStop.startTime}`
+    ? `${nextStop.title} · ${fmt12h(nextStop.startTime)}`
     : (dayNumber < totalDays ? `${t("Day")} ${dayNumber + 1}` : t("Free & easy"));
 
   function applyStatus(item, status, delayMinutes) {
@@ -614,7 +653,7 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
         {isToday && (
           <>
             <span className="tf-schedule-sep">·</span>
-            <span className="tf-schedule-part"><strong>{t("Now")}:</strong> {currentStop ? `${currentStop.title} · ${currentStop.startTime}` : t("Not started")}</span>
+            <span className="tf-schedule-part"><strong>{t("Now")}:</strong> {currentStop ? `${currentStop.title} · ${fmt12h(currentStop.startTime)}` : t("Not started")}</span>
             <span className="tf-schedule-sep">·</span>
             <span className="tf-schedule-part"><strong>{t("Next")}:</strong> {nextLabel}</span>
             <span className="tf-schedule-spacer" />
@@ -647,7 +686,7 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
                     {completed ? <CheckCircle2 size={15} color="var(--tf-green)" /> : <Circle size={15} />}
                   </button>
                 ) : (completed && <CheckCircle2 size={14} color="var(--tf-green)" style={{ flexShrink: 0 }} />)}
-                <span>{item.startTime}</span>
+                <span>{fmt12h(item.startTime)}</span>
                 {isNow && !st && <span className="tf-stop-now-text">{t("NOW")}</span>}
                 {meta && (
                   <span className="tf-stop-tag" style={{ color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>
@@ -686,7 +725,7 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
       {canEdit && editItem && (
         <div className="tf-stop-status-editor">
           <div className="tf-flex tf-gap-8" style={{ flexWrap: "wrap", alignItems: "center" }}>
-            <span className="tf-muted" style={{ fontSize: 12, fontWeight: 800 }}>{editItem.startTime} · {editItem.title}</span>
+            <span className="tf-muted" style={{ fontSize: 12, fontWeight: 800 }}>{fmt12h(editItem.startTime)} · {editItem.title}</span>
             <span className="tf-editor-label">{t("Schedule status")}</span>
             <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={() => applyStatus(editItem, "scheduled", 0)}><CheckCircle2 size={12} /> {t("On time")}</button>
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ color: "var(--tf-orange)" }} onClick={() => setEditMode(editMode === "delayed" ? null : "delayed")}><Clock size={12} /> {t("Delayed")}…</button>
@@ -770,7 +809,7 @@ function ItineraryOverview({ itinerary, mode, onAddClick }) {
                     {mode === "completed" && (s.completed
                       ? <CheckCircle2 size={13} color="var(--tf-green)" style={{ flexShrink: 0 }} />
                       : <Circle size={13} color="var(--tf-text-3)" style={{ flexShrink: 0 }} />)}
-                    <span className="tf-plan-time">{s.startTime}</span>
+                    <span className="tf-plan-time">{fmt12h(s.startTime)}</span>
                     <span className="tf-plan-title">{s.title}{s.location ? <span className="tf-muted"> · {s.location}</span> : null}</span>
                     {meta && (
                       <span className="tf-stop-tag" style={{ color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>
@@ -889,7 +928,7 @@ function CapacityPlanner({ delegateCount, coachCount, onGenerate }) {
  *  applyCheckpointLateCutoff() in backend/routes/checkpoints.js), making the
  *  single global cutoff field redundant.
  * ========================================================================== */
-function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDelegate, canEdit = true }) {
+function Hero({ trip, coachCount, delegateCount, dateRange, mode, onEditItinerary, onAddDelegate, canEdit = true }) {
   const { t } = useLang();
   const statusColor = TRIP_STATUS_COLOR[trip.status] || "grey";
   const showActions = canEdit && mode !== "completed";
@@ -909,7 +948,7 @@ function Hero({ trip, coachCount, delegateCount, mode, onEditItinerary, onAddDel
         )}
       </div>
       <div className="tf-hero-sub">
-        {trip.dateRange}{trip.dateRange ? " · " : ""}{coachCount} {t(coachCount === 1 ? "coach" : "coaches")} · {delegateCount} {t(delegateCount === 1 ? "delegate" : "delegates")}
+        {dateRange}{dateRange ? " · " : ""}{coachCount} {t(coachCount === 1 ? "coach" : "coaches")} · {delegateCount} {t(delegateCount === 1 ? "delegate" : "delegates")}
         {trip.lead ? ` · ${t("Lead")}: ${trip.lead}` : ""}
       </div>
     </div>
@@ -1085,7 +1124,7 @@ function EditItineraryModal({ tripId, itinerary, categories, onClose, onRefresh,
                 <div key={item.id}>
                   <div className="tf-flex tf-gap-10" style={{ alignItems: "center", padding: "8px 10px", borderRadius: 10, background: "var(--tf-surface-2)", border: "1px solid var(--tf-border)", marginBottom: 6 }}>
                     <Icon size={14} color="var(--tf-text-3)" />
-                    <span style={{ fontWeight: 700, fontSize: 13, minWidth: 42, flexShrink: 0 }}>{item.startTime}</span>
+                    <span style={{ fontWeight: 700, fontSize: 13, minWidth: 62, flexShrink: 0 }}>{fmt12h(item.startTime)}</span>
                     <span style={{ flex: 1, fontSize: 13 }}>{item.title}</span>
                     {item.location && <span className="tf-muted" style={{ fontSize: 12, flexShrink: 0 }}>{item.location}</span>}
                     <button className="tf-btn tf-btn-ghost tf-btn-icon-only" onClick={() => openEdit(item)} title={t("Edit")}><Edit2 size={13} /></button>
@@ -1329,6 +1368,14 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
   const [staffUserId, setStaffUserId] = useState(coach.staffUserId || "");
   const [driverName, setDriverName] = useState(coach.driverName || "");
   const [accountId, setAccountId] = useState(coach.accountId || "");
+  // Real-world coaches don't all seat the same number of people (2026-07-30 —
+  // "each coach may not have the same amount of seat"). Capacity could
+  // already be set per-coach at creation time (AddCoachModal), and
+  // PATCH /coaches/:id already accepted it server-side (desmond.js) — this
+  // was the only edit surface for an EXISTING coach, and it simply never
+  // exposed the field, leaving the bulk "set every coach on this trip to N"
+  // tool on the Edit Trip form as the only way to change it after creation.
+  const [capacity, setCapacity] = useState(coach.capacity || 40);
   const [staff, setStaff] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [accounts, setAccounts] = useState([]);
@@ -1348,7 +1395,10 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
     if (!staffUserId) { setError(t("Every coach needs a staff member")); return; }
     setSaving(true); setError(null);
     try {
-      const updated = await apiPatch(`/coaches/${coach.id}`, { staffUserId, driverName: driverName.trim(), accountId: accountId || null });
+      const updated = await apiPatch(`/coaches/${coach.id}`, {
+        staffUserId, driverName: driverName.trim(), accountId: accountId || null,
+        capacity: Math.max(1, Number(capacity) || 40),
+      });
       onSaved(updated); onClose();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -1372,7 +1422,16 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
 
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Coach captain (login)")}</label>
       <CaptainSelect value={accountId} onChange={setAccountId} accounts={accounts} />
-      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6 }}>{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
+      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
+
+      <label className="tf-field-label">{t("Capacity (seats)")}</label>
+      <input type="number" min={1} max={200} className="tf-input" value={capacity}
+        onChange={(e) => setCapacity(e.target.value)} />
+      {(coach.total ?? 0) > Number(capacity) && (
+        <p style={{ fontSize: 12, color: "var(--tf-red)", marginTop: 6, marginBottom: 0 }}>
+          {t("This coach already has")} {coach.total} {t("assigned — lowering capacity below that won't remove anyone, but the board will show it as over capacity.")}
+        </p>
+      )}
       {error && <p style={{ color: "var(--tf-red)", fontSize: 13, marginTop: 10 }}>{error}</p>}
     </Modal>
   );
@@ -1529,7 +1588,7 @@ function AttendanceModal({ tripId, item, scopedCoachId, canEdit, onClose }) {
   const ATT_ICON = { ARRIVED: CheckCircle2, LATE: Clock, MISSING: AlertCircle };
 
   return (
-    <Modal title={`${t("Attendance")} · ${item.startTime} ${item.title}`} onClose={onClose} maxWidth={660}>
+    <Modal title={`${t("Attendance")} · ${fmt12h(item.startTime)} ${item.title}`} onClose={onClose} maxWidth={660}>
       {error && <p style={{ color: "var(--tf-red)", fontSize: 13.5 }}>{error}</p>}
       {!data && !error && <div className="tf-flex" style={{ justifyContent: "center", padding: 28 }}><Loader2 size={20} className="spin" /></div>}
       {data && (
@@ -1691,11 +1750,11 @@ function CoachBoardView({ tripId }) {
   // 2s auto-refresh so a check-in from any scanner (which flips a delegate to
   // ARRIVED), or an edit by another signed-in staff member, shows up here
   // without a manual refresh — matches the integrated board's live behaviour.
-  useEffect(() => {
-    fetchAll();
-    const id = setInterval(fetchAll, 2000);
-    return () => clearInterval(id);
-  }, [fetchAll]);
+  // Pauses while the tab is hidden (2026-07-29, JQ — see
+  // lib/useVisiblePolling.js): 4 endpoints × every 2s is the heaviest poll in
+  // the app, and it was running even in a forgotten background tab. Behaviour
+  // while visible is unchanged, and it refetches immediately on re-show.
+  useVisiblePolling(fetchAll, 2000, [fetchAll]);
 
   const refreshCoaches = useCallback(async () => { const cd = await apiGet(`/trips/${tripId}/coaches`); setCoaches(cd.coaches); }, [tripId]);
   const refreshItinerary = useCallback(async () => { const data = await apiGet(`/trips/${tripId}/itinerary`); setItinerary(data.items); }, [tripId]);
@@ -1839,7 +1898,7 @@ function CoachBoardView({ tripId }) {
     try {
       await apiPatch(`/trips/${tripId}/itinerary/${item.id}`, payload);
       await refreshItinerary();
-      const where = changes.dayNumber ? `${t("Day")} ${payload.dayNumber}` : payload.startTime;
+      const where = changes.dayNumber ? `${t("Day")} ${payload.dayNumber}` : fmt12h(payload.startTime);
       pushToast(`${item.title} → ${where}`);
     } catch (e) { pushToast(e.message, "error"); }
   }
@@ -1948,6 +2007,25 @@ function CoachBoardView({ tripId }) {
     itinCancelled: itinerary.filter((i) => i.status === "cancelled").length,
   }), [delegates, statDelegates, scopedToCoach, coaches, itinerary, coachIdSet]);
 
+  // The day-tab bar used to cap strictly at trip.totalDays, so a newly-added
+  // Day 6 item was silently unreachable until someone also bumped "Total
+  // days" by hand on the Edit Trip form (2026-07-30 — "I added day 6 but it's
+  // not reflected"). First fix here took Math.max(trip.totalDays, itinerary
+  // max) — which only ever grows. That's wrong the moment a day gets
+  // DELETED ("if I remove day 8 it's still there"): trip.totalDays would
+  // already be smaller after the backend's own sync (see
+  // syncTotalDaysToItinerary in desmond.js, which now shrinks too), but
+  // Math.max against a stale ALREADY-fetched trip object kept showing the
+  // bigger number regardless. Trusting the itinerary's own max directly
+  // (falling back to trip.totalDays ONLY when the itinerary is completely
+  // empty, matching the backend sync's own guard) fixes both directions and
+  // means the tab bar reacts on THIS render, without waiting on a trip
+  // refetch to catch up.
+  const displayTotalDays = useMemo(() => {
+    const itineraryMax = itinerary.reduce((m, i) => Math.max(m, Number(i.dayNumber) || 0), 0);
+    return itineraryMax > 0 ? itineraryMax : (Number(trip?.totalDays) || 1);
+  }, [itinerary, trip?.totalDays]);
+
   if (!trip && !loadError) {
     return <div className={tfRootClass}><div className="tf-page"><SkeletonBoard /></div></div>;
   }
@@ -1997,6 +2075,7 @@ function CoachBoardView({ tripId }) {
 
         <Hero
           trip={trip} coachCount={coaches.length} delegateCount={delegates.length}
+          dateRange={liveDateRange(trip.startDate, displayTotalDays, trip.dateRange)}
           mode={mode} canEdit={canEdit}
           onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
         />
@@ -2007,13 +2086,13 @@ function CoachBoardView({ tripId }) {
         <div className="tf-card">
           {mode === "live" ? (
             <>
-              <div className="tf-between" style={{ flexWrap: "wrap", gap: 8, marginBottom: trip.totalDays > 1 ? 10 : 0 }}>
+              <div className="tf-between" style={{ flexWrap: "wrap", gap: 8, marginBottom: displayTotalDays > 1 ? 10 : 0 }}>
                 <div className="tf-section-eyebrow" style={{ marginBottom: 0 }}>
                   {displayDay === currentDay ? t("Today's itinerary") : t("Itinerary")} · {t("Day")} {displayDay}
                 </div>
-                {trip.totalDays > 1 && (
+                {displayTotalDays > 1 && (
                   <div className="tf-flex tf-gap-6" style={{ flexWrap: "wrap" }}>
-                    {Array.from({ length: trip.totalDays }, (_, i) => i + 1).map((d) => (
+                    {Array.from({ length: displayTotalDays }, (_, i) => i + 1).map((d) => (
                       <button
                         key={d}
                         className={"tf-btn tf-btn-sm " + (d === displayDay ? "tf-btn-solid" : "tf-btn-ghost")}
@@ -2026,7 +2105,7 @@ function CoachBoardView({ tripId }) {
                 )}
               </div>
               <JourneyTimeline
-                items={todayItems} dayNumber={displayDay} totalDays={trip.totalDays} isToday={displayDay === currentDay}
+                items={todayItems} dayNumber={displayDay} totalDays={displayTotalDays} isToday={displayDay === currentDay}
                 onAddClick={editable ? () => setShowItinerary(true) : undefined}
                 canEdit={editable} onSetStatus={handleSetItineraryStatus} onToggleComplete={handleToggleComplete} onMoveStop={handleMoveStop}
                 onOpenAttendance={(it) => setAttendanceItem(it)}

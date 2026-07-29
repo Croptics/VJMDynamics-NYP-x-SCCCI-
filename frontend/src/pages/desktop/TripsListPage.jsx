@@ -163,6 +163,9 @@ function TripFormModal({ trip, onClose, onSaved }) {
     totalDays: trip?.totalDays || 5,
     dayOf: trip?.dayOf || 1,
     startDate: trip?.startDate || "",
+    departureTime: trip?.departureTime || "10:00",
+    countryFrom: trip?.countryFrom || "Singapore",
+    countryTo: trip?.countryTo || "",
     coachCapacity: "",
   });
   // Whether "Current day" is a deliberate manual override vs. auto-computed
@@ -171,6 +174,29 @@ function TripFormModal({ trip, onClose, onSaved }) {
   const [dayOfManual, setDayOfManual] = useState(!!trip?.dayOfIsManual);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // "Total days" now follows the itinerary rather than being a second,
+  // independently-typed number (2026-07-30 — "you can create new days in the
+  // itinerary right? link that instead"): a trip whose itinerary already has
+  // Day 6 items but whose card still says "Day 5 of 5" read as broken. Null
+  // until the fetch below resolves; 0 once resolved with an empty itinerary.
+  const [itineraryDayCount, setItineraryDayCount] = useState(null);
+  useEffect(() => {
+    if (!editing) { setItineraryDayCount(0); return; }
+    let cancelled = false;
+    apiGet(`/trips/${trip.id}/itinerary`)
+      .then((data) => {
+        if (cancelled) return;
+        const max = (data?.items || []).reduce((m, i) => Math.max(m, Number(i.dayNumber) || 0), 0);
+        setItineraryDayCount(max);
+        if (max > 0) setForm((f) => ({ ...f, totalDays: max }));
+      })
+      .catch(() => { if (!cancelled) setItineraryDayCount(0); }); // fetch failed — fall back to the manual field rather than blocking the form
+    return () => { cancelled = true; };
+  }, [editing, trip?.id]);
+  // Once the itinerary has at least one day, it's the source of truth —
+  // manually typing a bigger/smaller number here wouldn't add or remove any
+  // actual itinerary days, so it'd just be a number that lies.
+  const totalDaysFromItinerary = itineraryDayCount > 0;
   // Staff normally set the real start date 2–3 days BEFORE the trip actually
   // begins, so a start date already in the past is unusual enough to be
   // worth a second look (e.g. picked the wrong month) rather than saving
@@ -195,6 +221,9 @@ function TripFormModal({ trip, onClose, onSaved }) {
         name: form.name.trim(), dateRange: computeDateRange(form.startDate, form.totalDays), status: form.status,
         lead: form.lead.trim(), totalDays: Number(form.totalDays) || 1,
         startDate: form.startDate || null,
+        departureTime: form.departureTime || null,
+        countryFrom: form.countryFrom.trim() || null,
+        countryTo: form.countryTo.trim() || null,
       };
       if (!editing || dayOfManual) payload.dayOf = Number(form.dayOf) || 1;
       else payload.resetDayOfAuto = true; // editing + not manual: let the backend recompute from startDate
@@ -261,29 +290,53 @@ function TripFormModal({ trip, onClose, onSaved }) {
             </div>
           )}
 
+          {/* "Current day" and "Total days" removed from this form entirely
+              (2026-07-30 — "hide both part"): both are now fully automatic —
+              Current day from startDate (syncTripDayOf, backend), Total days
+              from the itinerary's own day count (see totalDaysFromItinerary
+              above) — so two disabled-looking number inputs just cluttered
+              the form with nothing left for staff to actually do here. Their
+              underlying state/payload fields are untouched, still resubmitted
+              as-is on save (dayOf/dayOfManual keep whatever an existing trip
+              already had; a brand-new trip starts at day 1 and totalDays
+              grows on its own once itinerary items exist), so no existing
+              manual "Current day" override is silently lost by removing the
+              UI for it. */}
+
+          {/* Real anchor for the "Departure in" countdown on Dashboard/mobile
+              Home/mobile topbar (2026-07-30 — that chip was a frozen seed
+              string, "04:53", that never changed; there was no departure time
+              anywhere to compute a live countdown against). Departure is
+              assumed to be on the trip's LAST day — the same day "Total days"
+              already points at. */}
+          <label className="tf-field-label" style={{ marginTop: 14 }}>{t("Departure time (last day)")}</label>
+          <input type="time" className="tf-input" style={{ marginBottom: 4 }} value={form.departureTime}
+            onChange={(e) => set("departureTime", e.target.value)} />
+          <p className="tf-muted" style={{ fontSize: 12, marginTop: 0, marginBottom: 14 }}>
+            {t("Powers the live \"Departure in\" countdown on Dashboard and mobile.")}
+          </p>
+
+          {/* 2026-07-30 — "add the country from and to": the "Departure in"
+              chip previously had no way to say WHERE the delegation is
+              departing back TO without hardcoding "Singapore" in the code,
+              which would silently be wrong the day a trip isn't SCCCI's usual
+              Singapore-based one. "From" defaults to Singapore (matches the
+              chip's real-world usage today) but is editable per trip. */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
             <div>
-              <label className="tf-field-label">{t("Current day")}</label>
-              <input type="number" min={1} className="tf-input" value={form.dayOf}
-                onChange={(e) => { set("dayOf", e.target.value); setDayOfManual(true); }} />
-              {form.startDate && (
-                dayOfManual ? (
-                  <button type="button" className="tf-btn tf-btn-ghost" style={{ padding: "2px 0", fontSize: 12, height: "auto", marginTop: 4 }}
-                    onClick={() => setDayOfManual(false)}>
-                    {t("↺ Use automatic day")}
-                  </button>
-                ) : (
-                  <p className="tf-muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 0 }}>
-                    {t("Auto-calculated from start date")}
-                  </p>
-                )
-              )}
+              <label className="tf-field-label">{t("From (country)")}</label>
+              <input className="tf-input" value={form.countryFrom}
+                placeholder="Singapore" onChange={(e) => set("countryFrom", e.target.value)} />
             </div>
             <div>
-              <label className="tf-field-label">{t("Total days")}</label>
-              <input type="number" min={1} className="tf-input" value={form.totalDays} onChange={(e) => set("totalDays", e.target.value)} />
+              <label className="tf-field-label">{t("To (country)")}</label>
+              <input className="tf-input" value={form.countryTo}
+                placeholder={t("e.g. China")} onChange={(e) => set("countryTo", e.target.value)} />
             </div>
           </div>
+          <p className="tf-muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 14 }}>
+            {t("\"From\" is what the \"Departure back to...\" countdown shows.")}
+          </p>
 
           {editing && (
             <>

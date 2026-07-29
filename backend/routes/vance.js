@@ -41,6 +41,11 @@ import {
   accountPermissions,
   getVisibleCoachIds,
 } from "../data.js";
+// Audit trail (2026-07-30 — "the history log didn't track the qr, face
+// scanner and manual update right?" — confirmed: it didn't). Same helper
+// desmond.js's own edits already use; exported from there rather than
+// duplicated here.
+import { recordEvent } from "./desmond.js";
 import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
 
 const router = Router();
@@ -985,6 +990,17 @@ router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner")
   await q(`UPDATE delegates SET status='PRESENT', "coachId" = COALESCE($1, "coachId"), "lastSeen" = $2 WHERE id = $3`,
     [coachOverride, `QR check-in · ${nowStr}`, del.id]);
   invalidateSnapshot(); // a delegate just boarded — refresh the assistant's view
+  // Persisted audit row (2026-07-30 — QR check-ins never showed up on the
+  // History log at all before this). Best-effort by design — a logging
+  // failure must never undo or block a check-in that already succeeded.
+  const onboardTripUuid = await resolveTripUuid(tripId);
+  if (onboardTripUuid) {
+    await recordEvent(onboardTripUuid, req, {
+      action: "checkin.qr", entity: "delegate", entityId: del.id, kind: "checkin",
+      summary: `${del.name} checked in via QR scan.`,
+      before: { status: del.status }, after: { status: "PRESENT" },
+    });
+  }
 
   const counts = await q(
     `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present

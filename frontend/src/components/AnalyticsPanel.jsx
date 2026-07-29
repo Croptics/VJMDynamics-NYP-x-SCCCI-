@@ -2,8 +2,8 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Dashboard Analytics (charts + AI)
  * ============================================================================= */
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { BarChart3, LayoutGrid, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2, Download } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { BarChart3, LayoutGrid, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2 } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList,
@@ -13,6 +13,7 @@ import { getUser, apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { subscribe as subscribeInsights, getSnapshot as getInsightsSnapshot, generateInsights as runGenerateInsights } from "../lib/insightsStore.js";
 import { useElapsedSeconds } from "../lib/useElapsedSeconds.js";
+import { registerChart, unregisterChart } from "../lib/chartCapture.js";
 
 /**
  * Analytics panel — the "Analytics" tab inside the Dashboard page.
@@ -75,40 +76,63 @@ function splitInsightPoints(text) {
     });
 }
 
-/** Download a chart's underlying data as a CSV file (2026-07-27 — "give
- *  option to export into the csv for report or presentation"). Pure
- *  client-side: the numbers are already in the browser (the same arrays the
- *  charts render from), so no backend round-trip. The leading BOM makes
- *  Excel open UTF-8 correctly — matters once the UI language is Chinese,
- *  since the exported headers/labels come from t(). */
-function downloadCsv(filename, headers, rows) {
-  const esc = (v) => {
-    const s = String(v ?? "");
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const csv = [headers, ...rows].map((r) => r.map(esc).join(",")).join("\r\n");
-  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+/* The per-chart "CSV" buttons that used to live here are GONE (2026-07-29 —
+ * "currently if i click download csv button, it will give me number... what i
+ * want is to link it to the export section... make it display in image instead
+ * of number"). A CSV of raw numbers didn't serve the original purpose ("for
+ * report or presentation") — the recipient had to rebuild the chart to see
+ * anything. Charts now export as IMAGES on their own sheet of the Excel
+ * workbook, chosen in the Export modal, so there's one export flow instead of
+ * seven scattered download buttons. See lib/chartCapture.js (the PNG
+ * composition), ExportModal.jsx (the picker) and backend/routes/export.js
+ * (the "Charts" worksheet). `ChartFrame` below is what registers each chart
+ * with the capture registry while it's on screen. */
+
+/**
+ * Wraps a chart so it can be captured for the Excel export, and so its title
+ * renders consistently. Registers with lib/chartCapture.js on mount and
+ * deregisters on unmount, which is what makes the Export modal's chart list
+ * reflect exactly what's currently on screen.
+ *
+ * `legend` is passed explicitly rather than scraped from the DOM because
+ * recharts renders its Legend as sibling HTML, outside the <svg> that gets
+ * serialised — see the chartCapture.js header for the full reasoning.
+ */
+function useChartRegistration({ id, label, order, legend, empty }) {
+  const hostRef = useRef(null);
+  // `legend` is a fresh array literal on every render, so it must NOT be an
+  // effect dependency (that would re-register every render). Read through a
+  // ref instead — a getter on the registry entry keeps it always-current
+  // without re-registering. Same identity trap as useVisiblePolling's.
+  const legendRef = useRef(legend);
+  legendRef.current = legend;
+
+  useEffect(() => {
+    registerChart({
+      id,
+      label,
+      order,
+      empty,
+      getEl: () => hostRef.current,
+      get legend() { return legendRef.current; },
+    });
+    return () => unregisterChart(id);
+  }, [id, label, order, empty]);
+
+  return hostRef;
 }
 
-/** Small per-chart "CSV" button, top-right of each chart card. */
-function ExportCsvBtn({ onExport, disabled, t }) {
+function ChartFrame({ id, label, order, legend, empty, titleExtra, children }) {
+  const hostRef = useChartRegistration({ id, label, order, legend, empty });
   return (
-    <button
-      className="btn btn-ghost"
-      style={{ fontSize: 12, padding: "4px 10px", flexShrink: 0 }}
-      onClick={onExport}
-      disabled={disabled}
-      title={t("Export this chart's data as CSV")}
-      aria-label={t("Export this chart's data as CSV")}
-    >
-      <Download size={13} /> CSV
-    </button>
+    <div className="card" style={{ padding: 20 }}>
+      <div className="row between" style={{ marginBottom: 12 }}>
+        <h2 style={{ fontSize: 16, margin: 0 }}>
+          {label}{titleExtra}
+        </h2>
+      </div>
+      <div ref={hostRef}>{children}</div>
+    </div>
   );
 }
 
@@ -331,6 +355,19 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
       }));
   }, [checkpointStats, delegates]);
 
+  // The custom chart registers for export too, but only while its tab is the
+  // one on screen — a chart that isn't rendered has no <svg> to capture, so
+  // listing it in the export picker would offer something that silently
+  // produced nothing.
+  const customChartLabel = `${t("Custom chart")} — ${CUSTOM_GROUP_BY.find(([k]) => k === customGroupBy)?.[1] || customGroupBy}`;
+  const customChartHostRef = useChartRegistration({
+    id: "custom-chart",
+    label: customChartLabel,
+    order: 6,
+    empty: analyticsTab !== "custom" || customChartData.length === 0,
+    legend: customChartData.map((d) => ({ label: d.name, color: d.color })),
+  });
+
   return (
     <div>
       {/* Same pill treatment as the Dashboard's "Delegate management" sub-tabs
@@ -517,12 +554,9 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
       {data && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 20 }}>
           {visible.breakdown && (
-            <div className="card" style={{ padding: 20 }}>
-              <div className="row between" style={{ marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Attendance breakdown")}</h2>
-                <ExportCsvBtn t={t} disabled={breakdown.length === 0}
-                  onExport={() => downloadCsv("attendance-breakdown.csv", [t("Status"), t("Count")], breakdown.map((d) => [d.name, d.value]))} />
-              </div>
+            <ChartFrame id="attendance-breakdown" order={1} label={t("Attendance breakdown")}
+              empty={breakdown.length === 0}
+              legend={breakdown.map((d) => ({ label: d.name, color: d.color }))}>
               <ResponsiveContainer width="100%" height={240}>
                 <PieChart>
                   <Pie data={breakdown} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
@@ -532,19 +566,17 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
                   <Legend />
                 </PieChart>
               </ResponsiveContainer>
-            </div>
+            </ChartFrame>
           )}
 
           {visible.coachLoad && (
-            <div className="card" style={{ padding: 20 }}>
-              <div className="row between" style={{ marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, margin: 0 }}>
-                  {t("Coach load")}
-                  {coachFilter !== "ALL" && coachLoad[0] && ` — ${coachLoad[0].name}`}
-                </h2>
-                <ExportCsvBtn t={t} disabled={coachLoad.length === 0}
-                  onExport={() => downloadCsv("coach-load.csv", [t("Coach"), t("Boarded"), t("Remaining capacity"), t("Missing")], coachLoad.map((c) => [c.name, c.boarded, c.remaining, c.missingCount]))} />
-              </div>
+            <ChartFrame id="coach-load" order={2} label={t("Coach load")}
+              titleExtra={coachFilter !== "ALL" && coachLoad[0] ? ` — ${coachLoad[0].name}` : null}
+              empty={coachLoad.length === 0}
+              legend={[
+                { label: t("Boarded"), color: COLORS.present },
+                { label: t("Remaining capacity"), color: "#e6e8eb" },
+              ]}>
               <ResponsiveContainer width="100%" height={240}>
                 <BarChart data={coachLoad}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
@@ -556,16 +588,13 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
                   <Bar dataKey="remaining" stackId="a" fill="#e6e8eb" name={t("Remaining capacity")} />
                 </BarChart>
               </ResponsiveContainer>
-            </div>
+            </ChartFrame>
           )}
 
           {visible.vipMissing && (
-            <div className="card" style={{ padding: 20 }}>
-              <div className="row between" style={{ marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, margin: 0 }}>{t("VIP vs. non-VIP missing")}</h2>
-                <ExportCsvBtn t={t} disabled={missing.length === 0}
-                  onExport={() => downloadCsv("vip-missing.csv", [t("Group"), t("Missing")], vipMissing.map((d) => [d.name, d.value]))} />
-              </div>
+            <ChartFrame id="vip-missing" order={3} label={t("VIP vs. non-VIP missing")}
+              empty={missing.length === 0}
+              legend={vipMissing.map((d) => ({ label: d.name, color: d.color }))}>
               {missing.length === 0 ? (
                 <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("Nobody's missing right now.")}</div>
               ) : (
@@ -579,16 +608,17 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
                   </PieChart>
                 </ResponsiveContainer>
               )}
-            </div>
+            </ChartFrame>
           )}
 
           {visible.checkpointBreakdown && (
-            <div className="card" style={{ padding: 20 }}>
-              <div className="row between" style={{ marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Attendance by itinerary stop")}</h2>
-                <ExportCsvBtn t={t} disabled={checkpointChartData.length === 0}
-                  onExport={() => downloadCsv("attendance-by-stop.csv", [t("Itinerary stop"), t("Arrived"), t("Late"), t("Missing")], checkpointChartData.map((s) => [s.stopLabel, s[t("Arrived")], s[t("Late")], s[t("Missing")]]))} />
-              </div>
+            <ChartFrame id="attendance-by-stop" order={4} label={t("Attendance by itinerary stop")}
+              empty={checkpointChartData.length === 0}
+              legend={[
+                { label: t("Arrived"), color: COLORS.present },
+                { label: t("Late"), color: COLORS.late },
+                { label: t("Missing"), color: COLORS.missing },
+              ]}>
               {checkpointChartData.length === 0 ? (
                 <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
               ) : (
@@ -605,16 +635,16 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
                   </BarChart>
                 </ResponsiveContainer>
               )}
-            </div>
+            </ChartFrame>
           )}
 
           {visible.boardingByDay && (
-            <div className="card" style={{ padding: 20 }}>
-              <div className="row between" style={{ marginBottom: 12 }}>
-                <h2 style={{ fontSize: 16, margin: 0 }}>{t("Boarding over the trip")}</h2>
-                <ExportCsvBtn t={t} disabled={boardingByDayData.length === 0}
-                  onExport={() => downloadCsv("boarding-by-day.csv", [t("Day"), t("Onboard"), t("Missing")], boardingByDayData.map((d) => [d.day, d.onboard, d.missing]))} />
-              </div>
+            <ChartFrame id="boarding-by-day" order={5} label={t("Boarding over the trip")}
+              empty={boardingByDayData.length === 0}
+              legend={[
+                { label: t("Onboard"), color: COLORS.present },
+                { label: t("Missing"), color: COLORS.missing },
+              ]}>
               {boardingByDayData.length === 0 ? (
                 <div className="muted" style={{ fontSize: 13, padding: "24px 0" }}>{t("No itinerary stops yet.")}</div>
               ) : (
@@ -631,7 +661,7 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
                   </BarChart>
                 </ResponsiveContainer>
               )}
-            </div>
+            </ChartFrame>
           )}
         </div>
       )}
@@ -653,8 +683,6 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
               <div className="muted" style={{ fontSize: 12 }}>{t("Pick your own chart type and grouping.")}</div>
             </div>
           </div>
-          <ExportCsvBtn t={t} disabled={customChartData.length === 0}
-            onExport={() => downloadCsv(`custom-chart-${customGroupBy}.csv`, [CUSTOM_GROUP_BY.find(([k]) => k === customGroupBy)?.[1] || customGroupBy, t("Count")], customChartData.map((d) => [d.name, d.value]))} />
         </div>
 
         <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
@@ -709,6 +737,7 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
         {customChartData.length === 0 ? (
           <div className="muted" style={{ fontSize: 13 }}>{t("No delegates to chart yet.")}</div>
         ) : (
+          <div ref={customChartHostRef}>
           <ResponsiveContainer width="100%" height={280}>
             {customChartType === "bar" ? (
               <BarChart data={customChartData}>
@@ -741,6 +770,7 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
               </PieChart>
             )}
           </ResponsiveContainer>
+          </div>
         )}
       </div>
       )}

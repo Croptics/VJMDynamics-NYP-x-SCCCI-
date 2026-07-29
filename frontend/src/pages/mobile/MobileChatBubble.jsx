@@ -1,13 +1,16 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { MessageCircle, X, Bot } from "lucide-react";
 import MobileAssistantPage from "./MobileAssistantPage.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 
-// Same reasoning as ChatBubble.jsx (desktop): hidden by default regardless
-// of scroll position, fades in only while actively scrolling, fades back
-// out 5s after scrolling stops — direct user report that it stayed visible
-// indefinitely and blocked other clickable UI further down the page.
-const AUTO_HIDE_MS = 5000;
+// Always visible (2026-07-30 — "on android i not able to see chat bubble").
+// This used to fade in only while actively scrolling and hide again 5s after
+// scrolling stopped, invisible-by-default until the first scroll event —
+// ChatBubble.jsx (desktop) had the identical mechanism and was already fixed
+// to always-visible back on 2026-07-28 ("can you unhide the chat?"), but this
+// mobile copy was never updated to match. On a page short enough to need no
+// scrolling at all — plausible on plenty of phones/pages — the bubble could
+// never fire even one scroll event, so it just never appeared, ever.
 const DRAG_THRESHOLD_PX = 6;
 const FAB_SIZE = 50;
 const MARGIN_SIDE = 16;
@@ -30,26 +33,13 @@ const CORNERS = {
 export default function MobileChatBubble() {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
-  const [recentlyActive, setRecentlyActive] = useState(false);
   const [corner, setCorner] = useState(() => {
     try { return localStorage.getItem(CORNER_KEY) || "br"; } catch { return "br"; }
   });
   const [dragPos, setDragPos] = useState(null);
-  const hideTimer = useRef(null);
   const dragRef = useRef(null);
 
-  const bumpActivity = () => {
-    setRecentlyActive(true);
-    clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setRecentlyActive(false), AUTO_HIDE_MS);
-  };
-
-  useEffect(() => {
-    window.addEventListener("scroll", bumpActivity, { passive: true });
-    return () => { window.removeEventListener("scroll", bumpActivity); clearTimeout(hideTimer.current); };
-  }, []);
-
-  const visible = recentlyActive || open || !!dragPos;
+  const visible = true;
 
   const onPointerDown = (e) => {
     dragRef.current = { startX: e.clientX, startY: e.clientY, moved: false };
@@ -61,7 +51,6 @@ export default function MobileChatBubble() {
     const dy = e.clientY - dragRef.current.startY;
     if (!dragRef.current.moved && Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) dragRef.current.moved = true;
     if (dragRef.current.moved) {
-      bumpActivity();
       setDragPos({ x: e.clientX, y: e.clientY });
     }
   };
@@ -75,7 +64,6 @@ export default function MobileChatBubble() {
       setCorner(next);
       try { localStorage.setItem(CORNER_KEY, next); } catch { /* ignore */ }
       setDragPos(null);
-      bumpActivity();
     } else {
       setOpen((v) => !v);
     }

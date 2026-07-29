@@ -41,6 +41,19 @@ function fmtDelay(mins) {
   const h = Math.floor(m0 / 60), m = m0 % 60;
   return h && m ? `${h}h ${m}m` : h ? `${h}h` : `${m}m`;
 }
+// Display-only 12h formatting (2026-07-30 — "fix to 12 hr format"). The raw
+// 24h "HH:MM" itinerary_items.startTime stays untouched everywhere else —
+// the sort-by-time comparator below needs that exact shape — this only
+// prettifies what actually gets printed on screen. Same helper as the desktop
+// TripCoachPage.jsx; kept local rather than shared since it's a one-line pure
+// function, matching this codebase's existing per-file small-helper pattern.
+function fmt12h(hhmm) {
+  if (!hhmm) return hhmm;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${period}`;
+}
 
 function StatusBadge({ tone, children }) {
   if (!tone) return <span className="badge" style={{ color: "var(--ink-3)", background: "var(--line)" }}>{children}</span>;
@@ -213,7 +226,7 @@ function MobileAttendanceSheet({ tripId, item, scopedCoachId, canEdit, onClose }
       onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="mobile-card" onClick={(e) => e.stopPropagation()} style={{ width: "100%", margin: 0, borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28, maxHeight: "90vh", overflowY: "auto" }}>
         <div className="row between" style={{ marginBottom: 14 }}>
-          <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0 }}>{t("Attendance")} · {item.startTime} {item.title}</div>
+          <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0 }}>{t("Attendance")} · {fmt12h(item.startTime)} {item.title}</div>
           <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8, flexShrink: 0 }} aria-label={t("Close")}><X size={16} /></button>
         </div>
         {error && <div style={{ color: "var(--st-missing)", fontSize: 13, marginBottom: 10 }}>{error}</div>}
@@ -413,7 +426,7 @@ function TripDetail({ tripId, onBack }) {
                         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 13, opacity: s.completed ? 0.6 : 1,
                           width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 8, padding: "7px 6px", cursor: "pointer", color: "inherit", font: "inherit" }}>
                         <span className="row" style={{ gap: 8, minWidth: 0 }}>
-                          <span className="mono" style={{ fontWeight: 700, flexShrink: 0 }}>{s.startTime}</span>
+                          <span className="mono" style={{ fontWeight: 700, flexShrink: 0 }}>{fmt12h(s.startTime)}</span>
                           <span style={{ textDecoration: struck ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {mode !== "live" ? `D${s.dayNumber} · ` : ""}{s.title}
                           </span>

@@ -188,7 +188,7 @@ async function getRoomableRoster(tripUuid, account) {
 }
 
 /* =============================================================================
- *  DETERMINISTIC LIST PARSER (2026-07-28)
+ *  DETERMINISTIC LIST PARSER (2026-07-28, roommate groups added 2026-07-29)
  *
  *  The single most common way staff actually type this is a list of pairs:
  *      Chen Hao Ming - room 201
@@ -206,14 +206,20 @@ async function getRoomableRoster(tripUuid, account) {
  *      <name> - Grand Hyatt                 (hotel only)
  *  Room numbers may carry a letter suffix ("12A"). Returns null when the text
  *  isn't a list of assignments, so the caller falls through to the model.
+ *
+ *  ROOMMATE GROUPS (2026-07-29 — "Chen Hao Ming, Goh Mei Ling, Lim Hua - 599"
+ *  came back "Nothing to suggest"): a room almost always holds more than one
+ *  person, so a line of comma-separated BARE names followed by one final
+ *  "<name> - <room/hotel>" segment is read as one shared assignment for
+ *  EVERYONE named, not three independent (mostly instruction-less) fragments.
+ *  Only fires when every name before the last is an EXACT match to a roster
+ *  name with nothing else on it — "Chen Hao Ming - room 201, Goh Mei Ling -
+ *  room 202" still parses as two separate people, since neither segment is a
+ *  bare name.
  * ========================================================================== */
 function parseAssignmentList(request, roster) {
-  const lines = String(request)
-    .split(/[\r\n;]+/)
-    .flatMap((l) => (l.includes(",") && /\d/.test(l) && l.split(",").length <= roster.length + 1 ? l.split(",") : [l]))
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return null;
+  const rawLines = String(request).split(/[\r\n;]+/).map((l) => l.trim()).filter(Boolean);
+  if (rawLines.length === 0) return null;
 
   // Longest names first so "Lim Wei Jie" wins over a bare "Lim" on the same line.
   const byLongestName = [...roster].sort((a, b) => b.name.length - a.name.length);
@@ -221,15 +227,18 @@ function parseAssignmentList(request, roster) {
   const usedIds = new Set();
   let unmatchedLines = 0;
 
-  for (const line of lines) {
-    const lower = line.toLowerCase();
+  // Reads "<name> <rest>" out of one already-isolated segment. Returns
+  // {delegate, hotelName, roomNumber} or null — used both for a normal
+  // one-person-per-line entry and for the final segment of a roommate group.
+  function parseSegment(segment) {
+    const lower = segment.toLowerCase();
     const delegate = byLongestName.find((d) => lower.includes(d.name.toLowerCase()));
-    if (!delegate || usedIds.has(delegate.id)) { unmatchedLines += 1; continue; }
+    if (!delegate) return null;
 
     // Everything after the name is the instruction for that person.
     const idx = lower.indexOf(delegate.name.toLowerCase());
-    const rest = line.slice(idx + delegate.name.length).replace(/^[\s\-–—:,.]+/, "").trim();
-    if (!rest) { unmatchedLines += 1; continue; }
+    const rest = segment.slice(idx + delegate.name.length).replace(/^[\s\-–—:,.]+/, "").trim();
+    if (!rest) return null;
 
     // Room: "room 201", "rm 201", "#201", or a bare number/number+letter token.
     const roomMatch = rest.match(/(?:\b(?:room|rm|no\.?|number)\s*|#)\s*([A-Za-z]?\d+[A-Za-z]?)\b/i)
@@ -250,9 +259,49 @@ function parseAssignmentList(request, roster) {
     // A leftover that's only digits/punctuation is never a hotel name.
     const hotelName = hotelText.length >= 2 && /[A-Za-z一-鿿]/.test(hotelText) ? hotelText : undefined;
 
-    if (roomNumber === undefined && hotelName === undefined) { unmatchedLines += 1; continue; }
-    usedIds.add(delegate.id);
-    out.push({ delegate, hotelName, roomNumber });
+    if (roomNumber === undefined && hotelName === undefined) return null;
+    return { delegate, hotelName, roomNumber };
+  }
+
+  for (const rawLine of rawLines) {
+    // Roommate group check FIRST, before the generic comma-split below —
+    // "A, B, C - 599" must be read as one group, not three fragments.
+    if (rawLine.includes(",")) {
+      const segments = rawLine.split(",").map((s) => s.trim()).filter(Boolean);
+      if (segments.length >= 2) {
+        const last = segments[segments.length - 1];
+        const bareDelegates = segments.slice(0, -1).map((seg) =>
+          byLongestName.find((d) => d.name.toLowerCase() === seg.toLowerCase()));
+        const lastParsed = parseSegment(last);
+        if (lastParsed && bareDelegates.every(Boolean)) {
+          const group = [...bareDelegates, lastParsed.delegate];
+          const noDupes = new Set(group.map((d) => d.id)).size === group.length;
+          const noneUsed = group.every((d) => !usedIds.has(d.id));
+          if (noDupes && noneUsed) {
+            for (const d of group) {
+              usedIds.add(d.id);
+              out.push({ delegate: d, hotelName: lastParsed.hotelName, roomNumber: lastParsed.roomNumber });
+            }
+            continue; // whole line handled as a group — skip the fallback below
+          }
+        }
+      }
+    }
+
+    // Not a roommate group. Original behaviour: only split this line on commas
+    // when it looks like several independent "name - room" pairs squeezed onto
+    // one line (has a digit, and a sane number of parts) — otherwise the whole
+    // line is one segment.
+    const segments = (rawLine.includes(",") && /\d/.test(rawLine) && rawLine.split(",").length <= roster.length + 1)
+      ? rawLine.split(",").map((s) => s.trim()).filter(Boolean)
+      : [rawLine];
+
+    for (const segment of segments) {
+      const parsed = parseSegment(segment);
+      if (!parsed || usedIds.has(parsed.delegate.id)) { unmatchedLines += 1; continue; }
+      usedIds.add(parsed.delegate.id);
+      out.push(parsed);
+    }
   }
 
   // Only claim this text if it really was a list: at least one match, and the
@@ -408,4 +457,7 @@ router.post("/api/trips/:id/rooms/ai-apply", requirePermission("manageDelegates"
   res.json({ applied });
 }));
 
+// Exported for tests/jq/roomAssignParser.test.js — the router itself never
+// imports this named export, only its own local call sites do.
+export { parseAssignmentList };
 export default router;

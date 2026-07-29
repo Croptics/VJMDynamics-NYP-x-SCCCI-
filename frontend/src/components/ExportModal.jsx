@@ -2,11 +2,12 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Excel export dialog
  * ============================================================================= */
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useSyncExternalStore } from "react";
 import { X, Download, Sparkles, Loader2 } from "lucide-react";
 import { apiGet, apiPost, getToken } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useElapsedSeconds } from "../lib/useElapsedSeconds.js";
+import { listCharts, subscribeCharts, captureCharts } from "../lib/chartCapture.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const UNASSIGNED_KEY = "__unassigned";
@@ -44,6 +45,13 @@ export default function ExportModal({ tripId, onClose }) {
   // staff member might work in English but need to hand a Chinese-language
   // report to someone else, or vice versa.
   const [exportLang, setExportLang] = useState(lang);
+  // Which Analytics charts to embed as images. Sourced from the live registry
+  // in lib/chartCapture.js, so this list is exactly what's rendered right now
+  // on the Analytics tab (nothing else can be captured — see the Charts
+  // Section below). Defaults to none ticked: a chart-heavy workbook is a
+  // deliberate choice, not something to surprise someone with.
+  const availableCharts = useSyncExternalStore(subscribeCharts, listCharts);
+  const [selectedCharts, setSelectedCharts] = useState([]);
 
   const [prompt, setPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
@@ -101,10 +109,14 @@ export default function ExportModal({ tripId, onClose }) {
     setBusy(true);
     setErr(null);
     try {
+      // Captured here, at download time, rather than when the boxes were
+      // ticked — the charts are live, so this picks up whatever the numbers
+      // are NOW rather than whenever the modal happened to be opened.
+      const charts = selectedCharts.length ? await captureCharts(selectedCharts) : [];
       const res = await fetch(`${API_BASE}/trips/${tripId}/export`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ statuses, coachIds, vipOnly, columns, includeAiSummary, includeCheckpoints, lang: exportLang }),
+        body: JSON.stringify({ statuses, coachIds, vipOnly, columns, includeAiSummary, includeCheckpoints, lang: exportLang, charts }),
       });
       if (!res.ok) {
         throw new Error(
@@ -248,6 +260,43 @@ export default function ExportModal({ tripId, onClose }) {
             <Toggle checked={includeCheckpoints} onChange={() => setIncludeCheckpoints((v) => !v)}
               label={t("Include per-checkpoint history")} hint={t("A separate sheet: every stop each delegate was arrived/late/missing at, not just their current status.")} />
           </div>
+
+          {/* Chart images (2026-07-29) — replaces the per-chart CSV buttons
+              that used to sit on each Analytics card. Charts go in as PICTURES
+              on their own sheet, which is what makes them usable in a report
+              or a slide; a CSV of the same numbers needed rebuilding by hand.
+              Only charts currently rendered on the Analytics tab can be
+              captured (there's no <svg> to read otherwise), so the list is
+              driven by what's actually on screen and says so when it's
+              empty — rather than offering charts that would export blank. */}
+          <Section
+            title={t("Charts")}
+            hint={availableCharts.length ? `${selectedCharts.length}/${availableCharts.length} ${t("selected")}` : undefined}
+          >
+            {availableCharts.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12.5 }}>
+                {t("Open the Analytics tab to include charts as images.")}
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 6 }}>
+                  {availableCharts.map((c) => (
+                    <label key={c.id} className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer", padding: "4px 2px" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedCharts.includes(c.id)}
+                        onChange={() => toggle(selectedCharts, setSelectedCharts, c.id)}
+                      />
+                      {c.label}
+                    </label>
+                  ))}
+                </div>
+                <div className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>
+                  {t("Added to the workbook as images on their own \"Charts\" sheet.")}
+                </div>
+              </>
+            )}
+          </Section>
 
           {/* Columns */}
           <Section title={t("Columns")} hint={`${columns.length} ${t("selected")}`}>

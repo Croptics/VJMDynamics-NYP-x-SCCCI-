@@ -198,6 +198,29 @@ export async function createSchema() {
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "startDate" VARCHAR(10)`);
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "dayOfIsManual" BOOLEAN DEFAULT false`);
 
+  // Real departure time-of-day on the trip's LAST day (2026-07-30 — "Departure
+  // in" was a hardcoded seed string that never changed; this is what a genuine
+  // live countdown needs to count down TO). Same plain-string-not-DATE
+  // reasoning as startDate above: "HH:MM" text, cast to time inline wherever
+  // it's combined with a date. computeDepartureAt() in db/dashboard.js turns
+  // startDate + totalDays + this into one absolute timestamp for the frontend
+  // to tick a countdown against — see the "Departure in" chips on Dashboard/
+  // MobileHomePage/MobileLayout.
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "departureTime" VARCHAR(8) DEFAULT '10:00'`);
+
+  // Origin/destination country (2026-07-30 — "add the country from and to" /
+  // "can you say departure back to [country] in [X] hour"). The "Departure
+  // in" chip previously had no way to say WHERE the delegation is departing
+  // BACK TO without hardcoding an assumption (SCCCI trips are Singapore-based,
+  // but hardcoding that string here would silently be wrong the day a trip
+  // isn't). "countryFrom" is what the "Departure back to X" chips read;
+  // "countryTo" isn't consumed by any chip yet but is captured alongside it
+  // since the same form field pair is how staff would naturally think about
+  // it, and it costs nothing to have for later use (itinerary/document
+  // features, an eventual "flying to" chip, etc).
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "countryFrom" VARCHAR(80) DEFAULT 'Singapore'`);
+  await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "countryTo" VARCHAR(80)`);
+
   // users: a lightweight staff directory for coach assignment ONLY (a "guide"
   // per coach). Separate from `accounts` — these rows never sign in anywhere.
   await run(`CREATE TABLE IF NOT EXISTS users (

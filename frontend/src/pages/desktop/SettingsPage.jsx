@@ -3,13 +3,19 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
-import { ShieldCheck, Sun, Moon, Languages, Timer, Camera, X, Pencil, Bell, BellOff, Mail, Phone, Trash2, Megaphone, Video } from "lucide-react";
+import { ShieldCheck, Sun, Moon, Languages, Timer, Camera, X, Pencil, Bell, BellOff, Mail, Phone, Trash2, Megaphone, Video, ImagePlus } from "lucide-react";
 import { getUser, getPermissions, apiGet, apiPatch, apiPost, apiDelete, updateSession } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import { isAlertSoundMuted, setAlertSoundMuted } from "../../lib/alertSound.js";
 import MediaManager from "../../components/MediaManager.jsx";
 import PhotoCropModal from "../../components/PhotoCropModal.jsx";
+import CameraCaptureModal from "../../components/CameraCaptureModal.jsx";
+// Biometric sign-in / passkey management (Vimal's) — was only ever wired
+// into MobileProfilePage.jsx despite its own doc comment claiming "Settings/
+// mobile Profile" (2026-07-30 — "can you add this into desktop setting page
+// also"). Same component, no props beyond `t`.
+import PasskeyManager from "../../components/PasskeyManager.jsx";
 import { PERMISSIONS } from "../../../../permissions.js";
 
 // Read-only summary of an account's own access, grouped the same way
@@ -30,6 +36,18 @@ const DASHBOARD_TRIP_KEY = "mg_dashboard_trip";
 const SETTINGS_RESET_TRIP_KEY = "mg_settings_reset_trip";
 const RESET_WINDOW_OPTIONS = [1, 2, 5, 10, 15, 30, 60];
 const BUFFER_OPTIONS = [0, 5, 10, 15, 30, 60];
+
+/* Clock arithmetic for the worked examples under the two Checkpoint timing
+ * settings (2026-07-29) — showing "a stop at 09:00 resets at 08:55" explains
+ * the chosen number far faster than any amount of prose. Wraps within a
+ * 24h day so a 60-min window off an early stop can't render as "-1:00". */
+function shiftClock(hhmm, deltaMinutes) {
+  const [h, m] = String(hhmm).split(":").map(Number);
+  const total = (((h * 60 + m + deltaMinutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+const clockMinus = (hhmm, mins) => shiftClock(hhmm, -mins);
+const clockPlus = (hhmm, mins) => shiftClock(hhmm, mins);
 
 /**
  * Screen — Settings. Signed-in account info + app-wide preferences (theme,
@@ -56,9 +74,10 @@ export default function SettingsPage() {
   }
 
   const displayName = user.name || user.staffId || t("Signed in");
-  const roleLabel = user.role
-    ? t(user.role.charAt(0).toUpperCase() + user.role.slice(1))
-    : user.staffId || t("Staff");
+  // Same fix as Sidebar.jsx's identical fallback (2026-07-30 — "change the
+  // jq part to either admin or staff"): a cached session with no `role` yet
+  // used to fall back to the raw Staff ID, which reads as a bug, not a role.
+  const roleLabel = t(user.role === "admin" ? "Admin" : "Staff");
   const initials = displayName
     .trim()
     .split(/\s+/)
@@ -145,6 +164,14 @@ export default function SettingsPage() {
     }
   }
 
+  // The camera badge now offers a CHOICE (2026-07-29 — "allow me to take image
+  // using camera also"): it used to go straight to the file picker, which is
+  // the wrong default for staff who are at the event on a laptop with a webcam
+  // and no headshot saved anywhere. Both paths converge on the same
+  // `setCropFile()` → PhotoCropModal → upload flow, so nothing downstream
+  // needed to change.
+  const [photoMenuOpen, setPhotoMenuOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   function pickPhoto() {
     fileInputRef.current?.click();
   }
@@ -282,10 +309,11 @@ export default function SettingsPage() {
                 </span>
               )}
               <button
-                onClick={pickPhoto}
+                onClick={() => setPhotoMenuOpen((v) => !v)}
                 disabled={photoBusy}
                 aria-label={t("Change photo")}
                 title={t("Change photo")}
+                aria-expanded={photoMenuOpen}
                 style={{
                   position: "absolute", right: -2, bottom: -2, width: 24, height: 24, borderRadius: "50%",
                   background: "var(--surface)", border: "1px solid var(--line)", display: "grid", placeItems: "center",
@@ -294,12 +322,45 @@ export default function SettingsPage() {
               >
                 <Camera size={13} />
               </button>
+              {photoMenuOpen && (
+                <>
+                  {/* Click-away backdrop rather than a document listener — one
+                      element, no global handler to leak, and it also stops a
+                      stray click landing on whatever is underneath. */}
+                  <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={() => setPhotoMenuOpen(false)} />
+                  <div
+                    className="card"
+                    style={{
+                      position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 41,
+                      padding: 5, minWidth: 176, background: "var(--surface)", boxShadow: "var(--shadow-lg)",
+                    }}
+                  >
+                    <button
+                      className="btn btn-ghost btn-block"
+                      style={{ justifyContent: "flex-start", fontSize: 13 }}
+                      onClick={() => { setPhotoMenuOpen(false); setCameraOpen(true); }}
+                    >
+                      <Camera size={14} /> {t("Take a photo")}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-block"
+                      style={{ justifyContent: "flex-start", fontSize: 13 }}
+                      onClick={() => { setPhotoMenuOpen(false); pickPhoto(); }}
+                    >
+                      <ImagePlus size={14} /> {t("Upload a file")}
+                    </button>
+                  </div>
+                </>
+              )}
               <input ref={fileInputRef} type="file" accept="image/*" onChange={onPhotoChosen} style={{ display: "none" }} />
             </div>
             <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 5 }}>
               <div style={{ fontSize: 18, fontWeight: 700, lineHeight: 1.2 }}>{displayName}</div>
+              {/* Raw Staff ID removed (2026-07-30 — "remove jq") — the role
+                  badge is the useful signal here; the login-only Staff ID
+                  is still shown at the actual login screen and Account
+                  control, just not needed a second time on your own profile. */}
               <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <span className="mono muted" style={{ fontSize: 12.5 }}>{user.username || "—"}</span>
                 <span className="badge badge-neutral" style={{ padding: "1px 8px", fontSize: 11 }}>{roleLabel}</span>
               </div>
               {user.email && (
@@ -349,6 +410,15 @@ export default function SettingsPage() {
 
       {cropFile && (
         <PhotoCropModal file={cropFile} onCancel={() => setCropFile(null)} onSave={handleCropSave} t={t} />
+      )}
+      {/* A camera shot hands back a File and then goes through the exact same
+          crop step as an uploaded one, so the two paths can't drift apart. */}
+      {cameraOpen && (
+        <CameraCaptureModal
+          t={t}
+          onCancel={() => setCameraOpen(false)}
+          onCapture={(file) => { setCameraOpen(false); setCropFile(file); }}
+        />
       )}
 
       {editingProfile && (
@@ -510,6 +580,14 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* No extra .card wrapper — PasskeyManager already renders its own
+          self-contained .mobile-card box (background/border/radius/shadow),
+          which mobile.css defines unscoped (not nested under .mobile-shell),
+          so it already renders correctly here without double-boxing. */}
+      <div style={{ marginTop: 16 }}>
+        <PasskeyManager t={t} />
+      </div>
+
       {/* ---- Checkpoint reset window (manageTrips-gated) -----------------
           Was gated on manageDelegates, which most onsite staff already have
           by default — meaning ordinary staff could see and CHANGE a
@@ -521,16 +599,30 @@ export default function SettingsPage() {
           to let staff see"). */}
       {perms.manageTrips && (
         <div className="card" style={{ marginTop: 16, padding: 22 }}>
+          {/* Retitled from "Checkpoint reset window" (2026-07-29 — "can you
+              make this a bit more easier for user to understand what these
+              does"). The old title named only the FIRST setting, which made
+              "Buffer time" read as part of the same reset mechanic — it isn't
+              related to it at all. They're two different KINDS of setting:
+              one changes live attendance behaviour during the event, the other
+              is a validation rule that only applies while planning an
+              itinerary. Each now says which, in those terms, with a worked
+              example computed from the value actually selected. */}
           <div className="row" style={{ gap: 8, marginBottom: 4 }}>
             <Timer size={18} color="var(--ink-3)" />
-            <h2 style={{ fontSize: 16 }}>{t("Checkpoint reset window")}</h2>
+            <h2 style={{ fontSize: 16 }}>{t("Checkpoint timing")}</h2>
           </div>
           <div className="muted" style={{ fontSize: 12.5, marginBottom: 16 }}>
-            {t("How long before the next itinerary stop an arrived delegate resets to assigned, so they can be scanned in again.")}
+            {t("Two separate timing rules for this trip — one for scanning during the event, one for planning the itinerary.")}
           </div>
 
           <div className="row between" style={{ padding: "12px 0", borderBottom: "1px solid var(--line-2)", flexWrap: "wrap", gap: 10 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>{t("Trip")}</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>{t("Trip")}</div>
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                {t("Both settings below apply to this trip only.")}
+              </div>
+            </div>
             <select
               className="input"
               style={{ width: "auto", minWidth: 220 }}
@@ -544,51 +636,98 @@ export default function SettingsPage() {
             </select>
           </div>
 
-          <div className="row between" style={{ padding: "14px 0 4px", borderBottom: "1px solid var(--line-2)", flexWrap: "wrap", gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>{t("Reset window")}</div>
-              <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                {t("Shorter for testing, longer (e.g. 30 min) for a real trip.")}
+          {/* ---- 1. Reset window — live attendance behaviour ---- */}
+          <div style={{ padding: "16px 0 4px", borderBottom: "1px solid var(--line-2)" }}>
+            <div className="row between" style={{ flexWrap: "wrap", gap: 10 }}>
+              <div style={{ minWidth: 0, flex: "1 1 320px" }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <span className="badge badge-assigned" style={{ fontSize: 10.5, padding: "2px 8px" }}>{t("During the event")}</span>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 600, marginTop: 6 }}>
+                  {t("Re-scan reset")}
+                </div>
+                <div className="muted" style={{ fontSize: 12.5, marginTop: 3, lineHeight: 1.5 }}>
+                  {t("Before each stop, anyone still marked Arrived or Late is set back to Assigned, so staff scan everyone in fresh for that stop instead of seeing last stop's result. Someone already scanned in for the upcoming stop is left alone.")}
+                </div>
+              </div>
+              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                {resetSaved && <span style={{ fontSize: 12.5, color: "var(--scc-green, #1a9c5e)" }}>{t("Saved")}</span>}
+                <select
+                  className="input"
+                  style={{ width: "auto", minWidth: 110 }}
+                  value={resetWindowMinutes ?? ""}
+                  disabled={resetSaving || resetWindowMinutes === null}
+                  onChange={(e) => changeResetWindow(Number(e.target.value))}
+                >
+                  {RESET_WINDOW_OPTIONS.map((m) => (
+                    <option key={m} value={m}>{m} {t("min")}</option>
+                  ))}
+                </select>
               </div>
             </div>
-            <div className="row" style={{ gap: 10, alignItems: "center" }}>
-              {resetSaved && <span style={{ fontSize: 12.5, color: "var(--scc-green, #1a9c5e)" }}>{t("Saved")}</span>}
-              <select
-                className="input"
-                style={{ width: "auto", minWidth: 110 }}
-                value={resetWindowMinutes ?? ""}
-                disabled={resetSaving || resetWindowMinutes === null}
-                onChange={(e) => changeResetWindow(Number(e.target.value))}
-              >
-                {RESET_WINDOW_OPTIONS.map((m) => (
-                  <option key={m} value={m}>{m} {t("min")}</option>
-                ))}
-              </select>
-            </div>
+            {/* A concrete clock example beats any wording — it's the fastest
+                way to see what the number you just picked actually means. */}
+            {resetWindowMinutes !== null && (
+              <div style={{
+                marginTop: 10, marginBottom: 6, padding: "8px 11px", borderRadius: "var(--r-sm)",
+                background: "var(--surface-2)", fontSize: 12, color: "var(--ink-2)", lineHeight: 1.55,
+              }}>
+                {t("For example")}: {t("a stop at")} <strong>09:00</strong> → {t("everyone resets to Assigned at")}{" "}
+                <strong>{clockMinus("09:00", resetWindowMinutes)}</strong>{" "}
+                <span className="muted">({resetWindowMinutes} {t("min before")})</span>
+                <div className="muted" style={{ fontSize: 11.5, marginTop: 3 }}>
+                  {t("Use a short window while testing; 15–30 min suits a real trip, so staff have time to board everyone.")}
+                </div>
+              </div>
+            )}
           </div>
           {resetError && <div style={{ color: "var(--scc-red)", fontSize: 12.5, marginTop: 8, marginBottom: 4 }}>{resetError}</div>}
 
-          <div className="row between" style={{ padding: "14px 0 4px", flexWrap: "wrap", gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>{t("Buffer time")}</div>
-              <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                {t("Minimum gap required between two itinerary stops on the same day (0 = no minimum).")}
+          {/* ---- 2. Buffer time — itinerary planning validation ---- */}
+          <div style={{ padding: "16px 0 4px" }}>
+            <div className="row between" style={{ flexWrap: "wrap", gap: 10 }}>
+              <div style={{ minWidth: 0, flex: "1 1 320px" }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <span className="badge badge-neutral" style={{ fontSize: 10.5, padding: "2px 8px" }}>{t("When planning")}</span>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 600, marginTop: 6 }}>
+                  {t("Minimum gap between stops")}
+                </div>
+                <div className="muted" style={{ fontSize: 12.5, marginTop: 3, lineHeight: 1.5 }}>
+                  {t("A guard rail on the Trips board: it blocks you from saving two stops on the same day closer together than this. It does not affect scanning or anyone's status.")}
+                </div>
+              </div>
+              <div className="row" style={{ gap: 10, alignItems: "center" }}>
+                {bufferSaved && <span style={{ fontSize: 12.5, color: "var(--scc-green, #1a9c5e)" }}>{t("Saved")}</span>}
+                <select
+                  className="input"
+                  style={{ width: "auto", minWidth: 110 }}
+                  value={bufferMinutes ?? ""}
+                  disabled={bufferSaving || bufferMinutes === null}
+                  onChange={(e) => changeBufferMinutes(Number(e.target.value))}
+                >
+                  {BUFFER_OPTIONS.map((m) => (
+                    <option key={m} value={m}>{m === 0 ? t("No minimum") : `${m} ${t("min")}`}</option>
+                  ))}
+                </select>
               </div>
             </div>
-            <div className="row" style={{ gap: 10, alignItems: "center" }}>
-              {bufferSaved && <span style={{ fontSize: 12.5, color: "var(--scc-green, #1a9c5e)" }}>{t("Saved")}</span>}
-              <select
-                className="input"
-                style={{ width: "auto", minWidth: 110 }}
-                value={bufferMinutes ?? ""}
-                disabled={bufferSaving || bufferMinutes === null}
-                onChange={(e) => changeBufferMinutes(Number(e.target.value))}
-              >
-                {BUFFER_OPTIONS.map((m) => (
-                  <option key={m} value={m}>{m === 0 ? t("None") : `${m} ${t("min")}`}</option>
-                ))}
-              </select>
-            </div>
+            {bufferMinutes !== null && (
+              <div style={{
+                marginTop: 10, marginBottom: 6, padding: "8px 11px", borderRadius: "var(--r-sm)",
+                background: "var(--surface-2)", fontSize: 12, color: "var(--ink-2)", lineHeight: 1.55,
+              }}>
+                {bufferMinutes === 0 ? (
+                  t("Stops can be scheduled at any time, including two at once.")
+                ) : (
+                  <>
+                    {t("For example")}: {t("with a stop at")} <strong>09:00</strong>, {t("the next one can be")}{" "}
+                    <strong>{clockPlus("09:00", bufferMinutes)}</strong> {t("or later")}{" "}
+                    <span className="muted">({bufferMinutes} {t("min apart")})</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
           {bufferError && <div style={{ color: "var(--scc-red)", fontSize: 12.5, marginTop: 8 }}>{bufferError}</div>}
         </div>

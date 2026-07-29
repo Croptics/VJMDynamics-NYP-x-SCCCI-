@@ -47,8 +47,14 @@ export function useSessionGuard(onLogout) {
         // so an account's email could be set on the backend (e.g. via
         // registration) yet never actually show up anywhere in the UI until
         // the user happened to open Settings and hit Save once.
-        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name) {
-          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name } });
+        // role added to this sync (2026-07-30 — "change the jq part to
+        // either admin or staff"): a session cached from before login
+        // started storing `role` had none at all, so the Sidebar's role
+        // label fell back to showing the raw Staff ID, which read as a bug.
+        // Syncing it here means that self-corrects on the next 15s poll or
+        // tab focus, without needing a fresh login.
+        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role) {
+          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role } });
         }
       } catch (e) {
         // 401 means the token no longer resolves to any account — it was

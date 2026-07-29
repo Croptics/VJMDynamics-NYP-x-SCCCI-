@@ -256,6 +256,161 @@ pass · backend boots with no errors · malformed and legacy-v1 scan tokens both
 handled without a 500 · manual check-in and its replay-dedupe still work ·
 `MobileAttendancePage` byte-identical to before the merge.
 
+## Jayden SecureScan-Logs v2 integration (2026-07-29) — exception inbox overhaul + mobile inbox
+
+Merged from `C:\fsad\Project\integration\VJMDynamics-NYP-x-SCCCI-`, branch
+`SecureScan-Logs-(Jayden)` @ `85ff7af` ("Rebase onto JQ's latest build").
+
+**The cleanest teammate integration so far.** He had already rebased onto main,
+so instead of a 3-way merge this was a straight file-by-file comparison of his
+HEAD against main. Only **5 files** were genuinely his new work; every other
+difference was main being *ahead* of him (my own same-day changes), and those
+were left alone.
+
+### What came in
+
+| File | Change |
+|---|---|
+| `frontend/src/lib/exceptionsApi.js` | **Purely additive** — 9 new exports appended, zero deletions |
+| `backend/routes/exceptions.js` | 7 lines: adds `delegateStatus` to the ticket payload |
+| `frontend/src/pages/desktop/ExceptionInboxPage.jsx` | Overhaul, 248 → 555 lines |
+| `frontend/src/pages/desktop/ExceptionInboxPage.css` | Styles for the above |
+| `frontend/src/pages/mobile/MobileExceptionsPage.jsx` | **NEW** — mobile exception inbox |
+
+**Exception inbox overhaul:** search-as-you-type across issue/delegate/coach/
+note/raiser, multi-select with bulk resolve, ticket **ageing** (`fmtAge`,
+tinted at 15/30 min, re-rendering on a 30s tick so "8m" never sits stale), a
+resolve-time average + oldest-open-ticket tile, a recharts donut of open
+tickets by issue type, CSV export, and priority escalation. Filtering moved
+client-side on purpose (his own file header explains it: one trip's tickets are
+tens of rows, and it buys instant tab switches, live search, and summary tiles
+computed over *every* ticket rather than just the visible tab).
+
+**Present-aware override:** the new `delegateStatus` field drives it — once a
+delegate is checked in (`ARRIVED`, or the legacy `PRESENT` alias, via his new
+`isCheckedIn()`), the Override button is replaced by a "Present" marker instead
+of letting a second click write a duplicate `check_in_logs` row.
+
+### Compatibility work needed
+
+1. **His `MobileExceptionsPage.jsx` had no route and nothing linking to it** —
+   doubly unreachable. Added `/mobile/exceptions`, gated on the existing
+   `viewMobileIssues` (no new permission needed — `permissions.js` is
+   byte-identical between our trees), plus a Home tile to reach it.
+2. **Deliberately NOT merged into `/mobile/issues`.** His file header is
+   explicit that the two are different screens: `/mobile/issues` mounts
+   `IssuesPanel` (the log-a-ticket form + that coach's open list), his is the
+   full trip-wide inbox with actions. Both kept. The two Home tiles were
+   relabelled ("Report an issue" / "Exception inbox") because both previously
+   read as "Issues" and would have been indistinguishable.
+3. **Re-removed the `exc-live` "Live/Connecting…" pill** — his branch predates
+   the request to drop it, so his overhaul brought it back. Nothing functional
+   lost: the SSE subscription still drives the live refresh; that badge only
+   ever *displayed* the stream's connection state.
+4. CRLF → LF normalised on all 5 files (his tree is CRLF; main is LF).
+
+### What was verified
+
+- **My offline write queue survived** — the whole point of checking
+  `exceptionsApi.js` first, since `manualOverride()` carries the outbox
+  try/catch. His changes append after line 263; diff shows **0 deletions**, and
+  all 7 `outbox`/`isOfflineError`/`registerSender` references are intact.
+- All 16 functions his two UIs import are actually exported (checked each).
+- His modified SQL runs against the live DB (`exception_tickets` + the new
+  `d.status` join), and the Present/Override branch resolves correctly per
+  delegate across all 6 real tickets.
+- Auth guards unchanged: `requirePermission` ×7, `requireAuth` ×8,
+  `client_event_id` ×9 — identical counts before and after.
+- No NUL bytes (the trap Vimal's branch hit). Build clean, 113/113 tests pass,
+  backend healthy, `/exceptions` still 401s unauthenticated.
+
+### Still his call
+
+`MobileIssuesPage.jsx` (65 lines) is now arguably redundant next to his richer
+inbox — but it's coach-scoped and reuses `IssuesPanel`, which his page doesn't,
+so consolidating them is a decision for him rather than something to do *to*
+his feature.
+
+## Vimal FaceCheck-Pro integration (2026-07-29) — passkey sign-in + mobile Announcements
+
+Merged 3 commits from `FaceCheck-Pro-(Vimal)` @ `c86d5c9`, diffed against the
+last sync point (`f4a0e28`, the commit his branch was rebased onto for the
+previous integration above) rather than the seed — 11 files, all genuinely new.
+
+- **Passkey (WebAuthn/FIDO2) sign-in** — new `backend/routes/passkeys.js` on
+  `@simplewebauthn/server`/`@simplewebauthn/browser` (new deps, both
+  `npm install`ed): register/login options+verify, `webauthn_credentials`
+  table created on demand, single-use in-memory challenges (5-min TTL),
+  `userVerification: "required"`, signature-counter replay check. New
+  `PasskeyManager.jsx` (Settings / mobile Profile — register this device) and
+  `PasskeySignIn.jsx` (Login page), wired in with 2-line additive diffs.
+- **Mobile Announcements wired to the real backend** — `MobileAnnouncementsPage.jsx`
+  was his own earlier static placeholder; now hits `GET /trips/:id/announcements`
+  (read-only — posting stays admin-only on desktop), with day chips, a featured
+  "latest" hero, older posts collapsed, lazy-loaded media.
+
+### Bugs found and fixed before merging
+
+1. **Account-status check would have 403'd every account.** His check was
+   `if (acc.status !== "ACTIVE" && acc.status !== "APPROVED")` — uppercase
+   literals — but the `accounts` table's real values are lowercase (`'approved'`
+   by default; verified against all 5 live accounts). Rewritten to match
+   `routes/auth.js`'s own check exactly: `status === "pending"` / `"rejected"`.
+2. **Dead import** — `accountFromReq` imported from `../lib/auth.js`, which
+   doesn't export it and isn't used anywhere in the file; an ESM import of a
+   non-existent named export throws at module load, crashing the router on
+   boot. Removed.
+3. **Trip-scoping regression** — `MobileAnnouncementsPage.jsx` still had the
+   hardcoded `TRIP_ID = "t-1"` pattern his OTHER pages hit on the previous
+   integration (his branch predates `getMobileTripId()`). Re-applied it, plus
+   swapped the bare `setInterval(load, 15000)` for `useVisiblePolling`.
+
+Verified: both packages installed, backend restarts clean, all 3 passkey
+endpoints live-hit (`/available` public, `/register/options` 401s
+unauthenticated, `/login/options` on an unknown Staff ID returns `NO_PASSKEY`
+without leaking whether the account exists), `webauthn_credentials` columns
+confirmed. CRLF→LF normalised, no NUL bytes, build clean, 113/113 tests pass.
+
+## Vimal FaceCheck-Pro integration (2026-07-30) — mobile manual check-in rebuild
+
+Merged commit `9ef419a` ("wsdw") from the same branch, diffed against the
+`c86d5c9` sync point above — 5 files: `MobileManualCheckIn.jsx` (new),
+`MobileScannerPage.jsx`, `mobile.css`, `i18n.jsx`, `vite.config.http.js` (new).
+
+- **`MobileManualCheckIn.jsx`** (841 lines) replaces `ManualTrackingPanel.jsx`
+  as Manual mode on the mobile scanner. The desktop panel is
+  `position:absolute; inset:0` — built to fill the desktop scanner's fixed
+  camera square — so it rendered at zero height in the mobile page's
+  height-less viewport; this is a proper touch-first roster instead (swipe to
+  check in, multi-select, a session-reused "why manual?" reason capture,
+  one-tap undo, offline-queue aware). Verified before merging: `tripId` is a
+  prop (no hardcoded trip, forwarded from `getMobileTripId()`), all 6 of its
+  `exceptionsApi.js` imports exist, its exception-type enum matches the
+  backend's, and its own doc-comment about `check_in_logs` staying scoped to
+  the base trip while checkpoint KPIs scope separately matches an existing,
+  deliberate note already in `manualOverride()`.
+- **`MobileScannerPage.jsx`** — re-applied by hand rather than patched (it had
+  diverged from his branch via same-day edits — Reset moved into the hero
+  card, the sync row made conditional). Camera viewport now skips entirely in
+  Manual mode; the hero tally branches to coach boarded/expected instead of
+  session-scan count; the sound/low-light/slow-demo chip row, the "Recent
+  check-ins" strip, and the boarded-roster card are all hidden in Manual (the
+  new component already covers that ground, so a second copy would just be
+  redundant); Manual gets its own single "Reset headcount for the next leg"
+  action in the roster card's place; the PDPA footer branches to an
+  audit-trail line in Manual mode instead of the Zero-Image copy, since no
+  image is ever captured on that path.
+- **`vite.config.http.js`** (new) — plain-HTTP dev server on port 5175, same
+  `/api` proxy as `vite.config.js` minus `basicSsl()`. Solves the in-app
+  preview browser rejecting the project's self-signed HTTPS cert while
+  staying a secure context (`http://localhost` still allows `getUserMedia`/
+  passkeys). Copied in but not yet adopted as the day-to-day dev server.
+- 127 new `.mman-*` CSS rules appended to `mobile.css` (checked for zero
+  class-name collisions first); 55 new i18n keys added (2 duplicates —
+  `"Clear search"`/`"Clear"` — dropped, already present from earlier work).
+
+Verified: both new files confirmed LF/no-NUL. Build clean, 113/113 tests pass.
+
 ## ⚠️ Offline support — write queue BUILT 2026-07-28, service worker STILL MISSING
 
 **Read this before doing any more work on attendance/check-in features.**

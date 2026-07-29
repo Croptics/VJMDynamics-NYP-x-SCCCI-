@@ -18,6 +18,7 @@ import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
 import { getPermissions, apiGet } from "../lib/api.js";
 import { countUnseenAnnouncements } from "../lib/announcementsSeen.js";
+import { useVisiblePolling } from "../lib/useVisiblePolling.js";
 
 // How often (ms) to refresh the sidebar's critical-exception badge. Kept
 // separate from the session-guard's own interval since it's unrelated data.
@@ -59,41 +60,32 @@ export default function Layout({ onLogout }) {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadBadge() {
-      try {
-        const n = await getCriticalOpenCount();
-        if (!cancelled) setOpenExceptions(n);
-      } catch {
-        // Exception module unreachable/not seeded yet — leave the badge at 0
-        // rather than showing a stale or broken count.
-      }
+  // Both badge polls below pause while the tab is hidden (2026-07-29) — see
+  // useVisiblePolling. These two matter more than any single page's poller
+  // because they run on EVERY route: any open MusterGo tab, on any screen, was
+  // previously hitting the backend twice every 15s forever.
+  useVisiblePolling(async () => {
+    try {
+      setOpenExceptions(await getCriticalOpenCount());
+    } catch {
+      // Exception module unreachable/not seeded yet — leave the badge at 0
+      // rather than showing a stale or broken count.
     }
-    loadBadge();
-    const iv = setInterval(loadBadge, EXCEPTION_BADGE_INTERVAL_MS);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, []);
+  }, EXCEPTION_BADGE_INTERVAL_MS);
 
-  useEffect(() => {
+  useVisiblePolling(async () => {
     if (!getPermissions().viewAnnouncements) return;
-    let cancelled = false;
-    async function loadBadge() {
-      let tripId;
-      try { tripId = localStorage.getItem(DASHBOARD_TRIP_KEY); } catch { tripId = null; }
-      if (!tripId) return; // nobody's picked a trip yet — nothing to badge against
-      try {
-        const data = await apiGet(`/trips/${tripId}/announcements`);
-        if (!cancelled) setUnseenAnnouncements(countUnseenAnnouncements(tripId, data.announcements || []));
-      } catch {
-        // Trip switched/deleted mid-poll, or backend hiccup — leave the last
-        // known count rather than flashing the badge to 0.
-      }
+    let tripId;
+    try { tripId = localStorage.getItem(DASHBOARD_TRIP_KEY); } catch { tripId = null; }
+    if (!tripId) return; // nobody's picked a trip yet — nothing to badge against
+    try {
+      const data = await apiGet(`/trips/${tripId}/announcements`);
+      setUnseenAnnouncements(countUnseenAnnouncements(tripId, data.announcements || []));
+    } catch {
+      // Trip switched/deleted mid-poll, or backend hiccup — leave the last
+      // known count rather than flashing the badge to 0.
     }
-    loadBadge();
-    const iv = setInterval(loadBadge, EXCEPTION_BADGE_INTERVAL_MS);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, []);
+  }, EXCEPTION_BADGE_INTERVAL_MS);
 
   return (
     <div className="app-shell">

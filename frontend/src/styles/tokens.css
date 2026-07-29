@@ -380,6 +380,53 @@ a { color: inherit; }
   color: var(--ink-3);
 }
 .page-title { font-size: 28px; margin: 4px 0 2px; }
+/* The Dashboard's trip switcher, which IS the page title (2026-07-29). See the
+   comment at its call site in DashboardPage for the full reasoning; the short
+   version is that a <select> always sizes to its WIDEST option, so styling the
+   select directly left the chevron stranded far from a shorter selected name.
+   Instead the name is real text, the chevron sits immediately after it, and the
+   select is laid transparently over both — so the pair sizes to the actual
+   selected name at any length, while the click target stays the whole title and
+   the dropdown stays native. */
+.mg-title-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;          /* lets the name below ellipsis instead of overflowing */
+  max-width: 100%;
+  color: inherit;
+}
+.mg-title-switch .mg-title-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mg-title-switch > svg { flex-shrink: 0; color: var(--ink-3); }
+/* Covers the text AND the chevron, so clicking anywhere on the title opens the
+   list. opacity:0 rather than visibility/display so it stays focusable and the
+   browser still anchors its native dropdown here. */
+.mg-title-switch select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.mg-title-switch:hover .mg-title-name,
+.mg-title-switch:hover > svg { color: var(--scc-red); }
+/* The invisible select can't show its own focus ring, so the wrapper wears it —
+   otherwise keyboard users get no indication the title is focused. */
+.mg-title-switch:focus-within { outline: 2px solid var(--scc-red); outline-offset: 4px; border-radius: 4px; }
+/* The dropdown LIST renders with the OS's own styling, which would otherwise
+   inherit the transparent background and be unreadable in dark theme. */
+.mg-title-switch option { font-size: 14px; font-weight: 400; color: var(--ink); background: var(--surface); }
 .page-sub { color: var(--ink-3); font-size: 14px; }
 
 /* ---- Status + confidence badges --------------------------------------- */

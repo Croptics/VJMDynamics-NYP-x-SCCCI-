@@ -113,6 +113,38 @@ async function all(sql, params = []) { return (await pool.query(sql, params)).ro
 async function get(sql, params = []) { return (await all(sql, params))[0] || null; }
 async function run(sql, params = []) { await pool.query(sql, params); }
 
+/* "Total days" — and the trip card's "dateRange" display — now follow the
+ * itinerary directly rather than being independently-typed values that can
+ * drift out of sync. First cut (2026-07-30 — "I added day 6 but it's not
+ * reflected") only ever bumped totalDays UP; that turned out to be wrong the
+ * moment someone deleted a day ("if I remove day 8 it's still there") — a
+ * one-way ratchet isn't "following the itinerary", it's "following it only
+ * when it grows". This recomputes totalDays as the itinerary's actual
+ * highest day number every time (grows OR shrinks), AND recomputes dateRange
+ * (startDate + totalDays - 1, same "25 Jul 2026 – 1 Aug 2026" format
+ * TripsListPage.jsx's computeDateRange() renders) in the same statement, so
+ * the two can never disagree with each other or with what's actually
+ * scheduled. Guarded on `days > 0`: a trip with zero itinerary items keeps
+ * whatever totalDays/dateRange it already had rather than collapsing to 1
+ * day the moment its last item is deleted — this only takes over once an
+ * itinerary actually exists. Called after every itinerary create/update/
+ * delete. */
+async function syncTotalDaysToItinerary(tripId) {
+  await run(
+    `UPDATE trips t
+        SET "totalDays" = sub.days,
+            "dateRange" = CASE
+              WHEN t."startDate" IS NULL THEN t."dateRange"
+              WHEN sub.days <= 1 THEN to_char(t."startDate"::date, 'FMDD Mon YYYY')
+              ELSE to_char(t."startDate"::date, 'FMDD Mon YYYY') || ' – ' ||
+                   to_char(t."startDate"::date + (sub.days - 1), 'FMDD Mon YYYY')
+            END
+       FROM (SELECT COALESCE(MAX(day_number), 0) AS days FROM itinerary_items WHERE trip_id = $1) sub
+      WHERE t.uuid_id = $1 AND sub.days > 0`,
+    [tripId]
+  );
+}
+
 /* ---- Additive schema: live operational-status fields -----------------------
  * Columns this feature added AFTER the base schema was frozen in data.js
  * (JQ's, off-limits). Added idempotently at startup — the same additive
@@ -244,7 +276,12 @@ function logActivity(tripId, text, kind = "system") {
  * value changed FROM and TO, surviving a backend restart. Best-effort on the
  * persisted side: an audit failure must never block or fail the real mutation
  * it's describing, so the INSERT is wrapped and its error swallowed. */
-async function recordEvent(tripId, req, { action, entity, entityId = null, summary, before = null, after = null, kind = "system" }) {
+// Exported (2026-07-30 — "the history log didn't track the qr, face scanner
+// and manual update right?" — confirmed true, none of those check-in routes
+// ever called this) so vimal.js/exceptions.js/vance.js can log a check-in the
+// same way every desktop edit already does, instead of each duplicating this
+// non-trivial function. Nothing about its own behaviour changes.
+export async function recordEvent(tripId, req, { action, entity, entityId = null, summary, before = null, after = null, kind = "system" }) {
   if (!tripId || !summary) return;
   logActivity(tripId, summary, kind); // live feed (ephemeral) — unchanged behaviour
   try {
@@ -354,18 +391,24 @@ router.get("/api/all-trips", readAccess, wrap(async (_req, res) => {
   // startDate/dayOfIsManual added later (2026-07-24, JQ's auto-day feature) —
   // without them here, the Edit trip modal (which reuses these same trip
   // objects) always saw startDate as undefined and showed the date picker
-  // blank even for a trip that already had one saved.
+  // blank even for a trip that already had one saved. departureTime/
+  // countryFrom/countryTo added the same way (2026-07-30) after hitting the
+  // IDENTICAL bug again — "the To (country) never saved" turned out to mean
+  // it saved fine, but reopening Edit Trip re-seeds its form from THIS list,
+  // which never selected the new columns, so it always looked blank again.
   const trips = await all(`
     SELECT
       t.uuid_id AS id, t.name, t."dateRange", t.status, t."lead",
       t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual",
+      t."departureTime", t."countryFrom", t."countryTo",
       COUNT(DISTINCT c.id) AS "coachCount",
       COUNT(DISTINCT d.id) AS "delegateCount"
     FROM trips t
     LEFT JOIN coaches   c ON c.trip_id = t.uuid_id
     LEFT JOIN delegates d ON d.trip_id = t.uuid_id
     WHERE t.uuid_id IS NOT NULL
-    GROUP BY t.uuid_id, t.name, t."dateRange", t.status, t."lead", t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual"
+    GROUP BY t.uuid_id, t.name, t."dateRange", t.status, t."lead", t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual",
+             t."departureTime", t."countryFrom", t."countryTo"
     ORDER BY t.name
   `);
   res.json({
@@ -388,6 +431,10 @@ router.get("/api/trips/:tripId/summary", readAccess, wrap(async (req, res) => {
     lead: trip.lead,
     dayOf: trip.dayOf,
     totalDays: trip.totalDays,
+    startDate: trip.startDate,
+    departureTime: trip.departureTime,
+    countryFrom: trip.countryFrom,
+    countryTo: trip.countryTo,
     coachCount: Number(coachRow?.c || 0),
     delegateCount: Number(delegateRow?.c || 0),
   });
@@ -457,18 +504,26 @@ router.post("/api/trips/seed", writeAccess, wrap(async (_req, res) => {
  * ---------------------------------------------------------------------------- */
 const TRIP_STATUSES = ["Planning", "In progress", "Completed", "Cancelled"];
 
+const HHMM_RE = /^\d{2}:\d{2}$/;
+
 router.post("/api/trips", writeAccess, wrap(async (req, res) => {
-  const { name, dateRange, status, lead, dayOf, totalDays, startDate } = req.body || {};
+  const { name, dateRange, status, lead, dayOf, totalDays, startDate, departureTime, countryFrom, countryTo } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "A trip name is required." });
+  if (departureTime !== undefined && departureTime !== null && departureTime !== "" && !HHMM_RE.test(departureTime)) {
+    return res.status(400).json({ error: "BAD_DEPARTURE_TIME", message: "Departure time must be HH:MM." });
+  }
   const st = TRIP_STATUSES.includes(status) ? status : "Planning";
   const total = Math.max(1, Number(totalDays) || 5);
   const day = Math.min(total, Math.max(1, Number(dayOf) || 1));
   const sd = startDate ? String(startDate).trim() || null : null;
+  const dt = departureTime ? String(departureTime).trim() : null;
+  const cf = countryFrom !== undefined ? (String(countryFrom).trim() || null) : null;
+  const ct = countryTo !== undefined ? (String(countryTo).trim() || null) : null;
   let trip = await get(
-    `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead", "startDate")
-     VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
-     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual"`,
-    [name.trim(), (dateRange || "").trim() || null, day, total, st, (lead || "").trim() || null, sd]
+    `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead", "startDate", "departureTime", "countryFrom", "countryTo")
+     VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, COALESCE($8, '10:00'), COALESCE($9, 'Singapore'), $10)
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo"`,
+    [name.trim(), (dateRange || "").trim() || null, day, total, st, (lead || "").trim() || null, sd, dt, cf, ct]
   );
   // A startDate was given — compute the real "Day X of Y" immediately instead
   // of leaving whatever was typed (or the "1" default) until the next 60s
@@ -476,7 +531,7 @@ router.post("/api/trips", writeAccess, wrap(async (req, res) => {
   if (sd) {
     await syncTripDayOf(trip.id);
     trip = await get(
-      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual" FROM trips WHERE uuid_id = $1`,
+      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo" FROM trips WHERE uuid_id = $1`,
       [trip.id]
     );
   }
@@ -505,6 +560,13 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   }
   if (b.totalDays !== undefined) { sets.push(`"totalDays" = $${i++}`); params.push(Math.max(1, Number(b.totalDays) || 1)); }
   if (b.startDate !== undefined) { sets.push(`"startDate" = $${i++}`); params.push(String(b.startDate).trim() || null); }
+  if (b.departureTime !== undefined) {
+    const dt = b.departureTime ? String(b.departureTime).trim() : null;
+    if (dt && !HHMM_RE.test(dt)) return res.status(400).json({ error: "BAD_DEPARTURE_TIME", message: "Departure time must be HH:MM." });
+    sets.push(`"departureTime" = $${i++}`); params.push(dt);
+  }
+  if (b.countryFrom !== undefined) { sets.push(`"countryFrom" = $${i++}`); params.push(String(b.countryFrom).trim() || null); }
+  if (b.countryTo !== undefined) { sets.push(`"countryTo" = $${i++}`); params.push(String(b.countryTo).trim() || null); }
   // Hand-typing a specific "Current day" is a deliberate override — flip
   // dayOfIsManual on so the next auto-sync tick doesn't immediately stomp it.
   // "resetDayOfAuto: true" is the opposite action ("Use automatic day" in
@@ -522,7 +584,7 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   params.push(req.params.tripId);
   let trip = await get(
     `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
-     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual"`,
+     RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo"`,
     params
   );
   if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
@@ -531,7 +593,7 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   if (b.startDate !== undefined || b.resetDayOfAuto === true) {
     await syncTripDayOf(req.params.tripId);
     trip = await get(
-      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual" FROM trips WHERE uuid_id = $1`,
+      `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo" FROM trips WHERE uuid_id = $1`,
       [req.params.tripId]
     );
   }
@@ -824,6 +886,7 @@ router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) =
      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
     [req.params.tripId, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category), st, delay]
   );
+  await syncTotalDaysToItinerary(req.params.tripId);
   await recordEvent(req.params.tripId, req, {
     action: "itinerary.create", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" added to Day ${item.dayNumber}.`,
@@ -851,6 +914,7 @@ router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (re
     [Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, normalizeCategory(category), st, delay, req.params.itemId, req.params.tripId]
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
+  await syncTotalDaysToItinerary(req.params.tripId);
   await recordEvent(req.params.tripId, req, {
     action: "itinerary.update", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" updated.`,
@@ -915,6 +979,7 @@ router.delete("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (r
     [req.params.itemId, req.params.tripId]
   );
   if (!deleted) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
+  await syncTotalDaysToItinerary(req.params.tripId);
   await recordEvent(req.params.tripId, req, {
     action: "itinerary.delete", entity: "itinerary", entityId: deleted.id, kind: "itinerary",
     summary: `Itinerary: "${deleted.title}" removed.`,

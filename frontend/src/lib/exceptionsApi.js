@@ -263,3 +263,115 @@ export function fmtTime(v) {
   const d = new Date(v);
   return isNaN(d) ? String(v) : d.toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
 }
+
+/* ---- Delegate status ----------------------------------------------------- *
+ * The five-status model is UNASSIGNED → ASSIGNED → ARRIVED / LATE / MISSING.
+ * PRESENT is the pre-migration value and is still accepted as an alias for
+ * ARRIVED (see normalize() in backend/db/delegates.js), so anything asking
+ * "is this delegate checked in?" has to accept both.
+ * -------------------------------------------------------------------------- */
+
+/** Statuses that mean "checked in". */
+export const CHECKED_IN_STATUSES = ["ARRIVED", "PRESENT"];
+
+/** True when the delegate is already counted as boarded. */
+export function isCheckedIn(status) {
+  return CHECKED_IN_STATUSES.includes(status);
+}
+
+/* ---- Ageing -------------------------------------------------------------- *
+ * How long a ticket has been sitting. On a live trip the difference between a
+ * ticket raised 2 minutes ago and one raised 40 minutes ago is the whole point
+ * of the screen, but both render identically as an HH:MM stamp — so rows also
+ * show an age, tinted once it crosses the thresholds below.
+ * -------------------------------------------------------------------------- */
+export const AGE_WARN_MINS = 15;
+export const AGE_LATE_MINS = 30;
+
+/** Whole minutes between `iso` and `now` (never negative). null if unparseable. */
+export function ageMinutes(iso, now = Date.now()) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  return Math.max(0, Math.floor((now - t) / 60000));
+}
+
+/** Compact age: "just now" · "8m" · "2h 05m" · "3d". */
+export function fmtAge(mins) {
+  if (mins == null) return "";
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h ${String(mins % 60).padStart(2, "0")}m`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** "" | "warn" | "late" — drives the age tint. Only OPEN tickets age. */
+export function ageLevel(ticket, now = Date.now()) {
+  if (!ticket || ticket.status !== "OPEN") return "";
+  const m = ageMinutes(ticket.createdAt, now);
+  if (m == null) return "";
+  if (m >= AGE_LATE_MINS) return "late";
+  if (m >= AGE_WARN_MINS) return "warn";
+  return "";
+}
+
+/** Minutes a resolved ticket took, or null if it isn't resolved. */
+export function resolveMinutes(ticket) {
+  if (!ticket || ticket.status !== "RESOLVED" || !ticket.resolvedAt) return null;
+  const a = new Date(ticket.createdAt).getTime();
+  const b = new Date(ticket.resolvedAt).getTime();
+  if (isNaN(a) || isNaN(b) || b < a) return null;
+  return Math.round((b - a) / 60000);
+}
+
+/* ---- CSV export (opens in Excel) ----------------------------------------- *
+ * Mirrors exportRowsCsv() in claudeParse.js — same escaping and UTF-8 BOM, so
+ * every CSV the app produces behaves identically in Excel.
+ * -------------------------------------------------------------------------- */
+const TICKET_COLUMNS = [
+  ["priority", "Priority"], ["issue", "Issue"], ["delegate", "Delegate"],
+  ["coach", "Coach"], ["note", "Note"], ["status", "Status"],
+  ["raisedAt", "Raised at"], ["raisedBy", "Raised by"],
+  ["resolvedAt", "Resolved at"], ["resolvedBy", "Resolved by"],
+  ["ageMins", "Age (mins)"],
+];
+
+function toExportRow(t, now = Date.now()) {
+  return {
+    priority: t.priority,
+    issue: issueLabel(t),
+    delegate: t.delegateName || "Unidentified",
+    coach: t.coach || "",
+    note: t.note || "",
+    status: t.status,
+    raisedAt: t.createdAt ? new Date(t.createdAt).toLocaleString("en-SG") : "",
+    raisedBy: t.raisedBy || "",
+    resolvedAt: t.resolvedAt ? new Date(t.resolvedAt).toLocaleString("en-SG") : "",
+    resolvedBy: t.resolvedBy || "",
+    ageMins: t.status === "RESOLVED" ? (resolveMinutes(t) ?? "") : (ageMinutes(t.createdAt, now) ?? ""),
+  };
+}
+
+/** Download the given tickets as CSV. Returns the number of rows written. */
+export function exportTicketsCsv(tickets, filename = "exceptions.csv") {
+  const esc = (v) => {
+    const s = v == null ? "" : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const now = Date.now();
+  const header = TICKET_COLUMNS.map(([, label]) => label).join(",");
+  const lines = tickets.map((t) => {
+    const row = toExportRow(t, now);
+    return TICKET_COLUMNS.map(([key]) => esc(row[key])).join(",");
+  });
+  const csv = [header, ...lines].join("\r\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" }); // BOM so Excel reads UTF-8
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  return tickets.length;
+}

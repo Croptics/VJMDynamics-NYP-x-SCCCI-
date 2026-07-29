@@ -218,12 +218,13 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
 
   return (
     <div>
-      <div className="row between" style={{ alignItems: "baseline" }}>
-        <h2 style={{ fontSize: 20 }}>Log exception</h2>
-        <span className={`badge ${live ? "badge-present" : "badge-neutral"}`} style={{ fontSize: 11 }}>
-          {live ? "● Live" : "○ Offline"}
-        </span>
-      </div>
+      {/* The Live/Offline badge that used to sit here is gone (2026-07-29 —
+          "hide all the unnecessary sync part, cause already have on top of
+          the mobile top bar" — this panel is mobile-only, and MobileLayout's
+          topbar already carries a connectivity chip on every mobile screen.
+          Purely decorative: it only ever displayed the SSE stream's
+          connection state, never controlled it. */}
+      <h2 style={{ fontSize: 20 }}>Log exception</h2>
       <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
         Raise an issue for the team. Critical alerts reach every staff device instantly.
       </p>

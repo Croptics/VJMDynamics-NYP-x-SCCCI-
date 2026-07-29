@@ -9,11 +9,12 @@
 //
 // Shares the face vectorizer + validator + error tone with the desktop
 // scanner via lib/faceScan.js (one copy, not three), and mounts Jayden's
-// QRScannerPanel/ManualTrackingPanel unmodified — exactly like the desktop
-// page. The only differences are layout (single column, portrait viewport)
-// and the face camera facing (environment/rear here, since a handheld phone
-// points its back camera at the delegate, vs. the desktop's user-facing
-// webcam).
+// QRScannerPanel unmodified — exactly like the desktop page. Manual is the one
+// path that is NOT the desktop component any more (see the import below): it's
+// MobileManualCheckIn.jsx, a touch-first roster. The other differences are
+// layout (single column, portrait viewport) and the face camera facing
+// (environment/rear here, since a handheld phone points its back camera at the
+// delegate, vs. the desktop's user-facing webcam).
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
@@ -36,7 +37,14 @@ import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbedd
 const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
-import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
+// Manual check-in is mobile's OWN screen, not the desktop panel (2026-07-29,
+// Vimal). components/ManualTrackingPanel.jsx is `position:absolute; inset:0` —
+// built to fill the desktop scanner's fixed camera square — so mounting it in
+// this page's height-less "manual" viewport collapsed the roster to zero
+// height: the list was invisible on a phone. MobileManualCheckIn is the
+// touch-first replacement (swipe to check in, multi-select, session reason,
+// undo snackbar). The desktop scanner still uses the original panel.
+import MobileManualCheckIn from "./MobileManualCheckIn.jsx";
 // Re-applied at integration 2026-07-29: this branch hardcoded
 // `const TRIP_ID = "t-1"` at module scope, which silently pins the scanner to
 // the base trip and undoes the mobile trip switcher. Read per-render instead so
@@ -87,6 +95,12 @@ const SCAN_CSS = `
   padding: 16px 18px; color: #fff;
   background: linear-gradient(135deg, var(--scc-red) 0%, var(--scc-red-700) 100%);
   box-shadow: var(--shadow-md);
+  /* Owns its own bottom gap (2026-07-29 — "pls add some gap"). It used to
+     inherit separation from the Reset/sync toolbar row that sat beneath it;
+     that row is now conditional (it only renders when there's a sync problem),
+     so with Reset moved into this card the hero was left sitting flush against
+     the "CHECKING IN TO" label whenever everything was fine. */
+  margin-bottom: 14px;
 }
 .mscan-hero-glow {
   position: absolute; top: -45%; right: -12%; width: 220px; height: 220px;
@@ -190,6 +204,13 @@ export default function MobileScannerPage({ lockMode }) {
   const [camError, setCamError] = useState("");
   const [resetTick, setResetTick] = useState(0);
   const [facing, setFacing] = useState("user"); // user (selfie) | environment (rear)
+  // Owns QRScannerPanel's manual-entry toggle in controlled mode (2026-07-29 —
+  // see the component's doc comment for why: manual entry is rendered as a
+  // labelled button BELOW the viewport here, not the in-video icon it draws by
+  // default). Reset alongside the camera whenever the mode/reset key changes,
+  // so switching away from QR and back doesn't reopen a stale sheet.
+  const [qrManualOpen, setQrManualOpen] = useState(false);
+  useEffect(() => { setQrManualOpen(false); }, [scanMode, resetTick]);
 
   // Low-light voice fallback + slow-scan demo — same feature as Vimal's
   // original QRCheckInPage.jsx "Me tab" scanner, brought to this page too.
@@ -771,19 +792,14 @@ export default function MobileScannerPage({ lockMode }) {
     : 0;
 
   const S = {
-    // Manual check-in is a roster list, not a camera feed — give it a normal
-    // surface that grows with its content instead of a black square crop.
-    viewport: scanMode === "manual"
-      ? {
-          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-          background: "var(--surface)", border: "1px solid var(--line)",
-          width: "100%", boxShadow: "var(--shadow-sm)",
-        }
-      : {
-          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-          background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
-          boxShadow: "var(--shadow-md)",
-        },
+    // Camera viewport only. Manual check-in is no longer squeezed in here — it
+    // renders as its own full-width card below (MobileManualCheckIn), because a
+    // roster needs to grow with its content, not sit in a square camera crop.
+    viewport: {
+      position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+      background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
+      boxShadow: "var(--shadow-md)",
+    },
     overlay: {
       position: "absolute", inset: 0, display: "flex", alignItems: "center",
       justifyContent: "center", padding: 20, textAlign: "center", flexDirection: "column", gap: 10, zIndex: 4,
@@ -809,27 +825,60 @@ export default function MobileScannerPage({ lockMode }) {
                 : t("Face + QR scan")}
             </h1>
           </div>
-          <div style={{ flexShrink: 0, textAlign: "center", background: "rgba(255,255,255,0.16)", borderRadius: 14, padding: "8px 14px", minWidth: 76 }}>
-            <div className="mono" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>{sessionCount}</div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", opacity: 0.85, marginTop: 3 }}>
-              {t("checked in")}
+          {/* Reset lives IN the hero now (2026-07-29 — "i think the reset icon
+              put in the red kpi section"), which removes the orphaned toolbar
+              row it used to sit in entirely. It belongs here on two counts:
+              it's a page-level action rather than a scanning one, and what it
+              actually resets is this card's session tally — so pairing it with
+              the number it clears is self-explanatory. Icon-only with an
+              aria-label/title, since a text button would compete with the
+              tally for the eye. */}
+          <div className="row" style={{ flexShrink: 0, gap: 8, alignItems: "stretch" }}>
+            {/* Manual mode counts the COACH, not this session's matches
+                (2026-07-29, Vimal): there's no match timing to average, and
+                the number staff care about while working a roster by hand is
+                "how many are on board", not "how many I personally scanned". */}
+            <div style={{ textAlign: "center", background: "rgba(255,255,255,0.16)", borderRadius: 14, padding: "8px 14px", minWidth: 76 }}>
+              <div className="mono" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>
+                {scanMode === "manual" ? (coach ? coach.boarded : 0) : sessionCount}
+              </div>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", opacity: 0.85, marginTop: 3 }}>
+                {scanMode === "manual" ? `${t("of")} ${coach ? coach.expected : 0} ${t("on board")}` : t("checked in")}
+              </div>
             </div>
+            <button
+              onClick={resetScanner}
+              aria-label={t("Reset scanner")}
+              title={t("Reset scanner")}
+              style={{
+                flexShrink: 0, width: 40, borderRadius: 14, cursor: "pointer",
+                background: "rgba(255,255,255,0.16)", border: "none", color: "#fff",
+                display: "grid", placeItems: "center",
+              }}
+            >
+              <RefreshCw size={17} />
+            </button>
           </div>
         </div>
-        {sessionCount > 0 && (
+        {scanMode !== "manual" && sessionCount > 0 && (
           <div className="row" style={{ gap: 6, marginTop: 10, position: "relative", fontSize: 12, fontWeight: 600, opacity: 0.92 }}>
             <Clock size={13} /> {t("Avg match")} {avgSeconds.toFixed(1)}s · {t("this session")}
           </div>
         )}
       </div>
 
-      {/* Status + reset toolbar */}
-      <div className="row between" style={{ marginTop: 12, marginBottom: 12 }}>
-        <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
-        <button className="btn btn-ghost" onClick={resetScanner} aria-label={t("Reset scanner")} title={t("Reset scanner")} style={{ padding: "8px 12px", fontSize: 12.5 }}>
-          <RefreshCw size={15} /> {t("Reset")}
-        </button>
-      </div>
+      {/* Sync status. Reset moved into the hero above, so this row now exists
+          ONLY for the offline/pending badge — and it's rendered conditionally
+          rather than always: an empty flex row still costs its 24px of margin,
+          which is what left a dead gap above the coach picker once the badge
+          learned to hide itself in the all-clear state (entry 161). The same
+          condition lives in SyncBadge as a safety net; this one keeps the
+          WRAPPER from taking space. */}
+      {(!online || pending.length > 0) && (
+        <div className="row" style={{ marginTop: 12, marginBottom: 12 }}>
+          <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
+        </div>
+      )}
 
       {loadErr && (
         <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
@@ -857,7 +906,36 @@ export default function MobileScannerPage({ lockMode }) {
         ))}
       </select>
 
-      {/* Scanner viewport */}
+      {/* Manual check-in owns the whole width as its own card — a roster, not a
+          camera feed. Everything camera-shaped below is skipped in this mode. */}
+      {scanMode === "manual" && (
+        <>
+          <MobileManualCheckIn
+            key={resetTick}
+            coach={coach}
+            coachLabel={coach?.coachLabel}
+            coachId={coachId}
+            tripId={TRIP_ID}
+            onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
+          />
+          {/* Manual's own single reset action, since the shared boarded-roster
+              card (with its own per-row + group reset) is hidden in this mode —
+              see the guard on that card below for why. */}
+          {boardedList.length > 0 && (
+            <button
+              className="btn btn-ghost btn-block"
+              style={{ marginTop: 10, color: "var(--scc-red)" }}
+              onClick={() => setConfirmCoachReset(true)}
+              disabled={resetBusy}
+            >
+              <RotateCcw size={15} /> {t("Reset headcount for the next leg")}
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Scanner viewport (face / QR) */}
+      {scanMode !== "manual" && (
       <div style={S.viewport}>
         {scanMode === "face" && !lowLight && (
           <>
@@ -986,8 +1064,32 @@ export default function MobileScannerPage({ lockMode }) {
               coachId={coachId}
               coachLabel={coach?.coachLabel}
               facingMode={facing}
-              onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
+              manualOpen={qrManualOpen}
+              onManualOpenChange={setQrManualOpen}
+              onCheckedIn={(info) => {
+                fetchCoaches(); fetchCoach(coachId);
+                // Session tally + recents strip (2026-07-30 — "i successfully
+                // able to checkin by scanning qr code. but this part not
+                // updated"): the hero's "N checked in" count only ever grew
+                // from THIS page's OWN submitScan() (Face/Voice) — a QR scan,
+                // handled entirely inside QRScannerPanel, never told this
+                // page it happened at all. Re-scanning an already-boarded
+                // badge doesn't add a new tally entry (matches the Face path,
+                // which also only counts a genuinely NEW confirmed match).
+                if (info?.delegateId && !info.alreadyBoarded) {
+                  setSessionScans((prev) => [
+                    { delegateId: info.delegateId, name: info.name, time: `${(info.elapsedMs / 1000).toFixed(1)}s`, at: Date.now() },
+                    ...prev,
+                  ].slice(0, 12));
+                }
+              }}
             />
+            {/* Back at top:12/right:12 (2026-07-29) — the collision this was
+                offset for is gone now that QRScannerPanel is passed
+                `manualOpen`/`onManualOpenChange`: in controlled mode it draws
+                NO in-video icon of its own (see its doc comment), so this
+                corner is free again. The manual-entry trigger moved to a
+                labelled button below the viewport instead — see there for why. */}
             {!lowLight && (
               <button
                 className="mscan-glass" onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
@@ -998,15 +1100,6 @@ export default function MobileScannerPage({ lockMode }) {
               </button>
             )}
           </>
-        )}
-
-        {scanMode === "manual" && (
-          <ManualTrackingPanel
-            key={resetTick}
-            coach={coach}
-            coachLabel={coach?.coachLabel}
-            onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
-          />
         )}
 
         {scanResult && (
@@ -1025,6 +1118,26 @@ export default function MobileScannerPage({ lockMode }) {
           </div>
         )}
       </div>
+      )}
+
+      {/* Manual-entry trigger for QR, moved OFF the video (2026-07-29 —
+          layout advice given, then implemented on request). It isn't a camera
+          control — it's the fallback staff reach for when a code won't scan,
+          often under time pressure — so it's a findable labelled button here
+          rather than a 32px glass icon competing with the scan-guide corners.
+          QRScannerPanel is `position:absolute; inset:0` inside the viewport
+          box above, so it can't render anything below itself; that's why this
+          lives in the parent instead, wired through the `manualOpen`/
+          `onManualOpenChange` controlled-mode props. */}
+      {scanMode === "qr" && !qrManualOpen && (
+        <button
+          className="btn btn-ghost btn-block"
+          style={{ marginTop: 10 }}
+          onClick={() => setQrManualOpen(true)}
+        >
+          <PencilLine size={15} /> {t("Enter code manually")}
+        </button>
+      )}
 
       {/* Locked to one mode (the Face / QR / Manual routes) — offer the other
           two as a compact switcher, so Manual check-in is always one tap away
@@ -1116,8 +1229,11 @@ export default function MobileScannerPage({ lockMode }) {
       )}
 
       {/* Sound + simulated sensors — the confirmation chime, plus the demo
-          toggles for the fairness fallback and the 1s SLA. Shown regardless of
-          scanMode (matches UnifiedScannerPage.jsx). */}
+          toggles for the fairness fallback and the 1s SLA. Camera-only, so
+          hidden for Manual (2026-07-29, Vimal): none of the three apply to a
+          hand-typed roster — there's no chime timing, no light sensor, no
+          scan SLA to simulate. */}
+      {scanMode !== "manual" && (
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button
             className={`mscan-chip ${soundOn ? "on" : ""}`}
@@ -1142,10 +1258,13 @@ export default function MobileScannerPage({ lockMode }) {
             {simulateSlow ? t("Slow: on") : t("Slow demo")}
           </button>
       </div>
+      )}
 
       {/* Recent check-ins — this shift's confirmed matches, newest first, with
-          a one-tap undo of the most recent (client-side session log). */}
-      {sessionScans.length > 0 && (
+          a one-tap undo of the most recent (client-side session log). Camera
+          modes only — Manual has its own on-the-spot undo per row inside
+          MobileManualCheckIn, so this list would just duplicate it. */}
+      {scanMode !== "manual" && sessionScans.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <div className="row between" style={{ marginBottom: 8 }}>
             <span className="row" style={{ gap: 6, fontSize: 12, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink-3)" }}>
@@ -1178,8 +1297,12 @@ export default function MobileScannerPage({ lockMode }) {
         </div>
       )}
 
-      {/* Live count + boarded roster for the selected coach, with reset controls */}
-      {coach && (
+      {/* Live count + boarded roster for the selected coach, with reset controls.
+          Hidden for Manual (2026-07-29, Vimal): MobileManualCheckIn already
+          renders its own boarded/to-check-in split with the same delegates —
+          this card would just be a second, redundant roster below it. Manual
+          gets its own single "Reset headcount" action instead, right below. */}
+      {scanMode !== "manual" && coach && (
         <div className="mobile-card" style={{ marginTop: 16, padding: 16 }}>
           <div className="row between" style={{ alignItems: "baseline" }}>
             <span style={{ fontWeight: 700, fontSize: 14 }}>{coach.coachLabel}</span>
@@ -1280,7 +1403,9 @@ export default function MobileScannerPage({ lockMode }) {
       <div className="row" style={{ gap: 8, alignItems: "flex-start", marginTop: 16, padding: "0 2px" }}>
         <ShieldCheck size={15} style={{ color: "var(--st-present)", flexShrink: 0, marginTop: 1 }} />
         <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
-          {t("Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.")}
+          {scanMode === "manual"
+            ? t("Every manual check-in is logged with who did it, when, and the reason given — the head-count and the audit trail stay in step with a scanned one.")
+            : t("Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.")}
         </div>
       </div>
     </div>
@@ -1289,9 +1414,27 @@ export default function MobileScannerPage({ lockMode }) {
 
 /** Live-sync status pill under the page title. Green when everything's synced,
  *  amber when scans are queued offline (tap to force a sync once back online),
- *  red when the phone reports no connection at all. */
+ *  red when the phone reports no connection at all.
+ *
+ *  Renders NOTHING in the all-clear state (2026-07-29 — "what are the different
+ *  for live synce and synced in mobile page / if both work remove the live
+ *  synce"). The two indicators are NOT equivalent, so this one isn't deleted:
+ *
+ *    · MobileLayout's topbar "Synced" chip is `navigator.onLine` ONLY — a
+ *      browser connectivity flag. It knows nothing about scan data, and it
+ *      shows on every mobile page.
+ *    · This badge additionally tracks `musterGo.offlineScans` — how many scans
+ *      are captured but NOT yet sent — and in that state it's a BUTTON that
+ *      force-flushes the queue. That's the only place in the app that can.
+ *
+ *  What was genuinely redundant is the idle case: both went green and both said
+ *  a variant of "synced", stacked a few pixels apart. So the badge now stays
+ *  silent unless it has something the topbar can't tell you — queued scans, or
+ *  no connection — which is also the moment it becomes actionable. Nothing is
+ *  lost, and the all-clear screen loses a duplicated green pill. */
 function SyncBadge({ online, pending, onFlush, t }) {
   const hasPending = pending > 0;
+  if (online && !hasPending) return null;
   let bg, color, Icon, label;
   if (!online) {
     bg = "var(--st-missing-bg)"; color = "var(--st-missing)"; Icon = WifiOff;

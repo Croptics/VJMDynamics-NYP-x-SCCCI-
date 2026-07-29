@@ -41,6 +41,11 @@ import {
   // Needed by the trip-scoping below — also re-applied at integration.
   resolveTripUuid,
 } from "../data.js";
+// Audit trail (2026-07-30 — "the history log didn't track the qr, face
+// scanner and manual update right?" — confirmed: it didn't). Same helper
+// desmond.js's own edits already use; exported from there rather than
+// duplicated here.
+import { recordEvent } from "./desmond.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
 // Aliased: several handlers below use a local `all` for the delegate list.
@@ -452,6 +457,18 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
   // Write through JQ's own helper — updates the shared DB row and logs to the
   // dashboard activity feed, so every screen stays in sync.
   await updateDelegate(matched.id, { status: "PRESENT", lastSeen: seenAt });
+  // Persisted audit row (2026-07-30 — face/voice scans never showed up on the
+  // History log at all before this; only manual admin edits did). Best-effort
+  // by design (recordEvent swallows its own errors) — a logging failure must
+  // never undo or block a check-in that already succeeded.
+  const scanTripUuid = await resolveTripUuid(tripId);
+  if (scanTripUuid) {
+    await recordEvent(scanTripUuid, req, {
+      action: "checkin.scan", entity: "delegate", entityId: matched.id, kind: "checkin",
+      summary: `${matched.name} checked in via ${method.toLowerCase()} scan${coach ? ` — ${coach.name}` : ""}.`,
+      before: { status: matched.status }, after: { status: "PRESENT" },
+    });
+  }
 
   const processedInMs = Date.now() - started;
   const when = timestamp && !Number.isNaN(Date.parse(timestamp)) ? new Date(timestamp) : new Date();

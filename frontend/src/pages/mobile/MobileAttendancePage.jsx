@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock, LocateFixed, Siren, BedDouble, Briefcase } from "lucide-react";
+// RefreshCw dropped 2026-07-29 with this page's own Refresh button — MobileOpsPage
+// renders one directly above, and load() polls every 8s regardless.
+import { AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock, LocateFixed, Siren, BedDouble, Briefcase } from "lucide-react";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import { apiGet, apiPost, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -12,11 +14,22 @@ import { getMobileTripId } from "../../lib/mobileTrip.js";
 // Offline-capable delegate writes (2026-07-28) — attendance decisions taken
 // on-site must survive a dead signal. See lib/outbox.js.
 import { patchDelegate, applyQueuedPatches } from "../../lib/delegateWrites.js";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 // UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
 // staff on the desktop admin pages BEFORE the event; mobile's job during the
 // event is tracking who's arrived/late/missing, not doing the assignment
 // itself, so unassigned delegates don't belong on this list or its filters.
-const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING", "CANCELLED"];
+// "CANCELLED" is a special case among these (2026-07-30 — "i think can add
+// the cancelled one, to see their reason etc"): it isn't a real `status`
+// value at all — a cancelled delegate is forced to UNASSIGNED with a
+// `cancelled` flag + `cancelReason` (see changeStatus() below), which is
+// exactly why UNASSIGNED delegates are excluded from every other filter here
+// (see the comment above STATUS_OPTIONS) — a cancelled person was invisible
+// on mobile entirely, with no way to see WHY they cancelled short of going to
+// desktop. This filter checks `d.cancelled` directly instead of
+// effectiveStatus(d), the one place on this page that looks past the
+// UNASSIGNED exclusion on purpose.
 // The "Update status" sheet offers only these two (2026-07-28 — "can remove the
 // assigned, arrived, late for dropdown when update status, it too much stuff").
 // The FILTERS row above deliberately still shows all five, so staff can still
@@ -46,6 +59,19 @@ const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
 const STATUS_BADGE_CLASS = {
   PRESENT: "badge-arrived", ARRIVED: "badge-arrived", ASSIGNED: "badge-assigned",
   LATE: "badge-late", MISSING: "badge-missing", UNASSIGNED: "badge-unassigned",
+};
+// Row sort order — the roster is sorted by urgency before name, so the people
+// who need chasing surface at the top instead of wherever the alphabet puts
+// them. See the `visible` memo for the reasoning.
+const STATUS_ORDER = { MISSING: 0, LATE: 1, ASSIGNED: 2, ARRIVED: 3, UNASSIGNED: 4 };
+// The coloured stripe down the left edge of each row card. Status is already
+// spelled out in a badge lower down the card, but a colour you can scan without
+// reading is what makes a 40-person roster usable on a phone — you can find
+// every red row at a glance while scrolling.
+const STATUS_ACCENT = {
+  MISSING: "var(--st-missing)", LATE: "var(--st-late)",
+  ARRIVED: "var(--st-present)", PRESENT: "var(--st-present)",
+  ASSIGNED: "var(--st-assigned)", UNASSIGNED: "var(--line)",
 };
 
 /**
@@ -138,14 +164,14 @@ export default function MobileAttendancePage() {
   const savingIdRef = useRef(null);
   useEffect(() => { savingIdRef.current = savingId; }, [savingId]);
 
-  useEffect(() => {
-    load();
-    // Auto-refresh so a status change made by another signed-in staff
-    // member shows up here without needing to tap the manual Refresh button.
-    // Was 2s, slowed to 8s (2026-07-24, Neon egress reduction).
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
-  }, []);
+  // Auto-refresh so a status change made by another signed-in staff member
+  // shows up here without anyone tapping Refresh. Was 2s, slowed to 8s
+  // (2026-07-24, Neon egress reduction), and since 2026-07-29 it also pauses
+  // entirely while the tab/app is backgrounded — see useVisiblePolling. That
+  // matters most here of anywhere: this is the page staff leave open on a
+  // phone all day, where a backgrounded tab was still polling every 8s on
+  // mobile data. Catches up the instant they switch back.
+  useVisiblePolling(load, 8000);
 
   async function load() {
     if (loadingRef.current || savingIdRef.current) return;
@@ -157,6 +183,19 @@ export default function MobileAttendancePage() {
         apiGet(`/trips/${TRIP_ID}/delegates`),
         apiGet(`/trips/${TRIP_ID}/dashboard`),
       ]);
+      // Re-checked here, not just at the top of load() (2026-07-30 — "weird
+      // when i mark as cancelled, but then it reset it"): the entry guard
+      // above only stops a NEW poll from starting while a save is underway —
+      // it does nothing for a poll that was ALREADY in flight the instant a
+      // save started. That poll's request predates the save, so the response
+      // landing here still reflects the pre-save data; applying it would
+      // silently overwrite the fresh optimistic update (cancelled, a status
+      // change, a location edit) with stale server data moments after it was
+      // set — exactly what looked like the app "resetting" the cancellation.
+      // Bailing out here and letting the NEXT poll tick (which starts only
+      // after the save's own finally clears savingIdRef) pick up the real
+      // post-save state instead.
+      if (savingIdRef.current) return;
       // Overlay any still-unsynced offline changes on top of the server's copy,
       // so a reload with no signal doesn't appear to throw away the staff
       // member's own attendance decisions (2026-07-28).
@@ -298,32 +337,84 @@ export default function MobileAttendancePage() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
+    if (filter === "CANCELLED") {
+      // Bypasses the UNASSIGNED exclusion below on purpose — see the FILTERS
+      // comment on why "Cancelled" is the one filter that looks past it.
+      return delegates
+        .filter((d) => d.cancelled)
+        .filter((d) => !coachFilter || d.coachId === coachFilter)
+        .filter((d) => !q || (d.name || "").toLowerCase().includes(q))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
     return delegates
       .filter((d) => effectiveStatus(d) !== "UNASSIGNED") // see the FILTERS comment above
       .filter((d) => filter === "ALL" || effectiveStatus(d) === filter)
       .filter((d) => !coachFilter || d.coachId === coachFilter)
       .filter((d) => !q || (d.name || "").toLowerCase().includes(q))
-      .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      // Urgency first, then alphabetical (2026-07-29 — was alphabetical only).
+      // This is an attendance sheet: the people who need action (Missing, then
+      // Late) are the reason staff opened it, and burying them alphabetically
+      // meant scrolling past everyone already accounted for to find them. A-Z
+      // still applies WITHIN each status, so a specific person is no harder to
+      // find — and Search is right there for that case anyway. No-op when a
+      // single-status chip is selected, since urgency is then constant.
+      .sort((a, b) =>
+        (STATUS_ORDER[effectiveStatus(a)] ?? 9) - (STATUS_ORDER[effectiveStatus(b)] ?? 9)
+        || (a.name || "").localeCompare(b.name || ""));
   }, [delegates, query, filter, coachFilter]);
+
+  // Per-status counts for the filter chips. A chip reading "Missing 3" answers
+  // the question staff came here with WITHOUT them having to tap it first, and
+  // a "Late 0" is just as useful — it's a confirmation, not empty space, which
+  // is also why all five chips stay visible even at zero rather than being
+  // hidden. Scoped by the coach filter (so it reads as "missing ON THIS COACH")
+  // but deliberately NOT by the search box: counts that shifted while typing a
+  // name would be noise. Computed after the same UNASSIGNED exclusion the list
+  // uses, so the four status counts always sum to the ALL count.
+  const counts = useMemo(() => {
+    const coachScoped = delegates.filter((d) => !coachFilter || d.coachId === coachFilter);
+    const base = coachScoped.filter((d) => effectiveStatus(d) !== "UNASSIGNED");
+    const out = { ALL: base.length, ASSIGNED: 0, ARRIVED: 0, LATE: 0, MISSING: 0, CANCELLED: 0 };
+    for (const d of base) {
+      const s = effectiveStatus(d);
+      if (out[s] !== undefined) out[s] += 1;
+    }
+    // Counted separately from `base` — cancelled delegates are UNASSIGNED,
+    // which `base` deliberately excludes (see the FILTERS comment above).
+    out.CANCELLED = coachScoped.filter((d) => d.cancelled).length;
+    return out;
+  }, [delegates, coachFilter]);
+
+  const isFiltered = filter !== "ALL" || !!coachFilter || !!query.trim();
+  function clearFilters() {
+    setFilter("ALL");
+    setCoachFilter(null);
+    setQuery("");
+  }
 
   const FILTER_LABEL = {
     ALL: "All statuses", UNASSIGNED: "Unassigned", ASSIGNED: "Assigned",
-    ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing",
+    ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing", CANCELLED: "Cancelled",
   };
 
   return (
     <div>
-      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 18 }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("Attendance sheet")}
-          </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{delegates.length} {t("delegates")}</h1>
-        </div>
-        <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
-          <RefreshCw size={16} className={loading ? "spin" : ""} />
-        </button>
-      </div>
+      {/* The page title and the manual Refresh button that used to sit here are
+          GONE (2026-07-29 — "remove the refresh button since there alr one
+          ontop"). This page is only ever reached through MobileOpsPage, which
+          already renders, directly above it: a sticky "MusterGo" topbar, an
+          "Operations / Live headcount" card WITH its own Refresh, and a Total
+          KPI tile that said exactly what the old "N delegates" heading said.
+          Three stacked headings before the first delegate row was the real
+          space problem. The refresh was redundant regardless — load() polls
+          every 8s, so nothing here goes stale waiting to be tapped.
+
+          What replaces them is the one thing neither of those shows: how many
+          rows the CURRENT filters are producing (rendered just above the list,
+          below the chips). The old heading always counted the WHOLE roster, so
+          arriving via a ?status=MISSING deep link read "10 delegates" above a
+          list of 3 — actively misleading at the exact moment staff are
+          counting people. */}
 
       {error && (
         <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
@@ -334,38 +425,55 @@ export default function MobileAttendancePage() {
         </div>
       )}
 
-      <div style={{ position: "relative", marginBottom: 14 }}>
-        <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
-        <input
-          className="input"
-          placeholder={t("Search delegates…")}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          style={{ paddingLeft: 32 }}
-        />
-      </div>
-
-      <div className="row" style={{ gap: 8, marginBottom: 12 }}>
-        <select
-          className="select"
-          value={coachFilter || ""}
-          onChange={(e) => setCoachFilter(e.target.value || null)}
-          style={{ flex: 1, fontSize: 13 }}
-        >
-          <option value="">{t("All coaches")}</option>
-          {coaches.map((c) => (
-            <option key={c.id} value={c.id}>{[c.name, c.city].filter(Boolean).join(" · ")}</option>
-          ))}
-        </select>
-        {coachFilter && (
-          <button onClick={() => setCoachFilter(null)} aria-label={t("Clear coach filter")}
-            className="btn btn-ghost" style={{ padding: "8px 10px", flexShrink: 0 }}>
-            <X size={14} />
-          </button>
+      {/* Search + coach on ONE row (2026-07-29). They were two stacked rows,
+          which together with the chip row meant three full-width bands of
+          controls before the first delegate — on a 375px phone that's most of
+          the first screen spent on filters nobody has touched yet. */}
+      <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "stretch" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+          <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)", pointerEvents: "none" }} />
+          <input
+            className="input"
+            placeholder={t("Search delegates…")}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            style={{ paddingLeft: 32, paddingRight: query ? 32 : undefined }}
+          />
+          {/* Clearing a typo'd name meant holding backspace — on a phone, with
+              one hand, while looking for someone. */}
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              aria-label={t("Clear search")}
+              style={{
+                position: "absolute", right: 4, top: 4, bottom: 4, width: 26, padding: 0,
+                background: "none", border: "none", color: "var(--ink-3)",
+                display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+        {/* Only worth showing when there's a choice to make — a one-coach trip
+            got a dropdown whose only other option was "All coaches". */}
+        {coaches.length > 1 && (
+          <select
+            className="select"
+            value={coachFilter || ""}
+            onChange={(e) => setCoachFilter(e.target.value || null)}
+            aria-label={t("Filter by coach")}
+            style={{ flex: "0 1 42%", minWidth: 0, fontSize: 13 }}
+          >
+            <option value="">{t("All coaches")}</option>
+            {coaches.map((c) => (
+              <option key={c.id} value={c.id}>{[c.name, c.city].filter(Boolean).join(" · ")}</option>
+            ))}
+          </select>
         )}
       </div>
 
-      <div className="row" style={{ gap: 8, marginBottom: 16, overflowX: "auto", paddingBottom: 4 }}>
+      <div className="row" style={{ gap: 8, marginBottom: 10, overflowX: "auto", paddingBottom: 4 }}>
         {FILTERS.map((f) => {
           // Missing stays red at all times, active or not — it's the one
           // status that needs to read as urgent on sight, not just when
@@ -376,30 +484,98 @@ export default function MobileAttendancePage() {
           // green reads as "Arrived", which is a different status entirely.
           const isMissing = f === "MISSING";
           const active = filter === f;
-          const activeTone = { ASSIGNED: "assigned", ARRIVED: "present", LATE: "late", UNASSIGNED: "unassigned" }[f] || "present";
+          const activeTone = { ASSIGNED: "assigned", ARRIVED: "present", LATE: "late", UNASSIGNED: "unassigned", CANCELLED: "neutral" }[f] || "present";
           const cls = isMissing ? "badge-missing" : active ? `badge-${activeTone}` : "badge-neutral";
+          const n = counts[f];
           return (
             <button
               key={f}
               onClick={() => setFilter(f)}
+              aria-pressed={active}
               className={"badge " + cls}
               style={{
-                flexShrink: 0, cursor: "pointer", fontSize: 12.5, padding: "7px 13px",
+                flexShrink: 0, cursor: "pointer", fontSize: 12.5, padding: "7px 12px",
                 border: active ? "1.5px solid currentColor" : "1.5px solid transparent",
-                opacity: isMissing && !active ? 0.75 : 1,
+                // A zero-count chip is dimmed rather than hidden — all five
+                // stay put so the row never reflows under your thumb mid-tap,
+                // and "Late 0" is a useful answer in its own right.
+                opacity: n === 0 && !active ? 0.45 : isMissing && !active ? 0.75 : 1,
+                display: "inline-flex", alignItems: "center", gap: 6,
               }}
             >
               {t(FILTER_LABEL[f])}
+              <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{n}</span>
             </button>
           );
         })}
       </div>
 
-      {loading && delegates.length === 0 && !error && <div className="muted">{t("Loading…")}</div>}
+      {/* Replaces the old "N delegates" heading: says what's on screen RIGHT
+          NOW, and gives one tap back to the full roster. Only rendered while
+          something is actually filtered, so the unfiltered view stays clean. */}
+      {isFiltered && !error && (
+        <div className="row between" style={{ marginBottom: 12, gap: 8, fontSize: 12.5 }}>
+          <span className="muted">
+            {t("Showing")} <strong style={{ color: "var(--ink)" }}>{visible.length}</strong> {t("of")} {counts.ALL}
+          </span>
+          <button
+            onClick={clearFilters}
+            className="btn btn-ghost"
+            style={{ padding: "5px 10px", fontSize: 12, flexShrink: 0 }}
+          >
+            <X size={13} /> {t("Clear filters")}
+          </button>
+        </div>
+      )}
 
+      {/* Skeleton rows instead of a bare "Loading…" line — the roster is the
+          whole page, so showing its SHAPE while it loads avoids the layout
+          jumping down once real rows arrive. */}
+      {loading && delegates.length === 0 && !error && (
+        <>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="mobile-card" style={{ padding: "13px 14px", display: "flex", gap: 12, alignItems: "center" }}>
+              <div className="mg-skel" style={{ width: 36, height: 36, borderRadius: "50%", flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="mg-skel" style={{ height: 11, width: "55%", borderRadius: 4 }} />
+                <div className="mg-skel" style={{ height: 9, width: "35%", borderRadius: 4, marginTop: 7 }} />
+              </div>
+            </div>
+          ))}
+          {/* The skeletons are decorative, so the load still needs to be
+              announced for a screen reader. There's no global .sr-only in
+              tokens.css/mobile.css, so it's defined here rather than adding a
+              new app-wide class for one label. */}
+          <span className="mg-sr-only">{t("Loading…")}</span>
+          <style>{`
+            .mg-skel{background:var(--surface-2);animation:mg-skel-pulse 1.4s ease-in-out infinite}
+            @keyframes mg-skel-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+            @media (prefers-reduced-motion: reduce){.mg-skel{animation:none}}
+            .mg-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+          `}</style>
+        </>
+      )}
+
+      {/* A dead end with no way out was the old behaviour here: filter to
+          "Late", get "No delegates match your filters", and the only route
+          back was working out which of three controls to undo. Now the empty
+          state itself offers the way out. */}
       {!loading && visible.length === 0 && !error && (
-        <div className="mobile-card muted" style={{ textAlign: "center" }}>
-          {delegates.length === 0 ? t("No delegates yet.") : t("No delegates match your filters.")}
+        <div className="mobile-card" style={{ textAlign: "center", padding: "22px 16px" }}>
+          <CheckCircle2 size={22} style={{ color: "var(--ink-3)", marginBottom: 6 }} />
+          <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+            {delegates.length === 0 ? t("No delegates yet.") : t("No delegates match your filters.")}
+          </div>
+          {isFiltered && delegates.length > 0 && (
+            <>
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                {counts.ALL} {t("delegates are on this trip.")}
+              </div>
+              <button className="btn btn-ghost" style={{ marginTop: 12, fontSize: 12.5 }} onClick={clearFilters}>
+                <X size={13} /> {t("Clear filters")}
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -410,7 +586,20 @@ export default function MobileAttendancePage() {
         // running behind, not necessarily missing.
         const callable = missing || effectiveStatus(d) === "LATE";
         return (
-          <div key={d.id} className="mobile-card" style={{ padding: 16 }}>
+          <div
+            key={d.id}
+            className="mobile-card"
+            style={{
+              // Tightened from a flat 16 (2026-07-29). Ten rows at the old
+              // height ran well past two screens; this fits noticeably more
+              // roster per scroll without the tap targets getting smaller —
+              // every button below keeps its own padding.
+              padding: "13px 14px",
+              marginBottom: 10,
+              // Status stripe down the left edge — see STATUS_ACCENT.
+              borderLeft: `3px solid ${STATUS_ACCENT[effectiveStatus(d)] || "var(--line)"}`,
+            }}
+          >
             <div className="row" style={{ gap: 12, minWidth: 0 }}>
               {/* Tap the delegate's own info to open the detail sheet
                   (phone/map/escalate all in one place, 2026-07-25) — the
@@ -424,8 +613,12 @@ export default function MobileAttendancePage() {
                     {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
                   </div>
                   <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {coachName(d.coachId)}
-                    {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+                    {d.cancelled
+                      ? <>{t("Cancelled")} · {d.cancelReason ? d.cancelReason : t("no reason given")}</>
+                      : <>
+                          {coachName(d.coachId)}
+                          {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+                        </>}
                   </div>
                 </div>
               </div>
@@ -464,7 +657,7 @@ export default function MobileAttendancePage() {
                   so a separate button/modal for just that was redundant. */}
             </div>
 
-            <div className="row between" style={{ marginTop: 10, gap: 8 }}>
+            <div className="row between" style={{ marginTop: 9, gap: 8 }}>
               <span className={"badge " + (STATUS_BADGE_CLASS[d.status] || "badge-unassigned")}>
                 {savingId === d.id ? t("Saving…") : t(FILTER_LABEL[effectiveStatus(d)] || d.status)}
               </span>

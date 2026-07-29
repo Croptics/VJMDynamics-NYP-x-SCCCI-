@@ -19,12 +19,28 @@ import { TRIP } from "./constants.js";
 import { listDelegates } from "./delegates.js";
 import { getActivity } from "./history.js";
 
+// "departureAt" is computed here, not stored — it's the one absolute instant
+// (departure day = the trip's LAST day) that "startDate" + "totalDays" +
+// "departureTime" imply together, so nothing has to re-derive it (or risk
+// disagreeing with the DB) every time it's read. NULL whenever any of the
+// three inputs is missing, which the frontend treats as "no live countdown
+// available yet" and falls back to the legacy static "departsIn" string.
+// Same Asia/Singapore anchor as syncTripDayOf() below, for the same reason:
+// every delegation is Singapore-organised. The cast chain matters — adding
+// "departureTime"::time to a bare ::date gives a naive `timestamp`; THEN
+// applying `AT TIME ZONE` on that naive value is what correctly interprets
+// it as Singapore wall-clock time and converts it to a real instant (the
+// reverse of syncTripDayOf's `NOW() AT TIME ZONE` below, which converts an
+// instant TO naive local time — same operator, opposite direction depending
+// on which side of it is timezone-aware).
+const DEPARTURE_AT_SQL = `(("startDate"::date + ("totalDays" - 1) * INTERVAL '1 day' + "departureTime"::time) AT TIME ZONE 'Asia/Singapore') AS "departureAt"`;
+
 export async function getTrip(tripUuid = null) {
   if (tripUuid) {
-    const t = await get("SELECT * FROM trips WHERE uuid_id = $1", [tripUuid]);
+    const t = await get(`SELECT *, ${DEPARTURE_AT_SQL} FROM trips WHERE uuid_id = $1`, [tripUuid]);
     if (t) return t;
   }
-  return (await get("SELECT * FROM trips LIMIT 1")) || TRIP;
+  return (await get(`SELECT *, ${DEPARTURE_AT_SQL} FROM trips LIMIT 1`)) || TRIP;
 }
 
 /** Recomputes "dayOf" from the real calendar date for every trip that has a

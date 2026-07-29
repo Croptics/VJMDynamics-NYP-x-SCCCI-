@@ -40,6 +40,11 @@ import pg from "pg";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { resolveTripUuid } from "../data.js";
 import { syncCurrentCheckpointStatus } from "./checkpoints.js";
+// Audit trail (2026-07-30 — "the history log didn't track the qr, face
+// scanner and manual update right?" — confirmed: it didn't). Same helper
+// desmond.js's own edits already use; exported from there rather than
+// duplicated here.
+import { recordEvent } from "./desmond.js";
 
 const router = Router();
 
@@ -191,7 +196,7 @@ router.get("/api/exceptions/stream", requireAuth(), (req, res) => {
 const SELECT_TICKETS = `
   SELECT x.id, x.type, x.type_other, x.priority, x.status, x.note, x.created_at, x.resolved_at,
          x.delegate_id,
-         d.name  AS delegate_name, d.vip AS delegate_vip,
+         d.name  AS delegate_name, d.vip AS delegate_vip, d.status AS delegate_status,
          c.name  AS coach_name,
          a.name  AS raised_by_name,
          ar.name AS resolved_by_name
@@ -212,6 +217,11 @@ const shape = (r) => ({
   delegateId: r.delegate_id || null,
   delegateName: r.delegate_name || null,
   delegateVip: !!r.delegate_vip,
+  // Live attendance state of the linked delegate. Drives the Override action:
+  // once they are checked in (ARRIVED, or the legacy PRESENT alias) there is
+  // nothing left to override, so the button is replaced by a "Present" marker
+  // instead of letting a second click write a duplicate check_in_logs row.
+  delegateStatus: r.delegate_status || null,
   coach: r.coach_name || null,
   raisedBy: r.raised_by_name || null,
   resolvedBy: r.resolved_by_name || null,
@@ -429,6 +439,17 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
   // the same sync added to JQ's own PATCH /api/delegates/:id.
   const tripUuid = await resolveTripUuid(checkpointTripId || tripId);
   syncCurrentCheckpointStatus(delegateId, tripUuid, "ARRIVED", req.account?.username || "Manual");
+  // Persisted audit row (2026-07-30 — manual overrides never showed up on the
+  // History log at all before this; only Room Management/status-sheet edits
+  // did). Best-effort by design — a logging failure must never undo or block
+  // a check-in that already succeeded.
+  if (tripUuid) {
+    await recordEvent(tripUuid, req, {
+      action: "checkin.manual", entity: "delegate", entityId: delegateId, kind: "checkin",
+      summary: `${d.rows[0].name} manually checked in.`,
+      before: { status: d.rows[0].status }, after: { status: "ARRIVED" },
+    });
+  }
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL" });
   res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
@@ -516,6 +537,16 @@ router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
   // ARRIVED — the 5-status value (was the legacy PRESENT literal).
   await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`QR check-in · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
+  // Persisted audit row (2026-07-30 — QR check-ins never showed up on the
+  // History log at all before this).
+  const qrTripUuid = await resolveTripUuid(tripId);
+  if (qrTripUuid) {
+    await recordEvent(qrTripUuid, req, {
+      action: "checkin.qr", entity: "delegate", entityId: delegateId, kind: "checkin",
+      summary: `${d.rows[0].name} checked in via QR scan.`,
+      before: { status: d.rows[0].status }, after: { status: "ARRIVED" },
+    });
+  }
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "QR" });
   res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "ARRIVED", duplicate: false, method: "QR" });

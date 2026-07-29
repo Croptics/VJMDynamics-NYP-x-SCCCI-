@@ -89,30 +89,63 @@
   box-shadow: var(--shadow-lg);
 }
 
+/* .mobile-tab is the flex CELL — one per tab, all equal width via flex:1.
+   .mobile-tab-pill (new, 2026-07-29 — "can you align the navigation") is the
+   part that actually carries the active highlight, sized to its OWN content
+   (icon + label) rather than the full equal-width cell. Before this split,
+   the active background lived on .mobile-tab itself, so on a 5-tab dock each
+   pill was exactly 1/5 of the bar's width regardless of how narrow its label
+   was — "Home" and "Me" got a highlight visibly wider than the word it sat
+   under, reading as oversized/off-centre rather than a tight fit. Splitting
+   the cell (layout, equal spacing) from the pill (highlight, content-sized)
+   fixes that without touching the tap-target size — .mobile-tab is still the
+   full-width <NavLink>, so tapping anywhere in the cell still works. */
 .mobile-tab {
   flex: 1;
+  display: flex;
+  justify-content: center;
+  /* align-items added (2026-07-29 — "move the home, ops, face, me down a bit
+     so it center align top and bottom"). Cross-axis alignment had no explicit
+     value, so it defaulted to `stretch` — each cell stretched to the bar's
+     full height (which QR's raised, negative-margin disc makes taller than
+     the other tabs actually need), and with no vertical centring on the pill
+     inside, its content pinned to the TOP of that stretched box, leaving dead
+     space below. Home/Ops/Face/Me read as sitting high while QR's disc
+     dropped lower into the extra room. `center` lets every non-primary pill
+     centre itself in whatever height the bar ends up being, instead of
+     hugging the top of it. */
+  align-items: center;
+  color: var(--ink-3);
+  text-decoration: none;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+}
+.mobile-tab-pill {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 8px 4px;
+  /* Horizontal padding 10px -> 14px, plus a min-width floor (2026-07-29 —
+     "add a bit more padding for the selected red... for Ops and Me, mobile
+     can follow the Face one, should be consistent sizing"). Padding alone was
+     already equal for every tab, but a pill still sizes to its OWN label —
+     "Face" (4 letters + icon) was naturally wider than "Me" or the numeral-
+     badged "Ops", so the SAME padding produced visibly different-sized pills.
+     min-width floors the short ones up to roughly Face's own natural width,
+     so every active tab reads as the same size regardless of label length. */
+  padding: 8px 14px;
+  min-width: 60px;
   border-radius: 999px;
-  color: var(--ink-3);
-  text-decoration: none;
   font-size: 10.5px;
   font-weight: 600;
-  position: relative;
-  -webkit-tap-highlight-color: transparent;
   transition: color 0.2s ease, background 0.2s ease, transform 0.12s ease;
 }
-.mobile-tab:active { transform: scale(0.9); }
+.mobile-tab:active .mobile-tab-pill { transform: scale(0.9); }
 
 /* Active tab: a soft brand-tinted pill with a glow on the icon so staff can
    see where they are at a glance, even in a bright coach bay. */
-.mobile-tab.active {
-  color: var(--scc-red);
-  background: var(--scc-red-tint);
-}
+.mobile-tab.active { color: var(--scc-red); }
+.mobile-tab.active .mobile-tab-pill { background: var(--scc-red-tint); }
 .mobile-tab.active svg {
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--scc-red) 55%, transparent));
   animation: mobile-tab-pop 0.24s ease-out;
@@ -126,9 +159,15 @@
 /* Primary (centre) tab — the main check-in action, raised out of the dock as a
    brand-red disc so it reads as THE thing to tap, the way native apps treat a
    centre action. Sits in normal flow (no absolute positioning) so the evenly
-   spaced tab widths — and the dock's own centring — stay intact. */
+   spaced tab widths — and the dock's own centring — stay intact.
+   Raise trimmed -16px -> -8px and the disc 46px -> 42px (2026-07-29 — "QR
+   sits higher than the rest" was one of the confirmed alignment complaints):
+   the original offset lifted it clear of the dock's own top edge, reading as
+   a separate floating button rather than part of the same bar. Still bigger
+   and still popped forward — that's the point of a primary action — just not
+   detached from the row it's supposed to belong to. */
 .mobile-tab.primary .mobile-tab-icon {
-  width: 46px; height: 46px; margin-top: -16px; margin-bottom: 1px;
+  width: 42px; height: 42px; margin-top: -8px; margin-bottom: 1px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--scc-red), var(--scc-red-700));
   color: #fff;
@@ -141,16 +180,23 @@
 .mobile-tab.primary:active .mobile-tab-icon { transform: scale(0.92); }
 /* The raised disc already carries the brand colour, so the active pill behind
    it would just muddy things — keep the label tinted instead. */
-.mobile-tab.primary.active { background: transparent; }
+.mobile-tab.primary.active .mobile-tab-pill { background: transparent; }
 .mobile-tab.primary.active svg { filter: none; }
 
 /* Icon wrapper — anchors the live notification badge to the icon's top-right. */
 .mobile-tab-icon { position: relative; display: inline-flex; }
 .mobile-tab-badge {
+  /* Anchored to the icon's own top-right corner (2026-07-29 — the 3rd
+     confirmed complaint: the badge crept toward the raised QR disc next
+     door). The old `left:100%; transform:translateX(-45%)` centred the badge
+     ON the icon's right EDGE, so on a 20px icon inside a narrow flex cell it
+     sat close enough to the neighbouring primary tab to read as ambiguous —
+     which tab does "2" belong to? `right` anchors it to THIS icon
+     specifically, matching the badge pattern already used elsewhere in the
+     app (e.g. the desktop Alerts bell). */
   position: absolute;
-  top: -7px;
-  left: 100%;
-  transform: translateX(-45%);
+  top: -6px;
+  right: -8px;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
@@ -198,7 +244,11 @@
 @keyframes mobile-sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .mobile-tab, .mobile-tab.active svg, .mobile-sync-dot.pulse { animation: none; transition: none; }
+  /* .mobile-tab-pill added alongside .mobile-tab (2026-07-29) — the
+     background/transform transition moved onto it when the pill was split
+     out of the tab cell, so reduced-motion needs to target it too or the
+     active-state colour/scale would still animate. */
+  .mobile-tab-pill, .mobile-tab.active svg, .mobile-sync-dot.pulse { animation: none; transition: none; }
 }
 
 /* ==========================================================================
@@ -317,4 +367,141 @@
 @media (prefers-reduced-motion: reduce) {
   .m-fade-in, .spin { animation: none; }
   .m-stat, .m-tile, .m-row { transition: none; }
+}
+
+/* ==========================================================================
+   Manual check-in (MobileManualCheckIn.jsx) — the swipeable roster used by
+   /mobile/scan/manual. Namespaced .mman-* and built on the same tokens as the
+   .m-* primitives above; nothing here leaks into the desktop scanner, which
+   keeps using components/ManualTrackingPanel.jsx.
+   ========================================================================== */
+.mman-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.mman-head { padding: 14px 14px 13px; border-bottom: 1px solid var(--line); }
+.mman-count { font-size: 27px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+
+.mman-search-wrap { position: relative; margin-top: 12px; }
+.mman-search {
+  width: 100%; box-sizing: border-box; padding: 11px 34px 11px 34px;
+  border-radius: 999px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--ink);
+  font-size: 14px; font-family: inherit;
+}
+.mman-search:focus { outline: none; border-color: var(--scc-red-tint-2); background: var(--surface); }
+.mman-search-ic, .mman-search-clear {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  color: var(--ink-3); display: flex;
+}
+.mman-search-ic { left: 12px; pointer-events: none; }
+.mman-search-clear { right: 7px; background: none; border: none; padding: 4px; }
+
+/* The roster owns its own scroll so the search + filters above it never leave
+   the screen while staff work down the list (the page's own scroll container is
+   .mobile-shell — a sticky header here would slide under the topbar instead).
+   `overscroll-behavior` deliberately left at its default (auto), NOT
+   `contain` (2026-07-30 — "i still can't scroll on this section"): this list
+   can fill nearly the whole viewport on a phone, leaving no visible area
+   outside it to grab for the PAGE's own scroll — `contain` blocked the touch
+   gesture from handing off to `.mobile-shell` once it hit this list's own
+   top/bottom edge, so reaching the Reset/Face/QR controls and the PDPA
+   footer below required lifting your finger and starting a second, separate
+   gesture outside the list's bounds entirely. `auto` lets one continuous
+   swipe scroll the list, then chain into scrolling the page past it. */
+.mman-list {
+  max-height: min(56vh, 520px);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.mman-group {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.mman-group i { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
+
+.mman-row { position: relative; overflow: hidden; border-bottom: 1px solid var(--line-2); }
+.mman-row:last-child { border-bottom: none; }
+/* Revealed under a row as it slides — green "check in" on a right swipe, amber
+   "undo" on a left swipe of a row this session marked. */
+.mman-swipe-bg {
+  position: absolute; inset: 0; display: flex; align-items: center; gap: 8px;
+  padding: 0 16px; color: #fff; font-size: 13px; font-weight: 800;
+  background: var(--st-present);
+}
+.mman-swipe-bg.undo { justify-content: flex-end; background: var(--st-late); }
+.mman-swipe {
+  position: relative; display: flex; align-items: center; gap: 11px;
+  padding: 11px 12px; background: var(--surface);
+  touch-action: pan-y; /* vertical scrolling stays with the browser */
+}
+.mman-swipe.done { background: color-mix(in srgb, var(--st-present-bg) 60%, var(--surface)); }
+.mman-swipe.sel { background: var(--scc-red-tint); }
+.mman-name { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mman-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11.5px; overflow: hidden; }
+.mman-tag {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  font-size: 10px; font-weight: 700;
+  background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line);
+}
+/* Primary action per row, held at a 40px minimum so the tap target stays
+   thumb-sized even though the row itself is compact. */
+.mman-cta {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 40px; padding: 10px 14px; border-radius: 999px; border: none;
+  background: var(--ink); color: var(--surface);
+  font-size: 12.5px; font-weight: 800; font-family: inherit;
+  transition: transform 0.06s ease;
+}
+.mman-cta:active { transform: scale(0.94); }
+.mman-cta:disabled { opacity: 0.55; }
+.mman-tick {
+  flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 2px solid var(--line); background: var(--surface); color: transparent;
+}
+.mman-tick.on { background: var(--scc-red); border-color: var(--scc-red); color: #fff; }
+
+/* Floating bars, both lifted clear of the tab dock (which sits at 14px + inset
+   and is ~62px tall). */
+.mman-bulkbar, .mman-snack {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  width: min(440px, calc(100% - 24px));
+  display: flex; align-items: center; gap: 10px;
+  box-shadow: var(--shadow-lg);
+}
+.mman-bulkbar {
+  z-index: 30; padding: 10px 12px; border-radius: 16px;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.mman-snack {
+  z-index: 31; padding: 12px 14px; border-radius: 14px;
+  background: var(--ink); color: var(--surface); font-size: 13px; font-weight: 600;
+}
+.mman-snack button {
+  margin-left: auto; flex-shrink: 0; background: none; border: none;
+  display: inline-flex; align-items: center; gap: 5px;
+  color: #6ee7b7; font-size: 13px; font-weight: 800; font-family: inherit;
+}
+
+.mman-reason-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.mman-reason {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 11px 12px; border-radius: var(--r-md);
+  border: 1.5px solid var(--line); background: var(--surface);
+  color: var(--ink); text-align: left; font: inherit;
+}
+.mman-reason.on { border-color: var(--scc-red); background: var(--scc-red-tint); }
+.mman-reason > span { font-size: 13px; font-weight: 700; }
+.mman-reason > small { font-size: 10.5px; color: var(--ink-3); line-height: 1.3; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mman-cta, .mman-swipe { transition: none; }
 }

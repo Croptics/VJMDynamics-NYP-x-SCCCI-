@@ -12,6 +12,7 @@ import {
   LayoutGrid,
   Download,
   RefreshCw,
+  CalendarDays,
   AlertTriangle,
   UserCheck,
   HelpCircle,
@@ -47,6 +48,7 @@ import {
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
 import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
@@ -178,6 +180,23 @@ export default function DashboardPage() {
   const [delegates, setDelegates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Live wall clock for the header chip (2026-07-29). Ticks every 15s rather
+  // than every second: the display is HH:MM, so a per-second interval would
+  // re-render the whole Dashboard 60x a minute to change nothing. 15s bounds
+  // the visible lag to a quarter-minute, which nobody notices on a clock with
+  // no seconds. `hour12: true` forced explicitly (2026-07-30 — "fix to 12 hr
+  // format") rather than left to the viewer's locale: leaving it locale-driven
+  // read as 24h here, which is what prompted the request.
+  const [nowClock, setNowClock] = useState(() =>
+    new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })
+  );
+  useEffect(() => {
+    const id = setInterval(
+      () => setNowClock(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })),
+      15000
+    );
+    return () => clearInterval(id);
+  }, []);
   // Countdown to the next auto-refresh tick (2026-07-27 — "update this will
   // see how long it refresh") — the poll itself is a fixed 8s interval (see
   // the comment on that useEffect below); this is purely a visual "time
@@ -193,6 +212,13 @@ export default function DashboardPage() {
   const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
   const [currentCheckpoint, setCurrentCheckpoint] = useState(null); // the itinerary stop that's "current" right now, or null
   const [nextCheckpoint, setNextCheckpoint] = useState(null); // whatever stop immediately follows it, or null (2026-07-25)
+  // Every stop on TODAY's day, for the "Now:" chip's click-to-expand popover
+  // (2026-07-30 — "the now:...8:00am is like telling me it's happening now
+  // which is not" — "current" here means "the active leg of the schedule",
+  // not literally this second; letting staff open the whole day at a glance
+  // resolves that ambiguity better than any one-line label would).
+  const [todayCheckpoints, setTodayCheckpoints] = useState([]);
+  const [showTodayItinerary, setShowTodayItinerary] = useState(false);
 
   // "All delegates" table filter + sort
   const [delegateQuery, setDelegateQuery] = useState("");
@@ -478,9 +504,12 @@ export default function DashboardPage() {
         // next entry IS the next event (2026-07-25 — "then show the next
         // trip event" once the current one passes).
         setNextCheckpoint(currentIdx >= 0 ? all[currentIdx + 1] || null : null);
+        const today = (checkpoints.days || []).find((day) => day.dayNumber === dash.trip?.dayOf);
+        setTodayCheckpoints(today?.checkpoints || []);
       } else {
         setCurrentCheckpoint(null);
         setNextCheckpoint(null);
+        setTodayCheckpoints([]);
       }
       // Remember the base trip's uuid the first time we load it, so the trip
       // dropdown can list the OTHER trips without duplicating it.
@@ -514,11 +543,12 @@ export default function DashboardPage() {
   // activity dump and the full delegate list) was found to be the single
   // biggest contributor to the Neon project's monthly egress quota with
   // several tabs left open all day; 8s is still fast enough to feel live.
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
-  }, [load]);
+  // 2026-07-29: now also PAUSES entirely while the tab is hidden (and catches
+  // up on re-show) — see useVisiblePolling. The 8s slowdown above only reduced
+  // the tick rate; this stops the ticks nobody is looking at, which is where
+  // most of that egress was actually going. Five calls per tick makes this the
+  // single biggest beneficiary in the app.
+  useVisiblePolling(load, 8000, [load]);
 
   // Reactively re-reads ?tripId=/?escalationDelegate= on every URL change
   // (2026-07-25 bugfix) — clicking EscalationBanner's "View" while ALREADY on
@@ -602,16 +632,15 @@ export default function DashboardPage() {
       .catch((e) => setStaffOpsError(e.message || "Could not reach the backend."));
   }, [perms.manageAccounts]);
 
-  useEffect(() => {
-    if (tab !== "staffops" || !perms.manageAccounts) return;
-    loadStaffOps();
-    // Scoped to only fire while an admin actually has this tab open, so it
-    // doesn't add load for anyone else. Was 2s, slowed to 8s (2026-07-24,
-    // Neon egress reduction) — still shows a login/logout elsewhere within
-    // one tick.
-    const id = setInterval(loadStaffOps, 8000);
-    return () => clearInterval(id);
-  }, [tab, perms.manageAccounts, loadStaffOps]);
+  // Scoped to only fire while an admin actually has this tab open, so it
+  // doesn't add load for anyone else. Was 2s, slowed to 8s (2026-07-24, Neon
+  // egress reduction) — still shows a login/logout elsewhere within one tick.
+  // The old `if (...) return` guard is now expressed as a 0 interval, which
+  // useVisiblePolling treats as "don't poll and don't fetch" — same behaviour
+  // (no request at all unless an admin is on Staff operations), and it gains
+  // the hidden-tab pause on top.
+  const staffOpsPollMs = tab === "staffops" && perms.manageAccounts ? 8000 : 0;
+  useVisiblePolling(loadStaffOps, staffOpsPollMs, [staffOpsPollMs, loadStaffOps]);
 
   // Excel export now runs through the ExportModal (opened by the Export
   // button), which lets the user pick status/coach/VIP/columns + an AI filter
@@ -1000,6 +1029,30 @@ export default function DashboardPage() {
       if (tr.status !== "In progress" && tr.id !== selectedTripId) continue;
       opts.push({ id: tr.id, name: tr.name });
     }
+    /* Second dedup pass, because the uuid check above isn't always able to fire
+     * (2026-07-29 bugfix — the switcher listed "Beijing study mission" TWICE).
+     * `mainTrip` is only ever set while `selectedTripId === TRIP_ID` (see
+     * load()), so when the persisted selection is the base trip's UUID rather
+     * than the "t-1" alias, `mainTrip` is null, the skip never runs, and the
+     * same trip appears as both the alias option AND its own uuid row.
+     *
+     * "t-1" is an ALIAS for a real trip row, so a same-named pair here is the
+     * same trip twice, not two trips. Scoped deliberately to pairs INVOLVING
+     * the alias: two genuinely distinct trips are allowed to share a name, and
+     * a blanket name-dedup would silently hide one of them. The kept entry is
+     * whichever matches the current selection, so the <select>'s value always
+     * corresponds to a real option (otherwise it renders blank). */
+    const aliasIdx = opts.findIndex((o) => o.id === TRIP_ID);
+    if (aliasIdx >= 0) {
+      const aliasName = (opts[aliasIdx].name || "").trim().toLowerCase();
+      const twinIdx = opts.findIndex(
+        (o, i) => i !== aliasIdx && (o.name || "").trim().toLowerCase() === aliasName
+      );
+      if (twinIdx >= 0) {
+        const dropIdx = opts[twinIdx].id === selectedTripId ? aliasIdx : twinIdx;
+        opts.splice(dropIdx, 1);
+      }
+    }
     return opts;
   }, [trips, mainTrip, trip, selectedTripId]);
 
@@ -1051,39 +1104,204 @@ export default function DashboardPage() {
     <div className="page">
       {/* ---- Header ------------------------------------------------------- */}
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
-        <div>
-          <div className="page-eyebrow">{t("Active trip")}</div>
-          <h1 className="page-title">{t("Dashboard")}</h1>
-          {trip ? (
-            <p className="page-sub">
-              {lang === "zh"
-                ? `${trip.name} · 第 ${trip.dayOf}/${trip.totalDays} 天${trip.localTime ? ` · 当地时间 ${trip.localTime}` : ""} · ${k?.total} 位代表`
-                : `${trip.name} · Day ${trip.dayOf} of ${trip.totalDays}${trip.localTime ? ` · ${trip.localTime} local` : ""} · ${k?.total} delegates`}
-            </p>
-          ) : (
-            <p className="page-sub">{t("Live present / missing / unassigned visibility.")}</p>
-          )}
-          {/* Which checkpoint matters right now — same "current" tag the
-              scanner pages auto-focus on, so the Dashboard doesn't leave you
-              guessing which event is live without switching to /trips. */}
-          {currentCheckpoint && (
-            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-              <span className="badge badge-assigned" style={{ display: "inline-flex", maxWidth: "100%" }}>
-                <Clock size={12} style={{ flexShrink: 0 }} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${currentCheckpoint.scheduledTime}` : ""}
+        {/* Header restyled 2026-07-29 ("can you improve this uiux, it look
+            outdate"). What was dated about it wasn't the styling so much as the
+            information architecture: FOUR stacked rows — eyebrow, "Dashboard",
+            a run-on metadata sentence, a "Now:" chip, then a whole separate
+            "Viewing trip" row below — pushed the actual content ~200px down the
+            page, and the biggest text on screen said "Dashboard", which is the
+            one thing you already know from the nav.
+            Now: the TRIP is the title (that's the thing that changes and that
+            you care about), its facts are discrete chips instead of a
+            "·"-joined sentence, and the trip switcher is folded into the title
+            row as a compact control rather than owning a row of its own. */}
+        {/* flex "1 1 auto" -> "1 1 0%" (2026-07-30 — "currently the beijing
+            study mission show this, it should look like how the manila
+            innovation summit trip [looks]"). Beijing has a live itinerary stop
+            (the "Now: Hotel breakfast · 08:00" chip); Manila doesn't. With
+            "auto" as the flex-basis, a flex item's PREFERRED width is its
+            unwrapped max-content width — even though the chips row wraps
+            internally, the browser still measured how wide it'd be if nothing
+            wrapped, and that measurement (with the extra "Now:/Next:" chip) was
+            wide enough that the whole row ran out of space, so the Live/
+            Refresh/Bell/Export block got pushed onto a SECOND line entirely.
+            Manila's shorter, chip-free row never triggered that, so the two
+            trips rendered with genuinely different layouts, not just different
+            content. Basis 0% makes this item's width purely proportional
+            (flex-grow/shrink), ignoring its own content's natural width — so it
+            actually uses only the room it's given, its internal chip row wraps
+            within THAT space instead of demanding more, and the actions block
+            (flex-shrink:0 below) stays pinned on the same line as the title
+            for every trip, regardless of how many chips it's showing. */}
+        <div style={{ minWidth: 0, flex: "1 1 0%" }}>
+          <div className="page-eyebrow">{t("Dashboard")}</div>
+          {/* The trip name and the switcher are now ONE control (2026-07-29 —
+              "can you kinda merge the drop with the text cause got 2 same
+              text"): the heading previously printed the trip name and the
+              dropdown beside it printed the SAME name again. The <select> is
+              styled as the heading itself and sits inside the <h1>, so the
+              title you read is the thing you click to change — one piece of
+              text, no duplication. A single-trip account still gets plain
+              heading text, since a dropdown with one option is just noise. */}
+          <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            {/* marginTop 0 -> 7 (2026-07-29 — "add more space between dashboard
+                and beijing study mission text"). `.page-title`'s own 4px top
+                margin was overridden to 0 when the switcher moved in here, so
+                the uppercase DASHBOARD eyebrow ended up almost touching the
+                28px title. Bottom stays 0 — the chips below own that gap. */}
+            <h1 className="page-title" style={{ margin: "7px 0 0", minWidth: 0, display: "flex", alignItems: "center" }}>
+              {tripOptions.length > 1 ? (
+                /* The trip name is rendered as plain TEXT with the chevron
+                   right after it, and the <select> is laid invisibly OVER the
+                   pair (2026-07-29 — "put the dropdown icon next to the text
+                   instead, so whenever i have long name trip it should stick
+                   beside it").
+                   WHY not just style the <select> itself: a <select> sizes to
+                   its WIDEST option, never the selected one — so with "Manila
+                   Innovation Summit" in the list, the control stayed that wide
+                   while displaying the shorter "Beijing study mission", and the
+                   chevron sat stranded a few characters to the right. Sizing
+                   from real text fixes it for any name length, short or long.
+                   The overlaid select keeps the NATIVE dropdown (and its
+                   keyboard handling) and covers the text + chevron, so the
+                   whole title is the click target. */
+                <span className="mg-title-switch">
+                  <span className="mg-title-name">
+                    {trip ? `${trip.name}${trip.countryTo ? ` (${trip.countryTo})` : ""}` : t("Dashboard")}
+                  </span>
+                  <ChevronDown size={20} strokeWidth={2.5} aria-hidden="true" />
+                  <select
+                    value={selectedTripId}
+                    onChange={(e) => { setSelectedTripId(e.target.value); saveSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
+                    title={t("Switch trip")}
+                    aria-label={t("Switch trip")}
+                  >
+                    {tripOptions.map((tr) => (
+                      <option key={tr.id} value={tr.id}>{tr.name}</option>
+                    ))}
+                  </select>
                 </span>
+              ) : (
+                trip ? trip.name : t("Dashboard")
+              )}
+            </h1>
+          </div>
+
+          {trip ? (
+            /* marginTop 9 -> 14 (2026-07-29 — "add some gap between the day and
+               the title") — the chips sat tight under a 30px heading, reading
+               as part of it rather than as a separate band of facts. */
+            <div className="row" style={{ gap: 7, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
+              <span style={S.metaChip}>
+                <CalendarDays size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
+                {lang === "zh" ? `第 ${trip.dayOf}/${trip.totalDays} 天` : `${t("Day")} ${trip.dayOf} / ${trip.totalDays}`}
               </span>
-              {nextCheckpoint && (
-                <span className="muted" style={{ fontSize: 12, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {t("Next")}: {nextCheckpoint.label}{nextCheckpoint.scheduledTime ? ` · ${nextCheckpoint.scheduledTime}` : ""}
+              {/* Shows the REAL clock, ticking (2026-07-29 — "what the time
+                  icon for? if it showing actual time, pls fix it accordingly").
+                  It previously rendered `trip.localTime`, which is a HARDCODED
+                  SEED STRING ("14:26" in db/constants.js) written once at seed
+                  time and never updated by anything — so this chip had been
+                  frozen at 14:26 since the database was created, and was
+                  correct for exactly one minute a day by coincidence.
+                  This is the viewer's own device clock. It is NOT necessarily
+                  the destination's local time: `trips` has no timezone column,
+                  so there is nothing to convert against. Labelled plainly as
+                  the time instead of claiming "local", because overstating it
+                  is how the old value misled in the first place. Proper
+                  trip-local time needs a timezone on the trip — see AI Log. */}
+              <span style={S.metaChip} title={t("Your device's current time — the trip has no timezone set")}>
+                <Clock size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
+                {nowClock}
+              </span>
+              <span style={S.metaChip}>
+                <Users size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
+                {k?.total ?? "—"} <span className="muted">{t("delegates")}</span>
+              </span>
+              {/* Which checkpoint matters right now — same "current" tag the
+                  scanner pages auto-focus on, so the Dashboard doesn't leave
+                  you guessing which event is live without switching to /trips.
+                  Clickable (2026-07-30 — "the now:...8:00am is like telling
+                  me it's happening now which is not"): "current" means "the
+                  active leg of today's schedule", not literally this second —
+                  a delegate can be marked at the 8am breakfast checkpoint at
+                  1am if nothing since has superseded it. Rather than word that
+                  distinction into an already-tight chip, tapping it opens
+                  today's full schedule so the actual timing is never in
+                  question. The trailing muted "Next:" line this used to pair
+                  with is gone — the popover already covers that, and better. */}
+              {currentCheckpoint && (
+                <span style={{ position: "relative" }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowTodayItinerary((v) => !v)}
+                    style={{
+                      ...S.metaChip, borderColor: "var(--st-assigned)", color: "var(--st-assigned)",
+                      background: "var(--st-assigned-bg)", fontWeight: 600, maxWidth: "min(100%, 420px)",
+                      cursor: "pointer", fontFamily: "inherit",
+                    }}
+                    title={t("View today's full itinerary")}
+                    aria-expanded={showTodayItinerary}
+                  >
+                    <span style={{ width: 6, height: 6, borderRadius: 999, background: "currentColor", flexShrink: 0 }} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {t("Now")}: {currentCheckpoint.label}{currentCheckpoint.scheduledTime ? ` · ${fmt12h(currentCheckpoint.scheduledTime)}` : ""}
+                    </span>
+                    <ChevronDown size={13} style={{ flexShrink: 0, transform: showTodayItinerary ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+                  </button>
+                  {showTodayItinerary && (
+                    <>
+                      <div style={{ position: "fixed", inset: 0, zIndex: 39 }} onClick={() => setShowTodayItinerary(false)} />
+                      <div
+                        className="card"
+                        style={{
+                          position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 40,
+                          width: 280, maxHeight: 320, overflowY: "auto", padding: 8,
+                        }}
+                      >
+                        <div className="muted" style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", padding: "4px 8px" }}>
+                          {t("Today's itinerary")} · {t("Day")} {trip.dayOf}
+                        </div>
+                        {todayCheckpoints.length === 0 ? (
+                          <div className="muted" style={{ fontSize: 12.5, padding: "6px 8px" }}>{t("Nothing scheduled today.")}</div>
+                        ) : (
+                          todayCheckpoints.map((c) => (
+                            <div
+                              key={c.id}
+                              className="row"
+                              style={{
+                                gap: 8, padding: "7px 8px", borderRadius: "var(--r-sm)",
+                                background: c.timeState === "current" ? "var(--st-assigned-bg)" : "transparent",
+                              }}
+                            >
+                              <span style={{
+                                width: 6, height: 6, borderRadius: 999, flexShrink: 0,
+                                background: c.timeState === "current" ? "var(--st-assigned)" : c.timeState === "past" ? "var(--ink-3)" : "var(--line)",
+                              }} />
+                              <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", flexShrink: 0, minWidth: 60 }}>
+                                {fmt12h(c.scheduledTime)}
+                              </span>
+                              <span style={{ fontSize: 13, fontWeight: c.timeState === "current" ? 700 : 400 }}>{c.label}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
                 </span>
               )}
             </div>
+          ) : (
+            <p className="page-sub" style={{ marginTop: 6 }}>{t("Live present / missing / unassigned visibility.")}</p>
           )}
         </div>
 
-        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        {/* flexShrink:0 (2026-07-30, paired with the flex-basis fix above) —
+            pins this block to a fixed width so it can never be squeezed or
+            wrapped by the title block's own content; it either sits inline on
+            the title's row (the normal case at any trip) or, only at a
+            genuinely too-narrow viewport, wraps as a whole unit — never split
+            mid-cluster. */}
+        <div className="row" style={{ gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
           {data && (
             <span className="badge badge-present" title={t("Auto-refreshes every 8 seconds")}>
               <span style={S.dot} /> {t("Live · synced")} · {refreshCountdown}s
@@ -1122,26 +1340,14 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ---- Trip switcher bar (its own row, so its position never shifts) - */}
-      {tripOptions.length > 1 && (
-        <div className="row" style={{ gap: 8, marginTop: 16, alignItems: "center", flexWrap: "wrap" }}>
-          <span className="muted" style={{ fontSize: 13 }}>{t("Viewing trip")}</span>
-          <select
-            className="select"
-            style={{ maxWidth: 260 }}
-            value={selectedTripId}
-            onChange={(e) => { setSelectedTripId(e.target.value); saveSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
-            title={t("Switch trip")}
-          >
-            {tripOptions.map((tr) => (
-              <option key={tr.id} value={tr.id}>{tr.name}</option>
-            ))}
-          </select>
-        </div>
-      )}
+      {/* The standalone "Viewing trip" row that used to sit here is gone
+          (2026-07-29) — the switcher now lives beside the trip title above,
+          which is where the trip name it changes actually appears. Its old
+          comment claimed a separate row kept its position stable; in practice
+          it just added a whole row of chrome above the tabs. */}
 
       {/* ---- Tabs ----------------------------------------------------------- */}
-      <div className="row" style={{ gap: 8, marginTop: 18 }}>
+      <div className="row" style={{ gap: 8, marginTop: 20 }}>
         {perms.viewDashboard && (
           <button
             className="btn"
@@ -1260,14 +1466,25 @@ export default function DashboardPage() {
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 16 }}>
             {coaches.map((c) => {
-              // "Missing" folds in LATE too (per the simplified status logic),
-              // so this list shows everyone not yet accounted for — pulled from
-              // the full delegate list since the `missing` array is MISSING-only.
+              // Everyone on this coach NOT yet boarded — matches the Coach
+              // status card's own "N to board" figure (coach.total -
+              // coach.boarded, below). Used to filter on MISSING/LATE only
+              // (2026-07-30 — "it show green arrived which should not show
+              // until every delegate is arrived... it should still show the
+              // assigned delegate not there yet"): a coach with 5 people
+              // simply ASSIGNED but not yet scanned — not late enough to be
+              // flagged LATE, not past checkpoint-reset to be flagged
+              // MISSING — showed 0 "missing" and a green "Arrived" badge,
+              // directly contradicting the "5 to board" already visible one
+              // card over. `d.status` is normalised PRESENT→ARRIVED at fetch
+              // time (see the delegates-map above), so "not ARRIVED" alone
+              // is the correct "still needs to board" check — it already
+              // naturally includes ASSIGNED, LATE, and MISSING together.
               // Search/filter/sort applied on top (all client-side — the list
               // per coach is small enough not to need a server round-trip).
               const search = hcSearch.trim().toLowerCase();
               const coachMissing = delegates
-                .filter((d) => d.coachId === c.id && (d.status === "MISSING" || d.status === "LATE"))
+                .filter((d) => d.coachId === c.id && d.status !== "ARRIVED")
                 .filter((d) => {
                   if (hcFilter === "missing") return d.status === "MISSING";
                   if (hcFilter === "late") return d.status === "LATE";
@@ -1312,7 +1529,16 @@ export default function DashboardPage() {
                     ) : coachMissing.length === 0 ? (
                       <span className="badge badge-present">{t("Arrived")}</span>
                     ) : (
-                      <span className="badge badge-missing">{coachMissing.length} {t("not boarded")}</span>
+                      // Severity-toned rather than always red (2026-07-30 —
+                      // "i like the mobile blue color, do the same for
+                      // desktop"): a coach that's simply not fully SCANNED
+                      // yet (nobody late or missing, just not-yet-boarded)
+                      // reads as blue/"assigned", the same tone the mobile
+                      // Coach status card already uses for that case —
+                      // red is reserved for when someone's genuinely MISSING.
+                      <span className={`badge badge-${(c.missing || 0) > 0 ? "missing" : (c.late || 0) > 0 ? "late" : "assigned"}`}>
+                        {coachMissing.length} {t("not boarded")}
+                      </span>
                     )}
                   </div>
                   <div className="roster-bar" style={{ height: 8 }}>
@@ -1576,7 +1802,18 @@ export default function DashboardPage() {
               never on a coach's roster and can't meaningfully be "missing",
               so counting them here overstated N (2026-07-24). */}
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
-            suffix={`${t("of")} ${k.trackable ?? k.total}`} foot={trip?.departsIn ? `${t("Departure in")} ${trip.departsIn}` : null} big
+            suffix={`${t("of")} ${k.trackable ?? k.total}`}
+            foot={(() => {
+              const live = liveDepartsIn(trip?.departureAt);
+              const d = live ?? (trip?.departsIn ? fmtDepartsIn(trip.departsIn) : null);
+              // 2026-07-30 — "can you say departure back to [country] in [x]
+              // hour" / "add the country from and to": names WHERE the
+              // delegation is heading back to (trip.countryFrom — editable
+              // per trip on the Edit Trip form, defaults to Singapore since
+              // that's SCCCI's real usage today) instead of a bare duration
+              // with no destination context.
+              return d ? `${t("Departure back to")} ${trip?.countryFrom || "Singapore"} ${t("in")} ${d}` : null;
+            })()} big
             ringValue={k.missing} ringTotal={k.trackable ?? k.total}
             onClick={() => showDelegatesFiltered("MISSING")} />
           <Kpi tone="late" icon={Clock} label={t("Late")} value={`${k.late ?? 0}`}
@@ -2951,6 +3188,55 @@ function coachShortLabel(c) {
 /** Format a delegate's upload timestamp (createdAt) as e.g. "12 Jul, 14:30".
  *  Older rows created before the column existed still get the migration time,
  *  so this only shows "—" if the value is genuinely missing/unparseable. */
+// Display-only 12h formatting for checkpoint scheduledTime (2026-07-30 —
+// "do the same for these"). scheduledTime is a raw 24h "HH:MM" string from
+// the checkpoints API; nothing here sorts or compares it, so this only
+// prettifies what actually gets printed. Same one-line helper as
+// TripCoachPage.jsx/MobileTripsPage.jsx — kept local per this codebase's
+// existing per-file small-helper pattern rather than a shared import.
+function fmt12h(hhmm) {
+  if (!hhmm) return hhmm;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${period}`;
+}
+// trip.departsIn ("04:53") is a COUNTDOWN duration, not a clock time — running
+// it through fmt12h would print the nonsensical "4:53 AM" for "4 hours 53
+// minutes from now". This reformats it as a duration instead ("4h 53m"),
+// fixing the same "looks like raw 24h military time" complaint honestly.
+// Only reached as a fallback now, for a trip with no departureTime/startDate
+// set yet — see liveDepartsIn() below, which is preferred whenever the
+// backend can compute a real departureAt.
+function fmtDepartsIn(hhmm) {
+  if (!hhmm) return hhmm;
+  const [h, m] = String(hhmm).split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+// Genuine live countdown (2026-07-30 — "i see this one nvr change, is it
+// static?" — it was: trip.departsIn was a hardcoded seed string that never
+// moved). trip.departureAt is a real absolute instant computed server-side
+// from startDate + totalDays + the new departureTime field (getTrip(),
+// db/dashboard.js) — recomputing the diff against "right now" on every render
+// is what makes this actually tick down, unlike the old static string. Called
+// from render, not stored in state — it piggybacks on nowClock's existing 15s
+// re-render tick rather than running its own second timer for one more field.
+// Returns null once departure has passed, so the chip disappears instead of
+// showing a stale "0h -3m".
+function liveDepartsIn(departureAtIso) {
+  if (!departureAtIso) return null;
+  const diffMs = new Date(departureAtIso).getTime() - Date.now();
+  if (!(diffMs > 0)) return null;
+  const totalMin = Math.round(diffMs / 60000);
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
 function fmtUploadDate(v) {
   if (!v) return "—";
   const d = new Date(v);
@@ -3563,6 +3849,13 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
   const [coachFilter, setCoachFilter] = useState("ALL");   // ALL | NONE | <coachId>
   const [attFilter, setAttFilter] = useState("ALL");       // ALL | CLEAN | ISSUES
   const [dayFilter, setDayFilter] = useState("ALL");       // ALL | <dayNumber>
+  // Single-stop drill-down (2026-07-29 — "under the day filter, add filter to
+  // see that specific itinerary, so i can see how many was late, arrived,
+  // missing for that specific time"). Narrowing `visibleStops` to one stop is
+  // all it takes: every count on this tab is already derived from that array
+  // (see tally() below), so the summary strip, the chips and the attendance
+  // filters all scope themselves to the chosen stop automatically.
+  const [stopFilter, setStopFilter] = useState("ALL");     // ALL | <stopId>
   const [expandedId, setExpandedId] = useState(null);
   const [data, setData] = useState(null);                   // { stops, delegates, totalStops }
   const [loading, setLoading] = useState(true);
@@ -3587,7 +3880,18 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
   // So: a Day filter, and when showing every day the chips are GROUPED with a
   // small D1/D2/D3 label per group.
   const days = [...new Set(stops.map((s) => s.dayNumber))].sort((a, b) => a - b);
-  const visibleStops = dayFilter === "ALL" ? stops : stops.filter((s) => s.dayNumber === Number(dayFilter));
+  // Day narrows first, then the optional single-stop pick narrows within it.
+  const dayStops = dayFilter === "ALL" ? stops : stops.filter((s) => s.dayNumber === Number(dayFilter));
+  const selectedStop = stopFilter === "ALL" ? null : dayStops.find((s) => s.id === stopFilter) || null;
+  const visibleStops = selectedStop ? [selectedStop] : dayStops;
+
+  // A stop chosen on Day 1 doesn't exist once you switch to Day 2, so the
+  // selection is dropped whenever it falls outside the current day — otherwise
+  // `visibleStops` would silently go empty and every count would read 0.
+  useEffect(() => {
+    if (stopFilter !== "ALL" && !dayStops.some((s) => s.id === stopFilter)) setStopFilter("ALL");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayFilter, stops]);
   // Group the stops actually on screen, preserving day order.
   const stopGroups = days
     .map((day) => ({ day, items: visibleStops.filter((s) => s.dayNumber === day) }))
@@ -3616,6 +3920,24 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
     clean: counted.filter((d) => d.missing === 0 && d.late === 0).length,
     issues: counted.filter((d) => d.missing > 0 || d.late > 0).length,
   };
+
+  // With one stop selected, "how many arrived / were late / missing at THIS
+  // time" is the whole question being asked, so the summary strip switches to
+  // answering exactly that instead of trip-wide roll-ups. Computed over the
+  // same full roster the other strip tiles use, so the four numbers always sum
+  // to the delegate count. "No record" is the honest fourth bucket: a delegate
+  // with no check-in row for this stop is neither present nor confirmed
+  // absent, and folding them into Missing would overstate the problem.
+  const stopTotals = selectedStop
+    ? counted.reduce((acc, d) => {
+      const status = d.cells[selectedStop.id]?.status;
+      if (status === "ARRIVED") acc.arrived += 1;
+      else if (status === "LATE") acc.late += 1;
+      else if (status === "MISSING") acc.missing += 1;
+      else acc.noRecord += 1;
+      return acc;
+    }, { arrived: 0, late: 0, missing: 0, noRecord: 0 })
+    : null;
 
   const visible = counted
     .filter((d) => !query.trim() || d.name.toLowerCase().includes(query.trim().toLowerCase()))
@@ -3649,14 +3971,33 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
       </p>
 
       {/* ---- Summary strip ------------------------------------------------ */}
+      {/* Two modes: trip/day roll-ups normally, or that ONE stop's
+          arrived/late/missing split when a single stop is selected below. */}
+      {selectedStop && (
+        <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <Clock size={14} color="var(--scc-red)" />
+          <strong style={{ fontSize: 14 }}>{selectedStop.label}</strong>
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            {t("Day")} {selectedStop.dayNumber}{selectedStop.scheduledTime ? ` · ${fmt12h(selectedStop.scheduledTime)}` : ""}
+          </span>
+        </div>
+      )}
       <div className="card" style={{ padding: "14px 18px", marginBottom: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14 }}>
-        {[
-          [t("Delegates"), totals.delegates, "var(--ink)"],
-          // Reflects the day filter, so it agrees with the chips on the cards.
-          [dayFilter === "ALL" ? t("Itinerary stops") : `${t("Stops on day")} ${dayFilter}`, visibleStops.length, "var(--ink)"],
-          [t("Full attendance"), totals.clean, "var(--st-present)"],
-          [t("Late or missing"), totals.issues, "var(--st-missing)"],
-        ].map(([label, value, color]) => (
+        {(stopTotals
+          ? [
+            [t("Arrived"), stopTotals.arrived, "var(--st-present)"],
+            [t("Late"), stopTotals.late, "var(--st-late)"],
+            [t("Missing"), stopTotals.missing, "var(--st-missing)"],
+            [t("No record"), stopTotals.noRecord, "var(--ink-3)"],
+          ]
+          : [
+            [t("Delegates"), totals.delegates, "var(--ink)"],
+            // Reflects the day filter, so it agrees with the chips on the cards.
+            [dayFilter === "ALL" ? t("Itinerary stops") : `${t("Stops on day")} ${dayFilter}`, visibleStops.length, "var(--ink)"],
+            [t("Full attendance"), totals.clean, "var(--st-present)"],
+            [t("Late or missing"), totals.issues, "var(--st-missing)"],
+          ]
+        ).map(([label, value, color]) => (
           <div key={label}>
             <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
             <div style={{ fontSize: 26, fontWeight: 700, color, lineHeight: 1.2 }}>{value}</div>
@@ -3725,6 +4066,50 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
         </div>
       )}
 
+      {/* ---- Itinerary stop filter (2026-07-29) ---------------------------
+          "add filter to see that specific itinerary, so i can see how many was
+          late, arrived, missing for that specific time". A <select> rather than
+          another chip row: stop names are long ("Airport departure transfer")
+          and there can be 20+ across a trip, so chips would wrap into a wall.
+          Options carry the time, since two stops can share a name across days.
+          Selecting one re-points the whole tab — summary strip, per-card chips
+          and counts — at that single stop. */}
+      {dayStops.length > 0 && (
+        <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>
+            {t("Stop")}
+          </span>
+          <select
+            className="select"
+            style={{ maxWidth: 330 }}
+            value={stopFilter}
+            onChange={(e) => setStopFilter(e.target.value)}
+          >
+            <option value="ALL">
+              {dayFilter === "ALL"
+                ? `${t("All stops")} (${dayStops.length})`
+                : `${t("All stops on day")} ${dayFilter} (${dayStops.length})`}
+            </option>
+            {dayStops.map((s) => (
+              <option key={s.id} value={s.id}>
+                {dayFilter === "ALL" ? `${t("Day")} ${s.dayNumber} · ` : ""}
+                {s.scheduledTime ? `${fmt12h(s.scheduledTime)} · ` : ""}{s.label}
+              </option>
+            ))}
+          </select>
+          {selectedStop && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ padding: "5px 10px", fontSize: 12 }}
+              onClick={() => setStopFilter("ALL")}
+            >
+              <X size={13} /> {t("Clear")}
+            </button>
+          )}
+        </div>
+      )}
+
       {loading && <div className="muted" style={{ fontSize: 13 }}>{t("Loading…")}</div>}
       {error && <div style={{ color: "var(--st-missing)", fontSize: 13 }}>{t(error)}</div>}
 
@@ -3786,7 +4171,7 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
                           const label = cell ? t(CPT_STATUS_LABEL[cell.status] || cell.status) : t("No record");
                           return (
                             <span key={s.id}
-                              title={`${t("Day")} ${s.dayNumber} · ${s.scheduledTime || ""} ${s.label} — ${label}`}
+                              title={`${t("Day")} ${s.dayNumber} · ${s.scheduledTime ? fmt12h(s.scheduledTime) : ""} ${s.label} — ${label}`}
                               style={{
                                 width: 15, height: 15, borderRadius: 4, background: tone.bg,
                                 border: `1px solid ${tone.fg}`, flexShrink: 0,
@@ -3816,7 +4201,7 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
                           <div className="row" style={{ gap: 7, minWidth: 0 }}>
                             <Clock size={12} color="var(--ink-3)" style={{ flexShrink: 0 }} />
                             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {t("Day")} {s.dayNumber} · {s.label}{s.scheduledTime ? ` · ${s.scheduledTime}` : ""}
+                              {t("Day")} {s.dayNumber} · {s.label}{s.scheduledTime ? ` · ${fmt12h(s.scheduledTime)}` : ""}
                             </span>
                           </div>
                           {cell
@@ -3839,6 +4224,18 @@ function CheckpointHistoryTab({ coaches, t, tripId }) {
 /* ---- Local styles ------------------------------------------------------- */
 const S = {
   dot: { width: 10, height: 10, borderRadius: 999, background: "var(--st-present)", display: "inline-block", flexShrink: 0 },
+  /* Header fact chips (2026-07-29) — day / local time / delegate count / the
+     live stop. Replaces the single "·"-joined sentence, which forced you to
+     read the whole string to find one number. Deliberately quieter than
+     .badge (plain border, --ink-2 text) so four of them in a row read as
+     metadata, not as four status alerts. */
+  metaChip: {
+    display: "inline-flex", alignItems: "center", gap: 5,
+    fontSize: 12.5, color: "var(--ink-2)",
+    padding: "4px 9px", borderRadius: 999,
+    border: "1px solid var(--line)", background: "var(--surface-2)",
+    whiteSpace: "nowrap", minWidth: 0,
+  },
   twoCol: { display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 20 },
   track: { height: 8, borderRadius: 999, background: "var(--line)", overflow: "hidden" },
   fill: { height: "100%", borderRadius: 999, transition: "width 0.4s ease" },

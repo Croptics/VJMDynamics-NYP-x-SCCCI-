@@ -30,6 +30,7 @@ import MobileTripsPage from "./MobileTripsPage.jsx";
 // Trip id comes from the mobile trip switcher, not a hardcoded base trip
 // (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
 import { getMobileTripId } from "../../lib/mobileTrip.js";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 const TRIP_ID_FALLBACK = "t-1";
 
 export default function MobileOpsPage({ defaultView = "delegates" }) {
@@ -42,12 +43,11 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
   const [loading, setLoading] = useState(false);
   const busy = useRef(false);
 
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Pauses while backgrounded (2026-07-29, JQ) — see lib/useVisiblePolling.js.
+  // Needed here as well as on the Attendance page this screen wraps: pausing
+  // one but not the other would leave a backgrounded phone still polling the
+  // dashboard endpoint every 5s for a KPI strip nobody can see.
+  useVisiblePolling(load, 5000);
 
   async function load() {
     if (busy.current) return;
@@ -93,7 +93,10 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
       </div>
 
       {/* ---- Delegates / Trips switch ----------------------------------- */}
-      <div style={{ display: "flex", gap: 8, margin: "14px 0 4px" }}>
+      {/* Bottom margin widened 4px -> 16px (2026-07-29, "add some space between
+          delegate and search bar") — the switch and the search/coach row right
+          below it in MobileAttendancePage read as one cramped block at 4px. */}
+      <div style={{ display: "flex", gap: 8, margin: "14px 0 16px" }}>
         {[
           { key: "delegates", label: "Delegates", Icon: Users },
           { key: "trips", label: "Trips", Icon: Bus },

@@ -24,11 +24,12 @@
  * account); viewing is any signed-in account with "viewAnnouncements"
  * (defaults true — see permissions.js).
  */
-import { useEffect, useState } from "react";
-import { Megaphone, Plus, X, Trash2, Clock, ImagePlus, Pencil, Video, PlayCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Megaphone, Plus, X, Trash2, Clock, ImagePlus, Pencil, Video, PlayCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { apiGet, apiDelete, getPermissions, getToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { markAnnouncementsSeenNow } from "../../lib/announcementsSeen.js";
+import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const MAX_IMAGES = 6; // mirrors backend's routes/announcements.js MAX_IMAGES
@@ -85,7 +86,45 @@ export default function AnnouncementsPage() {
   // Lightbox (2026-07-27, "give me option to enlarge the photo when click"/
   // "when click can view the video") — a single overlay that shows either an
   // image or a video full-size; `kind` picks which element to render.
-  const [viewerMedia, setViewerMedia] = useState(null); // {kind: "image"|"video", url}
+  //
+  // Holds the WHOLE media list plus a cursor, not just the one item clicked
+  // (2026-07-29 — "allow me to click arrow button when in enlarge mode to
+  // navigate"): stepping between photos needs to know what the neighbours are,
+  // and a post can mix images and videos, so both live in one flat list in the
+  // order they appear on the card.
+  const [viewer, setViewer] = useState(null); // { items: [{kind,url}], index }
+  const openViewer = (items, index) => setViewer({ items, index });
+  const closeViewer = () => setViewer(null);
+  const stepViewer = (delta) => setViewer((v) => {
+    if (!v || v.items.length < 2) return v;
+    // Wraps both ways, so you can keep pressing one arrow to cycle round
+    // rather than hitting a dead end and having to reverse.
+    const next = (v.index + delta + v.items.length) % v.items.length;
+    return { ...v, index: next };
+  });
+  const viewerItem = viewer ? viewer.items[viewer.index] : null;
+
+  // Announcement detail (2026-07-29 — "when i click it should give me to
+  // detail page of this announcement, similar to delegate detail profile").
+  // The cards are deliberately compact (a long message is clamped, media are
+  // thumbnails), so there was no way to read a full post — this is the
+  // read-everything view, mirroring the delegate profile modal's shape.
+  const [detail, setDetail] = useState(null);
+
+  // Arrow keys / Escape while the lightbox is open. Registered once and gated
+  // on `viewer` so it never swallows keys when the overlay isn't showing —
+  // and NOT while the detail modal alone is open, where arrows do nothing.
+  useEffect(() => {
+    if (!viewer) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") closeViewer();
+      else if (e.key === "ArrowRight") stepViewer(1);
+      else if (e.key === "ArrowLeft") stepViewer(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewer]);
 
   useEffect(() => {
     apiGet("/all-trips").then((r) => {
@@ -128,12 +167,10 @@ export default function AnnouncementsPage() {
       setLoading(false);
     }
   }
-  useEffect(() => {
-    load();
-    const id = setInterval(load, 8000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTripId]);
+  // Pauses while the tab is hidden, catches up on re-show (2026-07-29) — see
+  // useVisiblePolling. Keyed on selectedTripId exactly as before, so switching
+  // trips still refetches immediately.
+  useVisiblePolling(load, 8000, [selectedTripId]);
 
   function pickTrip(id) {
     setSelectedTripId(id);
@@ -361,7 +398,7 @@ export default function AnnouncementsPage() {
         <div style={{ marginTop: 20 }}>
           {sections.length <= 1 && <h2 style={{ fontSize: 14, marginBottom: 10 }}>{t("General")}</h2>}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {general.map((a) => <AnnouncementCard key={a.id} a={a} canManage={canManage} onDelete={remove} onEdit={openEdit} onView={setViewerMedia} t={t} />)}
+            {general.map((a) => <AnnouncementCard key={a.id} a={a} canManage={canManage} onDelete={remove} onEdit={openEdit} onView={openViewer} onOpen={setDetail} t={t} />)}
           </div>
         </div>
       )}
@@ -385,7 +422,7 @@ export default function AnnouncementsPage() {
                 {c.scheduledTime && <span className="muted" style={{ fontSize: 12.5 }}>· {c.scheduledTime}</span>}
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 19 }}>
-                {byStop.get(c.id).map((a) => <AnnouncementCard key={a.id} a={a} canManage={canManage} onDelete={remove} onEdit={openEdit} onView={setViewerMedia} t={t} />)}
+                {byStop.get(c.id).map((a) => <AnnouncementCard key={a.id} a={a} canManage={canManage} onDelete={remove} onEdit={openEdit} onView={openViewer} onOpen={setDetail} t={t} />)}
               </div>
             </div>
           ))}
@@ -543,63 +580,151 @@ export default function AnnouncementsPage() {
        * "give me option to enlarge the photo when click and give video upload
        * also, when click can view the video" — one overlay reused for both;
        * a video gets real playback controls instead of just a bigger <img>. */}
-      {viewerMedia && (
+      {viewerItem && (
         <div
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "grid", placeItems: "center", padding: 24, zIndex: 70 }}
-          onClick={() => setViewerMedia(null)}
+          onClick={closeViewer}
         >
           <button
-            onClick={() => setViewerMedia(null)}
+            onClick={closeViewer}
             style={{ position: "absolute", top: 20, right: 20, background: "rgba(255,255,255,0.12)", border: "none", borderRadius: "50%", width: 36, height: 36, color: "#fff", display: "grid", placeItems: "center", cursor: "pointer" }}
             aria-label={t("Close")}
           >
             <X size={20} />
           </button>
-          {viewerMedia.kind === "video" ? (
-            <video src={viewerMedia.url} controls autoPlay style={{ maxWidth: "min(90vw, 900px)", maxHeight: "85vh", borderRadius: "var(--r-md)" }} onClick={(e) => e.stopPropagation()} />
+
+          {/* Prev/next (2026-07-29) — only rendered when there's more than one
+              item, so a single-photo post doesn't get arrows that go nowhere.
+              Arrow keys do the same thing (see the keydown effect above).
+              stopPropagation matters on every control in here: the backdrop's
+              own onClick closes the overlay, so without it, stepping forward
+              would immediately dismiss the thing you're trying to look at. */}
+          {viewer.items.length > 1 && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); stepViewer(-1); }}
+                aria-label={t("Previous")}
+                style={{ position: "absolute", left: 20, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.12)", border: "none", borderRadius: "50%", width: 44, height: 44, color: "#fff", display: "grid", placeItems: "center", cursor: "pointer" }}
+              >
+                <ChevronLeft size={24} />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); stepViewer(1); }}
+                aria-label={t("Next")}
+                style={{ position: "absolute", right: 20, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.12)", border: "none", borderRadius: "50%", width: 44, height: 44, color: "#fff", display: "grid", placeItems: "center", cursor: "pointer" }}
+              >
+                <ChevronRight size={24} />
+              </button>
+              <div
+                style={{ position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "rgba(0,0,0,0.55)", color: "#fff", fontSize: 12.5, fontWeight: 600, padding: "5px 12px", borderRadius: 999 }}
+              >
+                {viewer.index + 1} / {viewer.items.length}
+              </div>
+            </>
+          )}
+
+          {viewerItem.kind === "video" ? (
+            /* `key` forces a fresh <video> per item — without it, React reuses
+               the element and stepping to another video keeps the previous
+               one's playback position and paused state. */
+            <video key={viewerItem.url} src={viewerItem.url} controls autoPlay style={{ maxWidth: "min(90vw, 900px)", maxHeight: "85vh", borderRadius: "var(--r-md)" }} onClick={(e) => e.stopPropagation()} />
           ) : (
-            <img src={viewerMedia.url} alt="" style={{ maxWidth: "min(90vw, 900px)", maxHeight: "85vh", borderRadius: "var(--r-md)", objectFit: "contain" }} onClick={(e) => e.stopPropagation()} />
+            <img src={viewerItem.url} alt="" style={{ maxWidth: "min(90vw, 900px)", maxHeight: "85vh", borderRadius: "var(--r-md)", objectFit: "contain" }} onClick={(e) => e.stopPropagation()} />
           )}
         </div>
+      )}
+
+      {/* ---- Announcement detail (2026-07-29) --------------------------------
+       * "when i click it should give me to detail page of this announcement,
+       * similar to delegate detail profile" — a modal rather than a route, to
+       * match how a delegate profile opens from the roster: you keep your day
+       * tab and scroll position, and closing puts you straight back. Shows the
+       * full untruncated message, which stop it's tagged to, who posted it and
+       * when, and every photo/video at a usable size (still clicking through
+       * to the lightbox above for full-screen). */}
+      {detail && (
+        <AnnouncementDetailModal
+          a={detail}
+          canManage={canManage}
+          itineraryDays={itineraryDays}
+          onClose={() => setDetail(null)}
+          onView={openViewer}
+          onEdit={(x) => { setDetail(null); openEdit(x); }}
+          onDelete={(id) => { setDetail(null); remove(id); }}
+          t={t}
+        />
       )}
     </div>
   );
 }
 
-function AnnouncementCard({ a, canManage, onDelete, onEdit, onView, t }) {
-  // `images` (2026-07-27) is the new multi-photo array; `imageUrl` is the
-  // legacy single-photo column from before that feature — only ever
-  // populated on announcements posted before this update, so it's the
-  // fallback when `images` is empty rather than something new posts write to.
+/** `images` (2026-07-27) is the new multi-photo array; `imageUrl` is the legacy
+ *  single-photo column from before that feature — only ever populated on
+ *  announcements posted before this update, so it's the fallback when `images`
+ *  is empty rather than something new posts write to.
+ *
+ *  Also flattens photos + videos into ONE ordered list (2026-07-29), which is
+ *  what the lightbox steps through with its arrows — a post can hold both, and
+ *  navigation has to cross that boundary in the order shown on the card. */
+function mediaOf(a) {
   const images = a.images && a.images.length ? a.images : (a.imageUrl ? [{ url: a.imageUrl, publicId: null }] : []);
   const videos = a.videos || [];
+  return {
+    images,
+    videos,
+    all: [
+      ...images.map((img) => ({ kind: "image", url: img.url })),
+      ...videos.map((v) => ({ kind: "video", url: v.url })),
+    ],
+  };
+}
+
+function AnnouncementCard({ a, canManage, onDelete, onEdit, onView, onOpen, t }) {
+  const { images, videos, all } = mediaOf(a);
   return (
-    <div className="card" style={{ padding: 14, borderLeft: "3px solid var(--scc-red)" }}>
+    // The whole card opens the detail view (2026-07-29). Every control inside
+    // it — edit, delete, and each media thumbnail — stops propagation so it
+    // keeps doing its own job instead of also opening the detail modal behind
+    // itself. Keyboard-reachable too: a card is real content, not decoration,
+    // so it takes focus and responds to Enter/Space like a button would.
+    <div
+      className="card"
+      style={{ padding: 14, borderLeft: "3px solid var(--scc-red)", cursor: "pointer" }}
+      onClick={() => onOpen(a)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(a); }
+      }}
+      role="button"
+      tabIndex={0}
+      title={t("Open announcement")}
+    >
       <div className="row between" style={{ gap: 8, alignItems: "flex-start" }}>
         <strong style={{ fontSize: 14 }}>{a.title}</strong>
         {canManage && (
           <div className="row" style={{ gap: 4, flexShrink: 0 }}>
-            <button onClick={() => onEdit(a)} aria-label={t("Edit")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", cursor: "pointer" }}>
+            <button onClick={(e) => { e.stopPropagation(); onEdit(a); }} aria-label={t("Edit")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", cursor: "pointer" }}>
               <Pencil size={14} />
             </button>
-            <button onClick={() => onDelete(a.id)} aria-label={t("Delete")} style={{ background: "none", border: "none", color: "var(--st-missing)", display: "flex", cursor: "pointer" }}>
+            <button onClick={(e) => { e.stopPropagation(); onDelete(a.id); }} aria-label={t("Delete")} style={{ background: "none", border: "none", color: "var(--st-missing)", display: "flex", cursor: "pointer" }}>
               <Trash2 size={14} />
             </button>
           </div>
         )}
       </div>
       {a.message && <p style={{ fontSize: 13.5, marginTop: 4, whiteSpace: "pre-wrap" }}>{a.message}</p>}
-      {(images.length > 0 || videos.length > 0) && (
+      {all.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
           {/* Click to enlarge (2026-07-27, "give me option to enlarge the
               photo when click") — a single-image post enlarges as-is; with
               several, thumbnails stay compact and enlarge on click instead of
-              blowing up the whole card. */}
+              blowing up the whole card. The index passed here is the position
+              in the FLAT list, so the lightbox's arrows continue from
+              whichever item was actually clicked. */}
           {images.map((img, idx) => (
             <img
               key={img.publicId || idx}
               src={img.url} alt=""
-              onClick={() => onView({ kind: "image", url: img.url })}
+              onClick={(e) => { e.stopPropagation(); onView(all, idx); }}
               style={
                 images.length === 1 && videos.length === 0
                   ? { maxWidth: "100%", maxHeight: 260, borderRadius: "var(--r-sm)", cursor: "pointer" }
@@ -613,7 +738,7 @@ function AnnouncementCard({ a, canManage, onDelete, onEdit, onView, t }) {
           {videos.map((v, idx) => (
             <div
               key={v.publicId || idx}
-              onClick={() => onView({ kind: "video", url: v.url })}
+              onClick={(e) => { e.stopPropagation(); onView(all, images.length + idx); }}
               style={{ position: "relative", width: 140, height: 140, borderRadius: "var(--r-sm)", overflow: "hidden", cursor: "pointer", background: "#000" }}
             >
               <video src={v.url} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted />
@@ -625,6 +750,134 @@ function AnnouncementCard({ a, canManage, onDelete, onEdit, onView, t }) {
       <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
         {a.createdBy || t("Admin")} · {new Date(a.createdAt).toLocaleString()}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Full read view for one announcement (2026-07-29) — the "detail page" the
+ * cards link into. Deliberately mirrors the delegate profile modal on the
+ * Dashboard: an overlay card with a header, a labelled body, and the manage
+ * actions in a footer, so the two read the same way.
+ */
+function AnnouncementDetailModal({ a, canManage, itineraryDays, onClose, onView, onEdit, onDelete, t }) {
+  const { images, videos, all } = mediaOf(a);
+  // Which itinerary stop this post is tagged to, resolved for display. A
+  // trip-wide notice has no stop, which is itself worth stating rather than
+  // leaving the field blank and ambiguous.
+  const stop = (() => {
+    for (const day of itineraryDays || []) {
+      const found = (day.checkpoints || []).find((c) => c.id === a.itineraryItemId);
+      if (found) return { day: day.dayNumber ?? day.day, item: found };
+    }
+    return null;
+  })();
+
+  // Same drag-to-select-text guard every other modal in this app uses — only
+  // dismiss when the whole click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 65 }}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="card"
+        style={{ width: "min(680px, 100%)", maxHeight: "88vh", display: "flex", flexDirection: "column", padding: 0, background: "var(--surface)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="row between" style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", gap: 12, alignItems: "flex-start" }}>
+          <div style={{ minWidth: 0 }}>
+            <div className="row" style={{ gap: 7, marginBottom: 5 }}>
+              <Megaphone size={14} color="var(--scc-red)" style={{ flexShrink: 0 }} />
+              <span className="muted" style={{ fontSize: 11.5, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                {t("Announcement")}
+              </span>
+            </div>
+            <h2 style={{ fontSize: 17, margin: 0, lineHeight: 1.3 }}>{a.title}</h2>
+          </div>
+          <button onClick={onClose} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, cursor: "pointer", flexShrink: 0 }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div style={{ padding: 20, overflowY: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14, marginBottom: 18 }}>
+            <DetailField label={t("Itinerary stop")} t={t}>
+              {stop
+                ? `${t("Day")} ${stop.day} · ${stop.item.label}${stop.item.scheduledTime ? ` · ${stop.item.scheduledTime}` : ""}`
+                : <span className="muted">{t("Trip-wide (not tied to a stop)")}</span>}
+            </DetailField>
+            <DetailField label={t("Posted by")} t={t}>{a.createdBy || t("Admin")}</DetailField>
+            <DetailField label={t("Posted")} t={t}>{new Date(a.createdAt).toLocaleString()}</DetailField>
+          </div>
+
+          {a.message ? (
+            <>
+              <div className="field-label" style={{ marginBottom: 5 }}>{t("Message")}</div>
+              <p style={{ fontSize: 14, margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{a.message}</p>
+            </>
+          ) : (
+            <div className="muted" style={{ fontSize: 13 }}>{t("No message body.")}</div>
+          )}
+
+          {all.length > 0 && (
+            <>
+              <div className="field-label" style={{ marginTop: 18, marginBottom: 7 }}>
+                {t("Attachments")} <span className="muted" style={{ fontWeight: 400 }}>({all.length})</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                {images.map((img, idx) => (
+                  <img
+                    key={img.publicId || idx}
+                    src={img.url} alt=""
+                    onClick={() => onView(all, idx)}
+                    style={{ width: 150, height: 150, objectFit: "cover", borderRadius: "var(--r-sm)", cursor: "pointer" }}
+                    title={t("Click to enlarge")}
+                  />
+                ))}
+                {videos.map((v, idx) => (
+                  <div
+                    key={v.publicId || idx}
+                    onClick={() => onView(all, images.length + idx)}
+                    style={{ position: "relative", width: 150, height: 150, borderRadius: "var(--r-sm)", overflow: "hidden", cursor: "pointer", background: "#000" }}
+                    title={t("Click to play")}
+                  >
+                    <video src={v.url} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted />
+                    <PlayCircle size={30} color="#fff" style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.6))" }} />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {canManage && (
+          <div className="row between" style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", flexShrink: 0, gap: 10 }}>
+            <button
+              className="btn btn-ghost"
+              style={{ color: "var(--st-missing)" }}
+              onClick={() => onDelete(a.id)}
+            >
+              <Trash2 size={15} /> {t("Delete")}
+            </button>
+            <button className="btn btn-primary" onClick={() => onEdit(a)}>
+              <Pencil size={15} /> {t("Edit")}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailField({ label, children, t }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div className="field-label">{label}</div>
+      <div style={{ fontSize: 13.5, marginTop: 2, wordBreak: "break-word" }}>{children || <span className="muted">{t("—")}</span>}</div>
     </div>
   );
 }

@@ -260,7 +260,7 @@
   background: var(--tf-surface-2); border: 1px solid var(--tf-border); font-size: 13px;
 }
 .tf-plan-stop.is-completed .tf-plan-title { text-decoration: line-through; color: var(--tf-text-3); }
-.tf-plan-time { font-weight: 800; color: var(--tf-text); min-width: 44px; flex-shrink: 0; }
+.tf-plan-time { font-weight: 800; color: var(--tf-text); min-width: 64px; flex-shrink: 0; }
 .tf-plan-title { color: var(--tf-text-2); flex: 1; min-width: 0; }
 
 /* ---- Trip summary bar (readiness for Planning · results for Completed) ------ */

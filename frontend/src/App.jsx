@@ -23,12 +23,14 @@ import ChatAssistantPage from "./pages/desktop/ChatAssistantPage.jsx";
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
 import MobileHomePage from "./pages/mobile/MobileHomePage.jsx";
-import MobileAttendancePage from "./pages/mobile/MobileAttendancePage.jsx";
-import MobileTripsPage from "./pages/mobile/MobileTripsPage.jsx";
-// Combined Trips + Attendance destination — composes the two pages above.
+// MobileAttendancePage / MobileTripsPage are NOT imported here any more — both
+// are reached only through MobileOpsPage, which composes them behind its
+// Delegates/Trips switch. They were left as unused imports when the Ops screen
+// took over both routes (2026-07-29 cleanup).
 import MobileOpsPage from "./pages/mobile/MobileOpsPage.jsx";
 import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
+import MobileExceptionsPage from "./pages/mobile/MobileExceptionsPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
 import MobileAnnouncementsPage from "./pages/mobile/MobileAnnouncementsPage.jsx";
@@ -79,9 +81,15 @@ const MOBILE_FALLBACK_ORDER = [
  *  first mobile route they CAN see, deliberately excluding "/mobile" itself —
  *  returning it would bounce straight back here and spin forever. Returns null
  *  for admins, meaning "render Home normally". */
+// Only redirects away from "/mobile" when the account genuinely lacks
+// viewMobileHome (same permission the tab bar gates on) — it used to also
+// redirect every non-admin regardless of that permission (2026-07-30 — "i
+// assigned staff_3 to coach 1... but on mobile ui i can't see home page? i
+// should still be able to see"), on the theory that Home was an admin-only
+// overview. A captain assigned to a real coach needs their own Home too.
 function mobileHomeRedirect() {
   const perms = getPermissions();
-  if (perms.manageAccounts) return null; // admin — Home is theirs
+  if (perms.viewMobileHome) return null;
   const hit = MOBILE_FALLBACK_ORDER.filter((r) => r.path !== "/mobile").find((r) => perms[r.perm]);
   return hit ? hit.path : "/mobile/profile"; // profile is never gated
 }
@@ -130,6 +138,49 @@ function ViewGate({ perm, mode = "desktop", children }) {
   const perms = getPermissions();
   if (perms[perm]) return children;
   return <Navigate to={firstAllowedRoute(perms, mode)} replace />;
+}
+
+/**
+ * Whole-platform gates — wrap the entire desktop `<Layout>` / mobile
+ * `<MobileLayout>` route trees (2026-07-29 — "when i didn't select either
+ * desktop web view, login will lead me to mobile regardless if it in mobile
+ * responsive... same for mobile view, if [not] selected [I'm] not able to
+ * access desktop or mobile depending on which i didn't select").
+ *
+ * `pickModeFromPermissions` (above) already derives "desktop or mobile" this
+ * same way, but ONLY at the moment of login — it decides where to send you
+ * once, then `mg_ui_mode` just persists that choice. Nothing stopped an
+ * account with zero mobile permissions from still reaching a mobile URL via a
+ * bookmark, a stale open tab, a manually-typed address, or an admin revoking
+ * their mobile access mid-session — any of those would land them on
+ * `firstAllowedRoute`'s neutral fallback (`/settings` or `/mobile/profile`)
+ * rather than being moved to the platform they actually belong on. These make
+ * that a STANDING rule, re-checked on every navigation, not just at sign-in —
+ * and they never look at `window.innerWidth`, so "regardless of mobile
+ * responsive" holds structurally, not just by accident of viewport size.
+ *
+ * The redirect condition is deliberately `!hasThisMode && hasOtherMode`, NOT
+ * just `!hasThisMode`: an account with NO view permission on EITHER platform
+ * has nowhere correct to go, and redirecting it anyway would ping-pong it
+ * forever between `/settings` (desktop's gate sends it to mobile because it
+ * has no desktop perms) and `/mobile/profile` (mobile's gate sends it right
+ * back because it has no mobile perms either). Only redirect when there's an
+ * ACTUAL destination on the other side; a zero-permission account keeps
+ * today's existing behaviour (settles on desktop's neutral /settings).
+ */
+function RequireDesktopMode({ children }) {
+  const perms = getPermissions();
+  const hasDesktop = DESKTOP_FALLBACK_ORDER.some((r) => perms[r.perm]);
+  const hasMobile = MOBILE_FALLBACK_ORDER.some((r) => perms[r.perm]);
+  if (!hasDesktop && hasMobile) return <Navigate to={firstAllowedRoute(perms, "mobile")} replace />;
+  return children;
+}
+function RequireMobileMode({ children }) {
+  const perms = getPermissions();
+  const hasMobile = MOBILE_FALLBACK_ORDER.some((r) => perms[r.perm]);
+  const hasDesktop = DESKTOP_FALLBACK_ORDER.some((r) => perms[r.perm]);
+  if (!hasMobile && hasDesktop) return <Navigate to={firstAllowedRoute(perms, "desktop")} replace />;
+  return children;
 }
 
 /**
@@ -224,7 +275,7 @@ export default function App() {
       {/* Public delegate self-enrollment — reachable while authed too, no chrome. */}
       <Route path="/enroll" element={<EnrollPage />} />
 
-      <Route element={<Layout onLogout={handleLogout} />}>
+      <Route element={<RequireDesktopMode><Layout onLogout={handleLogout} /></RequireDesktopMode>}>
         <Route index element={<Navigate to={pickHomeRoute()} replace />} />
 
         {/* Jun Qi — Admin Dashboard & Analytics (Screen 2). View-gated —
@@ -318,7 +369,7 @@ export default function App() {
           View-gated the same way as desktop (see permissions.js's
           "mobileView" group) — /mobile/profile stays ungated, it's account
           settings, not a feature view. */}
-      <Route element={<MobileLayout onLogout={handleLogout} />}>
+      <Route element={<RequireMobileMode><MobileLayout onLogout={handleLogout} /></RequireMobileMode>}>
         {/* Home = admin overview. Staff are sent straight to Operations (or
             the first view they do have) — see mobileHomeRedirect(). */}
         <Route
@@ -339,6 +390,15 @@ export default function App() {
             Mobile Home. Gated behind viewMobileIssues (2026-07-21) so an
             admin can hide it per-account, same as every other mobile view. */}
         <Route path="/mobile/issues" element={<ViewGate perm="viewMobileIssues" mode="mobile"><MobileIssuesPage /></ViewGate>} />
+        {/* Jayden's mobile exception INBOX (2026-07-29 integration) — his new
+            page arrived unrouted, so nothing could reach it. Deliberately its
+            own route rather than replacing /mobile/issues above: his file
+            header is explicit that the two are different screens — /issues is
+            the log-a-ticket form plus that coach's open list, this is the full
+            trip-wide inbox with resolve/override/priority actions. Shares the
+            viewMobileIssues gate since it's the same subject matter, so no new
+            permission (and no per-account re-configuring) is needed. */}
+        <Route path="/mobile/exceptions" element={<ViewGate perm="viewMobileIssues" mode="mobile"><MobileExceptionsPage /></ViewGate>} />
         {/* Mobile scanner (Face + QR + Manual) — the mobile port of the
             desktop /scanner page, reached from WITHIN the logged-in mobile
             app (e.g. a staff member navigating here manually). Auth-only,
