@@ -34,6 +34,21 @@ const HOLD_TICKS = 4;      // aligned+live frames before capture starts (~1.4s)
 const SAMPLES = 5;         // embeddings averaged into the template
 const MIN_CONSISTENCY = 0.85; // sample agreement floor (cosine)
 
+// Guided small head movements. Capturing a few slightly-different angles makes
+// the averaged template more robust to how the delegate faces the scanner —
+// the same idea as a phone's "move your head" face-unlock enrolment. Kept small
+// so the embeddings stay close enough to average cleanly.
+const POSES = [
+  "Look straight at the camera",
+  "Turn your head a little to the left",
+  "Now a little to the right",
+  "Lift your chin up slightly",
+  "Back to the centre",
+];
+// Multi-angle embeddings vary more than same-pose ones, so the agreement floor
+// is looser — it only needs to reject a clearly different person / garbage.
+const MULTI_ANGLE_MIN_CONSISTENCY = 0.6;
+
 const STEPS = [
   { key: "identify", label: "You" },
   { key: "face", label: "Face" },
@@ -64,7 +79,8 @@ export default function EnrollPage({ embedded = false }) {
   const [camError, setCamError] = useState("");
   const [live, setLive] = useState({ ready: false, hint: "Fit your face in the circle", score: 0, liveness: null, real: null });
   const [progress, setProgress] = useState(0);
-  const [capture, setCapture] = useState({ active: false, done: 0, total: SAMPLES });
+  const [capture, setCapture] = useState({ active: false, done: 0, total: POSES.length });
+  const [poseIdx, setPoseIdx] = useState(-1); // current guided-pose index during capture
   const [captureMsg, setCaptureMsg] = useState("");
   const [faceToken, setFaceToken] = useState(null);
   const [quality, setQuality] = useState(null);
@@ -191,27 +207,37 @@ export default function EnrollPage({ embedded = false }) {
   }, [step, consent, faceToken, camError, modelState]);
 
   async function runCapture() {
-    setCapture({ active: true, done: 0, total: SAMPLES });
+    setCapture({ active: true, done: 0, total: POSES.length });
     setCaptureMsg("");
     const samples = [];
-    for (let i = 0; i < SAMPLES; i += 1) {
-      const det = await detectFace(videoRef.current);
-      if (det.ok && det.embedding && gate(det).ready) samples.push(det.embedding);
-      setCapture({ active: true, done: samples.length, total: SAMPLES });
-      await sleep(140);
+    for (let i = 0; i < POSES.length; i += 1) {
+      setPoseIdx(i);
+      await sleep(650); // give them a moment to move into the pose
+      // grab one good, gated embedding for this angle (a few attempts)
+      let got = null;
+      for (let a = 0; a < 5 && !got; a += 1) {
+        const det = await detectFace(videoRef.current);
+        if (det.ok && det.embedding && gate(det).ready) got = det.embedding;
+        else await sleep(120);
+      }
+      if (got) samples.push(got);
+      setCapture({ active: true, done: samples.length, total: POSES.length });
     }
+    setPoseIdx(-1);
     const cons = sampleConsistency(samples);
-    if (samples.length < 3 || cons < MIN_CONSISTENCY) {
-      setCapture({ active: false, done: 0, total: SAMPLES });
-      setCaptureMsg(samples.length < 3 ? "Couldn't get a steady read — hold still and look at the camera." : `Samples didn't agree (${cons.toFixed(2)}) — retrying.`);
+    if (samples.length < 3 || cons < MULTI_ANGLE_MIN_CONSISTENCY) {
+      setCapture({ active: false, done: 0, total: POSES.length });
+      setCaptureMsg(samples.length < 3
+        ? "Couldn't capture enough angles — keep your face in the circle and move slowly."
+        : `Those didn't look like the same face (${cons.toFixed(2)}) — let's try again.`);
       return;
     }
     const avg = averageEmbeddings(samples);
     const token = buildEmbeddingToken(avg);
-    if (!token) { setCapture({ active: false, done: 0, total: SAMPLES }); setCaptureMsg("Capture failed — try again in better light."); return; }
+    if (!token) { setCapture({ active: false, done: 0, total: POSES.length }); setCaptureMsg("Capture failed — try again in better light."); return; }
     setQuality({ samples: samples.length, consistency: cons, liveness: live.liveness, real: live.real });
     setFaceToken(token);
-    setCapture({ active: false, done: SAMPLES, total: SAMPLES });
+    setCapture({ active: false, done: POSES.length, total: POSES.length });
   }
 
   /* ---- voice ---- */
@@ -484,7 +510,9 @@ export default function EnrollPage({ embedded = false }) {
                 {!faceToken && !camError && modelState === "ready" && (
                   <>
                     <p className={"enr-hint" + (live.ready || capture.active ? " ok" : "")}>
-                      {capture.active ? `Capturing… ${capture.done}/${capture.total}` : live.hint}
+                      {capture.active
+                        ? (poseIdx >= 0 ? `${POSES[poseIdx]} · ${capture.done}/${capture.total}` : `Capturing… ${capture.done}/${capture.total}`)
+                        : live.hint}
                     </p>
                     {/* live signal meters */}
                     <div className="enr-meters">
