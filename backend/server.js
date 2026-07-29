@@ -129,6 +129,12 @@ app.use(vanceRouter);
 import vimalRouter from "./routes/vimal.js";
 app.use(vimalRouter);
 
+// Passkey (WebAuthn) sign-in — Face ID / Touch ID / fingerprint / Windows
+// Hello, using the biometric the device already has. See routes/passkeys.js
+// for why this is NOT the same thing as FaceCheck's face matching.
+import passkeysRouter from "./routes/passkeys.js";
+app.use(passkeysRouter);
+
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {

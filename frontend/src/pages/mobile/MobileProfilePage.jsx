@@ -3,6 +3,7 @@ import { LogOut, ShieldCheck, HelpCircle, ChevronRight, Settings, Moon, Sun, Lan
 import { getUser, getPermissions, clearToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
+import PasskeyManager from "../../components/PasskeyManager.jsx";
 
 /**
  * Mobile Profile — signed-in user info + logout, mirroring the account
@@ -84,6 +85,10 @@ export default function MobileProfilePage() {
           </span>
         </button>
       </div>
+
+      {/* Biometric sign-in — register this device's Face ID / fingerprint so
+          the login page can offer it instead of a typed password. */}
+      <PasskeyManager t={t} />
 
       <button
         className="mobile-card row between"
