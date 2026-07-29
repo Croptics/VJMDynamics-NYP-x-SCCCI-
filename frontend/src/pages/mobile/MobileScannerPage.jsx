@@ -25,6 +25,9 @@ import {
   vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken, playErrorTone,
   faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, captureFrame, FACE_CROP,
 } from "../../lib/faceScan.js";
+// Real face recognition (deep embedding + liveness/anti-spoof) — the scan path
+// now uses this so check-in matches the delegate's Human enrolment.
+import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbeddingToken } from "../../lib/humanFace.js";
 
 // Scans average this many vectorized frames, the same way enrollment does, so
 // a single blurred frame can't cause a false rejection.
@@ -212,6 +215,7 @@ export default function MobileScannerPage({ lockMode }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const autoScanRef = useRef(0);   // timestamp of the last auto-fired scan (cooldown)
+  const faceBusyRef = useRef(false); // serializes Human inference (live gate vs a scan)
   const recognitionRef = useRef(null);
   const voiceTimeoutRef = useRef(null);
 
@@ -447,19 +451,35 @@ export default function MobileScannerPage({ lockMode }) {
     return () => { clearInterval(id); meter.width = 0; meter.height = 0; setLuxEstimate(null); };
   }, [scanMode, lowLight]);
 
-  /* Live alignment feedback while the face camera is up, so staff can see the
-   * circle go green before tapping Scan instead of guessing. Same gate the
-   * scan itself uses. */
+  /* Warm the face model as soon as the face scanner opens, so the first scan
+   * isn't stalled behind a ~10MB model load. */
+  useEffect(() => {
+    if (scanMode === "face" && !lowLight) loadHuman().catch(() => {});
+  }, [scanMode, lowLight]);
+
+  /* Live gate feedback (real Human detection) while the face camera is up, so
+   * staff see the circle go green — including liveness/anti-spoof — before
+   * tapping Scan. A recursive loop with a busy guard avoids overlapping the
+   * ~200ms inferences and pauses itself during an actual scan. */
   useEffect(() => {
     if (!(scanMode === "face" && !lowLight) || camError) { setScanAlign({ ready: false, hint: "" }); return undefined; }
-    const id = setInterval(() => {
-      const f = captureFrame(videoRef.current);
-      if (!f) return;
-      const a = faceAlignment(f);
-      setScanAlign({ ready: a.ready, hint: a.hint });
-    }, 350);
-    return () => clearInterval(id);
-  }, [scanMode, lowLight, camError, resetTick]);
+    let cancelled = false;
+    async function loop() {
+      if (cancelled) return;
+      if (!faceBusyRef.current && !scanning && videoRef.current && videoRef.current.videoWidth) {
+        faceBusyRef.current = true;
+        try {
+          const det = await detectFace(videoRef.current);
+          const g = faceGate(det);
+          if (!cancelled) setScanAlign({ ready: g.ready, hint: g.hint });
+        } finally { faceBusyRef.current = false; }
+      }
+      if (!cancelled) setTimeout(loop, 400);
+    }
+    loop();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanMode, lowLight, camError, resetTick, scanning]);
 
   /* Hands-free auto-scan: when enabled, fire a scan the instant the face is
    * aligned in the circle, with a cooldown so one delegate isn't scanned over
@@ -642,37 +662,38 @@ export default function MobileScannerPage({ lockMode }) {
     }
   }
 
-  /* Gated scan: the delegate's face must be properly aligned in the circle —
-   * the same gate enrollment uses — before anything is sent. Then SCAN_SAMPLES
-   * frames are vectorized and averaged, matching how the enrolled template was
-   * built, so the two are directly comparable. */
+  /* Gated scan (real recognition): the delegate's face must pass the same
+   * liveness + anti-spoof + quality gate enrolment uses before anything is
+   * sent. Then SCAN_SAMPLES deep embeddings are captured and averaged, exactly
+   * like the enrolled template, so the backend can match them directly. */
   async function handleFaceScan() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) {
       setScanError("Camera not ready yet — wait a moment and try again.");
       return;
     }
-    const grab = () => captureFrame(video);
 
-    // 1) Alignment gate — refuse with a specific reason instead of sending a
-    // badly framed face that would be rejected by the matcher anyway.
-    const first = grab();
-    const a = first ? faceAlignment(first) : { ready: false, hint: "Camera not ready yet." };
-    if (!a.ready) { setScanError(a.hint); return; }
+    // 1) Live gate — refuse a spoof / poorly-framed / non-live face up front
+    // with a specific reason, rather than sending something the matcher rejects.
+    const first = await detectFace(video);
+    const g = faceGate(first);
+    if (!g.ready) { setScanError(g.hint); return; }
 
-    // 2) Multi-sample vectorization
+    // 2) Multi-sample real embeddings
     setScanning(true);
+    faceBusyRef.current = true;
     const samples = [];
     for (let i = 0; i < SCAN_SAMPLES; i += 1) {
-      const f = grab();
-      if (f) { const vec = parseFaceVector(vectorizeFaceLandmarks(f)); if (vec) samples.push(vec); }
+      const det = await detectFace(video);
+      if (det.ok && det.embedding && faceGate(det).ready) samples.push(det.embedding);
       if (i < SCAN_SAMPLES - 1) await new Promise((r) => setTimeout(r, 120));
     }
+    faceBusyRef.current = false;
     setScanning(false);
 
-    const token = samples.length ? buildFaceToken(averageFaceVectors(samples)) : null;
-    if (!token || !isValidBiometricToken(token)) {
-      setScanError("Camera captured an invalid or placeholder token — try again.");
+    const token = samples.length ? buildEmbeddingToken(averageEmbeddings(samples)) : null;
+    if (!token) {
+      setScanError("Couldn't read a clear face — try again in better light.");
       return;
     }
     submitScan(token);

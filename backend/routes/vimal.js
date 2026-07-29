@@ -189,6 +189,12 @@ const checksum = (str) => {
 // between frames.
 const FACE_MATCH_THRESHOLD = 0.94;
 const VOICE_MATCH_THRESHOLD = 0.75;
+// Real deep face embeddings (Human faceres, a ~1024-float v3 token) are compared
+// with RAW cosine — no mean-centring — to mirror similarity() in
+// frontend/src/lib/humanFace.js, and clear a lower bar than the hand-crafted
+// v2/v3 descriptors. TUNE ON-DEVICE with real faces: raise it if strangers get
+// accepted, lower it if the right person gets rejected.
+const FACE_V3_THRESHOLD = 0.55;
 
 /** Pull the numeric embedding out of a `<kind>:v<n>:<hash>:<v0,v1,…>` token.
  *  v3 face / v2 voice tokens are comma-separated floats; the older v2 face
@@ -226,6 +232,25 @@ function cosineSimilarity(a, b) {
   if (na === 0 || nb === 0) return -1;
   return dot / Math.sqrt(na * nb);
 }
+
+/* Deep embeddings (Human faceres, length ~1024) are already discriminative, so
+ * they're compared with RAW cosine — the exact maths as similarity() in
+ * frontend/src/lib/humanFace.js. The legacy hand-crafted descriptors (length
+ * ~40) keep the mean-centred comparison. We tell them apart purely by length. */
+const isDeepEmbedding = (v) => Array.isArray(v) && v.length >= 128;
+function rawCosine(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return -1;
+  const n = Math.min(a.length, b.length);
+  if (n < 8) return -1;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na === 0 || nb === 0 ? -1 : dot / Math.sqrt(na * nb);
+}
+// Version-aware face comparison + threshold. Only treat it as deep when BOTH
+// vectors are deep, so a length mismatch (a legacy enrolment vs a new scan)
+// can't accidentally score high on a truncated overlap.
+const faceSim = (a, b) => (isDeepEmbedding(a) && isDeepEmbedding(b) ? rawCosine(a, b) : cosineSimilarity(a, b));
+const faceThresh = (probe) => (isDeepEmbedding(probe) ? FACE_V3_THRESHOLD : FACE_MATCH_THRESHOLD);
 
 const timeNow = () =>
   new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -313,7 +338,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
     return fail(res, 400, "INVALID_SCAN", "Face scan carried no usable data — try again in better light.");
   }
 
-  const threshold = method === "FACE" ? FACE_MATCH_THRESHOLD : VOICE_MATCH_THRESHOLD;
+  const threshold = method === "FACE" ? faceThresh(scanVec) : VOICE_MATCH_THRESHOLD;
 
   // Score every CONSENTED, ENROLLED delegate across the WHOLE roster (not just
   // the coach-scoped pool) so we can both reject a truly unknown face AND still
@@ -324,7 +349,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
       if (!row || consentOf(row) !== "GRANTED") return { d, score: -1 };
       if (method === "FACE") {
         const enrolled = asVector(row.face_vector);
-        return { d, score: enrolled ? cosineSimilarity(scanVec, enrolled) : -1 };
+        return { d, score: enrolled ? faceSim(scanVec, enrolled) : -1 };
       }
       // VOICE — prefer the acoustic embedding; fall back to the typed-
       // passphrase hash for v1 tokens / delegates enrolled without a mic.
@@ -862,10 +887,11 @@ router.post("/api/enroll/verify", wrap(async (req, res) => {
     const enrolled = asVector(row.face_vector);
     if (!vec) return fail(res, 400, "INVALID_FACE_TOKEN", "That sample had no usable data.");
     if (!enrolled) return fail(res, 409, "NOT_ENROLLED", "No face is enrolled for this delegate.");
-    const similarity = cosineSimilarity(vec, enrolled);
+    const similarity = faceSim(vec, enrolled);
+    const thr = faceThresh(vec);
     return res.json({
       modality: "FACE", similarity: +similarity.toFixed(4),
-      threshold: FACE_MATCH_THRESHOLD, match: similarity >= FACE_MATCH_THRESHOLD,
+      threshold: thr, match: similarity >= thr,
     });
   }
   if (voiceToken) {
