@@ -54,6 +54,7 @@ export default function EnrollPage({ embedded = false }) {
   const [matches, setMatches] = useState([]);   // the full roster, filtered client-side
   const [rosterLoading, setRosterLoading] = useState(true);
   const [findErr, setFindErr] = useState("");
+  const [coachFilter, setCoachFilter] = useState(null); // null = all coaches
   const [stats, setStats] = useState(null);
   const [delegate, setDelegate] = useState(null);
 
@@ -343,8 +344,13 @@ export default function EnrollPage({ embedded = false }) {
                 <div className="enr-alert err"><AlertTriangle size={14} /><span>{findErr}</span></div>
               ) : (() => {
                 const q = query.trim().toLowerCase();
-                const shown = q ? matches.filter((m) => (m.name || "").toLowerCase().includes(q)) : matches;
-                if (shown.length === 0) return <p className="enr-sub" style={{ textAlign: "center", padding: "16px 0" }}>No delegate matches “{query}”. Check the spelling or ask staff.</p>;
+                // Coaches present in the roster (stable order) for the filter chips.
+                const coachOrder = [];
+                const seenCoach = {};
+                for (const m of matches) { const k = m.coachLabel || "No coach yet"; if (!seenCoach[k]) { seenCoach[k] = true; coachOrder.push(k); } }
+                const shown = matches.filter((m) =>
+                  (!q || (m.name || "").toLowerCase().includes(q)) &&
+                  (!coachFilter || (m.coachLabel || "No coach yet") === coachFilter));
                 const order = [];
                 const byCoach = {};
                 for (const m of shown) {
@@ -353,30 +359,47 @@ export default function EnrollPage({ embedded = false }) {
                   byCoach[k].push(m);
                 }
                 return (
-                  <div className="enr-roster">
-                    <div className="enr-roster-hint">{shown.length} {shown.length === 1 ? "delegate" : "delegates"}{q ? " matching" : ""} · tap your name</div>
-                    {order.map((k) => (
-                      <div key={k} className="enr-group">
-                        <div className="enr-group-head"><Bus size={12} /> {k} <span>{byCoach[k].length}</span></div>
-                        <ul className="enr-matches">
-                          {byCoach[k].map((m) => (
-                            <li key={m.delegateId}>
-                              <button className="enr-match" onClick={() => pickDelegate(m)}>
-                                <span className="enr-avatar">{initials(m.name)}</span>
-                                <span className="enr-match-text"><strong>{m.name}</strong><small>{m.coachLabel || "No coach yet"}</small></span>
-                                <span className="enr-match-tags">
-                                  {m.enrolled?.face && <em className="enr-tag ok">Face</em>}
-                                  {m.enrolled?.voice && <em className="enr-tag ok">Voice</em>}
-                                  {!m.enrolled?.face && !m.enrolled?.voice && <em className="enr-tag">Not enrolled</em>}
-                                </span>
-                                <ChevronRight size={16} className="enr-match-chev" />
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
+                  <>
+                    {coachOrder.length > 1 && (
+                      <div className="enr-chips-row">
+                        <button className={"enr-chip" + (!coachFilter ? " on" : "")} onClick={() => setCoachFilter(null)}>All</button>
+                        {coachOrder.map((k) => (
+                          <button key={k} className={"enr-chip" + (coachFilter === k ? " on" : "")}
+                            onClick={() => setCoachFilter((cur) => (cur === k ? null : k))}>
+                            {k}
+                          </button>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    )}
+                    {shown.length === 0 ? (
+                      <p className="enr-sub" style={{ textAlign: "center", padding: "16px 0" }}>No delegate matches — clear the filter or check the spelling.</p>
+                    ) : (
+                      <div className="enr-roster">
+                        <div className="enr-roster-hint">{shown.length} {shown.length === 1 ? "delegate" : "delegates"} · tap your name</div>
+                        {order.map((k) => (
+                          <div key={k} className="enr-group">
+                            {!coachFilter && <div className="enr-group-head"><Bus size={12} /> {k} <span>{byCoach[k].length}</span></div>}
+                            <ul className="enr-matches">
+                              {byCoach[k].map((m) => (
+                                <li key={m.delegateId}>
+                                  <button className="enr-match" onClick={() => pickDelegate(m)}>
+                                    <span className="enr-avatar">{initials(m.name)}</span>
+                                    <span className="enr-match-text"><strong>{m.name}</strong><small>{m.coachLabel || "No coach yet"}</small></span>
+                                    <span className="enr-match-tags">
+                                      {m.enrolled?.face && <em className="enr-tag ok">Face</em>}
+                                      {m.enrolled?.voice && <em className="enr-tag ok">Voice</em>}
+                                      {!m.enrolled?.face && !m.enrolled?.voice && <em className="enr-tag">Not enrolled</em>}
+                                    </span>
+                                    <ChevronRight size={16} className="enr-match-chev" />
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 );
               })()}
             </section>
@@ -644,6 +667,9 @@ const CSS = `
 .enr-tag { font-style: normal; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 4px; }
 .enr-tag.ok { background: var(--st-present-bg); color: var(--st-present); border-color: transparent; }
 
+.enr-chips-row { display: flex; gap: 8px; overflow-x: auto; padding: 12px 2px 2px; -webkit-overflow-scrolling: touch; }
+.enr-chip { flex-shrink: 0; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-size: 12.5px; font-weight: 700; white-space: nowrap; }
+.enr-chip.on { background: var(--scc-red-tint); color: var(--scc-red); border-color: var(--scc-red-tint-2); }
 .enr-roster { margin-top: 12px; max-height: 46vh; overflow-y: auto; }
 .enr-roster-hint { font-size: 11.5px; color: var(--ink-3); font-weight: 600; margin: 0 2px 8px; }
 .enr-group { margin-bottom: 12px; }
