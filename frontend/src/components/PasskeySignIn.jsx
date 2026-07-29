@@ -37,26 +37,38 @@ function biometricLabel() {
 
 export default function PasskeySignIn({ staffId = "", onSignedIn, keep = true, t = (s) => s }) {
   const [show, setShow] = useState(false);
+  const [registered, setRegistered] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const { text, Icon } = biometricLabel();
 
-  // Only offer this when the device has a built-in biometric AND the server
-  // says at least one passkey exists on a reachable (non-IP) hostname.
+  // Show whenever the DEVICE could do this (has a built-in biometric) and the
+  // origin allows passkeys. Deliberately NOT gated on a passkey already
+  // existing: that was a chicken-and-egg — the button stayed invisible, so
+  // nobody could discover the feature to set it up in the first place. If
+  // there's nothing registered yet we still render, and explain how to enable
+  // it rather than silently hiding.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const hasPlatform = await platformAuthenticatorIsAvailable();
-        if (!hasPlatform) return;
-        const info = await apiGet("/passkeys/available");
-        if (alive && info.supported && info.anyRegistered) setShow(true);
-      } catch { /* endpoint unavailable — just stay hidden */ }
+        const info = await apiGet("/passkeys/available").catch(() => ({ supported: false }));
+        if (!alive) return;
+        setShow(hasPlatform && info.supported);
+        setRegistered(!!info.anyRegistered);
+      } catch { /* endpoint unavailable — stay hidden */ }
     })();
     return () => { alive = false; };
   }, []);
 
   async function signIn() {
+    // Nothing registered anywhere yet — say so plainly instead of firing an OS
+    // prompt that can only fail.
+    if (!registered) {
+      setError(t("No device is set up yet. Sign in with your password once, then turn this on under Me → Biometric sign-in."));
+      return;
+    }
     setBusy(true); setError("");
     try {
       // 1) Server issues a one-time challenge. Passing a Staff ID narrows it to
