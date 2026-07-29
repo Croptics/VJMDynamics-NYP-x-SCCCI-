@@ -747,36 +747,43 @@ router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) =>
  * behind the per-delegate magic link from their confirmation email.
  * ========================================================================== */
 
-/* GET /api/enroll/lookup?name=...  — find your own delegate record to enroll
- * against. Returns minimal fields only (id, name, coach, what's already
- * enrolled), capped, and requires a real query so it isn't a roster dump. */
+/* GET /api/enroll/lookup — find your delegate record to enroll against.
+ * Returns minimal fields only (id, name, coach, what's already enrolled):
+ *   ?id=<delegateId>  exact record (used by the notification deep-link)
+ *   ?name=<2+ chars>  name filter
+ *   (neither)         the full roster, so the enrol page can show a browsable
+ *                     picker with everyone's coach instead of a blind search. */
 router.get("/api/enroll/lookup", wrap(async (req, res) => {
+  const id = String((req.query && req.query.id) || "").trim();
   const q = String((req.query && req.query.name) || "").trim().toLowerCase();
-  if (q.length < 2) {
-    return fail(res, 400, "QUERY_TOO_SHORT", "Type at least 2 letters of your name.");
-  }
   const all = await listDelegates();
   const dash = await liveDashboard();
   const bios = await bioMap();
-  const coachName = (id) => {
-    const c = (dash.coaches || []).find((x) => x.id === id);
+  const coachName = (cid) => {
+    const c = (dash.coaches || []).find((x) => x.id === cid);
     return c ? c.name : null;
   };
-  const matches = all
-    .filter((d) => (d.name || "").toLowerCase().includes(q))
-    .slice(0, 8)
-    .map((d) => {
-      const row = bios.get(d.id);
-      return {
-        delegateId: d.id,
-        name: d.name,
-        coachLabel: coachName(d.coachId),
-        enrolled: {
-          face: !!(row && asVector(row.face_vector)),
-          voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
-        },
-      };
-    });
+  const toMatch = (d) => {
+    const row = bios.get(d.id);
+    return {
+      delegateId: d.id,
+      name: d.name,
+      coachId: d.coachId || null,
+      coachLabel: coachName(d.coachId),
+      enrolled: {
+        face: !!(row && asVector(row.face_vector)),
+        voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
+      },
+    };
+  };
+  let list;
+  if (id) list = all.filter((d) => d.id === id);
+  else if (q.length >= 2) list = all.filter((d) => (d.name || "").toLowerCase().includes(q));
+  else list = all;
+  const matches = list
+    .slice(0, 300)
+    .map(toMatch)
+    .sort((a, b) => (a.coachLabel || "~").localeCompare(b.coachLabel || "~") || a.name.localeCompare(b.name));
   res.json({ matches });
 }));
 

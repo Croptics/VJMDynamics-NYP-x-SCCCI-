@@ -21,7 +21,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   ScanFace, Mic, CheckCircle2, AlertTriangle, Search, Camera, ShieldCheck,
-  RefreshCw, ArrowLeft, Trash2, BadgeCheck, Lock, Loader2, X, ShieldAlert, Sparkles, ChevronRight,
+  RefreshCw, ArrowLeft, Trash2, BadgeCheck, Lock, Loader2, X, Bus, Sparkles, ChevronRight,
 } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
 import { captureVoiceEmbedding, vectorizeVoiceprint } from "../lib/faceScan.js";
@@ -51,8 +51,8 @@ export default function EnrollPage({ embedded = false }) {
 
   // identify
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState([]);
-  const [searching, setSearching] = useState(false);
+  const [matches, setMatches] = useState([]);   // the full roster, filtered client-side
+  const [rosterLoading, setRosterLoading] = useState(true);
   const [findErr, setFindErr] = useState("");
   const [stats, setStats] = useState(null);
   const [delegate, setDelegate] = useState(null);
@@ -95,6 +95,16 @@ export default function EnrollPage({ embedded = false }) {
   }, []);
   useEffect(() => { loadStats(); }, [loadStats]);
 
+  /* Load the whole roster once so the identify step is a browsable picker
+   * (everyone + their coach), not a blind search. Filtered client-side. */
+  useEffect(() => {
+    (async () => {
+      try { const { matches: m } = await apiGet("/enroll/lookup"); setMatches(m || []); }
+      catch (e) { setFindErr(e.message || "Could not load the delegate list. Is the backend running?"); }
+      finally { setRosterLoading(false); }
+    })();
+  }, []);
+
   /* ---- deep-link pre-identify: /enroll?d=<delegateId> from the notification ---- */
   useEffect(() => {
     const id = params.get("d") || params.get("delegate");
@@ -108,21 +118,7 @@ export default function EnrollPage({ embedded = false }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ---- identify ---- */
-  const runSearch = useCallback(async (e) => {
-    if (e) e.preventDefault();
-    const q = query.trim();
-    if (q.length < 2) { setFindErr("Type at least 2 letters of your name."); return; }
-    setSearching(true); setFindErr("");
-    try {
-      const { matches: m } = await apiGet(`/enroll/lookup?name=${encodeURIComponent(q)}`);
-      setMatches(m || []);
-      if ((m || []).length === 0) setFindErr("No delegate found with that name. Check the spelling or ask staff.");
-    } catch (err) {
-      setFindErr(err.message || "Could not search. Is the backend running?");
-    } finally { setSearching(false); }
-  }, [query]);
-
+  /* ---- identify: filter the already-loaded roster client-side ---- */
   function pickDelegate(d) {
     setDelegate(d);
     setStep("face");
@@ -333,33 +329,56 @@ export default function EnrollPage({ embedded = false }) {
             </section>
 
             <section className="enr-card">
-              <form onSubmit={runSearch} className="enr-search">
+              <div className="enr-search">
                 <Search size={16} className="enr-search-icon" />
-                <input className="input" placeholder="Your full name…" value={query} autoFocus
+                <input className="input" placeholder="Find your name…" value={query} autoFocus
                   onChange={(e) => setQuery(e.target.value)} style={{ paddingLeft: 38 }} />
-                <button className="btn btn-primary btn-block" style={{ marginTop: 10 }} disabled={searching}>
-                  {searching ? <><Loader2 size={15} className="enr-spin" /> Searching…</> : "Find me"}
-                </button>
-              </form>
-              {findErr && <div className="enr-alert err"><AlertTriangle size={14} /><span>{findErr}</span></div>}
-              {matches.length > 0 && (
-                <ul className="enr-matches">
-                  {matches.map((m) => (
-                    <li key={m.delegateId}>
-                      <button className="enr-match" onClick={() => pickDelegate(m)}>
-                        <span className="enr-avatar">{initials(m.name)}</span>
-                        <span className="enr-match-text"><strong>{m.name}</strong><small>{m.coachLabel || "No coach yet"}</small></span>
-                        <span className="enr-match-tags">
-                          {m.enrolled?.face && <em className="enr-tag ok">Face</em>}
-                          {m.enrolled?.voice && <em className="enr-tag ok">Voice</em>}
-                          {!m.enrolled?.face && !m.enrolled?.voice && <em className="enr-tag">Not enrolled</em>}
-                        </span>
-                        <ChevronRight size={16} className="enr-match-chev" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              </div>
+
+              {rosterLoading ? (
+                <p className="enr-sub" style={{ textAlign: "center", padding: "16px 0" }}>
+                  <Loader2 size={15} className="enr-spin" style={{ verticalAlign: -3, marginRight: 6 }} /> Loading delegates…
+                </p>
+              ) : findErr ? (
+                <div className="enr-alert err"><AlertTriangle size={14} /><span>{findErr}</span></div>
+              ) : (() => {
+                const q = query.trim().toLowerCase();
+                const shown = q ? matches.filter((m) => (m.name || "").toLowerCase().includes(q)) : matches;
+                if (shown.length === 0) return <p className="enr-sub" style={{ textAlign: "center", padding: "16px 0" }}>No delegate matches “{query}”. Check the spelling or ask staff.</p>;
+                const order = [];
+                const byCoach = {};
+                for (const m of shown) {
+                  const k = m.coachLabel || "No coach yet";
+                  if (!byCoach[k]) { byCoach[k] = []; order.push(k); }
+                  byCoach[k].push(m);
+                }
+                return (
+                  <div className="enr-roster">
+                    <div className="enr-roster-hint">{shown.length} {shown.length === 1 ? "delegate" : "delegates"}{q ? " matching" : ""} · tap your name</div>
+                    {order.map((k) => (
+                      <div key={k} className="enr-group">
+                        <div className="enr-group-head"><Bus size={12} /> {k} <span>{byCoach[k].length}</span></div>
+                        <ul className="enr-matches">
+                          {byCoach[k].map((m) => (
+                            <li key={m.delegateId}>
+                              <button className="enr-match" onClick={() => pickDelegate(m)}>
+                                <span className="enr-avatar">{initials(m.name)}</span>
+                                <span className="enr-match-text"><strong>{m.name}</strong><small>{m.coachLabel || "No coach yet"}</small></span>
+                                <span className="enr-match-tags">
+                                  {m.enrolled?.face && <em className="enr-tag ok">Face</em>}
+                                  {m.enrolled?.voice && <em className="enr-tag ok">Voice</em>}
+                                  {!m.enrolled?.face && !m.enrolled?.voice && <em className="enr-tag">Not enrolled</em>}
+                                </span>
+                                <ChevronRight size={16} className="enr-match-chev" />
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </section>
 
             <section className="enr-card enr-privacy">
@@ -625,6 +644,11 @@ const CSS = `
 .enr-tag { font-style: normal; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 4px; }
 .enr-tag.ok { background: var(--st-present-bg); color: var(--st-present); border-color: transparent; }
 
+.enr-roster { margin-top: 12px; max-height: 46vh; overflow-y: auto; }
+.enr-roster-hint { font-size: 11.5px; color: var(--ink-3); font-weight: 600; margin: 0 2px 8px; }
+.enr-group { margin-bottom: 12px; }
+.enr-group-head { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); margin: 0 2px 6px; }
+.enr-group-head span { margin-left: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
 .enr-privacy ul { margin: 0; padding-left: 18px; color: var(--ink-3); font-size: 12.5px; line-height: 1.7; }
 .enr-coverage { margin-top: 12px; } .enr-coverage span { font-size: 11.5px; color: var(--ink-3); }
 .enr-coverage-bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; margin: 8px 0 4px; }
