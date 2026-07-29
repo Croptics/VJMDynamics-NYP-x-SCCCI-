@@ -240,26 +240,11 @@ export default function App() {
             (ChatBubble.jsx, rendered from Layout.jsx on every route)
             instead of a dedicated destination; no route needed. */}
 
-        {/* Biometric enrolment (Vimal) — the in-app counterpart to the public
-            /enroll link. Staff can enrol a delegate's face/voice at the desk;
-            delegates can still self-enrol from the public page. Gated on the
-            same viewScanner permission as the scanner it feeds. */}
-        <Route
-          path="/enrolment"
-          element={
-            <ViewGate perm="viewScanner">
-              <div className="page">
-                <div className="page-eyebrow">FaceCheck Pro</div>
-                <h1 className="page-title">Biometric enrolment</h1>
-                <p className="page-sub" style={{ marginBottom: 20 }}>
-                  Capture a delegate's face and voiceprint so the scanners can recognise them.
-                  Delegates can also self-enrol at <strong>/enroll</strong> before the trip.
-                </p>
-                <EnrollPage embedded />
-              </div>
-            </ViewGate>
-          }
-        />
+        {/* Biometric enrolment is its OWN standalone application at /enroll —
+            delegates open it from the emailed invite link on their own phone.
+            It is deliberately NOT embedded in the staff dashboard: capturing
+            someone's face is the delegate's own action, not a dashboard panel.
+            Staff manage coverage and send invites from /mobile/enrolment. */}
 
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
             page hosting all three real check-in paths on one screen. */}

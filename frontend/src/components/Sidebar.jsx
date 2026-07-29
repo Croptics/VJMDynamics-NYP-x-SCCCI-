@@ -7,7 +7,6 @@ import {
   ClipboardCheck,
   LogOut,
   ShieldCheck,
-  UserPlus,
   Languages,
   Sun,
   Moon,
@@ -41,9 +40,10 @@ export default function Sidebar({ exceptionCount = 0, onLogout, open = false }) 
     ...(perms.viewDocuments ? [{ to: "/onboarding", label: "Documents", icon: FileText }] : []),
     // Desktop entrance-kiosk scanner (Face + QR + Manual).
     ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
-    // Biometric enrolment — feeds the scanner above (a delegate can only be
-    // face/voice matched once they're enrolled), so it sits next to it.
-    ...(perms.viewScanner ? [{ to: "/enrolment", label: "Enrolment", icon: UserPlus }] : []),
+    // NOTE: biometric enrolment is intentionally NOT here. It is its own
+    // standalone app at /enroll that delegates open on their own phone from
+    // the emailed invite link — not a dashboard destination. Staff track
+    // coverage and send those invites from the mobile Enrolment invites view.
     ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),
     // Chat assistant is now a floating bubble (ChatBubble.jsx, rendered from
     // Layout.jsx on every route) instead of a dedicated destination.

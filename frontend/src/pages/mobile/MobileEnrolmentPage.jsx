@@ -146,7 +146,7 @@ export default function MobileEnrolmentPage() {
       <div className="row between" style={{ alignItems: "flex-start", marginBottom: 12 }}>
         <div>
           <div className="m-eyebrow">{t("FaceCheck")}</div>
-          <h1 className="m-page-title">{t("Enrolment")}</h1>
+          <h1 className="m-page-title">{t("Enrolment invites")}</h1>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
