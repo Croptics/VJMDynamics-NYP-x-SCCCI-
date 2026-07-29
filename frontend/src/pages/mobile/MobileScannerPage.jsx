@@ -15,6 +15,7 @@
 // webcam).
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ScanFace, QrCode, PencilLine, AlertTriangle, CheckCircle2, RefreshCw, Camera, SwitchCamera,
   Mic, Moon, Sun, Zap, Turtle, Wifi, WifiOff, Undo2, Users, RotateCcw,
@@ -165,6 +166,7 @@ const SCAN_CSS = `
  */
 export default function MobileScannerPage({ lockMode }) {
   const { t } = useLang();
+  const navigate = useNavigate();
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);
@@ -760,11 +762,19 @@ export default function MobileScannerPage({ lockMode }) {
     : 0;
 
   const S = {
-    viewport: {
-      position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-      background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
-      boxShadow: "var(--shadow-md)",
-    },
+    // Manual check-in is a roster list, not a camera feed — give it a normal
+    // surface that grows with its content instead of a black square crop.
+    viewport: scanMode === "manual"
+      ? {
+          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+          background: "var(--surface)", border: "1px solid var(--line)",
+          width: "100%", boxShadow: "var(--shadow-sm)",
+        }
+      : {
+          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+          background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
+          boxShadow: "var(--shadow-md)",
+        },
     overlay: {
       position: "absolute", inset: 0, display: "flex", alignItems: "center",
       justifyContent: "center", padding: 20, textAlign: "center", flexDirection: "column", gap: 10, zIndex: 4,
@@ -784,7 +794,10 @@ export default function MobileScannerPage({ lockMode }) {
               {t("Entrance scanner")}
             </div>
             <h1 style={{ fontFamily: "var(--font-display)", fontSize: 24, margin: "3px 0 0", color: "#fff", lineHeight: 1.15 }}>
-              {lockMode === "face" ? t("Face scan") : lockMode === "qr" ? t("QR scan") : t("Face + QR scan")}
+              {lockMode === "face" ? t("Face scan")
+                : lockMode === "qr" ? t("QR scan")
+                : lockMode === "manual" ? t("Manual check-in")
+                : t("Face + QR scan")}
             </h1>
           </div>
           <div style={{ flexShrink: 0, textAlign: "center", background: "rgba(255,255,255,0.16)", borderRadius: 14, padding: "8px 14px", minWidth: 76 }}>
@@ -1003,6 +1016,25 @@ export default function MobileScannerPage({ lockMode }) {
           </div>
         )}
       </div>
+
+      {/* Locked to one mode (the Face / QR / Manual routes) — offer the other
+          two as a compact switcher, so Manual check-in is always one tap away
+          when a scan won't cooperate. */}
+      {lockMode && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          {[
+            { key: "face", label: "Face", Icon: ScanFace, to: "/mobile/scan/face" },
+            { key: "qr", label: "QR", Icon: QrCode, to: "/mobile/scan/qr" },
+            { key: "manual", label: "Manual", Icon: PencilLine, to: "/mobile/scan/manual" },
+          ]
+            .filter((m) => m.key !== lockMode)
+            .map(({ key, label, Icon, to }) => (
+              <button key={key} className="mscan-chip" onClick={() => navigate(to)}>
+                <Icon size={14} /> {t(label)}
+              </button>
+            ))}
+        </div>
+      )}
 
       {/* Mode segmented control — hidden when the route pins this page to one
           scanner (the separate Face / QR bottom-nav tabs). */}

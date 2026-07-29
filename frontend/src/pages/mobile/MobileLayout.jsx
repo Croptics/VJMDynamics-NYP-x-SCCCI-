@@ -83,10 +83,15 @@ export default function MobileLayout({ onLogout }) {
     ...(perms.viewMobileAttendance || perms.viewMobileTrips
       ? [{ to: "/mobile/attendance", label: "Ops", icon: ClipboardList, badge: missing }] : []),
     // Face and QR are separate tabs rather than modes of one scanner screen.
+    // QR leads (and sits dead-centre, flagged `primary` so it renders as the
+    // raised action tab) because it's the fastest, most reliable check-in —
+    // face is the premium path but needs good light and an enrolled delegate.
+    // Manual is intentionally NOT a tab: it's the fallback you reach for when
+    // a scan won't cooperate, so it lives one tap inside the scanner screens.
     ...(perms.viewMobileScanner
       ? [
+          { to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true },
           { to: "/mobile/scan/face", label: "Face", icon: ScanFace },
-          { to: "/mobile/scan/qr", label: "QR", icon: QrCode },
         ]
       : []),
     { to: "/mobile/profile", label: "Me", icon: User },
@@ -133,16 +138,16 @@ export default function MobileLayout({ onLogout }) {
         <Outlet context={{ onLogout }} />
       </div>
       <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>
-        {tabs.map(({ to, label, icon: Icon, end, badge }) => (
+        {tabs.map(({ to, label, icon: Icon, end, badge, primary }) => (
           <NavLink
             key={to}
             to={to}
             end={end}
             onClick={() => buzz()}
-            className={({ isActive }) => "mobile-tab" + (isActive ? " active" : "")}
+            className={({ isActive }) => "mobile-tab" + (isActive ? " active" : "") + (primary ? " primary" : "")}
           >
             <span className="mobile-tab-icon">
-              <Icon size={20} />
+              <Icon size={primary ? 22 : 20} />
               {badge > 0 && <span className="mobile-tab-badge">{badge > 99 ? "99+" : badge}</span>}
             </span>
             {t(label)}

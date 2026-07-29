@@ -123,6 +123,27 @@
   100% { transform: scale(1); }
 }
 
+/* Primary (centre) tab — the main check-in action, raised out of the dock as a
+   brand-red disc so it reads as THE thing to tap, the way native apps treat a
+   centre action. Sits in normal flow (no absolute positioning) so the evenly
+   spaced tab widths — and the dock's own centring — stay intact. */
+.mobile-tab.primary .mobile-tab-icon {
+  width: 46px; height: 46px; margin-top: -16px; margin-bottom: 1px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--scc-red), var(--scc-red-700));
+  color: #fff;
+  align-items: center; justify-content: center;
+  border: 3px solid var(--surface);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--scc-red) 45%, transparent);
+  transition: transform 0.14s ease;
+}
+.mobile-tab.primary { color: var(--scc-red); }
+.mobile-tab.primary:active .mobile-tab-icon { transform: scale(0.92); }
+/* The raised disc already carries the brand colour, so the active pill behind
+   it would just muddy things — keep the label tinted instead. */
+.mobile-tab.primary.active { background: transparent; }
+.mobile-tab.primary.active svg { filter: none; }
+
 /* Icon wrapper — anchors the live notification badge to the icon's top-right. */
 .mobile-tab-icon { position: relative; display: inline-flex; }
 .mobile-tab-badge {

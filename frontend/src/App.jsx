@@ -324,6 +324,11 @@ export default function App() {
             /mobile/scanner above keeps the original combined toggle. */}
         <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
         <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
+        {/* Manual check-in — the fallback when a scan won't cooperate (bad
+            light, unenrolled delegate, damaged QR). Not a bottom-nav tab; it's
+            reached from the Face/QR screens, which is where you realise you
+            need it. */}
+        <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
         {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
             where MobileProfilePage's "User guide" button used to send you to
