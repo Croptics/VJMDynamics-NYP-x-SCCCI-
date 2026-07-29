@@ -9,11 +9,12 @@
 //
 // Shares the face vectorizer + validator + error tone with the desktop
 // scanner via lib/faceScan.js (one copy, not three), and mounts Jayden's
-// QRScannerPanel/ManualTrackingPanel unmodified — exactly like the desktop
-// page. The only differences are layout (single column, portrait viewport)
-// and the face camera facing (environment/rear here, since a handheld phone
-// points its back camera at the delegate, vs. the desktop's user-facing
-// webcam).
+// QRScannerPanel unmodified — exactly like the desktop page. Manual is the one
+// path that is NOT the desktop component any more (see the import below): it's
+// MobileManualCheckIn.jsx, a touch-first roster. The other differences are
+// layout (single column, portrait viewport) and the face camera facing
+// (environment/rear here, since a handheld phone points its back camera at the
+// delegate, vs. the desktop's user-facing webcam).
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
@@ -36,7 +37,14 @@ import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbedd
 const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
-import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
+// Manual check-in is mobile's OWN screen, not the desktop panel (2026-07-29).
+// components/ManualTrackingPanel.jsx is `position:absolute; inset:0` — built to
+// fill the desktop scanner's fixed camera square — so mounting it in this page's
+// height-less "manual" viewport collapsed the roster to zero height: the list
+// was invisible on a phone. MobileManualCheckIn is the touch-first replacement
+// (swipe to check in, multi-select, session reason, undo snackbar). The desktop
+// scanner still uses the original panel.
+import MobileManualCheckIn from "./MobileManualCheckIn.jsx";
 // Re-applied at integration 2026-07-29: this branch hardcoded
 // `const TRIP_ID = "t-1"` at module scope, which silently pins the scanner to
 // the base trip and undoes the mobile trip switcher. Read per-render instead so
@@ -771,19 +779,14 @@ export default function MobileScannerPage({ lockMode }) {
     : 0;
 
   const S = {
-    // Manual check-in is a roster list, not a camera feed — give it a normal
-    // surface that grows with its content instead of a black square crop.
-    viewport: scanMode === "manual"
-      ? {
-          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-          background: "var(--surface)", border: "1px solid var(--line)",
-          width: "100%", boxShadow: "var(--shadow-sm)",
-        }
-      : {
-          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-          background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
-          boxShadow: "var(--shadow-md)",
-        },
+    // Camera viewport only. Manual check-in is no longer squeezed in here — it
+    // renders as its own full-width card below (MobileManualCheckIn), because a
+    // roster needs to grow with its content, not sit in a square camera crop.
+    viewport: {
+      position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+      background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
+      boxShadow: "var(--shadow-md)",
+    },
     overlay: {
       position: "absolute", inset: 0, display: "flex", alignItems: "center",
       justifyContent: "center", padding: 20, textAlign: "center", flexDirection: "column", gap: 10, zIndex: 4,
@@ -809,14 +812,19 @@ export default function MobileScannerPage({ lockMode }) {
                 : t("Face + QR scan")}
             </h1>
           </div>
+          {/* Manual mode counts the COACH, not this session's matches: there's
+              no match timing to average, and the number staff care about while
+              working a roster by hand is "how many are on board". */}
           <div style={{ flexShrink: 0, textAlign: "center", background: "rgba(255,255,255,0.16)", borderRadius: 14, padding: "8px 14px", minWidth: 76 }}>
-            <div className="mono" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>{sessionCount}</div>
+            <div className="mono" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>
+              {scanMode === "manual" ? (coach ? coach.boarded : 0) : sessionCount}
+            </div>
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", opacity: 0.85, marginTop: 3 }}>
-              {t("checked in")}
+              {scanMode === "manual" ? `${t("of")} ${coach ? coach.expected : 0} ${t("on board")}` : t("checked in")}
             </div>
           </div>
         </div>
-        {sessionCount > 0 && (
+        {scanMode !== "manual" && sessionCount > 0 && (
           <div className="row" style={{ gap: 6, marginTop: 10, position: "relative", fontSize: 12, fontWeight: 600, opacity: 0.92 }}>
             <Clock size={13} /> {t("Avg match")} {avgSeconds.toFixed(1)}s · {t("this session")}
           </div>
@@ -857,7 +865,21 @@ export default function MobileScannerPage({ lockMode }) {
         ))}
       </select>
 
-      {/* Scanner viewport */}
+      {/* Manual check-in owns the whole width as its own card — a roster, not a
+          camera feed. Everything camera-shaped below is skipped in this mode. */}
+      {scanMode === "manual" && (
+        <MobileManualCheckIn
+          key={resetTick}
+          coach={coach}
+          coachLabel={coach?.coachLabel}
+          coachId={coachId}
+          tripId={TRIP_ID}
+          onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
+        />
+      )}
+
+      {/* Scanner viewport (face / QR) */}
+      {scanMode !== "manual" && (
       <div style={S.viewport}>
         {scanMode === "face" && !lowLight && (
           <>
@@ -1000,15 +1022,6 @@ export default function MobileScannerPage({ lockMode }) {
           </>
         )}
 
-        {scanMode === "manual" && (
-          <ManualTrackingPanel
-            key={resetTick}
-            coach={coach}
-            coachLabel={coach?.coachLabel}
-            onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
-          />
-        )}
-
         {scanResult && (
           <div style={S.overlay}>
             <div className="mobile-card mscan-pop" style={{ padding: "16px 18px", margin: 0, maxWidth: 280 }}>
@@ -1025,6 +1038,7 @@ export default function MobileScannerPage({ lockMode }) {
           </div>
         )}
       </div>
+      )}
 
       {/* Locked to one mode (the Face / QR / Manual routes) — offer the other
           two as a compact switcher, so Manual check-in is always one tap away
@@ -1116,8 +1130,10 @@ export default function MobileScannerPage({ lockMode }) {
       )}
 
       {/* Sound + simulated sensors — the confirmation chime, plus the demo
-          toggles for the fairness fallback and the 1s SLA. Shown regardless of
-          scanMode (matches UnifiedScannerPage.jsx). */}
+          toggles for the fairness fallback and the 1s SLA. Camera-only: none of
+          them mean anything on the Manual roster, where their presence just
+          made the screen look like a scanner with its camera missing. */}
+      {scanMode !== "manual" && (
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button
             className={`mscan-chip ${soundOn ? "on" : ""}`}
@@ -1142,10 +1158,12 @@ export default function MobileScannerPage({ lockMode }) {
             {simulateSlow ? t("Slow: on") : t("Slow demo")}
           </button>
       </div>
+      )}
 
       {/* Recent check-ins — this shift's confirmed matches, newest first, with
-          a one-tap undo of the most recent (client-side session log). */}
-      {sessionScans.length > 0 && (
+          a one-tap undo of the most recent (client-side session log). Scan-only:
+          the Manual roster shows its own "Checked in" filter and undo. */}
+      {scanMode !== "manual" && sessionScans.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <div className="row between" style={{ marginBottom: 8 }}>
             <span className="row" style={{ gap: 6, fontSize: 12, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink-3)" }}>
@@ -1178,8 +1196,22 @@ export default function MobileScannerPage({ lockMode }) {
         </div>
       )}
 
+      {/* Multi-leg headcount reset — in Manual mode the roster card above
+          already shows progress and per-person state, so only the reset that
+          lives nowhere else is offered here. */}
+      {scanMode === "manual" && boardedList.length > 0 && (
+        <button
+          className="btn btn-ghost"
+          style={{ marginTop: 12, width: "100%", fontSize: 12.5, color: "var(--scc-red)" }}
+          onClick={() => setConfirmCoachReset(true)}
+          disabled={resetBusy}
+        >
+          <RotateCcw size={14} /> {t("Reset headcount for the next leg")} · {boardedList.length}
+        </button>
+      )}
+
       {/* Live count + boarded roster for the selected coach, with reset controls */}
-      {coach && (
+      {scanMode !== "manual" && coach && (
         <div className="mobile-card" style={{ marginTop: 16, padding: 16 }}>
           <div className="row between" style={{ alignItems: "baseline" }}>
             <span style={{ fontWeight: 700, fontSize: 14 }}>{coach.coachLabel}</span>
@@ -1280,7 +1312,11 @@ export default function MobileScannerPage({ lockMode }) {
       <div className="row" style={{ gap: 8, alignItems: "flex-start", marginTop: 16, padding: "0 2px" }}>
         <ShieldCheck size={15} style={{ color: "var(--st-present)", flexShrink: 0, marginTop: 1 }} />
         <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
-          {t("Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.")}
+          {scanMode === "manual"
+            // No camera on this screen, so the Zero-Image note doesn't apply —
+            // what matters here is that bypassing a scan is still auditable.
+            ? t("Every manual check-in is logged with who did it, when, and the reason given — the head-count and the audit trail stay in step with a scanned one.")
+            : t("Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.")}
         </div>
       </div>
     </div>
