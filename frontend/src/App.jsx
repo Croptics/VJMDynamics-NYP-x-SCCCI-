@@ -29,6 +29,7 @@ import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
 import MobileAnnouncementsPage from "./pages/mobile/MobileAnnouncementsPage.jsx";
+import MobileEnrolmentPage from "./pages/mobile/MobileEnrolmentPage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
@@ -350,6 +351,9 @@ export default function App() {
         {/* Announcements — trip-wide notices, reached from a Home tile.
             Ungated (open to any signed-in account), like the User Guide. */}
         <Route path="/mobile/announcements" element={<MobileAnnouncementsPage />} />
+        {/* FaceCheck enrolment coverage — staff view of who's enrolled,
+            reached from a Home tile. Ungated (uses the public enrol data). */}
+        <Route path="/mobile/enrolment" element={<MobileEnrolmentPage />} />
       </Route>
     </Routes>
   );

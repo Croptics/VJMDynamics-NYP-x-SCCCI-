@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, ScanFace } from "lucide-react";
 import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
@@ -142,6 +142,14 @@ export default function MobileHomePage() {
             <div className="m-tile-body">
               <div className="m-tile-title">{t("Announcements")}</div>
               <div className="m-tile-sub">{t("Trip updates for staff")}</div>
+            </div>
+            <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+          </button>
+          <button className="m-tile" onClick={() => navigate("/mobile/enrolment")}>
+            <span className="m-tile-ic"><ScanFace size={18} /></span>
+            <div className="m-tile-body">
+              <div className="m-tile-title">{t("Enrolment")}</div>
+              <div className="m-tile-sub">{t("Who's ready for face check-in")}</div>
             </div>
             <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
           </button>
