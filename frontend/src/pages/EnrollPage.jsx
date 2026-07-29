@@ -97,8 +97,8 @@ export default function EnrollPage({ embedded = false }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState("");
   const [result, setResult] = useState(null);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null);
+  const [testingWhich, setTestingWhich] = useState(""); // "" | "face" | "voice"
+  const [testResult, setTestResult] = useState(null);   // { face?: {...}, voice?: {...} }
   const [erasing, setErasing] = useState(false);
   const [confirmErase, setConfirmErase] = useState(false);
 
@@ -277,9 +277,11 @@ export default function EnrollPage({ embedded = false }) {
     } finally { setSubmitting(false); }
   }
 
-  async function testEnrolment() {
+  // Self-test the FACE: capture a fresh embedding and score it against the
+  // stored template via /enroll/verify — without checking anyone in.
+  async function testFace() {
     if (!delegate) return;
-    setTesting(true); setTestResult(null);
+    setTestingWhich("face"); setTestResult((p) => ({ ...(p || {}), face: null }));
     try {
       await loadHuman();
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "user" } }, audio: false });
@@ -295,11 +297,28 @@ export default function EnrollPage({ embedded = false }) {
       }
       stream.getTracks().forEach((t) => t.stop());
       const token = samples.length ? buildEmbeddingToken(averageEmbeddings(samples)) : null;
-      if (!token) { setTestResult({ error: "Couldn't capture a test frame — face the camera and retry." }); return; }
-      setTestResult(await apiPost("/enroll/verify", { delegateId: delegate.delegateId, faceToken: token }));
+      const res = token
+        ? await apiPost("/enroll/verify", { delegateId: delegate.delegateId, faceToken: token })
+        : { error: "Couldn't capture a test frame — face the camera and retry." };
+      setTestResult((p) => ({ ...(p || {}), face: res }));
     } catch (e) {
-      setTestResult({ error: e.message || "Test failed — allow camera access and retry." });
-    } finally { setTesting(false); }
+      setTestResult((p) => ({ ...(p || {}), face: { error: e.message || "Test failed — allow camera access and retry." } }));
+    } finally { setTestingWhich(""); }
+  }
+
+  // Self-test the VOICE: record a fresh voiceprint and score it the same way.
+  async function testVoice() {
+    if (!delegate) return;
+    setTestingWhich("voice"); setTestResult((p) => ({ ...(p || {}), voice: null }));
+    try {
+      const token = await captureVoiceEmbedding(2500, () => {});
+      const res = token
+        ? await apiPost("/enroll/verify", { delegateId: delegate.delegateId, voiceToken: token })
+        : { error: "Too quiet — say your phrase clearly and retry." };
+      setTestResult((p) => ({ ...(p || {}), voice: res }));
+    } catch (e) {
+      setTestResult((p) => ({ ...(p || {}), voice: { error: e.message || "Mic unavailable — allow mic access and retry." } }));
+    } finally { setTestingWhich(""); }
   }
 
   async function eraseData() {
@@ -600,20 +619,29 @@ export default function EnrollPage({ embedded = false }) {
 
             <section className="enr-card">
               <div className="enr-card-head"><BadgeCheck size={15} /> Check it works</div>
-              <p className="enr-sub" style={{ marginTop: 0 }}>Look at the camera again and we'll score it against what we saved — without checking you in.</p>
-              <button className="btn btn-ghost btn-block" onClick={testEnrolment} disabled={testing}>
-                {testing ? <><Loader2 size={15} className="enr-spin" /> Testing…</> : <><ScanFace size={15} /> Test my enrolment</>}
-              </button>
-              {testResult && (testResult.error ? (
-                <div className="enr-alert err"><AlertTriangle size={14} /><span>{testResult.error}</span></div>
-              ) : (
-                <div className={"enr-test " + (testResult.match ? "ok" : "bad")}>
-                  <strong>{testResult.match ? "Recognised ✓" : "Not recognised"}</strong>
-                  <div className="enr-coverage-bar"><div style={{ width: `${Math.max(0, Math.min(100, (testResult.similarity || 0) * 100))}%` }} /></div>
-                  <small>similarity {(testResult.similarity || 0).toFixed(3)} · needs ≥ {testResult.threshold ?? MATCH_THRESHOLD}</small>
-                  {!testResult.match && <small>Try re-enrolling in the lighting you'll be scanned in.</small>}
+              <p className="enr-sub" style={{ marginTop: 0 }}>Score a fresh sample against what we saved — without checking you in.</p>
+
+              {result.enrolled?.face && (
+                <div className="enr-test-block">
+                  <button className="btn btn-ghost btn-block" onClick={testFace} disabled={testingWhich !== ""}>
+                    {testingWhich === "face" ? <><Loader2 size={15} className="enr-spin" /> Testing face…</> : <><ScanFace size={15} /> Test face</>}
+                  </button>
+                  {testResult?.face && <TestResult r={testResult.face} kind="face" />}
                 </div>
-              ))}
+              )}
+
+              {result.enrolled?.voice && result.enrolled?.voiceType === "acoustic" && (
+                <div className="enr-test-block" style={{ marginTop: 10 }}>
+                  <button className="btn btn-ghost btn-block" onClick={testVoice} disabled={testingWhich !== ""}>
+                    {testingWhich === "voice" ? <><Loader2 size={15} className="enr-spin" /> Listening…</> : <><Mic size={15} /> Test voice</>}
+                  </button>
+                  {testResult?.voice && <TestResult r={testResult.voice} kind="voice" />}
+                </div>
+              )}
+
+              {result.enrolled?.voice && result.enrolled?.voiceType !== "acoustic" && (
+                <p className="enr-fine" style={{ marginTop: 10 }}>Your voice was enrolled as a typed passphrase, so there's nothing to test by speaking — say those exact words at the coach.</p>
+              )}
             </section>
 
             <section className="enr-card">
@@ -638,6 +666,19 @@ export default function EnrollPage({ embedded = false }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function TestResult({ r, kind }) {
+  if (r.error) return <div className="enr-alert err" style={{ marginTop: 8 }}><AlertTriangle size={14} /><span>{r.error}</span></div>;
+  const sim = r.similarity || 0;
+  return (
+    <div className={"enr-test " + (r.match ? "ok" : "bad")}>
+      <strong>{kind === "voice" ? "Voice" : "Face"} · {r.match ? "Recognised ✓" : "Not recognised"}</strong>
+      <div className="enr-coverage-bar"><div style={{ width: `${Math.max(0, Math.min(100, sim * 100))}%` }} /></div>
+      <small>similarity {sim.toFixed(3)} · needs ≥ {r.threshold}</small>
+      {!r.match && <small>{kind === "voice" ? "Re-record in a quiet spot with the same phrase." : "Re-enrol in the lighting you'll be scanned in."}</small>}
     </div>
   );
 }
