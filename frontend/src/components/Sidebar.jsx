@@ -12,7 +12,6 @@ import {
   ClipboardCheck,
   LogOut,
   ShieldCheck,
-  UserPlus,
   Languages,
   Sun,
   Moon,
@@ -63,7 +62,11 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
     // ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
     // Biometric enrolment — feeds the scanner above (a delegate can only be
     // face/voice matched once they're enrolled), so it sits next to it.
-    ...(perms.viewScanner ? [{ to: "/enrolment", label: "Enrolment", icon: UserPlus }] : []),
+    // Biometric enrolment is deliberately NOT here (2026-07-29, "this page can
+    // be removed from desktop" — matches Vimal's own "enrolment is its own app"
+    // decision). It's a standalone delegate-facing app at /enroll, which is
+    // still routed and still reachable by the emailed invite links; staff track
+    // coverage and send those invites from the mobile Enrolment view instead.
     ...(perms.viewExceptions ? [{ to: "/exceptions", label: "Exceptions", icon: AlertTriangle, badge: exceptionCount }] : []),
     // MusterChat — Vance's inbox (AI assistant + team messaging + calls),
     // promoted to a real nav destination (2026-07-28 — "can you put the chat
@@ -208,7 +211,17 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
                 setting") — the whole block already linked to /settings, but
                 nothing visually signalled that; a gear icon is the
                 conventional cue. */}
-            <Settings size={16} color="var(--ink-3)" style={{ flexShrink: 0 }} />
+            {/* Nudged 9px left (2026-07-29 — "move the setting icon to the left
+                abit so it look same as the dark theme icon") so its centre
+                lines up with the Theme icon directly above it. The arithmetic,
+                since it's otherwise a magic number: sidebar is a fixed 232px
+                (--sidebar-w) with 14px side padding → 204px of content. The
+                utility row is 4 flex:1 buttons with 6px gaps, so each is
+                (204-18)/4 = 46.5 wide and the last icon's centre falls at
+                157.5 + 23.25 = 180.75. This gear sat at 190 (account padding
+                12 minus the link's -6 margin, less half the 16px icon), i.e.
+                9.25px too far right. If --sidebar-w changes, redo this. */}
+            <Settings size={16} color="var(--ink-3)" style={{ flexShrink: 0, marginRight: 9 }} />
           </NavLink>
         </div>
         <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={handleLogout}>

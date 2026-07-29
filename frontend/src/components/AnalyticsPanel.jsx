@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo base — Dashboard Analytics (charts + AI)
  * ============================================================================= */
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { BarChart3, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2, Download } from "lucide-react";
+import { BarChart3, LayoutGrid, Eye, EyeOff, Sparkles, Filter, ArrowUpDown, Wand2, Download } from "lucide-react";
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList,
@@ -333,19 +333,24 @@ export default function AnalyticsPanel({ data, missing, delegates = [], tripId =
 
   return (
     <div>
-      <div className="row" style={{ gap: 8, marginBottom: 16 }}>
+      {/* Same pill treatment as the Dashboard's "Delegate management" sub-tabs
+          (2026-07-28 — "for the analytics subtab, follow the delegate subtab"):
+          these are both second-level tabs, so they should read identically
+          instead of Analytics using the chunkier top-level button style. */}
+      <div className="row" style={{ gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
         {[
-          ["overview", t("Overview")],
-          ["custom", t("Custom chart")],
-        ].map(([k, label]) => (
-          <button key={k} onClick={() => setAnalyticsTab(k)} className="btn"
+          ["overview", t("Overview"), LayoutGrid],
+          ["custom", t("Custom chart"), BarChart3],
+        ].map(([k, label, Icon]) => (
+          <button key={k} type="button" onClick={() => setAnalyticsTab(k)}
             style={{
-              background: analyticsTab === k ? "var(--scc-red-tint)" : "transparent",
+              display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+              fontSize: 12.5, fontWeight: 600, padding: "6px 12px", borderRadius: 999,
+              background: analyticsTab === k ? "var(--scc-red-tint)" : "var(--surface-2)",
               color: analyticsTab === k ? "var(--scc-red)" : "var(--ink-2)",
-              border: `1px solid ${analyticsTab === k ? "var(--scc-red-tint-2)" : "var(--line)"}`,
-              fontWeight: 600,
+              border: `1px solid ${analyticsTab === k ? "var(--scc-red)" : "var(--line)"}`,
             }}>
-            {label}
+            <Icon size={14} /> {label}
           </button>
         ))}
       </div>

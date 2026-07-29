@@ -108,12 +108,50 @@ requirement even on a Google Cloud account with billing off.
 6. Without this set, the location card just shows the place name as plain
    text instead of a map.
 
-### AMap (Gaode) — no setup needed
-The same location card also offers an **AMap** tab (better for locations
-inside mainland China, where Google Maps is unreliable). This currently uses
-AMap's free public search-preview link, not an authenticated API — **no
-account or key required**. If AMap's own coverage/reliability becomes an
-issue later, a proper AMap API key could be added the same way as Google's.
+### AMap (高德地图) — works with no account; a key makes it better
+
+**Why it's here, and why it matters more than Google Maps for this client:**
+**Google Maps is blocked in mainland China.** MusterGo's flagship trip is a
+Beijing study mission, so for staff standing in Beijing on a China SIM, the
+Google tab simply won't load — the AMap tab is the one that works. Keep both.
+
+**No account is required.** The tab previews AMap's own public search page and
+always shows an **"Open in AMap ↗"** link that works for anyone, signed in or
+not. Nothing to register for basic use.
+
+**Why the preview may look empty (this is expected, not a bug):** AMap has very
+little map data outside mainland China, so a Singapore address typically returns
+nothing to draw, and a cross-border page load can be slow. Testing from
+Singapore with a Singapore address is the worst case. The card now shows the
+address plus an explanation behind the preview area, so an empty map still reads
+as informative rather than broken. Verified 2026-07-28 that AMap does **not**
+block embedding (no `X-Frame-Options`, no CSP `frame-ancestors`), so the preview
+is technically allowed to render — coverage, not permission, is the limit.
+
+**Optional upgrade — if the client (or their China partner) has an AMap account:**
+set `VITE_AMAP_KEY` in `frontend/.env`. With a key the card geocodes the address
+and renders a clean **static map image** pinned to the exact spot — no iframe, so
+nothing can be blocked, mis-sized or slow, and it renders correctly from inside
+China.
+
+**How to register (be realistic about who can):**
+1. Go to **console.amap.com** (高德开放平台) and create a developer account.
+2. **This requires a mainland-China mobile number and real-name verification**
+   (实名认证) — an ID or business registration. That is normally **not
+   obtainable by a Singapore-based student**, which is why the app is built to
+   work fully without it. SCCCI or a mainland partner organisation can usually
+   satisfy this.
+3. Create an application, then add a key of type **Web服务 (Web service)** —
+   not "Web端(JS API)", because this integration calls the REST geocoding and
+   static-map endpoints.
+4. Paste it into `frontend/.env` as `VITE_AMAP_KEY=...` and rebuild.
+5. If the key is restricted by domain/referer, allow the deployed frontend
+   origin, or the requests will be rejected.
+
+**Fail-soft by design:** a missing, invalid, quota-exceeded or referer-blocked
+key silently falls back to the keyless preview + link — the location card never
+breaks, it just gets less pretty. ⚠️ The keyed path was written without a key to
+test against, so **verify it once** the first time a real key is added.
 
 ---
 
@@ -144,14 +182,32 @@ whatever hosting platform is used, cost expectations).
 
 ---
 
-## 5. Email — escalation alerts ("Escalate to office")
+## 5. Email — escalation alerts AND biometric-enrolment invites
 
 **Status: ✅ live** — this app is currently sending via **SendGrid** (see
 setup below), confirmed working with a real test send.
 
-**What it's for:** when on-site staff can't reach a delegate and escalates to
-office/admin staff (the siren button on a Missing delegate), an email goes
-out to the chosen admin(s) in addition to the in-app banner.
+**What it's for — two features, one SMTP config:**
+
+1. **Escalation alerts** — when on-site staff can't reach a delegate and
+   escalates to office/admin staff (the siren button on a Missing delegate), an
+   email goes out to the chosen admin(s) in addition to the in-app banner.
+2. **Biometric-enrolment invites** (added 2026-07-29 with Vimal's FaceCheck-Pro
+   integration) — `backend/lib/mailer.js` emails a delegate a signed, expiring
+   link to `/enroll`, where they register their own face and voice. Sent one at
+   a time or in bulk from the mobile Enrolment view
+   (`/api/enroll/invite`, `/api/enroll/invite-all`; `/api/enroll/invite/preview`
+   renders the email without sending it).
+
+> **⚠️ Invites SEND FOR REAL in this project.** `mailer.js` fails soft only when
+> SMTP is *unconfigured* — and SMTP here is fully populated for the escalation
+> feature above, so the two features share it. Clicking "invite" with a real
+> delegate email dispatches a real email. Learned the hard way: one genuinely
+> went out during integration testing.
+>
+> **Before any demo or dry run, set `MAIL_DRY_RUN=true` in `backend/.env`** —
+> the email is composed and logged to the backend console, and nothing leaves
+> the machine.
 
 **Cost:** free either way, at this app's scale — the two supported options:
 
@@ -267,6 +323,54 @@ sender-approval process before use).
 
 ---
 
+## 7. Face recognition — on-device, no account, nothing to sign up for
+
+**Status: ✅ working, zero setup.** Added 2026-07-29 with Vimal's FaceCheck-Pro
+integration. This is the one "AI service" in the app that needs **no key, no
+account, and no internet** — worth knowing, because it's the opposite of every
+other entry on this page.
+
+**What it is:** [`@vladmandic/human`](https://github.com/vladmandic/human), an
+npm package that runs face detection, landmarks, a face **embedding**, and an
+anti-spoof/liveness check entirely in the browser via TensorFlow.js. It powers
+the face check-in scanner and the delegate self-enrolment flow.
+
+**Why there's nothing to configure:**
+
+- **It runs in the browser, on the delegate's/staff's own device.** No image, no
+  video, and no vector is ever sent to a third party. The only thing that
+  reaches our own backend is the resulting numeric embedding.
+- **The model weights are self-hosted, deliberately not loaded from a CDN.**
+  `frontend/scripts/copy-human-models.mjs` copies them out of the installed npm
+  package into `frontend/public/models/human/` (~11MB, 10 files), and it runs
+  automatically from the `predev` and `prebuild` hooks in
+  `frontend/package.json`. So a plain `npm install && npm run dev` is all the
+  setup there is.
+  - The folder is **gitignored** — it's build output, regenerated from the
+    package, not source. If face scan ever says the model failed to load, the
+    fix is `npm install` in `frontend/` (which re-runs the copy), not a config
+    change.
+  - Self-hosting also means face scan keeps working on a venue's captive/dead
+    Wi-Fi once the page is loaded, which a CDN dependency would not.
+- **The library is loaded by dynamic `import()`**, so its ~2MB never enters the
+  initial bundle — pages that don't scan faces don't pay for it.
+
+**Privacy / PDPA position (unchanged by this upgrade):** what's stored against a
+delegate is a token like `face:v3:<hash>:<~1024 floats>` — a one-way numeric
+descriptor, **not a photograph**. You cannot reconstruct a face from it. The
+older `face:v1:` hash tokens are still accepted so existing enrolments keep
+working.
+
+**Matching happens on our backend**, in `backend/lib/biometricMatch.js`: cosine
+similarity against the enrolled roster, gated by both a confidence threshold
+**and** a runner-up margin — if two delegates score too closely, it rejects
+rather than guesses, because a confidently wrong check-in is worse than asking
+staff to fall back to manual.
+
+**Cost: free** (Apache-2.0 / MIT-licensed model weights, no per-call pricing).
+
+---
+
 ## Summary table
 
 | Service | Required? | Cost | Powers |
@@ -274,9 +378,10 @@ sender-approval process before use).
 | Postgres (Neon) | **Required** | Free tier is enough | Everything — the database |
 | Cloudinary | Optional | Free tier (25 credits/mo) | Delegate/staff photos, announcement media (image+video), User Guide video |
 | Google Maps (Embed API) | Optional | Free | "Last known location" map |
-| AMap | N/A | Free, no key needed | Same map, China-focused alternative |
+| AMap (高德) | Optional — works keyless | Free; key needs a mainland-CN phone + real-name check | Same map, and **the only one that works in mainland China** (Google is blocked there) |
 | Ollama | Optional (recommended) | Free | AI Insights / chatbot / document parsing |
 | Anthropic (Claude) | Optional (fallback) | Pay-as-you-go | Same 3 AI features, if Ollama unavailable |
-| SendGrid | Optional — **✅ currently live** | Free (100/day) | "Escalate to office" emails |
+| SendGrid | Optional — **✅ currently live** | Free (100/day) | "Escalate to office" emails **and biometric-enrolment invites** — both send for real; use `MAIL_DRY_RUN=true` to demo |
+| `@vladmandic/human` face models | Bundled — **no account, no key** | Free | Face check-in + self-enrolment; runs on-device, weights self-hosted and copied automatically by `npm install` |
 | Twilio | Optional, **not yet enabled** | Paid per message | SMS/WhatsApp escalation alerts |
 | JWT_SECRET | Recommended | Free (self-generated) | Signs login sessions — see `backend/.env.example` |

@@ -356,8 +356,9 @@ function TripDetail({ tripId, onBack }) {
     </div>
   );
 
+  // m-fade-in to match the rest of the mobile UI (2026-07-29).
   return (
-    <div>
+    <div className="m-fade-in">
       {onBack && (
         <button className="btn btn-ghost" onClick={onBack} style={{ padding: "6px 10px", marginBottom: 10 }}>
           <ArrowLeft size={15} /> {t("Trips")}
@@ -593,10 +594,14 @@ export default function MobileTripsPage() {
     return <div className="muted">{t("Loading…")}</div>;
   }
 
+  // Styling brought over from Vimal's version (2026-07-29) — the m-* design
+  // classes, so this page matches the rest of the mobile UI. Only presentation
+  // was taken: his copy predates the per-itinerary-stop attendance marking and
+  // the wrong-coach warning below, so taking it wholesale would delete both.
   return (
-    <div>
-      <div className="muted" style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>{t("Trip management")}</div>
-      <h1 style={{ fontSize: 22, margin: "4px 0 12px" }}>{t("Trips")}</h1>
+    <div className="m-fade-in">
+      <div className="m-eyebrow">{t("Trip management")}</div>
+      <h1 className="m-page-title" style={{ marginBottom: 12 }}>{t("Trips")}</h1>
 
       {error && <div className="mobile-card" style={{ color: "var(--st-missing)", borderColor: "var(--st-missing)" }}>{t("Couldn't reach the backend")} — {error}</div>}
       {!trips && !error && <div className="muted">{t("Loading…")}</div>}

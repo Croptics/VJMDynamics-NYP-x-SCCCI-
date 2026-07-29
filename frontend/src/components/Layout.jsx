@@ -12,6 +12,7 @@ import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
 import ChatBubble from "./ChatBubble.jsx";
 import EscalationBanner from "./EscalationBanner.jsx";
+import SyncStatus from "./SyncStatus.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
@@ -126,6 +127,9 @@ export default function Layout({ onLogout }) {
         <Outlet />
       </main>
       {getPermissions().viewChatbot && <ChatBubble />}
+      {/* Offline / unsynced-writes pill (2026-07-28) — every route, since losing
+          signal isn't page-specific. Renders nothing when online and drained. */}
+      <SyncStatus />
     </div>
   );
 }

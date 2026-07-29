@@ -4,7 +4,11 @@ import { ArrowLeft } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import IssuesPanel from "../../components/IssuesPanel.jsx";
 import { getDelegates } from "../../lib/exceptionsApi.js";
+
+// Trip id comes from the mobile trip switcher, not a hardcoded base trip
+// (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
 import { getMobileTripId } from "../../lib/mobileTrip.js";
+const TRIP_ID_FALLBACK = "t-1";
 
 /**
  * Dedicated mobile Issues/Exceptions page (/mobile/issues).
@@ -27,12 +31,6 @@ import { getMobileTripId } from "../../lib/mobileTrip.js";
 export default function MobileIssuesPage() {
   const { t } = useLang();
   const navigate = useNavigate();
-  // Read fresh on every mount — reflects whichever trip is currently picked
-  // on Home's trip switcher (lib/mobileTrip.js). NOTE: getDelegates() below
-  // (lib/exceptionsApi.js) still always reads its own hardcoded default trip
-  // internally — this page's own TRIP_ID only scopes the IssuesPanel prop,
-  // not the roster fetch. Not fixed here — see the AI log.
-  const TRIP_ID = getMobileTripId();
   const [delegates, setDelegates] = useState([]);
 
   const loadDelegates = useCallback(async () => {
@@ -45,19 +43,22 @@ export default function MobileIssuesPage() {
   useEffect(() => { loadDelegates(); }, [loadDelegates]);
 
   return (
-    <div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 4 }}>
+    <div className="m-fade-in">
+      <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 6 }}>
         <button
           className="btn btn-ghost" onClick={() => navigate("/mobile")}
-          aria-label={t("Back to Home")} style={{ padding: 8 }}
+          aria-label={t("Back to Home")} style={{ padding: 8, flexShrink: 0 }}
         >
           <ArrowLeft size={18} />
         </button>
-        <h1 style={{ fontSize: 20 }}>{t("Issues")}</h1>
+        <div>
+          <div className="m-eyebrow">{t("Support")}</div>
+          <h1 style={{ fontSize: 20, margin: "1px 0 0" }}>{t("Issues")}</h1>
+        </div>
       </div>
 
-      <div style={{ marginTop: 10 }}>
-        <IssuesPanel tripId={TRIP_ID} coach={{ delegates }} onLogged={loadDelegates} />
+      <div style={{ marginTop: 12 }}>
+        <IssuesPanel tripId={getMobileTripId() || TRIP_ID_FALLBACK} coach={{ delegates }} onLogged={loadDelegates} />
       </div>
     </div>
   );

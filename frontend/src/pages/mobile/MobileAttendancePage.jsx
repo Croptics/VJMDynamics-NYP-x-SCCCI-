@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock, LocateFixed, Siren } from "lucide-react";
+import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock, LocateFixed, Siren, BedDouble, Briefcase } from "lucide-react";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import { apiGet, apiPost, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -9,15 +9,37 @@ import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 
 import { getMobileTripId } from "../../lib/mobileTrip.js";
+// Offline-capable delegate writes (2026-07-28) — attendance decisions taken
+// on-site must survive a dead signal. See lib/outbox.js.
+import { patchDelegate, applyQueuedPatches } from "../../lib/delegateWrites.js";
 // UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
 // staff on the desktop admin pages BEFORE the event; mobile's job during the
 // event is tracking who's arrived/late/missing, not doing the assignment
 // itself, so unassigned delegates don't belong on this list or its filters.
 const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
-// Same reasoning as FILTERS above — the "Update status" sheet only offers
-// active operational states during the event, not the pre-event Unassigned
-// state (that's set by staff on desktop before delegates ever board).
-const STATUS_OPTIONS = ["ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+// The "Update status" sheet offers only these two (2026-07-28 — "can remove the
+// assigned, arrived, late for dropdown when update status, it too much stuff").
+// The FILTERS row above deliberately still shows all five, so staff can still
+// VIEW who's assigned/arrived/late — this only trims what they can hand-SET.
+//
+//  - MISSING is the real field judgement this sheet exists for (and it captures
+//    a last-known location as a second step, see StatusSheet below).
+//  - ASSIGNED is kept purely as the UNDO for it: "I marked the wrong person
+//    missing." Without it there was no way back — tapping an already-active
+//    status is a no-op, so a mis-tap could only be fixed from desktop.
+//    changeStatus() clears lastLocation/lastSeen for any non-MISSING status, so
+//    undoing also wipes the stale location, which is what you want.
+//
+// Removed and why they shouldn't come back:
+//  - LATE is computed by the backend, not chosen by a human — the 60s scheduler
+//    in server.js flips ASSIGNED→LATE past each itinerary stop's cutoff
+//    (applyCheckpointLateCutoff), so a hand-set value is transient and gets
+//    overwritten on the next tick.
+//  - ARRIVED belongs to the real check-in paths (a scan, or the scanner's Manual
+//    tab), which write a `check_in_logs` row — who checked them in, when, by
+//    what method. Flipping status straight to ARRIVED here would mark someone
+//    present with NO audit trail, so the head-count and the log would disagree.
+const STATUS_OPTIONS = ["ASSIGNED", "MISSING"];
 // Legacy alias — some check-in routes still write "PRESENT" directly (see
 // normalize() in backend/data.js), not yet migrated to "ARRIVED".
 const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
@@ -135,7 +157,10 @@ export default function MobileAttendancePage() {
         apiGet(`/trips/${TRIP_ID}/delegates`),
         apiGet(`/trips/${TRIP_ID}/dashboard`),
       ]);
-      setDelegates(d || []);
+      // Overlay any still-unsynced offline changes on top of the server's copy,
+      // so a reload with no signal doesn't appear to throw away the staff
+      // member's own attendance decisions (2026-07-28).
+      setDelegates(applyQueuedPatches(d || []));
       setCoaches(dash.coaches || []);
       setTripUuid(dash.trip?.uuid_id || null);
     } catch (e) {
@@ -239,7 +264,9 @@ export default function MobileAttendancePage() {
       const patch = { cancelled: true, cancelReason: (extra || "").trim() };
       setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, ...patch, status: "UNASSIGNED", coachId: null } : x)));
       try {
-        await apiPatch(`/delegates/${d.id}`, patch);
+        // Queues instead of failing when there's no signal; the optimistic
+        // update above then simply stands (2026-07-28).
+        await patchDelegate(d.id, patch, { label: d.name });
       } catch (e) {
         setDelegates(prev);
         setRowError({ id: d.id, message: e.message || t("Save failed.") });
@@ -257,7 +284,10 @@ export default function MobileAttendancePage() {
     const patch = { status, lastLocation: nextLocation, lastSeen: status === "MISSING" ? d.lastSeen || "" : "" };
     setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, ...patch } : x)));
     try {
-      await apiPatch(`/delegates/${d.id}`, patch);
+      // Offline-capable (2026-07-28): with no signal this queues the change and
+      // resolves, so the optimistic update stands and the outbox replays it
+      // later. A real refusal (403/404) still throws and rolls back below.
+      await patchDelegate(d.id, patch, { label: d.name });
     } catch (e) {
       setDelegates(prev); // roll back the optimistic update
       setRowError({ id: d.id, message: e.message || t("Save failed.") });
@@ -525,9 +555,51 @@ export default function MobileAttendancePage() {
               </div>
             )}
 
+            {/* Company + Room (2026-07-28 — "add the room detail to mobile
+                also"). Desktop's profile has shown these for a while; mobile
+                didn't, so staff on the ground couldn't see which hotel/room a
+                delegate belongs to — exactly the thing you need when you're
+                trying to find a missing person at night. Two compact columns
+                rather than stacked blocks, since both values are short.
+                Room is read-only here: allocation happens on the desktop Room
+                Management tab, which is where the whole-roster view lives. */}
+            {(detailDelegate.company || detailDelegate.hotel_name || detailDelegate.room_number) && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "10px 14px", marginTop: 14 }}>
+                {detailDelegate.company && (
+                  <div>
+                    <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, marginBottom: 2 }}>
+                      <Briefcase size={12} /> {t("Company")}
+                    </div>
+                    <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                      {[detailDelegate.role, detailDelegate.company].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                )}
+                {(detailDelegate.hotel_name || detailDelegate.room_number) && (
+                  <div>
+                    <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, marginBottom: 2 }}>
+                      <BedDouble size={12} /> {t("Room")}
+                    </div>
+                    <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                      {[detailDelegate.hotel_name, detailDelegate.room_number ? `${t("Room")} ${detailDelegate.room_number}` : null].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {detailDelegate.lastLocation ? (
-              <div style={{ marginTop: 12 }}>
-                <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{detailDelegate.lastLocation}</div>
+              <div style={{ marginTop: 14 }}>
+                {/* Labelled like the desktop profile's own block (2026-07-28 —
+                    "maybe can indicate the this is last known location part"):
+                    the address used to be a bare grey line with no clue what it
+                    referred to, sitting between the phone number and a map. */}
+                <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <MapPin size={13} /> {t("Last known location")}
+                </div>
+                <p style={{ fontSize: 13, marginTop: 3, marginBottom: 8 }}>
+                  {[detailDelegate.lastLocation, detailDelegate.lastSeen].filter(Boolean).join(" · ")}
+                </p>
                 <DelegateLocationMap location={detailDelegate.lastLocation} height={180} />
               </div>
             ) : (

@@ -147,14 +147,142 @@ message (e.g. the 429 "slow down"). Every fix was re-tested, legitimate
 group calls / uploads / conversation still work, and all 82 of Vance's unit
 tests still pass.
 
-## ⚠️ CRITICAL — known gap: no offline support (2026-07-25)
+## Vimal FaceCheck-Pro integration (2026-07-29) — mobile UI, real face recognition, enrolment app
+
+Merged from Vimal's `FaceCheck-Pro-(Vimal)` branch (16 feature commits after his
+`a891f3b` seed of the shared app). His own handoff doc is
+`vimalintegration.md` **in his branch, not here** — parts of it are outdated;
+where it disagrees with this section, this section is authoritative.
+
+### What came in
+
+- **Real face recognition** — `@vladmandic/human` (new frontend dependency).
+  `frontend/src/lib/humanFace.js` wraps it: on-device detection, landmarks, a
+  deep embedding, plus anti-spoof/liveness gating. Loaded by **dynamic import**
+  so the ~2MB library never enters the initial bundle. Weights are **self-hosted**
+  under `frontend/public/models/human/` — copied out of the npm package by
+  `frontend/scripts/copy-human-models.mjs`, which runs automatically from the new
+  `predev`/`prebuild` hooks and is gitignored (11MB, 10 files).
+- **`backend/lib/biometricMatch.js`** (new) — the 1:N matcher: cosine similarity,
+  illumination-invariant normalisation, accept/reject with a confidence threshold
+  AND a runner-up margin, so an ambiguous pair is rejected rather than guessed.
+- **`backend/routes/vimal.js`** — his newer version: v3 deep-embedding tokens
+  (`face:v3:<hash>:<~1024 floats>`, still zero-image/PDPA — a vector, not a
+  picture), legacy v1 tokens still accepted, plus the enrolment-invite endpoints
+  (`/api/enroll/invite`, `/invite-all`, `/invite/preview`).
+- **Enrolment as its own app** — `frontend/src/pages/EnrollPage.jsx` rewritten as
+  a 4-step flow (identify → face → voice → done) with guided multi-angle capture
+  and signed, expiring invite links; `MobileEnrolmentPage.jsx` (new) is the staff
+  coverage/invite view.
+- **Mobile UI overhaul** — the `m-*` design system in `styles/mobile.css` (a
+  strict superset of what was there), the raised centre QR tab, Home hero +
+  quick-action tiles, Profile preferences card, richer Assistant empty state,
+  `MobileAnnouncementsPage` and `MobileMissingPage` (new), and manual check-in
+  restored as its own locked scanner mode.
+- **`backend/lib/mailer.js`** — nodemailer wrapper for the invites.
+
+### Compatibility issues found and fixed (his branch predated main)
+
+1. **`routes/vimal.js` imported `../auth.js`** — which no longer exists after the
+   `server.js` split. The whole router would have failed to load. Repointed to
+   `../lib/auth.js`.
+2. **Two raw NUL bytes** were embedded in his `routes/vimal.js` source (inside the
+   `"\u0000no-match"` sentinel). Harmless at runtime, but they made the file
+   **binary** to git/grep/diff — which is why it refused to merge at all.
+   Converted to escape sequences; the string value is unchanged.
+3. **Trip scoping was lost** — his version dropped `resolveTripUuid` /
+   `?tripId=` on `/api/attendance/coaches` and hardcoded `const TRIP_ID = "t-1"`
+   across the mobile pages, silently pinning the app to the Beijing trip.
+   Re-applied `getVisibleCoachIds`-style scoping and `getMobileTripId()`
+   everywhere (Home, Ops, Issues, Layout, Scanner).
+4. **His new mobile routes were completely ungated** — any signed-in account
+   could read announcements and send enrolment invites. Now gated
+   (`viewAnnouncements` / `viewMobileScanner`) to match their desktop equivalents.
+5. **Routed but unreachable** — nothing linked to `/mobile/enrolment`; added a
+   Home tile.
+6. His whole tree is CRLF; everything brought over was normalised to LF,
+   otherwise every future diff reads as a 100% rewrite.
+
+### Deliberately NOT taken
+
+- **`MobileAttendancePage.jsx` — main's version kept in full.** His copy is half
+  the size and imports **none** of `delegateWrites.js` / `geolocation.js` /
+  `DelegateTimeline` / `mobileTrip.js`, so taking it would have deleted the
+  offline write queue and left the sync pill permanently dark.
+- **`Sidebar.jsx`, `MobileOpsPage` extras, `MobileTripsPage` logic** — his copies
+  are older. `MobileTripsPage` in particular would have removed per-itinerary-stop
+  attendance marking and the wrong-coach warning; his *styling* for that page was
+  ported onto main's version instead.
+- His `App.jsx` wholesale — it reverts the `/scanner` redirect and deletes
+  `/assistant`, `/announcements`, `/register`. Only his three new routes were
+  cherry-picked.
+
+### Re-added on top of his mobile UI (function, not styling)
+
+`SyncStatus` (the offline pill), `EscalationBanner`, and `getMobileTripId()` —
+his `MobileLayout` has none of them.
+
+### Deliberate removals requested during this integration
+
+- **Desktop `/enrolment` page and its sidebar item** — enrolment is a standalone
+  delegate-facing app at `/enroll` (still routed; the emailed invite links point
+  there), and staff manage coverage/invites from `/mobile/enrolment`.
+- **`/mobile/scanner`** (the old combined Face/QR/Manual toggle) — the three
+  locked routes replace it. `MOBILE_FALLBACK_ORDER` was repointed to
+  `/mobile/scan/qr` so a scanner-only account still lands somewhere real.
+
+### ⚠️ Live email — read before demoing
+
+`mailer.js` fails soft ONLY when SMTP is unconfigured. This project's
+`backend/.env` **has SMTP populated** (from the escalation feature), so
+enrolment invites **send for real** the moment a delegate has an email address.
+Set `MAIL_DRY_RUN=true` in `backend/.env` to demo without sending. (Learned the
+hard way: a test invite genuinely dispatched during integration.)
+
+### Two independent offline queues now exist
+
+His scanner keeps its own queue of face/QR scans (`localStorage`
+`musterGo.offlineScans`) and replays it **only while a scanner screen is
+mounted**. JQ's `outbox.js` (`mg_outbox_v1`) handles manual check-ins and delegate
+patches and replays globally. They don't collide, but they're separate — the
+`SyncStatus` pill now *reports* the scan count so queued scans aren't invisible
+elsewhere in the app, while making clear it can't flush them from there.
+Consolidating the two is a sensible future cleanup.
+
+### Verified at integration time
+
+22/22 endpoints (JQ's + his) 200 · frontend builds clean · 106/106 unit tests
+pass · backend boots with no errors · malformed and legacy-v1 scan tokens both
+handled without a 500 · manual check-in and its replay-dedupe still work ·
+`MobileAttendancePage` byte-identical to before the merge.
+
+## ⚠️ Offline support — write queue BUILT 2026-07-28, service worker STILL MISSING
 
 **Read this before doing any more work on attendance/check-in features.**
-Client feedback: staff need to be able to take attendance even with **no
-internet signal** (common on-site) — this is NOT built yet. Do not assume the
-app works offline anywhere; it currently doesn't.
+Client requirement: staff must be able to take attendance with **no internet
+signal** (common on-site).
 
-**What's actually true today:**
+**Status (updated 2026-07-29) — one half done, one half not:**
+
+- ✅ **The offline write queue is built** — `frontend/src/lib/outbox.js`,
+  `lib/delegateWrites.js`, `components/SyncStatus.jsx`, plus the try/catch in
+  `lib/exceptionsApi.js`'s `manualOverride()`. Manual check-ins and delegate
+  status patches taken with no signal are queued and replayed automatically,
+  exactly once (idempotency key generated at enqueue, reused on retry, matched
+  against `check_in_logs.client_event_id`'s UNIQUE constraint). Proven by 24
+  unit tests in `tests/jq/` **and** verified live: the same event POSTed 3×
+  produced `duplicate:false,true,true` and exactly one DB row.
+- ❌ **The service worker / PWA app shell is NOT built.** This is the remaining
+  gap, and it's the one that makes the difference between "works offline" and
+  "works offline *if you never closed the tab*". Without it, a cold start with
+  no signal shows the browser's offline page and the queue never gets a chance
+  to run. Mobile browsers routinely discard backgrounded tabs, so this is a
+  realistic on-site scenario, not a corner case. **Do not tell the client the
+  offline requirement is met until this exists.**
+- ⚠️ **Two separate queues exist** — see the FaceCheck-Pro section above.
+  Vimal's scan queue only replays while a scanner screen is mounted.
+
+**The original analysis (2026-07-25), still accurate on the reasoning:**
 1. **Login/auth is *mostly* fine already.** A JWT is self-verifying — the
    existing session-check (`useSessionGuard.js`) already tolerates an
    unreachable server (only forces logout on an explicit 401, not on a
@@ -166,7 +294,8 @@ app works offline anywhere; it currently doesn't.
    anything — there's no honest way to verify someone offline. The fix
    needed is just a clear "No connection — use manual check-in" message, not
    a real offline scan capability.
-3. **Manual check-in is the actual gap — not yet built.** Needs an offline
+3. **Manual check-in was the actual gap — ✅ NOW BUILT, exactly as described
+   here.** Needed an offline
    queue ("outbox") + optimistic UI: a failed write gets queued locally (the
    *intended action* — delegate, new status, timestamp, who — not just
    cached data) and replayed against the backend once connectivity returns
@@ -175,7 +304,8 @@ app works offline anywhere; it currently doesn't.
    problem is queuing a WRITE, not caching a read.
 4. **A service worker (PWA asset caching) is a separate, also-needed piece**
    — without it, a fully offline phone may fail to load the app at all, not
-   just fail API calls.
+   just fail API calls. **❌ STILL NOT BUILT — this is now the only remaining
+   piece of the client's offline requirement.**
 
 **Recommendation:** three independently-buildable pieces — (a) tolerate-
 offline session handling (mostly already true, low effort), (b) offline
@@ -183,9 +313,92 @@ queue for manual check-in writes (the piece that actually addresses the
 client's stated concern), (c) service worker for the app shell (supporting
 piece, makes (b) usable when the page itself can't load).
 
-**Status: advised only, nothing built yet as of this entry.** If you're an
-AI assistant reading this before starting attendance/offline-related work,
-surface this section to the user first rather than assuming it's handled.
+### Status update 2026-07-28 — (b) is BUILT; (c) is still outstanding
+
+**(b) Offline manual check-in — done.** `frontend/src/lib/outbox.js` (JQ, new)
+is a localStorage-backed write queue: a manual check-in that can't reach the
+server is stored as an *intent* and replayed on the `online` event, on a 30s
+timer, and on app start. `components/SyncStatus.jsx` (JQ, new, mounted once from
+`Layout.jsx`) shows "N changes waiting to sync" with a manual **Sync now**, a
+distinct red state for writes the server *rejected* (with a details modal), and
+— when offline with nothing queued — the honest **"Offline — scanning
+unavailable, use manual check-in"** message that piece (2) of the list above
+asked for.
+
+**No backend change was needed, because Jayden had already built for this:**
+`check_in_logs.client_event_id` is `NOT NULL UNIQUE` and his
+`POST /api/checkins/manual` checks it before inserting, returning
+`{ duplicate: true }`; `client_ts` stores the client's own timestamp; and
+`is_offline_origin BOOLEAN` existed but had never been set by any client until
+now. So replay is idempotent at the *database* level, not just by convention.
+Verified live: the same `clientEventId` POSTed three times produced
+`duplicate:false, true, true` and **exactly one** `check_in_logs` row, with
+`is_offline_origin = true` and the original 09:05 `client_ts` preserved rather
+than the sync time.
+
+**Extended to mobile Attendance (2026-07-28, same day).** The mobile Attendance
+sheet writes attendance decisions via `PATCH /api/delegates/:id` (a different
+path from manual check-in), so those now route through
+`frontend/src/lib/delegateWrites.js` — `patchDelegate()` queues on a network
+failure, and `applyQueuedPatches()` overlays unsynced changes onto a freshly
+fetched roster so a reload with no signal doesn't appear to discard the staff
+member's own work. Replay is safe *without* an idempotency key here because a
+PATCH ASSIGNS state (`status = "MISSING"` twice = same row) rather than
+appending, and the outbox is FIFO so "Missing then Cancelled" can't land
+reversed. Accepted imperfection, documented in that file: if a request lands but
+its response is lost, the retry re-applies the same status (harmless) but adds a
+second `activity_log` line — cosmetic audit noise, fixable later by giving that
+endpoint its own `clientEventId`. **`SyncStatus` is now mounted in
+`MobileLayout.jsx` too** — it was desktop-only, which was backwards given mobile
+is where signal actually drops; on phones it sits above the floating tab bar.
+Tests: `tests/jq/delegateWrites.test.js` (8).
+
+Also made `api.js`'s `BASE_URL` read `import.meta.env?.VITE_API_URL` (optional
+chaining): `import.meta.env` doesn't exist outside Vite, so a plain read threw
+at import time and made every module that imports `api.js` untestable in Node.
+Verified the built bundle still resolves `"/api"` unchanged.
+
+**JQ's footprint inside Jayden's files is deliberately tiny** — one `try/catch`
+in `manualOverride()` (`lib/exceptionsApi.js`) plus its sender registration and
+two small helpers, and two lines in `ManualTrackingPanel.jsx` (seed the
+optimistic-present set from the queue so a check-in survives a page reload;
+disable **Undo** while that delegate is still queued). All queue logic lives in
+JQ's own `lib/outbox.js`. **If Jayden rewrites his data layer, re-adding that
+one `try/catch` restores offline support — nothing else is needed**, and if it's
+lost entirely the app degrades to today's behaviour (check-ins simply fail
+offline) rather than half-working.
+
+**Undo is intentionally NOT queued.** `POST /checkins/manual/undo` takes no
+idempotency key, so replaying it is unsafe; it's disabled while a check-in is
+pending and re-enabled once synced. Making undo replay-safe needs a
+`clientEventId` on that endpoint — Jayden's call, not done here.
+
+Tests: `tests/jq/outbox.test.js` — 16 tests, `node --test tests/jq/*.test.js`.
+They prove the exactly-once property directly (three flushes → one send), that
+the idempotency key is stable across retries, that the original timestamp is
+kept, that a still-offline flush preserves queue order, that a 403 goes to a
+"rejected" list instead of looping forever, and that a 401 is *kept* so an
+expired session can't lose a real attendance action.
+
+**(c) Service worker / PWA shell — still not built.** Without it a phone that is
+already fully offline may not load the app at all, which makes the outbox
+unreachable. This is the remaining piece for a complete offline story — and it's
+the specific reason a localStorage queue *alone* doesn't satisfy the client's
+concern: the queue only helps while the page is already loaded, and mobile
+browsers discard backgrounded tabs aggressively.
+
+**⚠️ When the standalone scanner page arrives** (2026-07-28: the desktop
+`/scanner` / `UnifiedScannerPage.jsx` is outdated and currently redirects to
+`/dashboard`; a teammate is rebuilding it standalone) — the offline queue is
+wired at the DATA LAYER, in `manualOverride()`, not in any page. So the new
+scanner gets offline check-in **for free if it calls `manualOverride()`**. If it
+POSTs `/api/checkins/manual` directly instead, it bypasses the queue and offline
+attendance silently won't work there — route it through `manualOverride()` or
+wrap its call the same way (`isOfflineError` → `enqueue`). Also remember to drop
+the `/scanner` → `/dashboard` redirect in `App.jsx` and un-comment the Scanner
+nav item in `Sidebar.jsx`, and to preserve the two small edits in
+`ManualTrackingPanel.jsx` (seed optimistic-present from the queue; disable Undo
+while queued) if that panel gets replaced too.
 
 ---
 

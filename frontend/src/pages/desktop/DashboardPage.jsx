@@ -9,6 +9,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
+  LayoutGrid,
   Download,
   RefreshCw,
   AlertTriangle,
@@ -145,18 +146,33 @@ export default function DashboardPage() {
     window.scrollTo(0, 0);
   }, []);
 
-  // Default to the first tab this account can actually see, in the same
-  // left-to-right order as the tab bar below; an account with none of them
-  // still needs SOME initial value, so it falls back to "delegate" (its
-  // content block is itself gated, so nothing renders — same "no visible
-  // tabs" edge case the desktop/mobile route fallbacks in App.jsx already
-  // accept).
+  // Lands on the tab this account actually works in; every content block is
+  // independently gated, so an account with no visible tab renders nothing
+  // rather than erroring — the same "no visible tabs" edge case App.jsx's
+  // route fallbacks already accept.
+  // Restructured 2026-07-28 ("move the all delegate to another tab called
+  // delegate management, rename the delegate tab to overview, move the
+  // checkpoint history / room management under the new delegate tab, so
+  // overview for admin, delegate tab is for staff"):
+  //   overview  — the at-a-glance read: KPI tiles, coach status, history
+  //               tracker. Admin's landing view.
+  //   delegates — the working area, with its own sub-tabs (All delegates /
+  //               Checkpoint history / Room Management). Staff's landing view.
+  //   analytics / staffops — unchanged, admin-only.
+  // Each feature KEPT its original permission gate, so nothing became more or
+  // less visible than before — only where it lives changed.
   const [tab, setTab] = useState(() => {
-    if (perms.viewDelegates) return "delegate";
+    if (!isAdmin && (perms.viewDelegates || perms.viewHistory)) return "delegates";
+    if (perms.viewDashboard) return "overview";
+    if (perms.viewDelegates || perms.viewHistory) return "delegates";
+    return "overview";
+  }); // "overview" | "delegates" | "analytics" | "staffops"
+  // Sub-tab inside "delegates".
+  const [delegateSubTab, setDelegateSubTab] = useState(() => {
+    if (perms.viewDelegates) return "list";
     if (perms.viewHistory) return "checkpointHistory";
-    if (isAdmin) return "rooms";
-    return "delegate";
-  }); // "delegate" | "checkpointHistory" | "rooms" | "analytics" | "staffops"
+    return "rooms";
+  }); // "list" | "checkpointHistory" | "rooms"
   const [data, setData] = useState(null);
   const [missing, setMissing] = useState([]);
   const [delegates, setDelegates] = useState([]);
@@ -242,6 +258,16 @@ export default function DashboardPage() {
   useEffect(() => { setHistoryShowAll(false); }, [selectedTripId, historyScope]);
   const [exportOpen, setExportOpen] = useState(false);
   const delegateTableRef = useRef(null);
+  // Set by showDelegatesFiltered() when a KPI drill-down needs to scroll to the
+  // roster table AFTER the tab switch has mounted it (2026-07-28).
+  const pendingTableScroll = useRef(false);
+  useEffect(() => {
+    if (!pendingTableScroll.current) return;
+    if (tab !== "delegates" || delegateSubTab !== "list") return;
+    if (!delegateTableRef.current) return; // table still loading — retry next render
+    pendingTableScroll.current = false;
+    delegateTableRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 
 
   // modal state
@@ -595,11 +621,16 @@ export default function DashboardPage() {
   // and scroll it into view. Shared by all 4 primary tiles (Missing/Present/
   // Unassigned/Late) so every one of them behaves the same way.
   function showDelegatesFiltered(status) {
-    setTab("delegate");
+    // The roster table moved under the "Delegate management" tab (2026-07-28),
+    // so a KPI drill-down (the tiles live on Overview) has to switch tab AND
+    // sub-tab first. The table therefore isn't mounted yet when this runs, so
+    // the scroll can't happen here — a single requestAnimationFrame raced the
+    // re-render and silently did nothing. Flag it instead and let the effect
+    // below scroll once the table actually exists.
+    setTab("delegates");
+    setDelegateSubTab("list");
     setStatusFilter(status);
-    requestAnimationFrame(() =>
-      delegateTableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
-    );
+    pendingTableScroll.current = true;
   }
 
   /* ---- CRUD handlers ---------------------------------------------------- */
@@ -1111,43 +1142,30 @@ export default function DashboardPage() {
 
       {/* ---- Tabs ----------------------------------------------------------- */}
       <div className="row" style={{ gap: 8, marginTop: 18 }}>
-        {perms.viewDelegates && (
+        {perms.viewDashboard && (
           <button
             className="btn"
-            onClick={() => setTab("delegate")}
+            onClick={() => setTab("overview")}
             style={{
-              background: tab === "delegate" ? "var(--scc-red-tint)" : "transparent",
-              color: tab === "delegate" ? "var(--scc-red)" : "var(--ink-2)",
-              border: `1px solid ${tab === "delegate" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+              background: tab === "overview" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "overview" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "overview" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
             }}
           >
-            {t("Delegate")}
+            <LayoutGrid size={16} /> {t("Overview")}
           </button>
         )}
-        {perms.viewHistory && (
+        {(perms.viewDelegates || perms.viewHistory || isAdmin) && (
           <button
             className="btn"
-            onClick={() => setTab("checkpointHistory")}
+            onClick={() => setTab("delegates")}
             style={{
-              background: tab === "checkpointHistory" ? "var(--scc-red-tint)" : "transparent",
-              color: tab === "checkpointHistory" ? "var(--scc-red)" : "var(--ink-2)",
-              border: `1px solid ${tab === "checkpointHistory" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+              background: tab === "delegates" ? "var(--scc-red-tint)" : "transparent",
+              color: tab === "delegates" ? "var(--scc-red)" : "var(--ink-2)",
+              border: `1px solid ${tab === "delegates" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
             }}
           >
-            <History size={16} /> {t("Checkpoint history")}
-          </button>
-        )}
-        {isAdmin && (
-          <button
-            className="btn"
-            onClick={() => setTab("rooms")}
-            style={{
-              background: tab === "rooms" ? "var(--scc-red-tint)" : "transparent",
-              color: tab === "rooms" ? "var(--scc-red)" : "var(--ink-2)",
-              border: `1px solid ${tab === "rooms" ? "var(--scc-red-tint-2)" : "var(--line)"}`,
-            }}
-          >
-            <BedDouble size={16} /> {t("Room Management")}
+            <Users size={16} /> {t("Delegate management")}
           </button>
         )}
         {isAdmin && (
@@ -1378,13 +1396,8 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {tab === "rooms" && isAdmin && (
-        <RoomManagementTab delegates={delegates} coaches={coaches} coachName={coachName} onSaved={load} t={t} lang={lang} tripId={selectedTripId} />
-      )}
-
-      {tab === "checkpointHistory" && perms.viewHistory && (
-        <CheckpointHistoryTab delegates={delegates} coaches={coaches} coachName={coachName} t={t} />
-      )}
+      {/* Room Management and Checkpoint history are now SUB-tabs of "Delegate
+          management" (2026-07-28) — see the sub-tab bar further down. */}
 
       {tab === "staffops" && perms.manageAccounts && (
         <div style={{ marginTop: 20 }}>
@@ -1507,7 +1520,44 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {tab === "delegate" && perms.viewDelegates && (
+      {/* Both tabs share this one fragment because the Add/Edit delegate modal
+          at the bottom of it has to stay mounted for the roster table, and the
+          KPI/coach/history widgets and the table are just two sections of it
+          (2026-07-28 restructure). Each section is gated individually below. */}
+      {(tab === "overview" || tab === "delegates") && (
+      <>
+
+      {/* ---- Sub-tabs, only inside "Delegate management" ------------------ */}
+      {tab === "delegates" && (
+        <div className="row" style={{ gap: 6, marginTop: 20, flexWrap: "wrap" }}>
+          {[
+            ...(perms.viewDelegates ? [["list", t("All delegates"), Users]] : []),
+            ...(perms.viewHistory ? [["checkpointHistory", t("Checkpoint history"), History]] : []),
+            ...(isAdmin ? [["rooms", t("Room Management"), BedDouble]] : []),
+          ].map(([key, label, Icon]) => (
+            <button key={key} type="button" onClick={() => setDelegateSubTab(key)}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                fontSize: 12.5, fontWeight: 600, padding: "6px 12px", borderRadius: 999,
+                background: delegateSubTab === key ? "var(--scc-red-tint)" : "var(--surface-2)",
+                color: delegateSubTab === key ? "var(--scc-red)" : "var(--ink-2)",
+                border: `1px solid ${delegateSubTab === key ? "var(--scc-red)" : "var(--line)"}`,
+              }}>
+              <Icon size={14} /> {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tab === "delegates" && delegateSubTab === "rooms" && isAdmin && (
+        <RoomManagementTab delegates={delegates} coaches={coaches} coachName={coachName} onSaved={load} t={t} lang={lang} tripId={selectedTripId} />
+      )}
+
+      {tab === "delegates" && delegateSubTab === "checkpointHistory" && perms.viewHistory && (
+        <CheckpointHistoryTab coaches={coaches} t={t} tripId={selectedTripId} />
+      )}
+
+      {tab === "overview" && perms.viewDashboard && (
       <>
       {/* ---- KPI tiles ------------------------------------------------------
        * Missing + Late keep the full attention-grabbing tile treatment — they're
@@ -1654,8 +1704,12 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* ---- All delegates (CRUD surface) -------------------------------- */}
-      {data && (
+      </>
+      )}
+
+      {/* ---- All delegates (CRUD surface) — now the "list" sub-tab of
+              Delegate management (2026-07-28) ------------------------------- */}
+      {tab === "delegates" && delegateSubTab === "list" && perms.viewDelegates && data && (
         <div ref={delegateTableRef} className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
             <div>
@@ -2145,13 +2199,13 @@ export default function DashboardPage() {
                     title={t("Enlarge photo")}
                     style={{ padding: 0, border: "none", background: "none", cursor: "zoom-in", flexShrink: 0, borderRadius: "50%" }}
                   >
-                    <img src={profileDelegate.photoUrl} alt="" style={{ width: 84, height: 84, borderRadius: "50%", objectFit: "cover", boxShadow: `0 0 0 2px ${statusTone(profileDelegate.status).fg}` }} />
+                    <img src={profileDelegate.photoUrl} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", boxShadow: `0 0 0 2px ${statusTone(profileDelegate.status).fg}` }} />
                   </button>
                 ) : (
                   <span
                     className="avatar"
                     style={{
-                      width: 84, height: 84, fontSize: 26, flexShrink: 0,
+                      width: 64, height: 64, fontSize: 21, flexShrink: 0,
                       background: statusTone(profileDelegate.status).bg,
                       color: statusTone(profileDelegate.status).fg,
                       boxShadow: `inset 0 0 0 1.5px ${statusTone(profileDelegate.status).fg}`,
@@ -2223,7 +2277,13 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {/* Auto-filling columns instead of a hardcoded "1fr 1fr"
+                (2026-07-28 — "desktop detail need better uiux, too much
+                space"). ProfileField renders nothing when a value is empty, so
+                a fixed 2-column grid left big holes and stranded single fields
+                on their own row; this packs 3-4 short fields per row on a wide
+                modal and still collapses to one column when narrow. */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: "12px 18px" }}>
               <ProfileField
                 icon={Phone}
                 label={t("Phone")}
@@ -2262,6 +2322,19 @@ export default function DashboardPage() {
                   <ProfileField label={t("Nationality")} value={profileDelegate.nationality} />
                   <ProfileField icon={BadgeCheck} label={t("Passport number")} value={profileDelegate.passport_no} mono />
                   <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
+                  {/* Room moved INTO this grid (2026-07-28) — it was a
+                      full-width bordered card of its own for one short value
+                      like "t · Room 2", which ate a whole row for almost no
+                      content. Same escalated-hiding rule as the fields above. */}
+                  <ProfileField
+                    icon={BedDouble}
+                    label={t("Room")}
+                    value={
+                      profileDelegate.hotel_name || profileDelegate.room_number
+                        ? [profileDelegate.hotel_name, profileDelegate.room_number ? `${t("Room")} ${profileDelegate.room_number}` : null].filter(Boolean).join(" · ")
+                        : <span className="muted" style={{ fontWeight: 400 }}>{t("Not assigned yet")}</span>
+                    }
+                  />
                 </>
               )}
             </div>
@@ -2275,24 +2348,9 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* Room allocation (2026-07-26) — hidden while escalated, same
-                "declutter for the emergency" reasoning as Company/Industry
-                above; shown whenever set, with a quick prompt to add it via
-                Edit when it's still empty. */}
-            {!profileDelegate.escalated && (
-              <div style={{ marginTop: 18, padding: "10px 12px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
-                <div className="field-label" style={{ margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
-                  <BedDouble size={13} /> {t("Room")}
-                </div>
-                {profileDelegate.hotel_name || profileDelegate.room_number ? (
-                  <p style={{ fontSize: 13.5, marginTop: 4 }}>
-                    {[profileDelegate.hotel_name, profileDelegate.room_number ? `${t("Room")} ${profileDelegate.room_number}` : null].filter(Boolean).join(" · ")}
-                  </p>
-                ) : (
-                  <p className="muted" style={{ fontSize: 13, marginTop: 4 }}>{t("No room assigned yet.")}</p>
-                )}
-              </div>
-            )}
+            {/* Room allocation (2026-07-26) now lives inside the field grid
+                above rather than in its own bordered card — see the
+                ProfileField for it there. */}
 
             {/* Replaces the Checkpoint timeline while an escalation is active
                 (2026-07-25) — the point of opening this profile right now is
@@ -3134,6 +3192,11 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
         setAiErr(t("Nothing to suggest — try naming a delegate, hotel, or room number."));
         return;
       }
+      // The local model often handles only the FIRST person in a multi-name
+      // request (2026-07-28) — say so rather than letting it look complete.
+      if (res.partial) {
+        setAiErr(`${t("Only")} ${suggestions.length} ${t("of")} ${res.mentioned} ${t("delegates you named were matched — review below, then ask again for the rest (one person per request works best).")}`);
+      }
       setEdits((prev) => {
         const next = { ...prev };
         for (const s of suggestions) next[s.delegateId] = { hotelName: s.hotelName, roomNumber: s.roomNumber };
@@ -3192,16 +3255,31 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
     }
   }
 
+  /* Which delegates the bulk hotel applies to (2026-07-28 — "make it so if i
+   * filter coach 1 it will apply to coach 1 delegate; if i filter to all coach
+   * then apply to all"). Follows the COACH filter only, deliberately not the
+   * search box: this button sits above the search row and reads as a
+   * coach-level action, and silently narrowing it to whatever someone happened
+   * to type would be a nasty surprise on a write that touches everyone. The
+   * button label always names the exact target so there's nothing to guess. */
+  const bulkTargets = coachFilter === "ALL" ? roomable : roomable.filter((d) => d.coachId === coachFilter);
+  const bulkScopeLabel = coachFilter === "ALL" ? null : coachName(coachFilter);
+
   async function applyHotelToAll() {
     const name = bulkHotel.trim();
-    if (!name || roomable.length === 0) return;
+    if (!name || bulkTargets.length === 0) return;
+    const n = bulkTargets.length;
     const msg = lang === "zh"
-      ? `将全部 ${roomable.length} 位（已分配教练的）代表的酒店设为 "${name}"？个别房间号不受影响，之后仍可单独修改。`
-      : `Set the hotel to "${name}" for all ${roomable.length} coach-assigned delegates? Room numbers are untouched — you can still edit individual delegates afterwards for a special case.`;
+      ? (bulkScopeLabel
+          ? `将 ${bulkScopeLabel} 的 ${n} 位代表的酒店设为 "${name}"？个别房间号不受影响，之后仍可单独修改。`
+          : `将全部 ${n} 位（已分配教练的）代表的酒店设为 "${name}"？个别房间号不受影响，之后仍可单独修改。`)
+      : (bulkScopeLabel
+          ? `Set the hotel to "${name}" for the ${n} delegate${n === 1 ? "" : "s"} on ${bulkScopeLabel}? Room numbers are untouched — you can still edit individual delegates afterwards for a special case.`
+          : `Set the hotel to "${name}" for all ${n} coach-assigned delegates? Room numbers are untouched — you can still edit individual delegates afterwards for a special case.`);
     if (!window.confirm(msg)) return;
     setBulkSaving(true);
     try {
-      await Promise.all(roomable.map((d) => apiPatch(`/delegates/${d.id}`, { hotelName: name, roomNumber: d.room_number || "" })));
+      await Promise.all(bulkTargets.map((d) => apiPatch(`/delegates/${d.id}`, { hotelName: name, roomNumber: d.room_number || "" })));
       setBulkHotel("");
       setEdits({});
       onSaved();
@@ -3242,11 +3320,21 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
         <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <Sparkles size={16} color="var(--scc-red)" style={{ flexShrink: 0 }} />
           <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{t("Ask AI to assign rooms")}</span>
-          <input
-            className="input" style={{ flex: "1 1 260px", fontSize: 13 }}
-            placeholder={t("e.g. Put all VIPs in Grand Hyatt room 501")}
+          {/* A textarea, not a one-line input (2026-07-28 — "can you let me put
+              in textbox instead of current one"): real requests run long ("Chen
+              Hao Ming and Lim Hua into Grand Hyatt, rooms 401 and 402") and a
+              single line hid most of what you'd typed. Enter still submits so
+              the quick case stays quick; Shift+Enter adds a newline for
+              multi-part instructions. */}
+          <textarea
+            className="input"
+            rows={3}
+            style={{ flex: "1 1 100%", fontSize: 13, resize: "vertical", minHeight: 62, lineHeight: 1.5, fontFamily: "inherit" }}
+            placeholder={t("e.g. Put all VIPs in Grand Hyatt room 501 — Shift+Enter for a new line")}
             value={aiRequest} onChange={(e) => setAiRequest(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !aiBusy) askAi(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!aiBusy && aiRequest.trim()) askAi(); }
+            }}
           />
           <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 12px" }}
             onClick={askAi} disabled={aiBusy || !aiRequest.trim()}>
@@ -3272,18 +3360,26 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
       {/* ---- Bulk "everyone's in this hotel" ------------------------------ */}
       <div className="card" style={{ padding: 14, marginBottom: 16, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <BedDouble size={16} color="var(--ink-3)" style={{ flexShrink: 0 }} />
-        <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>{t("Set hotel for everyone")}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, flexShrink: 0 }}>
+          {bulkScopeLabel ? t("Set hotel for this coach") : t("Set hotel for everyone")}
+        </span>
         <input
           className="input" style={{ maxWidth: 260, fontSize: 13 }}
           placeholder={t("e.g. Grand Hyatt")}
           value={bulkHotel} onChange={(e) => setBulkHotel(e.target.value)}
         />
         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 12px" }}
-          onClick={applyHotelToAll} disabled={bulkSaving || !bulkHotel.trim() || roomable.length === 0}>
-          {bulkSaving ? t("Applying…") : `${t("Apply to all")} ${roomable.length}`}
+          onClick={applyHotelToAll} disabled={bulkSaving || !bulkHotel.trim() || bulkTargets.length === 0}>
+          {bulkSaving
+            ? t("Applying…")
+            : bulkScopeLabel
+              ? `${t("Apply to")} ${bulkScopeLabel} (${bulkTargets.length})`
+              : `${t("Apply to all")} ${bulkTargets.length}`}
         </button>
         <span className="muted" style={{ fontSize: 11.5, width: "100%" }}>
-          {t("Room numbers are untouched — edit individual rows below for a delegate in a different hotel. Delegates without a coach aren't shown here — they aren't confirmed for a hotel yet.")}
+          {bulkScopeLabel
+            ? `${t("Follows the coach filter — only the")} ${bulkTargets.length} ${t("delegate(s) on")} ${bulkScopeLabel} ${t("will change. Switch the filter to \"All coaches\" to apply trip-wide. Room numbers are untouched, and the search box doesn't affect this.")}`
+            : t("Room numbers are untouched — edit individual rows below for a delegate in a different hotel. Filter to one coach to apply to just that coach. Delegates without a coach aren't shown here — they aren't confirmed for a hotel yet.")}
         </span>
       </div>
 
@@ -3318,10 +3414,22 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
           <span style={{ fontSize: 13 }}>
             {Object.keys(edits).length} {Object.keys(edits).length === 1 ? t("unsaved change") : t("unsaved changes")}
           </span>
-          <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 14px" }}
-            onClick={saveAllEdits} disabled={savingAll}>
-            {savingAll ? t("Saving…") : `${t("Save all")} (${Object.keys(edits).length})`}
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            {/* Discard (2026-07-28 — "give me option to cancel changes"). Until
+                now the only way out of a wrong AI suggestion or a mistyped row
+                was to reload the page: the inputs are local pending state, so
+                nothing reverted them. Clears every pending edit and the
+                AI-suggested highlighting in one go; nothing was ever written, so
+                there's nothing to undo server-side. */}
+            <button className="btn btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }}
+              onClick={() => { setEdits({}); setAiSuggestedIds(new Set()); }} disabled={savingAll}>
+              <X size={13} /> {t("Discard")}
+            </button>
+            <button className="btn btn-primary" style={{ fontSize: 12.5, padding: "6px 14px" }}
+              onClick={saveAllEdits} disabled={savingAll}>
+              {savingAll ? t("Saving…") : `${t("Save all")} (${Object.keys(edits).length})`}
+            </button>
+          </div>
         </div>
       )}
 
@@ -3433,45 +3541,132 @@ function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, lang, tr
  *  needed there). Fetched lazily per-delegate on first expand, not all
  *  upfront, so opening this tab with a large roster doesn't fire N requests
  *  before anyone's even clicked anything. */
-function CheckpointHistoryTab({ delegates, coaches, coachName, t }) {
-  const [query, setQuery] = useState("");
-  // Coach filter (2026-07-27 — "pls filter by coach") — same dropdown Room
-  // Management uses; "NONE" surfaces the unassigned delegates, which DO
-  // appear in this list (unlike Room Management, which excludes them).
-  const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | NONE | <coachId>
-  const [expandedId, setExpandedId] = useState(null);
-  const [timelines, setTimelines] = useState({}); // { [delegateId]: {loading, error, items} }
+/**
+ * Checkpoint history — every delegate's attendance across every itinerary stop,
+ * as a CARD GRID (2026-07-28 — "instead of seeing one by one", modelled on a
+ * live-headcount board the user shared).
+ *
+ * It replaced an expand-one-at-a-time list, which had two problems: you had to
+ * click through the roster to answer "who's been missing today", and it
+ * lazy-loaded one request PER delegate. Now a single
+ * `GET /api/trips/:id/checkpoint-matrix` returns the whole grid, so every
+ * delegate is scannable at once and it scales to a real roster.
+ *
+ * Each card carries one small chip per stop (colour = status), so a pattern like
+ * "fine all week, missing since lunch" is visible without opening anything.
+ * Clicking a card still expands the full stop-by-stop detail.
+ */
+const CPT_STATUS_LABEL = { ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
 
-  const filtered = delegates
+function CheckpointHistoryTab({ coaches, t, tripId }) {
+  const [query, setQuery] = useState("");
+  const [coachFilter, setCoachFilter] = useState("ALL");   // ALL | NONE | <coachId>
+  const [attFilter, setAttFilter] = useState("ALL");       // ALL | CLEAN | ISSUES
+  const [dayFilter, setDayFilter] = useState("ALL");       // ALL | <dayNumber>
+  const [expandedId, setExpandedId] = useState(null);
+  const [data, setData] = useState(null);                   // { stops, delegates, totalStops }
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    apiGet(`/trips/${tripId}/checkpoint-matrix`)
+      .then((r) => { if (alive) { setData(r); setLoading(false); } })
+      .catch((e) => { if (alive) { setError(e.message || "Could not load checkpoint history."); setLoading(false); } });
+    return () => { alive = false; };
+  }, [tripId]);
+
+  const stops = data?.stops || [];
+  const rows = data?.delegates || [];
+
+  // ---- Day handling (2026-07-28 — "can you sort by date instead? like day 1,
+  // day 2, day 3"). The backend already returns stops in day/time order, but a
+  // flat run of 20 chips gave no clue where one day ended and the next began.
+  // So: a Day filter, and when showing every day the chips are GROUPED with a
+  // small D1/D2/D3 label per group.
+  const days = [...new Set(stops.map((s) => s.dayNumber))].sort((a, b) => a - b);
+  const visibleStops = dayFilter === "ALL" ? stops : stops.filter((s) => s.dayNumber === Number(dayFilter));
+  // Group the stops actually on screen, preserving day order.
+  const stopGroups = days
+    .map((day) => ({ day, items: visibleStops.filter((s) => s.dayNumber === day) }))
+    .filter((g) => g.items.length > 0);
+
+  // Counts are recomputed over the stops CURRENTLY SHOWN rather than reusing the
+  // server's whole-trip totals — otherwise filtering to Day 2 would show Day 2's
+  // chips next to trip-wide numbers, which is exactly the kind of quiet
+  // mismatch that makes a dashboard untrustworthy.
+  function tally(d) {
+    let arrived = 0, late = 0, missing = 0, recorded = 0;
+    for (const s of visibleStops) {
+      const cell = d.cells[s.id];
+      if (!cell) continue;
+      recorded += 1;
+      if (cell.status === "ARRIVED") arrived += 1;
+      else if (cell.status === "LATE") late += 1;
+      else if (cell.status === "MISSING") missing += 1;
+    }
+    return { arrived, late, missing, recorded };
+  }
+  const counted = rows.map((d) => ({ ...d, ...tally(d) }));
+
+  const totals = {
+    delegates: counted.length,
+    clean: counted.filter((d) => d.missing === 0 && d.late === 0).length,
+    issues: counted.filter((d) => d.missing > 0 || d.late > 0).length,
+  };
+
+  const visible = counted
     .filter((d) => !query.trim() || d.name.toLowerCase().includes(query.trim().toLowerCase()))
     .filter((d) => {
       if (coachFilter === "ALL") return true;
       if (coachFilter === "NONE") return !d.coachId;
       return d.coachId === coachFilter;
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .filter((d) => {
+      if (attFilter === "CLEAN") return d.missing === 0 && d.late === 0;
+      if (attFilter === "ISSUES") return d.missing > 0 || d.late > 0;
+      return true;
+    });
 
-  async function toggleExpand(d) {
-    if (expandedId === d.id) { setExpandedId(null); return; }
-    setExpandedId(d.id);
-    if (timelines[d.id]) return; // already fetched this session — don't refetch on every re-open
-    setTimelines((prev) => ({ ...prev, [d.id]: { loading: true, error: null, items: [] } }));
-    try {
-      const res = await apiGet(`/delegates/${d.id}/checkpoint-timeline`);
-      setTimelines((prev) => ({ ...prev, [d.id]: { loading: false, error: null, items: res.timeline || [] } }));
-    } catch (e) {
-      setTimelines((prev) => ({ ...prev, [d.id]: { loading: false, error: e.message || t("Could not load."), items: [] } }));
-    }
-  }
+  const toneFor = (status) =>
+    status === "ARRIVED" ? { bg: "var(--st-present-bg)", fg: "var(--st-present)" }
+      : status === "LATE" ? { bg: "var(--st-late-bg)", fg: "var(--st-late)" }
+        : status === "MISSING" ? { bg: "var(--st-missing-bg)", fg: "var(--st-missing)" }
+          : { bg: "var(--surface-2)", fg: "var(--line)" }; // no record yet
+
+  const ATT_FILTERS = [
+    ["ALL", t("All"), totals.delegates],
+    ["ISSUES", t("Late or missing"), totals.issues],
+    ["CLEAN", t("Full attendance"), totals.clean],
+  ];
 
   return (
     <div style={{ marginTop: 20 }}>
       <p className="page-sub" style={{ margin: "0 0 14px" }}>
-        {t("Every delegate's status at every past itinerary stop — click a name to see their full timeline.")}
+        {t("Every delegate's status at every itinerary stop — click a card for the full timeline.")}
       </p>
 
+      {/* ---- Summary strip ------------------------------------------------ */}
+      <div className="card" style={{ padding: "14px 18px", marginBottom: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14 }}>
+        {[
+          [t("Delegates"), totals.delegates, "var(--ink)"],
+          // Reflects the day filter, so it agrees with the chips on the cards.
+          [dayFilter === "ALL" ? t("Itinerary stops") : `${t("Stops on day")} ${dayFilter}`, visibleStops.length, "var(--ink)"],
+          [t("Full attendance"), totals.clean, "var(--st-present)"],
+          [t("Late or missing"), totals.issues, "var(--st-missing)"],
+        ].map(([label, value, color]) => (
+          <div key={label}>
+            <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+            <div style={{ fontSize: 26, fontWeight: 700, color, lineHeight: 1.2 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ---- Search + filters -------------------------------------------- */}
       <div className="row" style={{ gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
-        <div style={{ position: "relative", maxWidth: 260, flex: "1 1 200px" }}>
+        <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
           <input className="input" style={{ paddingLeft: 32 }} placeholder={t("Search name…")}
             value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -3487,59 +3682,156 @@ function CheckpointHistoryTab({ delegates, coaches, coachName, t }) {
             <option value="NONE">{t("Unassigned")}</option>
           </optgroup>
         </select>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {ATT_FILTERS.map(([key, label, n]) => (
+            <button key={key} type="button" onClick={() => setAttFilter(key)}
+              style={{
+                fontSize: 12.5, fontWeight: 600, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
+                background: attFilter === key ? "var(--scc-red-tint)" : "var(--surface-2)",
+                color: attFilter === key ? "var(--scc-red)" : "var(--ink-2)",
+                border: `1px solid ${attFilter === key ? "var(--scc-red)" : "var(--line)"}`,
+              }}>
+              {label} <span style={{ opacity: 0.7 }}>{n}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="card" style={{ overflow: "hidden" }}>
-        {filtered.length === 0 && (
-          <div className="muted" style={{ padding: 24, textAlign: "center", fontSize: 13.5 }}>{t("No delegates match your search.")}</div>
-        )}
-        {filtered.map((d, idx) => {
-          const isOpen = expandedId === d.id;
-          const tl = timelines[d.id];
-          return (
-            <div key={d.id} style={{ borderTop: idx === 0 ? "none" : "1px solid var(--line)" }}>
-              <button
-                onClick={() => toggleExpand(d)}
-                className="row between"
-                style={{ width: "100%", padding: "12px 16px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}
-              >
-                <div className="row" style={{ gap: 10, minWidth: 0 }}>
-                  <DelegateAvatar delegate={d} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 500 }}>{d.name}</div>
-                    <div className="muted" style={{ fontSize: 12 }}>{coachName(d.coachId)}</div>
-                  </div>
-                </div>
-                {isOpen ? <ChevronUp size={16} className="muted" /> : <ChevronDown size={16} className="muted" />}
+      {/* ---- Day filter --------------------------------------------------- */}
+      {days.length > 1 && (
+        <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="muted" style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>
+            {t("Day")}
+          </span>
+          {/* No per-day stop count here (2026-07-28 — "what is this number
+              beside the day? i think remove it"): "Day 1 5" read as "Day 15".
+              The count lives in the summary strip's "Stops on day N" tile,
+              which updates with the selection anyway. */}
+          {[["ALL", t("All days")], ...days.map((n) => [String(n), `${t("Day")} ${n}`])]
+            .map(([key, label]) => (
+              <button key={key} type="button" onClick={() => setDayFilter(key)}
+                title={key === "ALL"
+                  ? `${stops.length} ${t("stops")}`
+                  : `${stops.filter((s) => s.dayNumber === Number(key)).length} ${t("stops")}`}
+                style={{
+                  fontSize: 12.5, fontWeight: 600, padding: "5px 11px", borderRadius: 999, cursor: "pointer",
+                  background: dayFilter === key ? "var(--scc-red-tint)" : "var(--surface-2)",
+                  color: dayFilter === key ? "var(--scc-red)" : "var(--ink-2)",
+                  border: `1px solid ${dayFilter === key ? "var(--scc-red)" : "var(--line)"}`,
+                }}>
+                {label}
               </button>
-              {isOpen && (
-                <div style={{ padding: "0 16px 14px 52px" }}>
-                  {tl?.loading && <div className="muted" style={{ fontSize: 13 }}>{t("Loading…")}</div>}
-                  {tl?.error && <div style={{ color: "var(--st-missing)", fontSize: 13 }}>{tl.error}</div>}
-                  {tl && !tl.loading && !tl.error && tl.items.length === 0 && (
-                    <div className="muted" style={{ fontSize: 13 }}>{t("No checkpoint scans recorded yet.")}</div>
-                  )}
-                  {tl && !tl.loading && tl.items.length > 0 && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {tl.items.map((it) => (
-                        <div key={it.id} className="row between" style={{ gap: 10, fontSize: 13 }}>
-                          <div className="row" style={{ gap: 8, minWidth: 0 }}>
-                            <Clock size={13} color="var(--ink-3)" style={{ flexShrink: 0 }} />
+            ))}
+        </div>
+      )}
+
+      {loading && <div className="muted" style={{ fontSize: 13 }}>{t("Loading…")}</div>}
+      {error && <div style={{ color: "var(--st-missing)", fontSize: 13 }}>{t(error)}</div>}
+
+      {!loading && !error && stops.length === 0 && (
+        <div className="card muted" style={{ padding: 24, textAlign: "center", fontSize: 13.5 }}>
+          {t("No itinerary stops on this trip yet — nothing to show a history for.")}
+        </div>
+      )}
+
+      {!loading && !error && stops.length > 0 && visible.length === 0 && (
+        <div className="card muted" style={{ padding: 24, textAlign: "center", fontSize: 13.5 }}>
+          {t("No delegates match these filters.")}
+        </div>
+      )}
+
+      {/* ---- Card grid --------------------------------------------------- */}
+      {!loading && !error && visible.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 14 }}>
+          {visible.map((d) => {
+            const isOpen = expandedId === d.id;
+            const hasIssue = d.missing > 0 || d.late > 0;
+            return (
+              <div key={d.id} className="card"
+                style={{ padding: 0, overflow: "hidden", borderColor: hasIssue ? "var(--st-missing-bg)" : "var(--line)" }}>
+                <button
+                  onClick={() => setExpandedId(isOpen ? null : d.id)}
+                  className="row between"
+                  style={{ width: "100%", padding: "12px 14px 10px", background: "none", border: "none", cursor: "pointer", textAlign: "left", gap: 10 }}
+                >
+                  <div className="row" style={{ gap: 10, minWidth: 0 }}>
+                    <DelegateAvatar delegate={d} />
+                    <div style={{ minWidth: 0 }}>
+                      <div className="row" style={{ gap: 5, minWidth: 0 }}>
+                        <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                        {d.vip && <Crown size={12} color="#e0a800" style={{ flexShrink: 0 }} />}
+                      </div>
+                      <div className="muted" style={{ fontSize: 11.5 }}>{d.coachLabel || t("Unassigned")}</div>
+                    </div>
+                  </div>
+                  {isOpen ? <ChevronUp size={16} className="muted" /> : <ChevronDown size={16} className="muted" />}
+                </button>
+
+                {/* Chips grouped BY DAY, each group labelled D1/D2/… so you can
+                    tell at a glance which day a run of red belongs to. When a
+                    single day is selected the label is dropped (the filter above
+                    already says which day you're looking at). */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, padding: "0 14px 10px" }}>
+                  {stopGroups.map((g) => (
+                    <div key={g.day} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      {dayFilter === "ALL" && (
+                        <span className="muted" style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3 }}>
+                          D{g.day}
+                        </span>
+                      )}
+                      <div style={{ display: "flex", gap: 3 }}>
+                        {g.items.map((s) => {
+                          const cell = d.cells[s.id];
+                          const tone = toneFor(cell?.status);
+                          const label = cell ? t(CPT_STATUS_LABEL[cell.status] || cell.status) : t("No record");
+                          return (
+                            <span key={s.id}
+                              title={`${t("Day")} ${s.dayNumber} · ${s.scheduledTime || ""} ${s.label} — ${label}`}
+                              style={{
+                                width: 15, height: 15, borderRadius: 4, background: tone.bg,
+                                border: `1px solid ${tone.fg}`, flexShrink: 0,
+                              }} />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="row" style={{ padding: "7px 14px", borderTop: "1px solid var(--line)", fontSize: 11.5, gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ color: "var(--st-present)", fontWeight: 600 }}>{d.arrived} {t("arrived")}</span>
+                  <span style={{ color: "var(--st-late)", fontWeight: 600 }}>{d.late} {t("late")}</span>
+                  <span style={{ color: "var(--st-missing)", fontWeight: 600 }}>{d.missing} {t("missing")}</span>
+                  <span className="muted" style={{ marginLeft: "auto" }}>{d.recorded}/{visibleStops.length}</span>
+                </div>
+
+                {isOpen && (
+                  <div style={{ padding: "10px 14px 14px", borderTop: "1px solid var(--line)", background: "var(--surface-2)", display: "flex", flexDirection: "column", gap: 7, maxHeight: 320, overflowY: "auto" }}>
+                    {/* Only the stops in view, so the detail matches the chips
+                        above it when a day is selected. */}
+                    {visibleStops.map((s) => {
+                      const cell = d.cells[s.id];
+                      return (
+                        <div key={s.id} className="row between" style={{ gap: 10, fontSize: 12.5 }}>
+                          <div className="row" style={{ gap: 7, minWidth: 0 }}>
+                            <Clock size={12} color="var(--ink-3)" style={{ flexShrink: 0 }} />
                             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {t("Day")} {it.dayNumber} · {it.checkpointLabel}{it.scheduledTime ? ` · ${it.scheduledTime}` : ""}
+                              {t("Day")} {s.dayNumber} · {s.label}{s.scheduledTime ? ` · ${s.scheduledTime}` : ""}
                             </span>
                           </div>
-                          <StatusBadge state={it.status} />
+                          {cell
+                            ? <StatusBadge state={cell.status} />
+                            : <span className="muted" style={{ fontSize: 11.5, flexShrink: 0 }}>{t("No record")}</span>}
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

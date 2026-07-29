@@ -10,6 +10,8 @@
  * ============================================================================= */
 
 import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "./api.js";
+// Offline write queue (JQ, 2026-07-28) — see manualOverride() below.
+import { enqueue, registerSender, isOfflineError, pending } from "./outbox.js";
 
 /** The base build ships a single trip (see data.js TRIP). */
 export const TRIP_ID = "t-1";
@@ -143,14 +145,51 @@ export async function deleteException(id) {
  *  (e.g. the scanner page's own trip switcher) — the backend resolves it via
  *  uuid_id (which every trip has) purely to sync the checkpoint-scoped view,
  *  never for the check_in_logs write. */
-export async function manualOverride(delegateId, checkpointTripId) {
-  return apiPost(`/checkins/manual`, {
+export async function manualOverride(delegateId, checkpointTripId, meta = {}) {
+  const body = {
     tripId: TRIP_ID,
     checkpointTripId,
     delegateId,
     clientEventId: crypto.randomUUID(),
     clientTs: new Date().toISOString(),
-  });
+  };
+  try {
+    return await apiPost(`/checkins/manual`, body);
+  } catch (err) {
+    // OFFLINE FALLBACK (JQ, 2026-07-28 — the client's "must work with no signal"
+    // requirement; see README/INTEGRATION_NOTES.md). If the request never
+    // reached the server, queue the INTENT and resolve as if it succeeded, so
+    // the caller's optimistic UI stands. Replay is safe because `clientEventId`
+    // is generated once, above, and reused on every retry — the UNIQUE
+    // constraint on check_in_logs.client_event_id makes a double-write
+    // impossible. An HTTP error (403/404/…) is a real refusal and still throws.
+    //
+    // ⚠️ This is the ONLY line of JQ's offline work inside Jayden's files; all
+    // the queue logic lives in lib/outbox.js. If this function gets rewritten,
+    // re-adding this try/catch restores offline support — nothing else needed.
+    if (!isOfflineError(err)) throw err;
+    enqueue({
+      kind: "checkins/manual",
+      payload: { ...body, isOfflineOrigin: true },
+      meta: { delegateId, label: meta.name || delegateId },
+    });
+    return { delegateId, status: "ARRIVED", queued: true };
+  }
+}
+
+/* Replay handler for the queue above. Registered here (not in outbox.js) so the
+ * outbox stays free of feature imports — it just calls back into this module. */
+registerSender("checkins/manual", (payload) => apiPost(`/checkins/manual`, payload));
+
+/** Is this delegate's manual check-in still waiting to sync? Lets a panel show
+ *  them as present after a reload, before the queue has drained. */
+export function isCheckinQueued(delegateId) {
+  return pending().some((e) => e.kind === "checkins/manual" && e.meta?.delegateId === delegateId);
+}
+
+/** Delegate ids with a queued manual check-in (for seeding optimistic UI). */
+export function queuedCheckinIds() {
+  return pending().filter((e) => e.kind === "checkins/manual").map((e) => e.meta?.delegateId).filter(Boolean);
 }
 
 /** Undo a manual attendance override — reverts the delegate to whatever

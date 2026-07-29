@@ -71,6 +71,31 @@ These all live in `backend/.env.example` and follow the identical
 | `FRONTEND_URL` | Optional (needed once deployed) | Locks CORS to your deployed frontend URL |
 | `ANTHROPIC_API_KEY` | Optional | AI Insights / chatbot / document-vision fallback when Ollama isn't running |
 | `OLLAMA_MODEL` / `ANTHROPIC_MODEL` | Optional | Override the default model name for either provider |
+| `MAIL_DRY_RUN` | **Set to `true` before any demo** | Escalation emails and biometric-enrolment invites both send for real otherwise (SMTP is live) — this composes and logs them instead |
+
+## The face-recognition model needs NO key and is NOT deployed with the above
+
+Worth stating explicitly, because "AI feature" here means two different things:
+
+- **The text/vision AI** (Insights, MusterChat assistant, document parsing, room
+  assignment) runs **server-side** through Ollama or Anthropic — that's what this
+  whole guide is about, and what `ANTHROPIC_API_KEY` is for.
+- **Face recognition** (check-in scanner + delegate self-enrolment) runs
+  **in the browser, on-device**, via `@vladmandic/human`. There is **no API key,
+  no account, and no cloud call** — so there is nothing to configure on your
+  hosting platform for it.
+
+The one deployment consideration: the model weights (~11MB) are **self-hosted**
+under `frontend/public/models/human/`, copied out of the npm package by
+`frontend/scripts/copy-human-models.mjs`. That script runs from the `prebuild`
+hook, so any host that runs `npm install && npm run build` in `frontend/` gets
+them automatically. **Don't skip or override `prebuild`** — the folder is
+gitignored, so if the copy doesn't run, face scan fails at runtime with a
+model-load error while every other page works fine. Also make sure the host
+serves `/models/**` as static files (the default for Vite's `dist/`).
+
+Face scan also needs **HTTPS** in production — `getUserMedia` is blocked on plain
+HTTP on anything but `localhost`.
 
 ## Why Claude over Gemini for these features
 

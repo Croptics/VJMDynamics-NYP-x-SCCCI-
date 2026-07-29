@@ -27,6 +27,9 @@
  * ============================================================================= */
 
 import { Router } from "express";
+// `../lib/auth.js`, not `../auth.js` (re-applied at integration 2026-07-29):
+// JQ's server.js split moved auth into lib/, so this branch's original path no
+// longer resolves and the whole router would fail to load.
 import { requireAuth, requireKioskOrPermission } from "../lib/auth.js";
 import {
   listDelegates,
@@ -35,14 +38,43 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
+  // Needed by the trip-scoping below — also re-applied at integration.
   resolveTripUuid,
 } from "../data.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
 // Aliased: several handlers below use a local `all` for the delegate list.
 import { all as dbAll, get as dbGet, run as dbRun } from "../db/connection.js";
+import jwt from "jsonwebtoken";
+import { sendMail, enrolInviteEmail, appBaseUrl, isDryRun, mailConfigured } from "../lib/mailer.js";
 
 const router = Router();
+
+/* ---------------------------------------------------------------------------
+ * Enrolment invite links.
+ *
+ * The invite carries a SIGNED, EXPIRING token rather than a bare delegate id,
+ * so a link can't be guessed (or a stranger's id typed in) to enrol as someone
+ * else. It is deliberately NOT an auth token: it carries no `username`, so
+ * accountFromReq() in auth.js resolves no account and requireAuth() rejects it
+ * outright — exactly like the kiosk token pattern. Its only power is to
+ * pre-identify one delegate on the public /enroll page.
+ * ------------------------------------------------------------------------- */
+const ENROL_TOKEN_DAYS = 14;
+const JWT_SECRET = process.env.JWT_SECRET || "mustergo-dev-insecure-default-change-me";
+
+function signEnrolToken(delegateId) {
+  return jwt.sign({ enrol: delegateId }, JWT_SECRET, { expiresIn: `${ENROL_TOKEN_DAYS}d` });
+}
+function verifyEnrolToken(token) {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    return payload && typeof payload.enrol === "string" ? payload.enrol : null;
+  } catch {
+    return null; // expired / tampered / not an invite token
+  }
+}
+const enrolLink = (delegateId) => `${appBaseUrl()}/enroll?t=${encodeURIComponent(signEnrolToken(delegateId))}`;
 
 /* ---------------------------------------------------------------------------
  * PERSISTENT biometric enrollment storage.
@@ -177,11 +209,25 @@ const checksum = (str) => {
  * face recognition, so it trades some strictness for working under the varied
  * light of a real coach bay. Raise it to reduce false matches, lower it if a
  * genuinely-enrolled delegate is being rejected. */
-// Cosine-similarity thresholds. Face uses the 0.85 figure from the design
-// brief; voice is a shade looser because the same speaker's spectrum varies
-// more between utterances than a face does between frames.
-const FACE_MATCH_THRESHOLD = 0.85;
-const VOICE_MATCH_THRESHOLD = 0.8;
+// Cosine-similarity thresholds, set from measured separation rather than
+// picked by feel. Since the descriptor is now computed over the DETECTED FACE
+// (scale/position normalised) instead of a fixed window, genuine re-scans sit
+// very high and impostors well below, so the band moved up:
+//   same person, incl. distance/lighting change + sensor noise -> >= 0.993
+//   different people                                           -> <= 0.911
+// 0.94 sits between them, leaning slightly toward accepting the real person
+// (a false rejection strands a delegate at the coach door; a near-miss is
+// caught by the staff member standing right there). Voice is looser again —
+// a speaker's spectrum varies more between utterances than a face does
+// between frames.
+const FACE_MATCH_THRESHOLD = 0.94;
+const VOICE_MATCH_THRESHOLD = 0.75;
+// Real deep face embeddings (Human faceres, a ~1024-float v3 token) are compared
+// with RAW cosine — no mean-centring — to mirror similarity() in
+// frontend/src/lib/humanFace.js, and clear a lower bar than the hand-crafted
+// v2/v3 descriptors. TUNE ON-DEVICE with real faces: raise it if strangers get
+// accepted, lower it if the right person gets rejected.
+const FACE_V3_THRESHOLD = 0.55;
 
 /** Pull the numeric embedding out of a `<kind>:v<n>:<hash>:<v0,v1,…>` token.
  *  v3 face / v2 voice tokens are comma-separated floats; the older v2 face
@@ -220,15 +266,35 @@ function cosineSimilarity(a, b) {
   return dot / Math.sqrt(na * nb);
 }
 
+/* Deep embeddings (Human faceres, length ~1024) are already discriminative, so
+ * they're compared with RAW cosine — the exact maths as similarity() in
+ * frontend/src/lib/humanFace.js. The legacy hand-crafted descriptors (length
+ * ~40) keep the mean-centred comparison. We tell them apart purely by length. */
+const isDeepEmbedding = (v) => Array.isArray(v) && v.length >= 128;
+function rawCosine(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return -1;
+  const n = Math.min(a.length, b.length);
+  if (n < 8) return -1;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na === 0 || nb === 0 ? -1 : dot / Math.sqrt(na * nb);
+}
+// Version-aware face comparison + threshold. Only treat it as deep when BOTH
+// vectors are deep, so a length mismatch (a legacy enrolment vs a new scan)
+// can't accidentally score high on a truncated overlap.
+const faceSim = (a, b) => (isDeepEmbedding(a) && isDeepEmbedding(b) ? rawCosine(a, b) : cosineSimilarity(a, b));
+const faceThresh = (probe) => (isDeepEmbedding(probe) ? FACE_V3_THRESHOLD : FACE_MATCH_THRESHOLD);
+
 const timeNow = () =>
   new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false });
 
 /* Live coach list (id/label/name/city/capacity/boarded/missing/total) —
  * sourced from JQ's own getDashboard() so dynamically added coaches are
  * always included. Optional tripUuid scopes it to one trip (2026-07-23,
- * additive — omitting it keeps the original single-trip default behavior)
+ * additive — omitting it keeps the original single-trip default behaviour)
  * so the scanner's trip switcher can test check-in against any trip, not
- * just the base one. */
+ * just the base one. Re-applied at integration 2026-07-29: this branch
+ * predated it and dropping it would have broken the scanner's trip switcher. */
 async function liveDashboard(tripUuid = null) {
   return getDashboard(tripUuid);
 }
@@ -239,6 +305,7 @@ async function liveDashboard(tripUuid = null) {
  * unassigned pool size, so the staff app can pick which coach to muster.
  * Optional ?tripId= (a "t-1"/uuid, resolved the same way the dashboard does)
  * scopes the coach list to that trip instead of the default base trip.
+ * Re-applied at integration 2026-07-29 — see liveDashboard() above.
  * ========================================================================== */
 router.get("/api/attendance/coaches", requireAuth(), wrap(async (req, res) => {
   const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
@@ -312,7 +379,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
     return fail(res, 400, "INVALID_SCAN", "Face scan carried no usable data — try again in better light.");
   }
 
-  const threshold = method === "FACE" ? FACE_MATCH_THRESHOLD : VOICE_MATCH_THRESHOLD;
+  const threshold = method === "FACE" ? faceThresh(scanVec) : VOICE_MATCH_THRESHOLD;
 
   // Score every CONSENTED, ENROLLED delegate across the WHOLE roster (not just
   // the coach-scoped pool) so we can both reject a truly unknown face AND still
@@ -323,7 +390,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
       if (!row || consentOf(row) !== "GRANTED") return { d, score: -1 };
       if (method === "FACE") {
         const enrolled = asVector(row.face_vector);
-        return { d, score: enrolled ? cosineSimilarity(scanVec, enrolled) : -1 };
+        return { d, score: enrolled ? faceSim(scanVec, enrolled) : -1 };
       }
       // VOICE — prefer the acoustic embedding; fall back to the typed-
       // passphrase hash for v1 tokens / delegates enrolled without a mic.
@@ -412,19 +479,15 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
  * GET /api/attendance/:trip_id/coach/:coach_id
  * Reverse-Headcount source: live statuses + consent flags for ONE coach,
  * plus trip meta. Coach lookup is dynamic (works for c5/c6/…).
- * trip_id is now resolved and used to scope the coach/delegate lookup
- * (2026-07-23, additive — "t-1" still resolves to the same base trip as
- * before, so single-trip callers are unaffected) instead of being accepted
- * but ignored, so the scanner's trip switcher shows the right roster.
+ * (The base app is single-trip — "t-1" — so trip_id is accepted verbatim.)
  * ========================================================================== */
 router.get("/api/attendance/:trip_id/coach/:coach_id", requireAuth(), wrap(async (req, res) => {
   const { trip_id, coach_id } = req.params;
-  const tripUuid = await resolveTripUuid(trip_id);
-  const dash = await liveDashboard(tripUuid);
+  const dash = await liveDashboard();
   const coach = (dash.coaches || []).find((c) => c.id === coach_id);
   if (!coach) return fail(res, 404, "NOT_FOUND", "Unknown coach.");
 
-  const all = await listDelegates(tripUuid);
+  const all = await listDelegates();
   const bios = await bioMap();
   const onCoach = all.filter((d) => d.coachId === coach_id);
   const payload = onCoach.map((d) => {
@@ -725,36 +788,52 @@ router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) =>
  * behind the per-delegate magic link from their confirmation email.
  * ========================================================================== */
 
-/* GET /api/enroll/lookup?name=...  — find your own delegate record to enroll
- * against. Returns minimal fields only (id, name, coach, what's already
- * enrolled), capped, and requires a real query so it isn't a roster dump. */
+/* GET /api/enroll/lookup — find your delegate record to enroll against.
+ * Returns minimal fields only (id, name, coach, what's already enrolled):
+ *   ?id=<delegateId>  exact record (used by the notification deep-link)
+ *   ?name=<2+ chars>  name filter
+ *   (neither)         the full roster, so the enrol page can show a browsable
+ *                     picker with everyone's coach instead of a blind search. */
 router.get("/api/enroll/lookup", wrap(async (req, res) => {
-  const q = String((req.query && req.query.name) || "").trim().toLowerCase();
-  if (q.length < 2) {
-    return fail(res, 400, "QUERY_TOO_SHORT", "Type at least 2 letters of your name.");
+  // ?t=<signed invite token> — the emailed link. Resolves to exactly one
+  // delegate, and only while the token is still valid.
+  const invite = String((req.query && req.query.t) || "").trim();
+  const id = invite
+    ? (verifyEnrolToken(invite) || "\u0000no-match")
+    : String((req.query && req.query.id) || "").trim();
+  if (invite && id === "\u0000no-match") {
+    return fail(res, 410, "INVITE_EXPIRED", "That enrolment link has expired. Ask staff to send a new one.");
   }
+  const q = String((req.query && req.query.name) || "").trim().toLowerCase();
   const all = await listDelegates();
   const dash = await liveDashboard();
   const bios = await bioMap();
-  const coachName = (id) => {
-    const c = (dash.coaches || []).find((x) => x.id === id);
+  const coachName = (cid) => {
+    const c = (dash.coaches || []).find((x) => x.id === cid);
     return c ? c.name : null;
   };
-  const matches = all
-    .filter((d) => (d.name || "").toLowerCase().includes(q))
-    .slice(0, 8)
-    .map((d) => {
-      const row = bios.get(d.id);
-      return {
-        delegateId: d.id,
-        name: d.name,
-        coachLabel: coachName(d.coachId),
-        enrolled: {
-          face: !!(row && asVector(row.face_vector)),
-          voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
-        },
-      };
-    });
+  const toMatch = (d) => {
+    const row = bios.get(d.id);
+    return {
+      delegateId: d.id,
+      name: d.name,
+      coachId: d.coachId || null,
+      coachLabel: coachName(d.coachId),
+      email: d.email || null, // lets the staff view show who still needs an address
+      enrolled: {
+        face: !!(row && asVector(row.face_vector)),
+        voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
+      },
+    };
+  };
+  let list;
+  if (id) list = all.filter((d) => d.id === id);
+  else if (q.length >= 2) list = all.filter((d) => (d.name || "").toLowerCase().includes(q));
+  else list = all;
+  const matches = list
+    .slice(0, 300)
+    .map(toMatch)
+    .sort((a, b) => (a.coachLabel || "~").localeCompare(b.coachLabel || "~") || a.name.localeCompare(b.name));
   res.json({ matches });
 }));
 
@@ -823,6 +902,101 @@ router.post("/api/enroll", wrap(async (req, res) => {
   });
 }));
 
+/* ============================================================================
+ * ENROLMENT INVITES — email delegates a personal link to enrol their face and
+ * voice before the trip.
+ *
+ * Staff-only (requireAuth): sending mail is an outward-facing side effect, so
+ * it is never reachable from the public enrolment surface. The mailer itself
+ * fails closed — with SMTP unconfigured or MAIL_DRY_RUN=true nothing is
+ * transmitted and the response reports dryRun, so this can be exercised safely
+ * before you ever point it at real delegates.
+ * ========================================================================== */
+
+/* GET /api/enroll/invite/preview?delegateId=… — render the invite WITHOUT
+ * sending, so staff (and tests) can see exactly what a delegate would get. */
+router.get("/api/enroll/invite/preview", requireAuth(), wrap(async (req, res) => {
+  const delegateId = String((req.query && req.query.delegateId) || "").trim();
+  const delegate = delegateId ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+  const trip = await getTrip();
+  const link = enrolLink(delegate.id);
+  const mail = enrolInviteEmail({
+    name: delegate.name, tripName: trip && trip.name, link, expiresInDays: ENROL_TOKEN_DAYS,
+  });
+  res.json({
+    delegateId: delegate.id, name: delegate.name, to: delegate.email || null,
+    dryRun: isDryRun(), mailConfigured: mailConfigured(),
+    subject: mail.subject, html: mail.html, text: mail.text, link,
+  });
+}));
+
+/* POST /api/enroll/invite  { delegateId, email? }
+ * Emails ONE delegate their personal enrolment link. An email passed here is
+ * saved onto the delegate first, so staff can fill in a missing address and
+ * invite in a single action. */
+router.post("/api/enroll/invite", requireAuth(), wrap(async (req, res) => {
+  const { delegateId, email } = req.body || {};
+  const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+
+  let to = (typeof email === "string" ? email : delegate.email || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return fail(res, 400, "NO_EMAIL", "That delegate has no valid email address yet.");
+  }
+  if (typeof email === "string" && email.trim() && email.trim() !== delegate.email) {
+    await updateDelegate(delegate.id, { email: to });
+  }
+
+  const trip = await getTrip();
+  const link = enrolLink(delegate.id);
+  const mail = enrolInviteEmail({
+    name: delegate.name, tripName: trip && trip.name, link, expiresInDays: ENROL_TOKEN_DAYS,
+  });
+  const result = await sendMail({ to, ...mail });
+  res.json({ delegateId: delegate.id, name: delegate.name, ...result });
+}));
+
+/* POST /api/enroll/invite-all  { onlyMissing = true }
+ * Bulk-invites the roster. Defaults to only those NOT yet enrolled, and skips
+ * anyone with no email on file (reported back so staff can fill them in). */
+router.post("/api/enroll/invite-all", requireAuth(), wrap(async (req, res) => {
+  const onlyMissing = (req.body || {}).onlyMissing !== false;
+  const all = await listDelegates();
+  const bios = await bioMap();
+  const trip = await getTrip();
+
+  const enrolled = (d) => {
+    const row = bios.get(d.id);
+    if (!row || consentOf(row) !== "GRANTED") return false;
+    return !!(asVector(row.face_vector) || asVector(row.voice_vector) || row.voice_hash !== null);
+  };
+
+  const targets = all.filter((d) => (onlyMissing ? !enrolled(d) : true));
+  const noEmail = targets.filter((d) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((d.email || "").trim()));
+  const sendable = targets.filter((d) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((d.email || "").trim()));
+
+  const results = [];
+  for (const d of sendable) {
+    const mail = enrolInviteEmail({
+      name: d.name, tripName: trip && trip.name, link: enrolLink(d.id), expiresInDays: ENROL_TOKEN_DAYS,
+    });
+    // Sequential on purpose: a burst of parallel sends is what gets an SMTP
+    // account rate-limited or flagged as spam.
+    results.push({ delegateId: d.id, name: d.name, ...(await sendMail({ to: d.email.trim(), ...mail })) });
+  }
+
+  res.json({
+    dryRun: isDryRun(),
+    considered: targets.length,
+    sent: results.filter((r) => r.sent).length,
+    previewed: results.filter((r) => r.dryRun).length,
+    failed: results.filter((r) => !r.sent && !r.dryRun).length,
+    skippedNoEmail: noEmail.map((d) => ({ delegateId: d.id, name: d.name })),
+    results,
+  });
+}));
+
 /* GET /api/enroll/stats — how much of the roster is enrolled. Powers the
  * progress panel on the enrolment page so staff can see coverage at a glance
  * ("34 of 42 enrolled") instead of checking delegates one by one. */
@@ -865,10 +1039,11 @@ router.post("/api/enroll/verify", wrap(async (req, res) => {
     const enrolled = asVector(row.face_vector);
     if (!vec) return fail(res, 400, "INVALID_FACE_TOKEN", "That sample had no usable data.");
     if (!enrolled) return fail(res, 409, "NOT_ENROLLED", "No face is enrolled for this delegate.");
-    const similarity = cosineSimilarity(vec, enrolled);
+    const similarity = faceSim(vec, enrolled);
+    const thr = faceThresh(vec);
     return res.json({
       modality: "FACE", similarity: +similarity.toFixed(4),
-      threshold: FACE_MATCH_THRESHOLD, match: similarity >= FACE_MATCH_THRESHOLD,
+      threshold: thr, match: similarity >= thr,
     });
   }
   if (voiceToken) {

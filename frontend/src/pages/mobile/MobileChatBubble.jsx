@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { MessageCircle, X } from "lucide-react";
+import { MessageCircle, X, Bot } from "lucide-react";
 import MobileAssistantPage from "./MobileAssistantPage.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -30,9 +30,6 @@ const CORNERS = {
 export default function MobileChatBubble() {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
-  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
-  // not wherever the mouse was released after dragging to select chat text.
-  const downOnBackdrop = useRef(false);
   const [recentlyActive, setRecentlyActive] = useState(false);
   const [corner, setCorner] = useState(() => {
     try { return localStorage.getItem(CORNER_KEY) || "br"; } catch { return "br"; }
@@ -91,12 +88,13 @@ export default function MobileChatBubble() {
   return (
     <>
       {open && (
-        <div className="mg-mobile-chat-overlay"
-          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
-          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setOpen(false); }}>
+        <div className="mg-mobile-chat-overlay" onClick={() => setOpen(false)}>
           <div className="mg-mobile-chat-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Trip assistant")}</div>
+              <div className="row" style={{ gap: 10 }}>
+                <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}><Bot size={15} /></span>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Trip assistant")}</div>
+              </div>
               <button onClick={() => setOpen(false)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
                 <X size={20} />
               </button>
@@ -129,9 +127,9 @@ export default function MobileChatBubble() {
         .mg-mobile-chat-fab {
           position: fixed; z-index: 25;
           width: 50px; height: 50px; border-radius: 50%;
-          background: var(--scc-red); color: #fff; border: none;
+          background: linear-gradient(135deg, var(--scc-red), var(--scc-red-700)); color: #fff; border: none;
           display: flex; align-items: center; justify-content: center;
-          box-shadow: var(--shadow-lg); cursor: pointer;
+          box-shadow: 0 6px 20px color-mix(in srgb, var(--scc-red) 45%, transparent), var(--shadow-lg); cursor: pointer;
           transition: opacity 0.2s ease, transform 0.2s ease;
         }
         .mg-mobile-chat-overlay {

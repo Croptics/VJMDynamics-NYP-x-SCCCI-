@@ -2,9 +2,10 @@
 // Mobile port of the desktop /scanner (UnifiedScannerPage.jsx) — the same
 // three real check-in paths (Face / QR / Manual) that write to the shared
 // delegate list, re-laid-out single-column for a phone held at an entrance.
-// Route: /mobile/scanner (inside MobileLayout — has the mobile topbar + tab
-// bar). Reached primarily from the Login page's "Quick Scanner Access"
-// shortcut (see LoginPage.jsx / App.jsx handleSignIn).
+// Routes: /mobile/scan/qr, /mobile/scan/face, /mobile/scan/manual — one per
+// mode, each passing `lockMode` (inside MobileLayout, so the mobile topbar +
+// tab bar are present). The old combined /mobile/scanner route was removed
+// 2026-07-29 once the three standalone routes covered it.
 //
 // Shares the face vectorizer + validator + error tone with the desktop
 // scanner via lib/faceScan.js (one copy, not three), and mounts Jayden's
@@ -15,15 +16,20 @@
 // webcam).
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ScanFace, QrCode, PencilLine, AlertTriangle, CheckCircle2, RefreshCw, Camera, SwitchCamera,
   Mic, Moon, Sun, Zap, Turtle, Wifi, WifiOff, Undo2, Users, RotateCcw,
+  Flashlight, FlashlightOff, Volume2, VolumeX, ScanEye, Clock, ShieldCheck, History,
 } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api.js";
 import {
   vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken, playErrorTone,
-  faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, FACE_CROP,
+  faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, captureFrame, FACE_CROP,
 } from "../../lib/faceScan.js";
+// Real face recognition (deep embedding + liveness/anti-spoof) — the scan path
+// now uses this so check-in matches the delegate's Human enrolment.
+import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbeddingToken } from "../../lib/humanFace.js";
 
 // Scans average this many vectorized frames, the same way enrollment does, so
 // a single blurred frame can't cause a false rejection.
@@ -31,7 +37,10 @@ const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
-
+// Re-applied at integration 2026-07-29: this branch hardcoded
+// `const TRIP_ID = "t-1"` at module scope, which silently pins the scanner to
+// the base trip and undoes the mobile trip switcher. Read per-render instead so
+// switching trips on Home propagates here.
 import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 // Offline queue — check-ins captured while the phone has no signal (on a
@@ -53,6 +62,9 @@ const isNetworkDown = (e) => !navigator.onLine || (e && e.name === "TypeError" &
 // single longer buzz on failure. No-op where the Vibration API is unsupported.
 const haptic = (pattern) => { try { navigator.vibrate && navigator.vibrate(pattern); } catch { /* unsupported */ } };
 
+// Two-letter monogram for the recent-check-ins avatars.
+const initials = (name) => (name || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+
 const SCAN_CSS = `
 @keyframes mscan-line { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
 .mscan-line {
@@ -61,26 +73,108 @@ const SCAN_CSS = `
   box-shadow: 0 0 16px var(--st-present);
   animation: mscan-line 1.6s ease-in-out infinite;
 }
-.mscan-corner { position: absolute; width: 34px; height: 34px; border: 4px solid var(--st-present); opacity: .9; }
+.mscan-corner { position: absolute; width: 34px; height: 34px; border: 4px solid var(--st-present); opacity: .9; z-index: 2; }
 .mscan-corner.tl { top: 14px; left: 14px; border-right: none; border-bottom: none; border-radius: 10px 0 0 0; }
 .mscan-corner.tr { top: 14px; right: 14px; border-left: none; border-bottom: none; border-radius: 0 10px 0 0; }
 .mscan-corner.bl { bottom: 14px; left: 14px; border-right: none; border-top: none; border-radius: 0 0 0 10px; }
 .mscan-corner.br { bottom: 14px; right: 14px; border-left: none; border-top: none; border-radius: 0 0 10px 0; }
 @keyframes mscan-pop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .mscan-pop { animation: mscan-pop .18s ease-out; }
-@media (prefers-reduced-motion: reduce) { .mscan-line { animation: none; top: 48%; } .mscan-pop { animation: none; } }
+
+/* Brand hero — same red gradient language as the Home "Active trip" card. */
+.mscan-hero {
+  position: relative; overflow: hidden; border-radius: var(--r-lg);
+  padding: 16px 18px; color: #fff;
+  background: linear-gradient(135deg, var(--scc-red) 0%, var(--scc-red-700) 100%);
+  box-shadow: var(--shadow-md);
+}
+.mscan-hero-glow {
+  position: absolute; top: -45%; right: -12%; width: 220px; height: 220px;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(255,255,255,0.24), transparent 70%);
+}
+
+/* Legibility gradient behind the overlaid viewfinder chips. */
+.mscan-vignette {
+  position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.30), transparent 20%, transparent 80%, rgba(0,0,0,0.30));
+}
+
+/* Frosted floating controls over the camera (flip / torch). */
+.mscan-glass {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.35); background: rgba(16,24,40,0.42);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  color: #fff; transition: background .15s, transform .05s;
+}
+.mscan-glass:active { transform: scale(0.92); }
+.mscan-glass.on { background: var(--st-review); border-color: transparent; }
+
+/* iOS-style segmented control for Face / QR / Manual. */
+.mscan-seg {
+  position: relative; display: grid; grid-template-columns: repeat(3, 1fr);
+  padding: 4px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+}
+.mscan-seg-ind {
+  position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / 3);
+  border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-sm);
+  border: 1px solid var(--line);
+  transition: transform .25s cubic-bezier(.4, 0, .2, 1);
+}
+.mscan-seg-btn {
+  position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; padding: 9px 0; border: none; background: none; border-radius: 999px;
+  font-size: 13px; font-weight: 700; color: var(--ink-3); transition: color .2s;
+}
+.mscan-seg-btn.active { color: var(--scc-red); }
+
+/* Hands-free auto-scan toggle row + switch. */
+.mscan-toggle {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 11px 14px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+}
+.mscan-toggle.on { border-color: color-mix(in srgb, var(--st-present) 45%, var(--line)); background: var(--st-present-bg); }
+.mscan-switch { flex-shrink: 0; width: 42px; height: 24px; border-radius: 999px; background: var(--line); position: relative; transition: background .2s; }
+.mscan-switch.on { background: var(--st-present); }
+.mscan-switch > span { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: var(--shadow-sm); transition: transform .2s; }
+.mscan-switch.on > span { transform: translateX(18px); }
+
+/* Compact utility chips (sound / light / slow demo). */
+.mscan-chip {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 6px; border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink-2); font-size: 12.5px; font-weight: 600;
+}
+.mscan-chip.on { border-color: var(--scc-red-tint-2); background: var(--scc-red-tint); color: var(--scc-red); }
+
+/* Recent check-in pills (horizontal scroller). */
+.mscan-recent {
+  flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px 8px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mscan-line { animation: none; top: 48%; } .mscan-pop { animation: none; }
+  .mscan-seg-ind, .mscan-switch, .mscan-switch > span, .mscan-glass { transition: none; }
+}
 `;
 
 /**
- * `lockMode` ("face" | "qr") pins this page to a single scanner and hides the
- * mode switcher — that's what lets Face and QR live as their own bottom-nav
- * tabs instead of being two states of one screen. Left undefined (the legacy
- * /mobile/scanner route) the page keeps its original Face/QR/Manual toggle.
+ * `lockMode` ("face" | "qr" | "manual") pins this page to a single scanner and
+ * swaps the in-page mode toggle for links to the OTHER two modes — that's what
+ * lets each scanner be its own destination rather than three states of one
+ * screen. Every live route now passes it (see App.jsx), so the undefined case
+ * — the original combined toggle — is no longer reachable; the branches are
+ * left in place because they're harmless and re-adding a combined route would
+ * otherwise mean rebuilding them.
  */
 export default function MobileScannerPage({ lockMode }) {
   const { t } = useLang();
-  // Read fresh on every mount so this reflects whichever trip is currently
-  // picked on Home's trip switcher, not a stale module-load-time snapshot.
+  const navigate = useNavigate();
+  // Per-render so the Home trip switcher propagates (see the import note above).
   const TRIP_ID = getMobileTripId();
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
@@ -112,8 +206,6 @@ export default function MobileScannerPage({ lockMode }) {
   // Individual + group reset (multi-leg headcount).
   const [resetBusy, setResetBusy] = useState(false);
   const [confirmCoachReset, setConfirmCoachReset] = useState(false);
-  // Only dismiss if the WHOLE click gesture started on the backdrop itself.
-  const downOnBackdrop = useRef(false);
   const [simulateSlow, setSimulateSlow] = useState(false); // demo the >1s SLA breach on demand
   const [passphrase, setPassphrase] = useState("");
   const [voiceListening, setVoiceListening] = useState(false);
@@ -124,8 +216,17 @@ export default function MobileScannerPage({ lockMode }) {
   const [micLevel, setMicLevel] = useState(0); // live input level while recording
   const [scanAlign, setScanAlign] = useState({ ready: false, hint: "" }); // live circle feedback
 
+  // Scanner ergonomics — all client-side, no backend changes.
+  const [soundOn, setSoundOn] = useState(true);          // audible chime on a confirmed match
+  const [autoScan, setAutoScan] = useState(false);       // hands-free: fire the moment a face aligns
+  const [torchOn, setTorchOn] = useState(false);         // rear-camera flashlight (night entrances)
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [sessionScans, setSessionScans] = useState([]);  // this shift's confirmed check-ins (most recent first)
+
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const autoScanRef = useRef(0);   // timestamp of the last auto-fired scan (cooldown)
+  const faceBusyRef = useRef(false); // serializes Human inference (live gate vs a scan)
   const recognitionRef = useRef(null);
   const voiceTimeoutRef = useRef(null);
 
@@ -155,36 +256,6 @@ export default function MobileScannerPage({ lockMode }) {
 
   useEffect(() => { fetchCoaches(); }, [fetchCoaches]);
   useEffect(() => { fetchCoach(coachId); }, [coachId, fetchCoach]);
-
-  // Multi-day / multi-checkpoint attendance (2026-07-22) — same optional
-  // second write as the desktop scanner (UnifiedScannerPage.jsx). Face/Voice
-  // only for now — QR and Manual go through shared components that don't
-  // report back which delegate matched.
-  const [checkpoints, setCheckpoints] = useState([]);
-  const [activeCheckpointId, setActiveCheckpointId] = useState("");
-  const [checkpointStats, setCheckpointStats] = useState(null);
-
-  const fetchCheckpoints = useCallback(async () => {
-    try {
-      const data = await apiGet(`/trips/${TRIP_ID}/checkpoints`);
-      const flat = [];
-      for (const day of data.days || []) {
-        for (const cp of day.checkpoints || []) flat.push({ ...cp, dayNumber: day.dayNumber });
-      }
-      setCheckpoints(flat);
-      // Auto-focus on whatever checkpoint is relevant right now — first
-      // load only, never overrides a staff member's own manual choice.
-      setActiveCheckpointId((prev) => prev || flat.find((c) => c.timeState === "current")?.id || "");
-    } catch { /* selector just stays empty */ }
-  }, []);
-  useEffect(() => { fetchCheckpoints(); }, [fetchCheckpoints]);
-
-  const fetchCheckpointStats = useCallback(async (checkpointId) => {
-    if (!checkpointId) { setCheckpointStats(null); return; }
-    try { setCheckpointStats((await apiGet(`/checkpoints/${checkpointId}/checkins`)).stats); }
-    catch { setCheckpointStats(null); }
-  }, []);
-  useEffect(() => { fetchCheckpointStats(activeCheckpointId); }, [activeCheckpointId, fetchCheckpointStats]);
 
   /* Drain the offline queue: replay each stashed scan in order. A server
    * rejection (has .status/.code — e.g. that delegate is already boarded)
@@ -324,6 +395,13 @@ export default function MobileScannerPage({ lockMode }) {
         });
         if (cancelled) { stream.getTracks().forEach((tr) => tr.stop()); return; }
         streamRef.current = stream;
+        // Detect a controllable torch (rear cameras on most phones) so the
+        // flashlight button only appears where it can actually do something.
+        try {
+          const track = stream.getVideoTracks()[0];
+          const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+          setTorchSupported(!!caps.torch);
+        } catch { setTorchSupported(false); }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
@@ -336,6 +414,8 @@ export default function MobileScannerPage({ lockMode }) {
       if (streamRef.current) streamRef.current.getTracks().forEach((tr) => tr.stop());
       streamRef.current = null;
       if (videoRef.current) videoRef.current.srcObject = null;
+      setTorchSupported(false);
+      setTorchOn(false);
     }
 
     if (wantCamera) start(); else stop();
@@ -382,23 +462,51 @@ export default function MobileScannerPage({ lockMode }) {
     return () => { clearInterval(id); meter.width = 0; meter.height = 0; setLuxEstimate(null); };
   }, [scanMode, lowLight]);
 
-  /* Live alignment feedback while the face camera is up, so staff can see the
-   * circle go green before tapping Scan instead of guessing. Same gate the
-   * scan itself uses. */
+  /* Warm the face model as soon as the face scanner opens, so the first scan
+   * isn't stalled behind a ~10MB model load. */
+  useEffect(() => {
+    if (scanMode === "face" && !lowLight) loadHuman().catch(() => {});
+  }, [scanMode, lowLight]);
+
+  /* Live gate feedback (real Human detection) while the face camera is up, so
+   * staff see the circle go green — including liveness/anti-spoof — before
+   * tapping Scan. A recursive loop with a busy guard avoids overlapping the
+   * ~200ms inferences and pauses itself during an actual scan. */
   useEffect(() => {
     if (!(scanMode === "face" && !lowLight) || camError) { setScanAlign({ ready: false, hint: "" }); return undefined; }
-    const canvas = document.createElement("canvas");
-    canvas.width = 160; canvas.height = 120;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    let cancelled = false;
+    async function loop() {
+      if (cancelled) return;
+      if (!faceBusyRef.current && !scanning && videoRef.current && videoRef.current.videoWidth) {
+        faceBusyRef.current = true;
+        try {
+          const det = await detectFace(videoRef.current);
+          const g = faceGate(det);
+          if (!cancelled) setScanAlign({ ready: g.ready, hint: g.hint });
+        } finally { faceBusyRef.current = false; }
+      }
+      if (!cancelled) setTimeout(loop, 400);
+    }
+    loop();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanMode, lowLight, camError, resetTick, scanning]);
+
+  /* Hands-free auto-scan: when enabled, fire a scan the instant the face is
+   * aligned in the circle, with a cooldown so one delegate isn't scanned over
+   * and over. Lets a phone sit in a stand at the coach door and check people in
+   * as they step up — no tap required. Same alignment gate as a manual scan. */
+  useEffect(() => {
+    if (!(autoScan && scanMode === "face" && !lowLight) || camError) return undefined;
     const id = setInterval(() => {
-      const video = videoRef.current;
-      if (!video || !video.videoWidth) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const a = faceAlignment(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      setScanAlign({ ready: a.ready, hint: a.hint });
-    }, 350);
-    return () => { clearInterval(id); canvas.width = 0; canvas.height = 0; };
-  }, [scanMode, lowLight, camError, resetTick]);
+      if (scanning || scanResult || !scanAlign.ready) return;
+      const now = Date.now();
+      if (now - autoScanRef.current < 2500) return; // cooldown between people
+      autoScanRef.current = now;
+      handleFaceScan();
+    }, 500);
+    return () => clearInterval(id);
+  }, [autoScan, scanMode, lowLight, camError, scanning, scanResult, scanAlign.ready]);
 
   function resetScanner() {
     setScanError("");
@@ -407,6 +515,54 @@ export default function MobileScannerPage({ lockMode }) {
     setResetTick((n) => n + 1);
     fetchCoaches();
     fetchCoach(coachId);
+  }
+
+  // Pleasant rising two-note chime on a confirmed match — a second confirmation
+  // channel alongside the haptic, so staff can keep their eyes on the queue.
+  function successTone() {
+    if (!soundOn) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const t0 = ctx.currentTime;
+      [[784, 0], [1046.5, 0.08]].forEach(([freq, at]) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, t0 + at);
+        gain.gain.exponentialRampToValueAtTime(0.18, t0 + at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.2);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(t0 + at); osc.stop(t0 + at + 0.22);
+      });
+      setTimeout(() => ctx.close().catch(() => {}), 600);
+    } catch { /* audio blocked — the haptic already fired */ }
+  }
+
+  // Rear-camera flashlight for dark entrances. Feature-detected in the camera
+  // effect; applyConstraints is the only cross-browser way to drive it.
+  async function toggleTorch() {
+    const track = streamRef.current && streamRef.current.getVideoTracks
+      ? streamRef.current.getVideoTracks()[0] : null;
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: next }] });
+      setTorchOn(next);
+    } catch {
+      setTorchSupported(false);
+    }
+  }
+
+  // Undo the most recent confirmed check-in (flip them back to Missing) —
+  // e.g. a mis-scan, or the wrong delegate stepped forward.
+  async function undoLastScan() {
+    const last = sessionScans[0];
+    if (!last || !last.delegateId) return;
+    await resetDelegate(last.delegateId);
+    setSessionScans((prev) => prev.slice(1));
   }
 
   // Stash a scan for later replay and surface a brief confirmation. Used both
@@ -453,16 +609,16 @@ export default function MobileScannerPage({ lockMode }) {
         return;
       }
       haptic([18, 40, 18]); // confirmed-match double-tick
-      setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s` });
+      successTone();        // audible confirmation for eyes-on-the-queue scanning
+      const time = `${(elapsed / 1000).toFixed(1)}s`;
+      setScanResult({ name: res.name, time });
+      // Session tally + recents strip (client-side only — this shift's log).
+      setSessionScans((prev) => [
+        { delegateId: res.delegateId, name: res.name, time, at: Date.now() },
+        ...prev,
+      ].slice(0, 12));
       fetchCoaches();
       fetchCoach(coachId);
-      // Second, separate write — only when a checkpoint is actively selected.
-      // Never blocks the actual check-in above; failures here are silent.
-      if (activeCheckpointId) {
-        apiPost(`/checkpoints/${activeCheckpointId}/checkins`, {
-          delegateId: res.delegateId, status: "ARRIVED", method: res.method,
-        }).then(() => fetchCheckpointStats(activeCheckpointId)).catch(() => {});
-      }
       setTimeout(() => setScanResult(null), 3500);
     } catch (e) {
       // Connection dropped mid-send: queue it instead of reporting a failure.
@@ -517,44 +673,38 @@ export default function MobileScannerPage({ lockMode }) {
     }
   }
 
-  /* Gated scan: the delegate's face must be properly aligned in the circle —
-   * the same gate enrollment uses — before anything is sent. Then SCAN_SAMPLES
-   * frames are vectorized and averaged, matching how the enrolled template was
-   * built, so the two are directly comparable. */
+  /* Gated scan (real recognition): the delegate's face must pass the same
+   * liveness + anti-spoof + quality gate enrolment uses before anything is
+   * sent. Then SCAN_SAMPLES deep embeddings are captured and averaged, exactly
+   * like the enrolled template, so the backend can match them directly. */
   async function handleFaceScan() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) {
       setScanError("Camera not ready yet — wait a moment and try again.");
       return;
     }
-    const canvas = document.createElement("canvas");
-    canvas.width = 160; canvas.height = 120;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const grab = () => { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); return ctx.getImageData(0, 0, canvas.width, canvas.height); };
 
-    // 1) Alignment gate — refuse with a specific reason instead of sending a
-    // badly framed face that would be rejected by the matcher anyway.
-    const a = faceAlignment(grab());
-    if (!a.ready) {
-      setScanError(a.hint);
-      canvas.width = 0; canvas.height = 0;
-      return;
-    }
+    // 1) Live gate — refuse a spoof / poorly-framed / non-live face up front
+    // with a specific reason, rather than sending something the matcher rejects.
+    const first = await detectFace(video);
+    const g = faceGate(first);
+    if (!g.ready) { setScanError(g.hint); return; }
 
-    // 2) Multi-sample vectorization
+    // 2) Multi-sample real embeddings
     setScanning(true);
+    faceBusyRef.current = true;
     const samples = [];
     for (let i = 0; i < SCAN_SAMPLES; i += 1) {
-      const vec = parseFaceVector(vectorizeFaceLandmarks(grab()));
-      if (vec) samples.push(vec);
+      const det = await detectFace(video);
+      if (det.ok && det.embedding && faceGate(det).ready) samples.push(det.embedding);
       if (i < SCAN_SAMPLES - 1) await new Promise((r) => setTimeout(r, 120));
     }
-    canvas.width = 0; canvas.height = 0;
+    faceBusyRef.current = false;
     setScanning(false);
 
-    const token = samples.length ? buildFaceToken(averageFaceVectors(samples)) : null;
-    if (!token || !isValidBiometricToken(token)) {
-      setScanError("Camera captured an invalid or placeholder token — try again.");
+    const token = samples.length ? buildEmbeddingToken(averageEmbeddings(samples)) : null;
+    if (!token) {
+      setScanError("Couldn't read a clear face — try again in better light.");
       return;
     }
     submitScan(token);
@@ -614,50 +764,71 @@ export default function MobileScannerPage({ lockMode }) {
   // and PRESENT (legacy) count as boarded, matching the backend.
   const boardedList = (coach?.delegates || []).filter((d) => d.status === "PRESENT" || d.status === "ARRIVED");
 
+  const modeIndex = ["face", "qr", "manual"].indexOf(scanMode);
+  const sessionCount = sessionScans.length;
+  const avgSeconds = sessionCount
+    ? sessionScans.reduce((s, r) => s + (parseFloat(r.time) || 0), 0) / sessionCount
+    : 0;
+
   const S = {
-    viewport: {
-      position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
-      background: "#000", width: "100%", aspectRatio: "3 / 4", maxHeight: "58vh",
-    },
+    // Manual check-in is a roster list, not a camera feed — give it a normal
+    // surface that grows with its content instead of a black square crop.
+    viewport: scanMode === "manual"
+      ? {
+          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+          background: "var(--surface)", border: "1px solid var(--line)",
+          width: "100%", boxShadow: "var(--shadow-sm)",
+        }
+      : {
+          position: "relative", borderRadius: "var(--r-lg)", overflow: "hidden",
+          background: "#000", width: "100%", aspectRatio: "1", maxHeight: "58vh",
+          boxShadow: "var(--shadow-md)",
+        },
     overlay: {
       position: "absolute", inset: 0, display: "flex", alignItems: "center",
-      justifyContent: "center", padding: 20, textAlign: "center", flexDirection: "column", gap: 10,
+      justifyContent: "center", padding: 20, textAlign: "center", flexDirection: "column", gap: 10, zIndex: 4,
     },
-    modeBtn: (active) => ({
-      flex: 1, padding: "11px 0", borderRadius: 999, fontWeight: 700, fontSize: 13,
-      border: "1px solid var(--line)", display: "flex", alignItems: "center",
-      justifyContent: "center", gap: 6,
-      background: active ? "var(--scc-red-tint)" : "var(--surface)",
-      color: active ? "var(--scc-red)" : "var(--ink-2)",
-    }),
   };
 
   return (
     <div>
       <style>{SCAN_CSS}</style>
-      <div className="row between" style={{ alignItems: "flex-start", marginBottom: 12 }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            {t("Entrance scanner")}
+
+      {/* Brand hero with a live session tally */}
+      <div className="mscan-hero">
+        <div className="mscan-hero-glow" />
+        <div className="row between" style={{ alignItems: "flex-start", position: "relative" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", opacity: 0.85 }}>
+              {t("Entrance scanner")}
+            </div>
+            <h1 style={{ fontFamily: "var(--font-display)", fontSize: 24, margin: "3px 0 0", color: "#fff", lineHeight: 1.15 }}>
+              {lockMode === "face" ? t("Face scan")
+                : lockMode === "qr" ? t("QR scan")
+                : lockMode === "manual" ? t("Manual check-in")
+                : t("Face + QR scan")}
+            </h1>
           </div>
-          <h1 style={{ fontSize: 22, margin: "4px 0 0" }}>
-            {lockMode === "face" ? t("Face scan") : lockMode === "qr" ? t("QR scan") : t("Face + QR scan")}
-          </h1>
-          <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
+          <div style={{ flexShrink: 0, textAlign: "center", background: "rgba(255,255,255,0.16)", borderRadius: 14, padding: "8px 14px", minWidth: 76 }}>
+            <div className="mono" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1 }}>{sessionCount}</div>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", opacity: 0.85, marginTop: 3 }}>
+              {t("checked in")}
+            </div>
+          </div>
         </div>
-        <div className="row" style={{ gap: 6 }}>
-          {(scanMode === "face" || scanMode === "qr") && !lowLight && (
-            <button
-              className="btn btn-ghost" onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
-              aria-label="Flip camera" title="Flip camera" style={{ padding: 8 }}
-            >
-              <SwitchCamera size={16} />
-            </button>
-          )}
-          <button className="btn btn-ghost" onClick={resetScanner} aria-label={t("Reset scanner")} title={t("Reset scanner")} style={{ padding: 8 }}>
-            <RefreshCw size={16} />
-          </button>
-        </div>
+        {sessionCount > 0 && (
+          <div className="row" style={{ gap: 6, marginTop: 10, position: "relative", fontSize: 12, fontWeight: 600, opacity: 0.92 }}>
+            <Clock size={13} /> {t("Avg match")} {avgSeconds.toFixed(1)}s · {t("this session")}
+          </div>
+        )}
+      </div>
+
+      {/* Status + reset toolbar */}
+      <div className="row between" style={{ marginTop: 12, marginBottom: 12 }}>
+        <SyncBadge online={online} pending={pending.length} onFlush={flushQueue} t={t} />
+        <button className="btn btn-ghost" onClick={resetScanner} aria-label={t("Reset scanner")} title={t("Reset scanner")} style={{ padding: "8px 12px", fontSize: 12.5 }}>
+          <RefreshCw size={15} /> {t("Reset")}
+        </button>
       </div>
 
       {loadErr && (
@@ -669,6 +840,9 @@ export default function MobileScannerPage({ lockMode }) {
       )}
 
       {/* Coach picker */}
+      <label style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink-3)", display: "block", marginBottom: 6 }}>
+        {t("Checking in to")}
+      </label>
       <select
         className="select"
         value={coachId || ""}
@@ -683,38 +857,6 @@ export default function MobileScannerPage({ lockMode }) {
         ))}
       </select>
 
-      {/* Checkpoint Selector (2026-07-22) — optional, scanning works fine
-          with none picked; this just adds a checkpoint-scoped attendance
-          record per scan. See submitScan() for the second write. */}
-      {checkpoints.length > 0 && (
-        <>
-          <select
-            className="select"
-            value={activeCheckpointId}
-            onChange={(e) => setActiveCheckpointId(e.target.value)}
-            style={{ width: "100%", marginBottom: 8 }}
-          >
-            <option value="">{t("Not scanning for a checkpoint")}</option>
-            {checkpoints.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.timeState === "current" ? "→ " : ""}
-                {t("Day")} {c.dayNumber} · {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{c.label}
-                {c.status === "delayed" && c.delayMinutes > 0 ? ` (+${c.delayMinutes}m)` : ""}
-                {c.status === "moved" ? ` (${t("Moved")})` : ""}
-                {c.timeState === "past" ? ` (${t("Done")})` : c.timeState === "current" ? ` (${t("Now")})` : ""}
-              </option>
-            ))}
-          </select>
-          {activeCheckpointId && checkpointStats && (
-            <div className="row" style={{ gap: 8, marginBottom: 12, fontSize: 12 }}>
-              <span className="badge badge-present">{checkpointStats.arrived} {t("arrived")}</span>
-              <span className="badge badge-late">{checkpointStats.late} {t("late")}</span>
-              <span className="badge badge-missing">{checkpointStats.missing} {t("missing")}</span>
-            </div>
-          )}
-        </>
-      )}
-
       {/* Scanner viewport */}
       <div style={S.viewport}>
         {scanMode === "face" && !lowLight && (
@@ -723,8 +865,28 @@ export default function MobileScannerPage({ lockMode }) {
               ref={videoRef} autoPlay playsInline muted
               style={{ width: "100%", height: "100%", objectFit: "cover", transform: facing === "user" ? "scaleX(-1)" : "none" }}
             />
+            <div className="mscan-vignette" />
             <span className="mscan-corner tl" /><span className="mscan-corner tr" />
             <span className="mscan-corner bl" /><span className="mscan-corner br" />
+            {/* Floating glass controls — flip camera + torch. */}
+            {!camError && (
+              <div style={{ position: "absolute", top: 12, right: 12, display: "flex", flexDirection: "column", gap: 8, zIndex: 3 }}>
+                <button
+                  className="mscan-glass" onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
+                  aria-label="Flip camera" title="Flip camera"
+                >
+                  <SwitchCamera size={17} />
+                </button>
+                {torchSupported && (
+                  <button
+                    className={`mscan-glass ${torchOn ? "on" : ""}`} onClick={toggleTorch}
+                    aria-label={torchOn ? "Torch off" : "Torch on"} title={torchOn ? "Torch off" : "Torch on"}
+                  >
+                    {torchOn ? <Flashlight size={17} /> : <FlashlightOff size={17} />}
+                  </button>
+                )}
+              </div>
+            )}
             {/* Alignment circle — marks the exact region the vectorizer reads.
                 The delegate's face must sit here for the scan to match the
                 sample they enrolled with. */}
@@ -817,14 +979,25 @@ export default function MobileScannerPage({ lockMode }) {
         )}
 
         {scanMode === "qr" && (
-          <QRScannerPanel
-            key={resetTick}
-            tripId={TRIP_ID}
-            coachId={coachId}
-            coachLabel={coach?.coachLabel}
-            facingMode={facing}
-            onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
-          />
+          <>
+            <QRScannerPanel
+              key={resetTick}
+              tripId={TRIP_ID}
+              coachId={coachId}
+              coachLabel={coach?.coachLabel}
+              facingMode={facing}
+              onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
+            />
+            {!lowLight && (
+              <button
+                className="mscan-glass" onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
+                aria-label="Flip camera" title="Flip camera"
+                style={{ position: "absolute", top: 12, right: 12, zIndex: 3 }}
+              >
+                <SwitchCamera size={17} />
+              </button>
+            )}
+          </>
         )}
 
         {scanMode === "manual" && (
@@ -853,16 +1026,40 @@ export default function MobileScannerPage({ lockMode }) {
         )}
       </div>
 
-      {/* Mode toggle — hidden when the route pins this page to one scanner
-          (the separate Face / QR bottom-nav tabs). */}
-      {!lockMode && (
+      {/* Locked to one mode (the Face / QR / Manual routes) — offer the other
+          two as a compact switcher, so Manual check-in is always one tap away
+          when a scan won't cooperate. */}
+      {lockMode && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          {[
+            { key: "face", label: "Face", Icon: ScanFace, to: "/mobile/scan/face" },
+            { key: "qr", label: "QR", Icon: QrCode, to: "/mobile/scan/qr" },
+            { key: "manual", label: "Manual", Icon: PencilLine, to: "/mobile/scan/manual" },
+          ]
+            .filter((m) => m.key !== lockMode)
+            .map(({ key, label, Icon, to }) => (
+              <button key={key} className="mscan-chip" onClick={() => navigate(to)}>
+                <Icon size={14} /> {t(label)}
+              </button>
+            ))}
+        </div>
+      )}
+
+      {/* Mode segmented control — hidden when the route pins this page to one
+          scanner (the separate Face / QR bottom-nav tabs). */}
+      {!lockMode && (
+        <div className="mscan-seg" style={{ marginTop: 12 }}>
+          <span className="mscan-seg-ind" style={{ transform: `translateX(${modeIndex * 100}%)` }} />
           {[
             { key: "face", label: "Face", Icon: ScanFace },
             { key: "qr", label: "QR", Icon: QrCode },
             { key: "manual", label: "Manual", Icon: PencilLine },
           ].map(({ key, label, Icon }) => (
-            <button key={key} style={S.modeBtn(scanMode === key)} onClick={() => { setScanMode(key); setScanError(""); }}>
+            <button
+              key={key}
+              className={`mscan-seg-btn ${scanMode === key ? "active" : ""}`}
+              onClick={() => { setScanMode(key); setScanError(""); }}
+            >
               <Icon size={16} /> {t(label)}
             </button>
           ))}
@@ -870,12 +1067,30 @@ export default function MobileScannerPage({ lockMode }) {
       )}
 
       {scanMode === "face" && !lowLight && !camError && (
-        <button
-          className="btn btn-primary btn-block" style={{ marginTop: 12, padding: "13px 0", fontSize: 15 }}
-          onClick={handleFaceScan} disabled={scanning}
-        >
-          <ScanFace size={18} /> {scanning ? t("Processing…") : t("Scan face")}
-        </button>
+        <>
+          <button
+            className="btn btn-primary btn-block" style={{ marginTop: 12, padding: "14px 0", fontSize: 15 }}
+            onClick={handleFaceScan} disabled={scanning}
+          >
+            <ScanFace size={18} /> {scanning ? t("Processing…") : t("Scan face")}
+          </button>
+          {/* Hands-free auto-scan — fires the instant a face aligns. */}
+          <button
+            className={`mscan-toggle ${autoScan ? "on" : ""}`} onClick={() => setAutoScan((v) => !v)}
+            style={{ marginTop: 8 }} aria-pressed={autoScan}
+          >
+            <span className="row" style={{ gap: 10 }}>
+              <ScanEye size={17} style={{ color: autoScan ? "var(--st-present)" : "var(--ink-3)", flexShrink: 0 }} />
+              <span style={{ display: "flex", flexDirection: "column", textAlign: "left" }}>
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{t("Hands-free auto-scan")}</span>
+                <span style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                  {autoScan ? t("Fires the moment a face aligns") : t("Scan without pressing the button")}
+                </span>
+              </span>
+            </span>
+            <span className={`mscan-switch ${autoScan ? "on" : ""}`}><span /></span>
+          </button>
+        </>
       )}
 
       {scanError && (
@@ -900,37 +1115,84 @@ export default function MobileScannerPage({ lockMode }) {
         </div>
       )}
 
-      {/* Simulated sensors — for demoing the fairness fallback + the 1s SLA.
-          Shown regardless of scanMode (matches UnifiedScannerPage.jsx) —
-          switching to QR/Manual no longer hides these controls. */}
+      {/* Sound + simulated sensors — the confirmation chime, plus the demo
+          toggles for the fairness fallback and the 1s SLA. Shown regardless of
+          scanMode (matches UnifiedScannerPage.jsx). */}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button
-            className="btn btn-ghost" style={{ flex: 1, fontSize: 12.5, padding: "8px 6px" }}
+            className={`mscan-chip ${soundOn ? "on" : ""}`}
+            onClick={() => setSoundOn((v) => !v)}
+            aria-pressed={soundOn} title={soundOn ? "Mute confirmation chime" : "Play confirmation chime"}
+          >
+            {soundOn ? <Volume2 size={14} /> : <VolumeX size={14} />}
+            {soundOn ? t("Sound on") : t("Sound off")}
+          </button>
+          <button
+            className={`mscan-chip ${lowLight ? "on" : ""}`}
             onClick={() => { setAutoLowLight(false); setLowLight((v) => !v); setScanError(""); }}
           >
             {lowLight ? <Sun size={14} /> : <Moon size={14} />}
-            {lowLight ? "Normal light" : "Simulate low light"}
+            {lowLight ? t("Normal light") : t("Low light")}
           </button>
           <button
-            className="btn btn-ghost" style={{ flex: 1, fontSize: 12.5, padding: "8px 6px" }}
+            className={`mscan-chip ${simulateSlow ? "on" : ""}`}
             onClick={() => setSimulateSlow((v) => !v)}
           >
             {simulateSlow ? <Zap size={14} /> : <Turtle size={14} />}
-            {simulateSlow ? "Slow demo: ON" : "Slow demo: OFF"}
+            {simulateSlow ? t("Slow: on") : t("Slow demo")}
           </button>
       </div>
 
+      {/* Recent check-ins — this shift's confirmed matches, newest first, with
+          a one-tap undo of the most recent (client-side session log). */}
+      {sessionScans.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div className="row between" style={{ marginBottom: 8 }}>
+            <span className="row" style={{ gap: 6, fontSize: 12, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+              <History size={13} /> {t("Recent check-ins")}
+            </span>
+            {sessionScans[0]?.delegateId && (
+              <button
+                className="btn btn-ghost" style={{ padding: "5px 10px", fontSize: 12, color: "var(--scc-red)" }}
+                onClick={undoLastScan} disabled={resetBusy}
+              >
+                <Undo2 size={13} /> {t("Undo last")}
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4 }}>
+            {sessionScans.slice(0, 8).map((r) => (
+              <div key={`${r.delegateId}-${r.at}`} className="mscan-recent">
+                <span className="avatar" style={{ background: "var(--st-present-bg)", color: "var(--st-present)" }}>
+                  {initials(r.name)}
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 116 }}>
+                    {r.name}
+                  </div>
+                  <div className="muted" style={{ fontSize: 11 }}>{r.time}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Live count + boarded roster for the selected coach, with reset controls */}
       {coach && (
-        <div className="mobile-card" style={{ marginTop: 14, padding: 14 }}>
+        <div className="mobile-card" style={{ marginTop: 16, padding: 16 }}>
           <div className="row between" style={{ alignItems: "baseline" }}>
-            <span style={{ fontWeight: 600, fontSize: 13.5 }}>{coach.coachLabel}</span>
+            <span style={{ fontWeight: 700, fontSize: 14 }}>{coach.coachLabel}</span>
             <span className="mono" style={{ fontSize: 12.5, color: "var(--ink-3)" }}>
               {coach.boarded}/{coach.expected} {t("boarded")} · {coach.missing} {t("missing")}
             </span>
           </div>
-          <div style={{ height: 7, background: "var(--line)", borderRadius: 4, marginTop: 10, overflow: "hidden" }}>
-            <div style={{ height: "100%", borderRadius: 4, background: "var(--st-present)", width: `${boardedPct}%`, transition: "width .4s ease" }} />
+          <div className="row between" style={{ marginTop: 12, marginBottom: 6 }}>
+            <span className="muted" style={{ fontSize: 12 }}>{t("Boarding progress")}</span>
+            <span className="mono" style={{ fontSize: 13, fontWeight: 800, color: "var(--st-present)" }}>{boardedPct}%</span>
+          </div>
+          <div style={{ height: 9, background: "var(--line)", borderRadius: 999, overflow: "hidden" }}>
+            <div style={{ height: "100%", borderRadius: 999, background: "linear-gradient(90deg, var(--st-present), #34d399)", width: `${boardedPct}%`, transition: "width .4s ease" }} />
           </div>
 
           {/* Boarded roster — each row can be individually reset to Missing
@@ -989,8 +1251,7 @@ export default function MobileScannerPage({ lockMode }) {
       {confirmCoachReset && (
         <div
           style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
-          onClick={(e) => { if (!resetBusy && downOnBackdrop.current && e.target === e.currentTarget) setConfirmCoachReset(false); }}
+          onClick={() => !resetBusy && setConfirmCoachReset(false)}
         >
           <div
             className="card"
@@ -1016,9 +1277,11 @@ export default function MobileScannerPage({ lockMode }) {
         </div>
       )}
 
-      <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 12, lineHeight: 1.5 }}>
-        Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous
-        token is derived. No images stored or transmitted — PDPA compliant.
+      <div className="row" style={{ gap: 8, alignItems: "flex-start", marginTop: 16, padding: "0 2px" }}>
+        <ShieldCheck size={15} style={{ color: "var(--st-present)", flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.5 }}>
+          {t("Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.")}
+        </div>
       </div>
     </div>
   );

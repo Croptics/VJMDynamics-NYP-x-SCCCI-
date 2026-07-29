@@ -12,7 +12,11 @@
  */
 import { DEFAULT_PERMISSIONS, PERM_KEYS } from "../../../permissions.js";
 
-const BASE_URL = import.meta.env.VITE_API_URL || "/api";
+// `?.` so this module can also be imported outside Vite (Node unit tests —
+// tests/jq/*), where `import.meta.env` doesn't exist at all and a plain
+// property read throws at import time. Vite still statically replaces
+// `import.meta.env` in the browser build, so behaviour there is unchanged.
+const BASE_URL = import.meta.env?.VITE_API_URL || "/api";
 const TOKEN_KEY = "mg_token";
 const USER_KEY = "mg_user";
 

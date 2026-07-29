@@ -31,6 +31,8 @@ import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
 import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
+import MobileAnnouncementsPage from "./pages/mobile/MobileAnnouncementsPage.jsx";
+import MobileEnrolmentPage from "./pages/mobile/MobileEnrolmentPage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
@@ -66,7 +68,10 @@ const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile", perm: "viewMobileHome" },
   { path: "/mobile/attendance", perm: "viewMobileAttendance" },
   { path: "/mobile/trips", perm: "viewMobileTrips" },
-  { path: "/mobile/scanner", perm: "viewMobileScanner" },
+  // Was "/mobile/scanner" until 2026-07-29; that route no longer exists, so the
+  // fallback points at the QR scanner (the primary/centre tab) instead — an
+  // account whose only permission is viewMobileScanner still lands somewhere real.
+  { path: "/mobile/scan/qr", perm: "viewMobileScanner" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
 
@@ -252,22 +257,13 @@ export default function App() {
             /enroll link. Staff can enrol a delegate's face/voice at the desk;
             delegates can still self-enrol from the public page. Gated on the
             same viewScanner permission as the scanner it feeds. */}
-        <Route
-          path="/enrolment"
-          element={
-            <ViewGate perm="viewScanner">
-              <div className="page">
-                <div className="page-eyebrow">FaceCheck Pro</div>
-                <h1 className="page-title">Biometric enrolment</h1>
-                <p className="page-sub" style={{ marginBottom: 20 }}>
-                  Capture a delegate's face and voiceprint so the scanners can recognise them.
-                  Delegates can also self-enrol at <strong>/enroll</strong> before the trip.
-                </p>
-                <EnrollPage embedded />
-              </div>
-            </ViewGate>
-          }
-        />
+        {/* The desktop /enrolment page was REMOVED 2026-07-29 ("this page can be
+            removed from desktop"), matching Vimal's "enrolment is its own app"
+            decision. Nothing biometric is lost: the standalone delegate-facing
+            app at /enroll is still routed (public + authed), the emailed invite
+            links point there, and staff manage coverage/invites from
+            /mobile/enrolment. Anyone with the old URL bookmarked now falls
+            through to the catch-all redirect below. */}
 
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
             page hosting all three real check-in paths on one screen.
@@ -352,12 +348,24 @@ export default function App() {
             Route tree entirely) — that one is the Login page's "Quick
             Scanner Access" target and needs no session at all; this one is
             for someone already using the app who just wants the scanner. */}
-        <Route path="/mobile/scanner" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage /></ViewGate>} />
-        {/* Face and QR are their own bottom-nav tabs. Same page, pinned to one
-            scanner via lockMode (which also hides the in-page mode switcher);
-            /mobile/scanner above keeps the original combined toggle. */}
+        {/* /mobile/scanner (the legacy combined Face/QR/Manual toggle) was
+            REMOVED 2026-07-29 — "already have it standalone". The three locked
+            routes below fully replace it and are what the bottom nav points at.
+            The page component is unchanged and still used by all three; only
+            the unlocked entry point is gone, so an old bookmark now falls
+            through to the mobile catch-all instead of showing a second,
+            redundant scanner UI. */}
         <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
         <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
+        {/* Manual check-in as its own locked mode (Vimal, taken 2026-07-29) —
+            reached from inside the scanner screens rather than the tab bar. */}
+        <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
+        {/* Mobile Announcements + biometric-enrolment coverage/invites (Vimal,
+            taken 2026-07-29). Gated on the SAME permissions as their desktop
+            counterparts — his branch left both ungated, which would have let any
+            signed-in account read announcements and send enrolment invites. */}
+        <Route path="/mobile/announcements" element={<ViewGate perm="viewAnnouncements" mode="mobile"><MobileAnnouncementsPage /></ViewGate>} />
+        <Route path="/mobile/enrolment" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileEnrolmentPage /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
         {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
             where MobileProfilePage's "User guide" button used to send you to

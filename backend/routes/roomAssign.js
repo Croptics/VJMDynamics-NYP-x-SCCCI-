@@ -107,20 +107,53 @@ function extractJsonArray(text) {
   return null;
 }
 
+/* Values the model might return meaning "leave this alone", which must NEVER be
+ * written as if they were a real hotel name or room number (2026-07-28 bug: a
+ * request about a ROOM NUMBER overwrote the delegate's hotel with the literal
+ * string "none"). The old prompt caused it — it printed empty fields to the
+ * model as hotel "none", so "none" became the model's vocabulary for empty and
+ * it echoed it back as a value. The prompt no longer does that, AND anything in
+ * this list is now treated as null regardless of what the model says. */
+const PLACEHOLDER_VALUES = new Set([
+  "", "-", "--", "—", "n/a", "na", "none", "null", "nil", "nan", "undefined",
+  "unchanged", "no change", "nochange", "same", "same as before", "unset", "empty",
+  "无", "不变", "同上", "没有",
+]);
+const isPlaceholder = (v) =>
+  v === null || v === undefined || PLACEHOLDER_VALUES.has(String(v).trim().toLowerCase());
+
 function buildPrompt(request, roster) {
-  const rosterLines = roster.map((d) =>
-    `- id "${d.id}" = ${d.name}${d.vip ? " (VIP)" : ""}, coach ${d.coachName || "?"}, currently: hotel "${d.hotelName || "none"}", room "${d.roomNumber || "none"}"`
-  ).join("\n");
+  const rosterLines = roster.map((d) => {
+    const hotel = d.hotelName ? `hotel="${d.hotelName}"` : "hotel not set";
+    const room = d.roomNumber ? `room="${d.roomNumber}"` : "room not set";
+    return `- id "${d.id}" = ${d.name}${d.vip ? " (VIP)" : ""}, coach ${d.coachName || "?"}, currently ${hotel}, ${room}`;
+  }).join("\n");
   return `You translate a staff member's plain-language room-assignment request into a JSON array of updates for a hotel/room tracker. Output ONLY a JSON array, no prose, no markdown fences.
 
-Roster (use the id EXACTLY as given — never invent an id, never include a delegate not listed here):
+Roster — ${roster.length} delegate${roster.length === 1 ? "" : "s"} (use the id EXACTLY as given — never invent an id, never include a delegate not listed here):
 ${rosterLines}
 
-Each item in your output array must be exactly: {"delegateId": "<id from the roster above>", "hotelName": "<string or null to leave unchanged>", "roomNumber": "<string or null to leave unchanged>"}
-- Only include delegates the request actually applies to (e.g. "VIPs" → only VIP rows above; "everyone" → every row above; a named person → just that person, matched by name).
-- If the request only sets a hotel (not specific rooms), set "roomNumber": null for every item — do NOT invent room numbers.
-- If the request only sets room numbers for named people, set "hotelName": null for those items unless a hotel was also specified.
-- Never output a delegateId that isn't in the roster above.
+Each item in your output array must be exactly: {"delegateId": "<id from the roster above>", "hotelName": <string or null>, "roomNumber": <string or null>}
+
+CRITICAL RULES — breaking these corrupts real data:
+1. Use JSON null (not a word) for any field the request does not explicitly set.
+   NEVER write "none", "null", "n/a", "-", "unchanged" or similar as a VALUE.
+   If the staff member only mentions a room number, hotelName MUST be null.
+   If they only mention a hotel, roomNumber MUST be null.
+2. Never invent a hotel name or a room number that the request does not state.
+3. Only include delegates the request actually applies to ("VIPs" → only VIP rows
+   above; a named person → just that person, by name).
+4. If the request applies to EVERYONE ("everyone", "all", "all delegates", "the
+   whole group"), your array MUST contain exactly ${roster.length} items — one per
+   roster row above, in the same order. Do not stop after the first one.
+5. Never output a delegateId that isn't in the roster above.
+6. If the request does not clearly state a hotel or a room number, output exactly [].
+
+Shapes to follow (FORMAT ONLY — never copy a hotel name or room number out of
+these; every value must come from the staff request itself):
+- request sets only a room -> [{"delegateId":"<id>","hotelName":null,"roomNumber":"<room from the request>"}]
+- request sets only a hotel -> [{"delegateId":"<id>","hotelName":"<hotel from the request>","roomNumber":null}]
+- request names a person but states no hotel and no room -> []
 
 Staff request: "${String(request).slice(0, 400)}"
 
@@ -135,7 +168,97 @@ JSON array:`;
 async function getRoomableRoster(tripUuid, account) {
   const visibleCoachIds = await getVisibleCoachIds(tripUuid, account);
   const delegates = await listDelegates(tripUuid);
-  return delegates.filter((d) => d.coachId && (!visibleCoachIds || visibleCoachIds.has(d.coachId)));
+  return delegates
+    .filter((d) => d.coachId && (!visibleCoachIds || visibleCoachIds.has(d.coachId)))
+    // ROOT CAUSE of the 2026-07-28 "asked about a room number, it wiped the
+    // hotel" bug: listDelegates() returns these two columns in snake_case
+    // (hotel_name / room_number — the DB-passthrough convention used across the
+    // delegate payload), but this module read d.hotelName / d.roomNumber, which
+    // were therefore ALWAYS undefined. Two bad consequences: the prompt told the
+    // model every delegate's hotel was "none" (so it had no idea of current
+    // values, and "none" became its vocabulary for empty), and the suggestion
+    // fallback `d.hotelName || ""` collapsed to "" — so a suggestion that only
+    // touched the room came back with an EMPTY hotel and clearing it looked
+    // intentional. Normalised here so both shapes work.
+    .map((d) => ({
+      ...d,
+      hotelName: d.hotelName ?? d.hotel_name ?? "",
+      roomNumber: d.roomNumber ?? d.room_number ?? "",
+    }));
+}
+
+/* =============================================================================
+ *  DETERMINISTIC LIST PARSER (2026-07-28)
+ *
+ *  The single most common way staff actually type this is a list of pairs:
+ *      Chen Hao Ming - room 201
+ *      Goh Mei Ling - room 202
+ *      Lim Hua - room 200
+ *  and that is precisely what a 3B local model is worst at — it answers with the
+ *  first line and stops, or nothing at all. An LLM is the wrong tool here: the
+ *  format is mechanical, so it's parsed in code instead. Exact, instant, free,
+ *  and it can't hallucinate. The model stays as the fallback for genuinely fuzzy
+ *  phrasing ("put the VIPs somewhere nicer").
+ *
+ *  Recognises, per line (also accepts one line split on ";" or ","):
+ *      <name> - room 201 | <name> room 201 | <name>: 201 | <name> #201
+ *      <name> - Grand Hyatt room 201        (hotel too)
+ *      <name> - Grand Hyatt                 (hotel only)
+ *  Room numbers may carry a letter suffix ("12A"). Returns null when the text
+ *  isn't a list of assignments, so the caller falls through to the model.
+ * ========================================================================== */
+function parseAssignmentList(request, roster) {
+  const lines = String(request)
+    .split(/[\r\n;]+/)
+    .flatMap((l) => (l.includes(",") && /\d/.test(l) && l.split(",").length <= roster.length + 1 ? l.split(",") : [l]))
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  // Longest names first so "Lim Wei Jie" wins over a bare "Lim" on the same line.
+  const byLongestName = [...roster].sort((a, b) => b.name.length - a.name.length);
+  const out = [];
+  const usedIds = new Set();
+  let unmatchedLines = 0;
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    const delegate = byLongestName.find((d) => lower.includes(d.name.toLowerCase()));
+    if (!delegate || usedIds.has(delegate.id)) { unmatchedLines += 1; continue; }
+
+    // Everything after the name is the instruction for that person.
+    const idx = lower.indexOf(delegate.name.toLowerCase());
+    const rest = line.slice(idx + delegate.name.length).replace(/^[\s\-–—:,.]+/, "").trim();
+    if (!rest) { unmatchedLines += 1; continue; }
+
+    // Room: "room 201", "rm 201", "#201", or a bare number/number+letter token.
+    const roomMatch = rest.match(/(?:\b(?:room|rm|no\.?|number)\s*|#)\s*([A-Za-z]?\d+[A-Za-z]?)\b/i)
+      || rest.match(/^([A-Za-z]?\d+[A-Za-z]?)$/);
+    const roomNumber = roomMatch ? roomMatch[1] : undefined;
+
+    // Hotel: whatever is left once the ROOM PHRASE THAT ACTUALLY MATCHED and the
+    // filler words are removed. Removing `roomMatch[0]` specifically matters for
+    // the bare-number form — "Chen Hao Ming: 305" would otherwise leave "305"
+    // behind and set it as the hotel name too (caught while testing).
+    let residual = rest;
+    if (roomMatch) residual = residual.replace(roomMatch[0], " ");
+    const hotelText = residual
+      .replace(/(?:\b(?:room|rm|no\.?|number)\s*|#)\s*[A-Za-z]?\d+[A-Za-z]?\b/gi, " ")
+      .replace(/\b(?:at|in|into|to|the|hotel|stay|staying|put|move)\b/gi, " ")
+      .replace(/[\s\-–—:,.]+/g, " ")
+      .trim();
+    // A leftover that's only digits/punctuation is never a hotel name.
+    const hotelName = hotelText.length >= 2 && /[A-Za-z一-鿿]/.test(hotelText) ? hotelText : undefined;
+
+    if (roomNumber === undefined && hotelName === undefined) { unmatchedLines += 1; continue; }
+    usedIds.add(delegate.id);
+    out.push({ delegate, hotelName, roomNumber });
+  }
+
+  // Only claim this text if it really was a list: at least one match, and the
+  // lines we couldn't read are the minority. Otherwise let the model try.
+  if (out.length === 0 || unmatchedLines > out.length) return null;
+  return { items: out, unmatchedLines };
 }
 
 router.post("/api/trips/:id/rooms/ai-suggest", requirePermission("manageDelegates"), wrap(async (req, res) => {
@@ -146,8 +269,34 @@ router.post("/api/trips/:id/rooms/ai-suggest", requirePermission("manageDelegate
   const roster = await getRoomableRoster(tripUuid, req.account);
   if (roster.length === 0) return res.json({ suggestions: [] });
 
+  // Try the mechanical read FIRST — no model call, no latency, no hallucination.
+  const listed = parseAssignmentList(request, roster);
+  if (listed) {
+    const suggestions = listed.items.map(({ delegate, hotelName, roomNumber }) => ({
+      delegateId: delegate.id,
+      name: delegate.name,
+      hotelName: hotelName !== undefined ? hotelName : (delegate.hotelName || ""),
+      roomNumber: roomNumber !== undefined ? roomNumber : (delegate.roomNumber || ""),
+    })).filter((s) => {
+      const d = roster.find((x) => x.id === s.delegateId);
+      return s.hotelName !== (d.hotelName || "") || s.roomNumber !== (d.roomNumber || "");
+    });
+    if (suggestions.length > 0) {
+      return res.json({
+        suggestions,
+        source: "parsed",
+        ...(listed.unmatchedLines > 0 ? { skippedLines: listed.unmatchedLines } : {}),
+      });
+    }
+  }
+
   const prompt = buildPrompt(request, roster);
-  let raw = await tryOllama(prompt, { numPredict: 600 });
+  // Scale the token cap with the roster: a whole-roster answer is ~70 tokens per
+  // item, and a flat 600 silently truncated (invalid JSON → looked like "the AI
+  // failed") once a trip had more than ~8 delegates. Floor keeps small trips
+  // snappy, ceiling stops a huge roster running away.
+  const numPredict = Math.min(4000, Math.max(600, 160 + roster.length * 80));
+  let raw = await tryOllama(prompt, { numPredict });
   let parsed = extractJsonArray(raw);
   if (!parsed) {
     raw = await callAnthropic(prompt, 800);
@@ -163,9 +312,16 @@ router.post("/api/trips/:id/rooms/ai-suggest", requirePermission("manageDelegate
     if (!item || typeof item !== "object") continue;
     const delegate = byId.get(item.delegateId);
     if (!delegate) continue; // not a real id on this roster — dropped, never trusted
-    const hotelName = item.hotelName === null || item.hotelName === undefined ? undefined : String(item.hotelName).trim();
-    const roomNumber = item.roomNumber === null || item.roomNumber === undefined ? undefined : String(item.roomNumber).trim();
+    // Placeholder-aware (2026-07-28): a model that answers "none"/"n/a"/"-"
+    // means "leave it", so those must collapse to undefined rather than being
+    // written over a real hotel name. `undefined` here = don't touch this field.
+    const hotelName = isPlaceholder(item.hotelName) ? undefined : String(item.hotelName).trim();
+    const roomNumber = isPlaceholder(item.roomNumber) ? undefined : String(item.roomNumber).trim();
     if (hotelName === undefined && roomNumber === undefined) continue; // nothing to actually change
+    // Drop no-op suggestions: proposing the value a delegate already has just
+    // creates a fake "unsaved change" for the user to review.
+    if ((hotelName === undefined || hotelName === (delegate.hotelName || "")) &&
+        (roomNumber === undefined || roomNumber === (delegate.roomNumber || ""))) continue;
     suggestions.push({
       delegateId: delegate.id,
       name: delegate.name,
@@ -173,7 +329,53 @@ router.post("/api/trips/:id/rooms/ai-suggest", requirePermission("manageDelegate
       roomNumber: roomNumber !== undefined ? roomNumber : delegate.roomNumber || "",
     });
   }
-  res.json({ suggestions });
+  /* Deterministic bulk expansion (2026-07-28). A small local model (llama3.2 3B)
+   * reliably UNDERSTANDS "move everyone into Grand Hyatt" but will not ENUMERATE
+   * — it returns one item and stops, no matter how forcefully the prompt demands
+   * one per row (verified repeatedly). Fighting that with prompt wording is a
+   * losing game, so the enumeration is done in code instead: the model only has
+   * to extract WHICH hotel, and we fan it out across the roster.
+   *
+   * Only the HOTEL is ever fanned out — never a room number, since two people
+   * can't share one room, and never on top of a per-person room the request
+   * specified. Safe by construction: this endpoint writes nothing, it only fills
+   * the review form, and every filled row is highlighted for the human to check
+   * before Save. */
+  const wantsEveryone = /\b(everyone|every one|all delegates|all of them|all the delegates|whole group|entire group|all guests|all)\b/i
+    .test(request);
+  const distinctHotels = [...new Set(suggestions.map((s) => s.hotelName).filter(Boolean))];
+  const mentionsSpecificRoom = suggestions.some((s) => {
+    const d = byId.get(s.delegateId);
+    return s.roomNumber && s.roomNumber !== (d?.roomNumber || "");
+  });
+  if (wantsEveryone && suggestions.length < roster.length && distinctHotels.length === 1 && !mentionsSpecificRoom) {
+    const hotel = distinctHotels[0];
+    const expanded = roster.map((d) => ({
+      delegateId: d.id,
+      name: d.name,
+      hotelName: hotel,
+      roomNumber: d.roomNumber || "", // each delegate keeps their own room
+    }));
+    return res.json({ suggestions: expanded, expandedToEveryone: true });
+  }
+
+  /* Honest "only got some of them" signal (2026-07-28). Neither local model
+   * reliably enumerates: "Lim Hua and Chen Hao Ming into X, rooms 501 and 502"
+   * comes back with just the first person. Silently returning one row would let
+   * the user believe both were handled, so count how many roster names the
+   * request actually mentions and tell the client when the answer covers fewer.
+   * The UI shows this as a warning so they can re-run for the rest. */
+  const namedInRequest = roster.filter((d) => {
+    const first = String(d.name).trim().split(/\s+/)[0];
+    return d.name && (request.toLowerCase().includes(d.name.toLowerCase())
+      || (first.length >= 3 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(request)));
+  });
+  const partial = namedInRequest.length > 1 && suggestions.length < namedInRequest.length;
+
+  res.json({
+    suggestions,
+    ...(partial ? { partial: true, mentioned: namedInRequest.length } : {}),
+  });
 }));
 
 router.post("/api/trips/:id/rooms/ai-apply", requirePermission("manageDelegates"), wrap(async (req, res) => {
@@ -182,16 +384,25 @@ router.post("/api/trips/:id/rooms/ai-apply", requirePermission("manageDelegates"
 
   const tripUuid = await resolveTripUuid(req.params.id);
   const roster = await getRoomableRoster(tripUuid, req.account);
-  const validIds = new Set(roster.map((d) => d.id));
+  const byId = new Map(roster.map((d) => [d.id, d]));
 
   const actor = actorOf(req);
   let applied = 0;
   for (const u of updates) {
-    if (!u || !validIds.has(u.delegateId)) continue; // re-validated here too — never trust the client's list
-    await updateDelegate(u.delegateId, {
-      hotelName: (u.hotelName || "").trim(),
-      roomNumber: (u.roomNumber || "").trim(),
-    }, actor);
+    const delegate = byId.get(u?.delegateId);
+    if (!delegate) continue; // re-validated here too — never trust the client's list
+    // Placeholder-aware on the WRITE path as well (2026-07-28). A value of
+    // "none"/"n/a"/"-" means "leave it alone", so it must fall back to what the
+    // delegate already has instead of being written literally. A genuinely
+    // blank field still clears the value — that's a real edit a human can make
+    // in the row inputs — but a placeholder WORD never masquerades as one.
+    const hotelName = isPlaceholder(u.hotelName) && u.hotelName !== ""
+      ? (delegate.hotelName || "")
+      : String(u.hotelName ?? "").trim();
+    const roomNumber = isPlaceholder(u.roomNumber) && u.roomNumber !== ""
+      ? (delegate.roomNumber || "")
+      : String(u.roomNumber ?? "").trim();
+    await updateDelegate(u.delegateId, { hotelName, roomNumber }, actor);
     applied++;
   }
   res.json({ applied });

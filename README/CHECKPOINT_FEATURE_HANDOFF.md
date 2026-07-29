@@ -270,6 +270,51 @@ updating to match.
   Dashboard's Edit delegate form, or a manual override — see Jayden's section
   below) could sit stale on this page indefinitely.
 
+### 2026-07-29 — your FaceCheck-Pro branch is now merged into main, with 4 edits
+
+Your branch was integrated (face recognition, the `m-*` mobile UI, the
+enrolment app). Almost everything came over as-is — but **four things in your
+own files had to be changed**, because your branch predated main by ~3 weeks.
+Please pull main before you continue, or you'll re-introduce these:
+
+1. **`routes/vimal.js` imported `../auth.js`, which no longer exists.** `server.js`
+   was split up on main and auth moved to `backend/lib/auth.js`. Your import
+   would have thrown at boot and taken **every** scan endpoint down with it.
+   Now `../lib/auth.js`.
+2. **Two raw NUL bytes were embedded in `routes/vimal.js`** (inside the
+   `" no-match"` sentinel — likely an editor/paste accident). Harmless at
+   runtime, but they made the file **binary** to git, which is why it wouldn't
+   diff or merge at all. Replaced with an escape sequence; the string value is
+   identical. Worth checking your editor settings, since it'll happen again.
+3. **Trip scoping was gone** — your copies had `const TRIP_ID = "t-1"` hardcoded
+   across the mobile pages, and `/api/attendance/coaches` had lost its
+   `?tripId=` parameter and `resolveTripUuid`. That silently pins a multi-trip
+   app to the Beijing trip. Re-applied `liveDashboard(tripUuid = null)` and
+   `getMobileTripId()` throughout — see the trip-switcher section further down
+   for the pattern.
+4. **Your new mobile routes were ungated** — `/mobile/announcements` and
+   `/mobile/enrolment` were reachable by any signed-in account, so a
+   scanner-only staff member could send enrolment invites (which send **real
+   email** — see below). Now gated `viewAnnouncements` / `viewMobileScanner`,
+   matching their desktop equivalents.
+
+Two other things you should know about main:
+
+- **`MobileAttendancePage.jsx` on main is NOT your version, deliberately.** Your
+  copy is about half the size and imports none of `lib/delegateWrites.js`,
+  `lib/geolocation.js` or `DelegateTimeline` — taking it would have deleted the
+  offline write queue, which is a hard client requirement (attendance must work
+  with no signal). If you need to change that page, please build on main's copy.
+- **Enrolment invites send real email.** `lib/mailer.js` only fails soft when
+  SMTP is *unconfigured*, and main's SMTP is live for escalation alerts, so the
+  two share it. Set `MAIL_DRY_RUN=true` in `backend/.env` when testing.
+
+Your scanner's offline queue (`musterGo.offlineScans`) was left as-is. Note it
+only replays while a scanner screen is mounted, so queued scans go unsent the
+moment staff navigate away — main's global `SyncStatus` pill now *reports* your
+count so they're at least visible, but merging the two queues is still worth
+doing and is your call on how.
+
 ## For Jayden — what changed in your files
 
 **`backend/routes/exceptions.js` was edited directly** (2026-07-23) — the

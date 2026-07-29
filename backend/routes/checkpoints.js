@@ -478,6 +478,92 @@ router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res)
 }));
 
 /**
+ * GET /api/trips/:id/checkpoint-matrix (2026-07-28) — the WHOLE attendance grid
+ * for a trip in one round trip: every scheduled stop, every delegate, and each
+ * delegate's status at each stop.
+ *
+ * Why this exists: the Dashboard's Checkpoint history tab used to be a list you
+ * expanded one delegate at a time, lazy-loading
+ * `/api/delegates/:id/checkpoint-timeline` per person ("instead of seeing one by
+ * one" — 2026-07-28). Showing everyone at once that way would be one request per
+ * delegate; this is a single query instead, so the card grid scales to a real
+ * roster.
+ *
+ * Adds no new tracking — it reads the same `checkpoint_checkins` rows the
+ * scanner writes and `checkpoint-stats` already aggregates. Coach-scoped for
+ * Staff exactly like every other delegate-reading route (see getVisibleCoachIds
+ * in db/dashboard.js); `coachId` is used for that filter and for the card's
+ * subtitle, so unlike the per-checkpoint route above it stays in the response.
+ */
+router.get("/api/trips/:id/checkpoint-matrix", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  if (!tripUuid) return res.status(404).json({ error: "TRIP_NOT_FOUND" });
+
+  const stops = await all(
+    `SELECT i.id, i.title AS label, i.day_number AS "dayNumber",
+            TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime"
+       FROM itinerary_items i
+      WHERE i.trip_id = $1 AND COALESCE(i.status, 'scheduled') <> 'cancelled'
+      ORDER BY i.day_number, i.start_time`,
+    [tripUuid]
+  );
+
+  // One row per delegate/stop pair that has a record. Delegates with no records
+  // at all still need to appear (as a fully-blank row), so the roster is read
+  // separately rather than inner-joined away.
+  const roster = await all(
+    `SELECT d.id, d.name, d."coachId", d.vip, d.status,
+            c.name AS "coachName", c.city AS "coachCity"
+       FROM delegates d
+       LEFT JOIN coaches c ON c.id = d."coachId"
+      WHERE d.trip_id = $1
+      ORDER BY d.name`,
+    [tripUuid]
+  );
+  const cells = await all(
+    `SELECT cc.delegate_id AS "delegateId", cc.itinerary_item_id AS "stopId",
+            cc.status, cc.method, cc.updated_at AS "updatedAt"
+       FROM checkpoint_checkins cc
+       JOIN itinerary_items i ON i.id = cc.itinerary_item_id
+      WHERE i.trip_id = $1`,
+    [tripUuid]
+  );
+
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  const scopedRoster = visibleCoachIds
+    ? roster.filter((d) => d.coachId && visibleCoachIds.has(d.coachId))
+    : roster;
+  const allowed = new Set(scopedRoster.map((d) => d.id));
+
+  const byDelegate = new Map();
+  for (const c of cells) {
+    if (!allowed.has(c.delegateId)) continue; // never leak another coach's records
+    if (!byDelegate.has(c.delegateId)) byDelegate.set(c.delegateId, {});
+    byDelegate.get(c.delegateId)[c.stopId] = { status: c.status, method: c.method, updatedAt: c.updatedAt };
+  }
+
+  const delegates = scopedRoster.map((d) => {
+    const cellsFor = byDelegate.get(d.id) || {};
+    const values = Object.values(cellsFor);
+    return {
+      id: d.id,
+      name: d.name,
+      vip: !!d.vip,
+      status: d.status,
+      coachId: d.coachId,
+      coachLabel: d.coachName ? `${d.coachName}${d.coachCity ? ` · ${d.coachCity}` : ""}` : null,
+      cells: cellsFor,
+      arrived: values.filter((v) => v.status === "ARRIVED").length,
+      late: values.filter((v) => v.status === "LATE").length,
+      missing: values.filter((v) => v.status === "MISSING").length,
+      recorded: values.length,
+    };
+  });
+
+  res.json({ stops, delegates, totalStops: stops.length });
+}));
+
+/**
  * GET /api/delegates/:id/checkpoint-timeline — every checkpoint record for
  * ONE delegate, across every itinerary stop on every day, newest first.
  * Powers the Delegate Timeline on both Desktop and Mobile.
