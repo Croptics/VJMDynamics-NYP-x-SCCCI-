@@ -37,7 +37,9 @@
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import pg from "pg";
-import { requireAuth, requirePermission } from "../auth.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
+import { resolveTripUuid } from "../data.js";
+import { syncCurrentCheckpointStatus } from "./checkpoints.js";
 
 const router = Router();
 
@@ -117,6 +119,13 @@ export async function initExceptions() {
   )`);
   await q(`CREATE INDEX IF NOT EXISTS idx_checkins_delegate ON check_in_logs(delegate_id)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_checkins_trip     ON check_in_logs(trip_id)`);
+  // Captures the delegate's status right before a MANUAL override flips it to
+  // ARRIVED (2026-07-23), so Undo can restore what they actually were (e.g.
+  // LATE) instead of unconditionally resetting to ASSIGNED — a delegate who
+  // was Late before an accidental "Mark present" click should go back to
+  // Late on Undo, not lose that. NULL for older rows/other methods (QR/face) —
+  // undo falls back to ASSIGNED for those, same as before.
+  await q(`ALTER TABLE check_in_logs ADD COLUMN IF NOT EXISTS prev_status VARCHAR(16)`);
 
   // HLD §7 — owned by Jayden.
   await q(`CREATE TABLE IF NOT EXISTS exception_tickets (
@@ -380,11 +389,19 @@ router.delete("/api/exceptions/:id", requirePermission("manageExceptions"), wrap
  * Needs manageExceptions.
  * -------------------------------------------------------------------------- */
 router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(async (req, res) => {
-  const { tripId, delegateId, clientEventId, clientTs } = req.body || {};
+  // NOTE (2026-07-23): tripId here is written into check_in_logs.trip_id,
+  // which REFERENCES trips(id) — the LEGACY VARCHAR id ("t-1"), not
+  // trips.uuid_id. Only the original Beijing trip has that legacy column
+  // populated; every trip created since (Desmond's newer flow) has it NULL,
+  // so passing a real trip's uuid here violates the FK and 500s. tripId is
+  // therefore left as its historical "t-1" default from callers — the
+  // checkpoint-sync below uses checkpointTripId instead, resolved through
+  // uuid_id, which every trip actually has.
+  const { tripId, checkpointTripId, delegateId, clientEventId, clientTs } = req.body || {};
   if (!tripId || !delegateId) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "tripId and delegateId are required." });
   }
-  const d = await q('SELECT id, name, "coachId" FROM delegates WHERE id = $1', [delegateId]);
+  const d = await q('SELECT id, name, status, "coachId" FROM delegates WHERE id = $1', [delegateId]);
   if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
 
   const eventId = clientEventId || randomUUID();
@@ -394,16 +411,24 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
   const id = randomUUID();
   await q(
     `INSERT INTO check_in_logs
-       (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts)
-     VALUES ($1,$2,$3,$4,'MANUAL',$5,$6,$7,$8)`,
+       (id, delegate_id, trip_id, coach_id, method, checked_in_by, client_event_id, is_offline_origin, client_ts, prev_status)
+     VALUES ($1,$2,$3,$4,'MANUAL',$5,$6,$7,$8,$9)`,
     [id, delegateId, tripId, d.rows[0].coachId, req.account.id, eventId,
-     !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString()]
+     !!req.body?.isOfflineOrigin, clientTs || new Date().toISOString(), d.rows[0].status]
   );
 
   // ARRIVED — the 5-status value (was the legacy PRESENT literal). Reflect
   // the override on the delegate so the dashboard head-count agrees.
   await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`Manual override · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
+
+  // Keep the checkpoint-scoped view (the scanner page's Boarded/Late/Missing
+  // KPIs) in sync — a manual mark-present used to only flip the GLOBAL
+  // status, so a checkpoint's earlier stale MISSING/LATE record kept
+  // showing even after staff manually checked someone in by hand. Mirrors
+  // the same sync added to JQ's own PATCH /api/delegates/:id.
+  const tripUuid = await resolveTripUuid(checkpointTripId || tripId);
+  syncCurrentCheckpointStatus(delegateId, tripUuid, "ARRIVED", req.account?.username || "Manual");
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL" });
   res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
@@ -413,33 +438,42 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
  * The revert half of the Manual panel's "Mark present" — for the accidental-
  * click case ("Undo" shown right next to a just-marked delegate). Same
  * manageExceptions gate as the mark-present action itself, so whoever can do
- * one can do the other. Sets the delegate back to ASSIGNED (not MISSING —
- * matches the spec's explicit target status; a delegate whose real-world
- * whereabouts is unknown again is "assigned to a coach, not yet checked in",
- * not automatically re-flagged as missing) and removes the MANUAL check-in
- * log row this override created, so the audit trail doesn't keep a phantom
- * check-in for a status that was immediately undone. Best-effort on the log
- * delete (only ever removes the single most recent MANUAL row for this
- * delegate, so it can't accidentally wipe an earlier, real check-in). */
+ * one can do the other. Restores whatever status the delegate ACTUALLY had
+ * right before the override (check_in_logs.prev_status, captured above) —
+ * e.g. a delegate who was Late before an accidental "Mark present" goes back
+ * to Late, not a blanket ASSIGNED (2026-07-23 — was unconditionally ASSIGNED
+ * before, which lost a real Late/Missing status on undo). Falls back to
+ * ASSIGNED only when there's no prev_status to restore (an older row from
+ * before this column existed). Removes the MANUAL check-in log row this
+ * override created, so the audit trail doesn't keep a phantom check-in for a
+ * status that was immediately undone. Best-effort on the log delete (only
+ * ever removes the single most recent MANUAL row for this delegate, so it
+ * can't accidentally wipe an earlier, real check-in). */
 router.post("/api/checkins/manual/undo", requirePermission("manageExceptions"), wrap(async (req, res) => {
-  const { delegateId } = req.body || {};
+  const { delegateId, checkpointTripId } = req.body || {};
   if (!delegateId) return res.status(400).json({ error: "MISSING_FIELDS", message: "delegateId is required." });
 
   const d = await q('SELECT id, name FROM delegates WHERE id = $1', [delegateId]);
   if (!d.rows.length) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
 
-  await q(
-    `DELETE FROM check_in_logs WHERE id = (
-       SELECT id FROM check_in_logs
-        WHERE delegate_id = $1 AND method = 'MANUAL'
-        ORDER BY client_ts DESC NULLS LAST LIMIT 1
-     )`,
+  const lastLog = await q(
+    `SELECT id, prev_status FROM check_in_logs
+      WHERE delegate_id = $1 AND method = 'MANUAL'
+      ORDER BY client_ts DESC NULLS LAST LIMIT 1`,
     [delegateId]
   );
-  await q(`UPDATE delegates SET status='ASSIGNED', "lastSeen"=NULL WHERE id=$1`, [delegateId]);
+  const restoredStatus = lastLog.rows[0]?.prev_status || "ASSIGNED";
+  if (lastLog.rows.length) await q(`DELETE FROM check_in_logs WHERE id = $1`, [lastLog.rows[0].id]);
+
+  await q(`UPDATE delegates SET status=$1, "lastSeen"=NULL WHERE id=$2`, [restoredStatus, delegateId]);
+
+  if (checkpointTripId) {
+    const tripUuid = await resolveTripUuid(checkpointTripId);
+    syncCurrentCheckpointStatus(delegateId, tripUuid, restoredStatus, req.account?.username || "Manual");
+  }
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL_UNDO" });
-  res.json({ delegateId, status: "ASSIGNED" });
+  res.json({ delegateId, status: restoredStatus });
 }));
 
 /* ---------------------------------------------------------------------------

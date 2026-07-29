@@ -18,7 +18,7 @@
 import { useState, useMemo, useRef } from "react";
 import { Search, CheckCircle2, UserCheck, ShieldAlert, PencilLine, Undo2 } from "lucide-react";
 import { getPermissions } from "../lib/api.js";
-import { manualOverride, undoManualOverride } from "../lib/exceptionsApi.js";
+import { manualOverride, undoManualOverride, queuedCheckinIds, isCheckinQueued } from "../lib/exceptionsApi.js";
 
 const initialsOf = (name = "?") =>
   name.trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
@@ -48,10 +48,15 @@ const STATUS_TONE = {
   UNASSIGNED: "var(--st-unassigned)",
 };
 
-export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) {
+export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn, tripId }) {
   const canEdit = getPermissions().manageExceptions;
   const [query, setQuery] = useState("");
-  const [justMarked, setJustMarked] = useState(() => new Set()); // optimistic PRESENT
+  // Optimistic PRESENT. Seeded from the offline outbox (JQ, 2026-07-28) so a
+  // check-in taken with no signal still SHOWS as present after a page reload —
+  // otherwise it silently reverts to its old status until the queue drains and
+  // staff re-tap people they already did. (Re-tapping is harmless thanks to the
+  // clientEventId dedupe, but it looks broken.)
+  const [justMarked, setJustMarked] = useState(() => new Set(queuedCheckinIds()));
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -90,7 +95,7 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
     // optimistic
     setJustMarked((prev) => new Set(prev).add(d.delegateId));
     try {
-      await manualOverride(d.delegateId);
+      await manualOverride(d.delegateId, tripId);
       flash(`${d.name} marked present`);
       onCheckedIn?.();
     } catch (e) {
@@ -108,13 +113,15 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
 
   // Only offered right next to a delegate THIS panel just marked present —
   // the accidental-click case, not a general "un-arrive anyone" control.
-  // Reverts to ASSIGNED and removes the log row markPresent() just wrote.
+  // Reverts to whatever status they actually had before (e.g. Late), not a
+  // blanket ASSIGNED — see undoManualOverride()'s own comment. Removes the
+  // log row markPresent() just wrote.
   async function undoPresent(d) {
     if (!canEdit) return;
     setBusyId(d.delegateId);
     setError("");
     try {
-      await undoManualOverride(d.delegateId);
+      await undoManualOverride(d.delegateId, tripId);
       setJustMarked((prev) => { const n = new Set(prev); n.delete(d.delegateId); return n; });
       flash(`${d.name} reverted`);
       onCheckedIn?.();
@@ -215,25 +222,36 @@ export default function ManualTrackingPanel({ coach, coachLabel, onCheckedIn }) 
                   {/* Undo — only next to a delegate THIS panel just marked
                       present (justMarked), for the accidental-click case;
                       delegates already ARRIVED from an earlier session/scan
-                      don't get one (nothing to "undo" here). */}
-                  {justMarked.has(d.delegateId) && (
+                      don't get one (nothing to "undo" here). Hidden entirely
+                      without canEdit (2026-07-24) — a disabled-but-visible
+                      action button read as broken rather than as "you don't
+                      have permission", same fix already applied on mobile. */}
+                  {/* Undo is deliberately BLOCKED while this delegate's
+                      check-in is still queued offline (JQ, 2026-07-28): the
+                      undo endpoint has no idempotency key, so queuing it
+                      alongside the check-in could replay out of order. Once the
+                      queue drains, Undo comes back. */}
+                  {canEdit && justMarked.has(d.delegateId) && (
                     <button
                       className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12 }}
-                      onClick={() => undoPresent(d)} disabled={!canEdit || busyId === d.delegateId}
-                      title="Undo — revert to Assigned"
+                      onClick={() => undoPresent(d)}
+                      disabled={busyId === d.delegateId || isCheckinQueued(d.delegateId)}
+                      title={isCheckinQueued(d.delegateId)
+                        ? "Waiting to sync — undo available once this check-in reaches the server"
+                        : "Undo — revert to Assigned"}
                     >
                       {busyId === d.delegateId ? "…" : (<><Undo2 size={13} /> Undo</>)}
                     </button>
                   )}
                 </div>
-              ) : (
+              ) : canEdit ? (
                 <button
                   className="btn btn-dark" style={{ padding: "7px 12px", fontSize: 12.5, flexShrink: 0 }}
-                  onClick={() => markPresent(d)} disabled={!canEdit || busyId === d.delegateId}
+                  onClick={() => markPresent(d)} disabled={busyId === d.delegateId}
                 >
                   {busyId === d.delegateId ? "…" : (<><UserCheck size={14} /> Mark present</>)}
                 </button>
-              )}
+              ) : null}
             </div>
           );
         })}

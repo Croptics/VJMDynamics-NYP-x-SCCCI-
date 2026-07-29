@@ -5,10 +5,12 @@ import { getToken, clearToken, getPermissions, apiPost } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
+import RegisterPage from "./pages/RegisterPage.jsx";
 import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
 
 // Scaffolds — owned by teammates
 import DashboardPage from "./pages/desktop/DashboardPage.jsx";
+import AnnouncementsPage from "./pages/desktop/AnnouncementsPage.jsx";
 import TripCoachPage from "./pages/desktop/TripCoachPage.jsx";
 import UnifiedScannerPage from "./pages/desktop/UnifiedScannerPage.jsx";
 import ExceptionInboxPage from "./pages/desktop/ExceptionInboxPage.jsx";
@@ -16,6 +18,7 @@ import AccountControlPage from "./pages/desktop/AccountControlPage.jsx";
 import SettingsPage from "./pages/desktop/SettingsPage.jsx";
 import HistoryLogPage from "./pages/desktop/HistoryLogPage.jsx";
 import UserGuidePage from "./pages/desktop/UserGuidePage.jsx";
+import ChatAssistantPage from "./pages/desktop/ChatAssistantPage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
@@ -54,6 +57,7 @@ function setUiMode(mode) {
 // (an account with literally every view unchecked still lands somewhere).
 const DESKTOP_FALLBACK_ORDER = [
   { path: "/dashboard", perm: "viewDashboard" },
+  { path: "/announcements", perm: "viewAnnouncements" },
   { path: "/trips", perm: "viewTrips" },
   { path: "/onboarding", perm: "viewDocuments" },
   { path: "/scanner", perm: "viewScanner" },
@@ -64,7 +68,10 @@ const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile", perm: "viewMobileHome" },
   { path: "/mobile/attendance", perm: "viewMobileAttendance" },
   { path: "/mobile/trips", perm: "viewMobileTrips" },
-  { path: "/mobile/scanner", perm: "viewMobileScanner" },
+  // Was "/mobile/scanner" until 2026-07-29; that route no longer exists, so the
+  // fallback points at the QR scanner (the primary/centre tab) instead — an
+  // account whose only permission is viewMobileScanner still lands somewhere real.
+  { path: "/mobile/scan/qr", perm: "viewMobileScanner" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
 
@@ -186,6 +193,10 @@ export default function App() {
     return (
       <Routes>
         <Route path="/login" element={<LoginPage onSignIn={handleSignIn} />} />
+        {/* Self-service registration (2026-07-24) — public, like /login. New
+            accounts start "pending" and can't sign in until an admin
+            approves them on Account control, so this never sets `authed`. */}
+        <Route path="/register" element={<RegisterPage />} />
         {/* Passwordless entrance-kiosk scanner — reachable with NO auth at
             all, in both the logged-out and logged-in route trees (see the
             matching entry below). Deliberately registered OUTSIDE Layout/
@@ -223,6 +234,8 @@ export default function App() {
         <Route path="/dashboard" element={<ViewGate perm="viewDashboard"><DashboardPage /></ViewGate>} />
 
         {/* Desmond — Trip Booking & Dynamic Coach Management (Screen 3) */}
+        <Route path="/announcements" element={<ViewGate perm="viewAnnouncements"><AnnouncementsPage /></ViewGate>} />
+
         <Route path="/trips" element={<ViewGate perm="viewTrips"><TripCoachPage /></ViewGate>} />
 
         {/* Vance — AI Document Parsing & Onboarding (Screen 4) — FULL.
@@ -240,15 +253,26 @@ export default function App() {
             (ChatBubble.jsx, rendered from Layout.jsx on every route)
             instead of a dedicated destination; no route needed. */}
 
-        {/* Biometric enrolment is its OWN standalone application at /enroll —
-            delegates open it from the emailed invite link on their own phone.
-            It is deliberately NOT embedded in the staff dashboard: capturing
-            someone's face is the delegate's own action, not a dashboard panel.
-            Staff manage coverage and send invites from /mobile/enrolment. */}
+        {/* Biometric enrolment (Vimal) — the in-app counterpart to the public
+            /enroll link. Staff can enrol a delegate's face/voice at the desk;
+            delegates can still self-enrol from the public page. Gated on the
+            same viewScanner permission as the scanner it feeds. */}
+        {/* The desktop /enrolment page was REMOVED 2026-07-29 ("this page can be
+            removed from desktop"), matching Vimal's "enrolment is its own app"
+            decision. Nothing biometric is lost: the standalone delegate-facing
+            app at /enroll is still routed (public + authed), the emailed invite
+            links point there, and staff manage coverage/invites from
+            /mobile/enrolment. Anyone with the old URL bookmarked now falls
+            through to the catch-all redirect below. */}
 
         {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
-            page hosting all three real check-in paths on one screen. */}
-        <Route path="/scanner" element={<ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>} />
+            page hosting all three real check-in paths on one screen.
+            Temporarily hidden (2026-07-27, "hide this page for now, don't
+            show it on frontend") — redirects to the dashboard instead of
+            rendering, so even a direct /scanner visit doesn't show it while
+            the sidebar link is also commented out (Sidebar.jsx). Restore by
+            swapping this back to <ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>. */}
+        <Route path="/scanner" element={<Navigate to="/dashboard" replace />} />
 
         {/* Account control — needs the manage-accounts permission. Kept on
             manageAccounts (an action permission), NOT folded into the
@@ -272,6 +296,12 @@ export default function App() {
         {/* History log — standalone audit trail (date-grouped activity_log),
             reached from the Dashboard's History tracker card */}
         <Route path="/history" element={<ViewGate perm="viewHistory"><HistoryLogPage /></ViewGate>} />
+
+        {/* MusterChat — Vance's full inbox (AI assistant + team messaging +
+            video calls), integrated 2026-07-27. Not in the sidebar: the
+            floating ChatBubble's unread badge/"open Messages" bar links here.
+            Gated on the same viewChatbot permission that gates the bubble. */}
+        <Route path="/assistant" element={<ViewGate perm="viewChatbot"><ChatAssistantPage /></ViewGate>} />
 
         {/* Settings — signed-in account info + theme/language preferences */}
         <Route path="/settings" element={<SettingsPage />} />
@@ -318,17 +348,24 @@ export default function App() {
             Route tree entirely) — that one is the Login page's "Quick
             Scanner Access" target and needs no session at all; this one is
             for someone already using the app who just wants the scanner. */}
-        <Route path="/mobile/scanner" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage /></ViewGate>} />
-        {/* Face and QR are their own bottom-nav tabs. Same page, pinned to one
-            scanner via lockMode (which also hides the in-page mode switcher);
-            /mobile/scanner above keeps the original combined toggle. */}
+        {/* /mobile/scanner (the legacy combined Face/QR/Manual toggle) was
+            REMOVED 2026-07-29 — "already have it standalone". The three locked
+            routes below fully replace it and are what the bottom nav points at.
+            The page component is unchanged and still used by all three; only
+            the unlocked entry point is gone, so an old bookmark now falls
+            through to the mobile catch-all instead of showing a second,
+            redundant scanner UI. */}
         <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
         <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
-        {/* Manual check-in — the fallback when a scan won't cooperate (bad
-            light, unenrolled delegate, damaged QR). Not a bottom-nav tab; it's
-            reached from the Face/QR screens, which is where you realise you
-            need it. */}
+        {/* Manual check-in as its own locked mode (Vimal, taken 2026-07-29) —
+            reached from inside the scanner screens rather than the tab bar. */}
         <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
+        {/* Mobile Announcements + biometric-enrolment coverage/invites (Vimal,
+            taken 2026-07-29). Gated on the SAME permissions as their desktop
+            counterparts — his branch left both ungated, which would have let any
+            signed-in account read announcements and send enrolment invites. */}
+        <Route path="/mobile/announcements" element={<ViewGate perm="viewAnnouncements" mode="mobile"><MobileAnnouncementsPage /></ViewGate>} />
+        <Route path="/mobile/enrolment" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileEnrolmentPage /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
         {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
             where MobileProfilePage's "User guide" button used to send you to
@@ -338,12 +375,6 @@ export default function App() {
             instead, so it gets the normal mobile topbar + tab bar. Ungated,
             same as /guide — a help resource open to any signed-in account. */}
         <Route path="/mobile-user-guide" element={<MobileUserGuidePage />} />
-        {/* Announcements — trip-wide notices, reached from a Home tile.
-            Ungated (open to any signed-in account), like the User Guide. */}
-        <Route path="/mobile/announcements" element={<MobileAnnouncementsPage />} />
-        {/* FaceCheck enrolment coverage — staff view of who's enrolled,
-            reached from a Home tile. Ungated (uses the public enrol data). */}
-        <Route path="/mobile/enrolment" element={<MobileEnrolmentPage />} />
       </Route>
     </Routes>
   );

@@ -6,8 +6,8 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useEffect, useState, useCallback, useMemo } from "react";
-import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight, Eye, EyeOff } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../../permissions.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -24,6 +24,8 @@ import { useLang } from "../../lib/i18n.jsx";
 const EMPTY_FORM = {
   username: "",
   name: "",
+  email: "",
+  phone: "",
   password: "",
   role: "staff",
   perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
@@ -46,6 +48,30 @@ const ROLE_PRESETS = {
   admin: Object.fromEntries(PERMISSIONS.map((p) => [p.key, true])),
 };
 
+// Named STAFF access templates (2026-07-24) — a real SCCCI deployment has
+// many staff with only a couple of real job shapes, not 50 individually
+// hand-ticked permission sets. Persisted server-side now (GET/POST/PATCH/
+// DELETE /api/role-templates — see "Manage roles" below), so admins can
+// rename/edit/delete the 2 defaults or add their own, not just the 2
+// hardcoded ones this started as. "Apply" quick-fills the checkboxes below
+// (the permission set is still what's actually enforced/stored — a template
+// is just a starting point, fully editable after applying); the Accounts
+// list's "Access role" filter shows which template each staff account's
+// CURRENT permissions exactly match, so you can see who's in charge of what
+// at a glance. An account whose permissions don't exactly match any template
+// (including a template account someone has since hand-edited, or a
+// template that's since been deleted) shows as "Custom" — this is
+// intentionally a DERIVED label (computed fresh from the permission set),
+// not a stored tag, so it can never drift out of sync with what's actually
+// enforced, and deleting/editing a template can never retroactively change
+// what an existing account can do.
+function matchRoleTemplate(permissions, templates) {
+  for (const tpl of templates) {
+    if (Object.entries(tpl.permissions).every(([k, v]) => !!permissions?.[k] === v)) return tpl.id;
+  }
+  return null;
+}
+
 // The three labelled, collapsible sections the modal's checkboxes are
 // grouped into — order matches how an admin thinks about it: what can this
 // account DO, then what can it SEE on desktop, then what can it SEE on
@@ -67,6 +93,8 @@ const ERR_TEXT = {
   WEAK_PASSWORD: "Password must be at least 8 characters, with a letter and a number.",
   LAST_MAIN: "You can't remove or demote the last Admin account.",
   NOT_FOUND: "That account no longer exists.",
+  EMAIL_REQUIRED: "A valid email address is required.",
+  EMAIL_TAKEN: "That email is already registered to another account.",
 };
 
 // Password rule (mirrors the backend check in data.js). Returns a message, or
@@ -91,6 +119,11 @@ export default function AccountControlPage() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formErr, setFormErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showPw, setShowPw] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop, not
+  // wherever the mouse was released after dragging to select text in a
+  // username/password field.
+  const downOnBackdrop = useRef(false);
   // Which PERM_GROUPS sections are collapsed in the New/Edit modal — a Set
   // of group keys, so state persists across re-renders but resets (all
   // expanded) every time the modal is freshly opened, see openCreate/
@@ -100,7 +133,26 @@ export default function AccountControlPage() {
   // Search / filter / sort for the accounts table.
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("ALL"); // ALL | admin | staff
+  // Which named access template (fetched from the server, see roleTemplates
+  // state below / "Manage roles") a STAFF account's
+  // permissions currently match — "so I can see who's in charge of what" at
+  // a glance, instead of reading each account's individual permission chips.
+  const [templateFilter, setTemplateFilter] = useState("ALL"); // ALL | <templateId> | custom
   const [sortMode, setSortMode] = useState("username"); // username | name | role
+
+  // Pagination for the accounts table — mirrors the All-delegates table's
+  // own pattern (DashboardPage.jsx) since a real SCCCI deployment has 50+
+  // staff accounts and one long unpaginated list read as messy (2026-07-24).
+  const [accountPage, setAccountPage] = useState(0);
+  const [accountPageSize, setAccountPageSize] = useState(10);
+
+  // Role templates — fetched from the server (see "Manage roles" modal
+  // below), not hardcoded, so admins can rename/edit/delete/add them.
+  const [roleTemplates, setRoleTemplates] = useState([]);
+  const [rolesModalOpen, setRolesModalOpen] = useState(false);
+  const loadRoleTemplates = useCallback(async () => {
+    try { setRoleTemplates((await apiGet("/role-templates")).templates || []); } catch { /* non-fatal — quick-fill/filter just show empty */ }
+  }, []);
 
   // Batch selection — Set of account ids. Your OWN account is never
   // selectable (see visibleAccounts below and the row checkbox), so a batch
@@ -123,9 +175,74 @@ export default function AccountControlPage() {
     }
   }, []);
 
+  // Self-registration approval queue (2026-07-24) — accounts that signed up
+  // via the public /register page and are stuck "pending" until approved or
+  // rejected here. Loaded alongside the main account list.
+  const [pendingAccounts, setPendingAccounts] = useState([]);
+  const [pendingBusyId, setPendingBusyId] = useState(null);
+  // Search — real registration volume can easily get messy at 50+ pending
+  // requests (2026-07-24 feedback), same fix pattern as everywhere else in
+  // this app: a search box + a bounded, independently-scrollable list.
+  const [pendingSearch, setPendingSearch] = useState("");
+  const loadPending = useCallback(async () => {
+    try { setPendingAccounts((await apiGet("/accounts/pending")).accounts || []); } catch { /* non-fatal — banner just shows empty */ }
+  }, []);
+
+  async function approvePending(id) {
+    setPendingBusyId(id);
+    try {
+      await apiPost(`/accounts/${id}/approve`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || "Could not approve this account.");
+    } finally {
+      setPendingBusyId(null);
+    }
+  }
+
+  async function rejectPending(id) {
+    setPendingBusyId(id);
+    try {
+      await apiPost(`/accounts/${id}/reject`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || "Could not reject this account.");
+    } finally {
+      setPendingBusyId(null);
+    }
+  }
+
+  const visiblePendingAccounts = useMemo(() => {
+    const q = pendingSearch.trim().toLowerCase();
+    if (!q) return pendingAccounts;
+    return pendingAccounts.filter((a) => `${a.username} ${a.email || ""}`.toLowerCase().includes(q));
+  }, [pendingAccounts, pendingSearch]);
+
+  // "Approve all"/"Reject all" (2026-07-24, requested while clearing 50 demo
+  // pending accounts by hand) — a single bulk request instead of looping the
+  // per-account endpoint. Asks for confirmation first since acting on every
+  // pending account at once (especially Approve all) isn't easily undone.
+  const [bulkPendingBusy, setBulkPendingBusy] = useState(false);
+  const [bulkPendingConfirm, setBulkPendingConfirm] = useState(null); // "approve" | "reject" | null
+
+  async function runBulkPending(action) {
+    setBulkPendingConfirm(null);
+    setBulkPendingBusy(true);
+    try {
+      await apiPost(`/accounts/pending/${action}-all`, {});
+      await Promise.all([loadPending(), load()]);
+    } catch (e) {
+      setError(e.message || `Could not ${action} all pending accounts.`);
+    } finally {
+      setBulkPendingBusy(false);
+    }
+  }
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadRoleTemplates();
+    loadPending();
+  }, [load, loadRoleTemplates, loadPending]);
 
   // Search + role filter + sort, applied in that order. Search matches
   // username or display name (case-insensitive substring).
@@ -134,6 +251,11 @@ export default function AccountControlPage() {
     let list = accounts.filter((a) => {
       const role = a.role === "admin" ? "admin" : "staff";
       if (roleFilter !== "ALL" && role !== roleFilter) return false;
+      if (templateFilter !== "ALL") {
+        if (role === "admin") return false; // templates are a staff-only concept
+        const matched = matchRoleTemplate(a.permissions, roleTemplates) || "custom";
+        if (matched !== templateFilter) return false;
+      }
       if (q) {
         const hay = `${a.username || ""} ${a.name || ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -147,11 +269,45 @@ export default function AccountControlPage() {
       return byUsername(a, b); // username
     });
     return list;
-  }, [accounts, search, roleFilter, sortMode]);
+  }, [accounts, search, roleFilter, templateFilter, sortMode, roleTemplates]);
+
+  const pageCount = Math.max(1, Math.ceil(visibleAccounts.length / accountPageSize));
+  // Search/filter/sort/page-size changing can leave accountPage pointing
+  // past the new (smaller) result set — clamp back into range rather than
+  // showing an empty page.
+  const clampedAccountPage = Math.min(accountPage, pageCount - 1);
+  useEffect(() => { if (clampedAccountPage !== accountPage) setAccountPage(clampedAccountPage); }, [clampedAccountPage, accountPage]);
+  // Any filter/sort change resets to page 1 — otherwise you could end up on
+  // page 4 of a filter that now only has 1 page of results.
+  useEffect(() => { setAccountPage(0); }, [search, roleFilter, templateFilter, sortMode, accountPageSize]);
+  const accountsShown = visibleAccounts.slice(clampedAccountPage * accountPageSize, (clampedAccountPage + 1) * accountPageSize);
+
+  const clearAccountFilters = () => { setSearch(""); setRoleFilter("ALL"); setTemplateFilter("ALL"); };
+  const accountFiltersActive = search.trim() !== "" || roleFilter !== "ALL" || templateFilter !== "ALL";
+
+  const roleCounts = useMemo(() => {
+    let admin = 0, staff = 0;
+    for (const a of accounts) { if (a.role === "admin") admin++; else staff++; }
+    return { admin, staff };
+  }, [accounts]);
+
+  const templateCounts = useMemo(() => {
+    const counts = { custom: 0 };
+    for (const tpl of roleTemplates) counts[tpl.id] = 0;
+    for (const a of accounts) {
+      if (a.role === "admin") continue;
+      const key = matchRoleTemplate(a.permissions, roleTemplates) || "custom";
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+  }, [accounts, roleTemplates]);
 
   // Every visible account EXCEPT your own — your own account is never
   // selectable for batch delete (see the row checkbox below).
-  const selectableVisible = useMemo(() => visibleAccounts.filter((a) => a.username !== me.username), [visibleAccounts, me.username]);
+  // Scoped to the current PAGE, not every filtered result — matches the
+  // All-delegates table's own "select all" (2026-07-24 pagination pass), so
+  // ticking the header checkbox never silently selects rows you can't see.
+  const selectableVisible = useMemo(() => accountsShown.filter((a) => a.username !== me.username), [accountsShown, me.username]);
   const allSelectableChecked = selectableVisible.length > 0 && selectableVisible.every((a) => selectedIds.has(a.id));
 
   function toggleSelected(id) {
@@ -230,6 +386,8 @@ export default function AccountControlPage() {
     setForm({
       username: a.username,
       name: a.name || "",
+      email: a.email || "",
+      phone: a.phone || "",
       password: "",
       perms,
       role: a.role === "admin" ? "admin" : "staff",
@@ -245,6 +403,12 @@ export default function AccountControlPage() {
 
   function selectRole(role) {
     setForm((f) => ({ ...f, role, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
+  }
+
+  function applyTemplate(templateId) {
+    const tpl = roleTemplates.find((t) => t.id === templateId);
+    if (!tpl) return;
+    setForm((f) => ({ ...f, perms: { ...f.perms, ...tpl.permissions } }));
   }
 
   function toggleGroupCollapsed(groupKey) {
@@ -282,6 +446,11 @@ export default function AccountControlPage() {
     setFormErr("");
     if (!form.username.trim()) return setFormErr(ERR_TEXT.USERNAME_REQUIRED);
     if (!editingId && !form.password) return setFormErr(ERR_TEXT.PASSWORD_REQUIRED);
+    // Email is compulsory for a brand-new account (2026-07-24 — "need email
+    // for each staff and admin now"), but NOT force-required when editing an
+    // existing pre-2026-07-24 account that never had one on file — see the
+    // payload note below on why it's simply omitted rather than sent blank.
+    if (!editingId && !form.email.trim()) return setFormErr(ERR_TEXT.EMAIL_REQUIRED);
     // Enforce the password rule when creating, or when editing AND a new
     // password was typed (blank on edit = keep the current one).
     if (form.password) {
@@ -297,6 +466,12 @@ export default function AccountControlPage() {
       permissions: form.perms,
     };
     if (form.password) payload.password = form.password; // blank on edit = keep current
+    // Only sent if actually filled in — an edit that leaves this blank on an
+    // account with no email yet should still be able to save (e.g. just
+    // changing a permission), not get blocked into backfilling an email
+    // that account never had. A brand-new account already required it above.
+    if (form.email.trim()) payload.email = form.email.trim();
+    if (form.phone.trim()) payload.phone = form.phone.trim();
 
     try {
       if (editingId) {
@@ -387,6 +562,124 @@ export default function AccountControlPage() {
         </div>
       )}
 
+      {/* ---- Pending approval (2026-07-24) ---------------------------------
+       * "add a ui for admin to accept or reject the new account creation on
+       * account control page." Self-registered accounts (see RegisterPage.jsx)
+       * sit here, unable to sign in, until an admin approves or rejects them.
+       * Only rendered when there's actually something to review. */}
+      {pendingAccounts.length > 0 && (
+        <div className="card" style={{ marginTop: 20, padding: 20, borderColor: "var(--st-review)", background: "var(--st-review-bg)" }}>
+          <div className="row between" style={{ marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <UserPlus size={18} color="var(--st-review)" />
+              <h2 style={{ fontSize: 16 }}>{t("Pending approval")}</h2>
+              <span className="badge badge-review" style={{ padding: "2px 8px" }}>{pendingAccounts.length}</span>
+            </div>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {/* Bulk actions (2026-07-24) — a single confirm-gated request
+                  instead of clicking Approve/Reject one-by-one down a long
+                  list. Reject all is the safer of the two (rejected accounts
+                  just can't log in — nothing is deleted), Approve all is
+                  more consequential since it lets every one of them sign in
+                  immediately, so both go through the same confirm step. */}
+              <button
+                className="btn btn-ghost"
+                style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+                onClick={() => setBulkPendingConfirm("reject")}
+                disabled={bulkPendingBusy}
+              >
+                {t("Reject all")}
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => setBulkPendingConfirm("approve")}
+                disabled={bulkPendingBusy}
+              >
+                {t("Approve all")}
+              </button>
+              {/* Search — real registration volume gets messy fast otherwise
+                  (2026-07-24 feedback, live-demoed at 50 pending requests). */}
+              {pendingAccounts.length > 6 && (
+                <div style={{ position: "relative", maxWidth: 240, flex: "1 1 200px" }}>
+                  <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+                  <input
+                    className="input"
+                    style={{ paddingLeft: 32, background: "var(--surface)" }}
+                    placeholder={t("Search name or email…")}
+                    value={pendingSearch}
+                    onChange={(e) => setPendingSearch(e.target.value)}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+          {/* Bounded, independently-scrollable list — same pattern as the
+              Reverse Headcount coach lists / Staff Ops active-sessions grid
+              elsewhere in this app, so a real volume of requests never
+              pushes the rest of Account control off-screen. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto", paddingRight: 4 }}>
+            {visiblePendingAccounts.length === 0 && (
+              <div className="muted" style={{ fontSize: 13, textAlign: "center", padding: "12px 0" }}>
+                {t("No pending requests match your search.")}
+              </div>
+            )}
+            {visiblePendingAccounts.map((a) => (
+              <div key={a.id} className="row between" style={{ padding: "10px 12px", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", flexWrap: "wrap", gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <span className="mono" style={{ fontWeight: 600 }}>{a.username}</span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>{a.email || t("No email on file")}</div>
+                </div>
+                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" }}
+                    onClick={() => rejectPending(a.id)}
+                    disabled={pendingBusyId === a.id}
+                  >
+                    {t("Reject")}
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => approvePending(a.id)}
+                    disabled={pendingBusyId === a.id}
+                  >
+                    {pendingBusyId === a.id ? t("Saving…") : t("Approve")}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {bulkPendingConfirm && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 60 }}>
+          <div className="card" style={{ width: "min(400px, 100%)", padding: 22 }}>
+            <h2 style={{ fontSize: 16, marginBottom: 8 }}>
+              {bulkPendingConfirm === "approve" ? t("Approve all pending accounts?") : t("Reject all pending accounts?")}
+            </h2>
+            <p className="muted" style={{ fontSize: 13, marginBottom: 18 }}>
+              {bulkPendingConfirm === "approve"
+                ? t("Every pending account below will be approved and able to sign in immediately.")
+                : t("Every pending account below will be rejected. They'll stay in the system but won't be able to sign in.")}
+            </p>
+            <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setBulkPendingConfirm(null)} disabled={bulkPendingBusy}>{t("Cancel")}</button>
+              <button
+                className={bulkPendingConfirm === "reject" ? "btn btn-ghost" : "btn btn-primary"}
+                style={bulkPendingConfirm === "reject" ? { color: "var(--st-missing)", borderColor: "var(--st-missing-bg)" } : undefined}
+                onClick={() => runBulkPending(bulkPendingConfirm)}
+                disabled={bulkPendingBusy}
+              >
+                {bulkPendingBusy ? t("Saving…") : (bulkPendingConfirm === "approve" ? t("Approve all") : t("Reject all"))}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginTop: 20, overflow: "hidden" }}>
         <div className="row" style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", gap: 8 }}>
           <ShieldCheck size={18} color="var(--ink-3)" />
@@ -395,28 +688,73 @@ export default function AccountControlPage() {
         </div>
 
         {accounts.length > 0 && (
-          <div className="row" style={{ gap: 10, padding: "12px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
-            <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
-              <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
-              <input
-                className="input"
-                style={{ paddingLeft: 32 }}
-                placeholder={t("Search accounts…")}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+          <>
+            {/* Admin/Staff tabs — a real SCCCI deployment has far more staff
+                than admins, so splitting by role (instead of one long mixed
+                list behind a filter dropdown) makes each group easier to
+                scan (2026-07-24). */}
+            <div className="row" style={{ gap: 8, padding: "14px 20px 0" }}>
+              {[
+                ["ALL", t("All"), accounts.length],
+                ["admin", t("Admin"), roleCounts.admin],
+                ["staff", t("Staff"), roleCounts.staff],
+              ].map(([k, label, count]) => (
+                <button key={k} onClick={() => { setRoleFilter(k); if (k === "admin") setTemplateFilter("ALL"); }} className="btn"
+                  style={{
+                    background: roleFilter === k ? "var(--scc-red-tint)" : "transparent",
+                    color: roleFilter === k ? "var(--scc-red)" : "var(--ink-2)",
+                    border: `1px solid ${roleFilter === k ? "var(--scc-red-tint-2)" : "var(--line)"}`,
+                    fontWeight: 600,
+                  }}>
+                  {label} <span className="muted" style={{ marginLeft: 4 }}>{count}</span>
+                </button>
+              ))}
             </div>
-            <select className="select" style={{ maxWidth: 160 }} value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
-              <option value="ALL">{t("All roles")}</option>
-              <option value="admin">{t("Admin")}</option>
-              <option value="staff">{t("Staff")}</option>
-            </select>
-            <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
-              <option value="username">{t("Sort: Username")}</option>
-              <option value="name">{t("Sort: Name")}</option>
-              <option value="role">{t("Sort: Role")}</option>
-            </select>
-          </div>
+
+            <div className="row" style={{ gap: 10, padding: "12px 20px", borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+              <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
+                <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+                <input
+                  className="input"
+                  style={{ paddingLeft: 32 }}
+                  placeholder={t("Search accounts…")}
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              {roleFilter !== "admin" && (
+                // Staff-only concept — which named access template (fetched
+                // from the server, see "Manage roles") each staff account's
+                // permissions currently match, so you can see "who's in
+                // charge of what" at a glance instead of reading individual
+                // permission chips (2026-07-24).
+                <select className="select" style={{ maxWidth: 210 }} value={templateFilter} onChange={(e) => setTemplateFilter(e.target.value)}>
+                  <option value="ALL">{t("All access roles")}</option>
+                  {roleTemplates.map((tpl) => (
+                    <option key={tpl.id} value={tpl.id}>{tpl.label} ({templateCounts[tpl.id] || 0})</option>
+                  ))}
+                  <option value="custom">{t("Custom")} ({templateCounts.custom})</option>
+                </select>
+              )}
+              <select className="select" style={{ maxWidth: 190 }} value={sortMode} onChange={(e) => setSortMode(e.target.value)}>
+                <option value="username">{t("Sort: Username")}</option>
+                <option value="name">{t("Sort: Name")}</option>
+                <option value="role">{t("Sort: Role")}</option>
+              </select>
+              {accountFiltersActive && (
+                <button className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12.5 }} onClick={clearAccountFilters}>
+                  {t("Clear filters")}
+                </button>
+              )}
+              {/* Moved here from inside the account modal (2026-07-24) — managing
+                  the list of roles is a standalone admin task, not something that
+                  only makes sense while creating/editing one particular account,
+                  and it belongs next to the filter it directly controls. */}
+              <button type="button" className="btn btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setRolesModalOpen(true)}>
+                <ShieldCheck size={15} /> {t("Manage roles")}
+              </button>
+            </div>
+          </>
         )}
 
         {loading ? (
@@ -424,8 +762,19 @@ export default function AccountControlPage() {
         ) : accounts.length === 0 ? (
           <div className="muted" style={{ padding: 24, fontSize: 14 }}>{t("No accounts yet.")}</div>
         ) : (
-          <table className="table">
-            <thead>
+          <>
+          {/* Fixed-height scroll area with a sticky header — mirrors the
+              All-delegates table (2026-07-24). Without this, 50+ staff
+              accounts rendered as one long unpaginated list, which was the
+              "too messy" complaint. overflowX added (2026-07-24, mobile
+              responsiveness pass) so this many-column table scrolls
+              horizontally on a narrow screen instead of clipping/squishing
+              columns — the sidebar/page shell already collapses correctly
+              below 1024px, but the table itself had no horizontal-scroll
+              safety net. */}
+          <div style={{ maxHeight: 640, overflowY: "auto", overflowX: "auto" }}>
+          <table className="table" style={{ minWidth: 640 }}>
+            <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--surface)" }}>
               <tr>
                 <th style={{ width: 36 }}>
                   <input
@@ -447,15 +796,17 @@ export default function AccountControlPage() {
                   </td>
                 </tr>
               )}
-              {visibleAccounts.map((a) => {
+              {accountsShown.map((a) => {
                 const isMe = a.username === me.username;
                 const isAdmin = a.role === "admin";
-                // Table chips show only ACTION permissions — view permissions
-                // default to open for everyone (see permissions.js), so
-                // listing all of them here would be 8+ near-identical chips
-                // on almost every row. The modal is where per-page view
-                // access actually gets configured/audited.
-                const granted = PERMISSIONS.filter((p) => p.group === "action" && a.permissions?.[p.key]);
+                // Access column shows the named role template this account's
+                // permissions currently match (same computation as the
+                // Access-role filter above) instead of raw permission chips —
+                // one clear label ("Onsite Headcount Staff") reads faster
+                // than a wrapped row of 7+ near-identical chips, and stays
+                // consistent with how the filter groups accounts (2026-07-24).
+                const matchedTplId = isAdmin ? null : matchRoleTemplate(a.permissions, roleTemplates);
+                const matchedTpl = matchedTplId ? roleTemplates.find((tp) => tp.id === matchedTplId) : null;
                 return (
                   <tr key={a.id}>
                     <td>
@@ -470,11 +821,27 @@ export default function AccountControlPage() {
                     </td>
                     <td>
                       <div className="row" style={{ gap: 10 }}>
-                        <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
-                          {a.username.slice(0, 2).toUpperCase()}
-                        </span>
-                        <span className="mono" style={{ fontWeight: 500 }}>{a.username}</span>
-                        {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>{t("You")}</span>}
+                        {a.photoUrl ? (
+                          <img className="avatar" src={a.photoUrl} alt="" style={{ objectFit: "cover" }} />
+                        ) : (
+                          <span className="avatar" style={{ background: "var(--st-neutral-bg)", color: "var(--ink-2)" }}>
+                            {a.username.slice(0, 2).toUpperCase()}
+                          </span>
+                        )}
+                        <div style={{ minWidth: 0 }}>
+                          <div className="row" style={{ gap: 6 }}>
+                            <span className="mono" style={{ fontWeight: 500 }}>{a.username}</span>
+                            {isMe && <span className="badge badge-present" style={{ padding: "2px 8px" }}>{t("You")}</span>}
+                          </div>
+                          {/* Email (2026-07-24) — added going forward for every
+                              new account; pre-existing accounts predate this
+                              field and simply show nothing here. */}
+                          {a.email && (
+                            <div className="muted" style={{ fontSize: 11.5, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {a.email}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td>{a.name || "—"}</td>
@@ -484,21 +851,13 @@ export default function AccountControlPage() {
                       </span>
                     </td>
                     <td>
-                      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                        {granted.length === 0 ? (
-                          <span className="badge badge-neutral">{t("View only")}</span>
-                        ) : (
-                          granted.map((p) => (
-                            <span
-                              key={p.key}
-                              className={"badge " + (p.key === "manageAccounts" ? "badge-missing" : "badge-normal")}
-                              style={{ padding: "2px 8px" }}
-                            >
-                              {p.chip}
-                            </span>
-                          ))
-                        )}
-                      </div>
+                      {isAdmin ? (
+                        <span className="badge badge-missing">{t("Full access")}</span>
+                      ) : matchedTpl ? (
+                        <span className="badge badge-normal" style={{ padding: "2px 8px" }}>{matchedTpl.label}</span>
+                      ) : (
+                        <span className="badge badge-neutral">{t("Custom")}</span>
+                      )}
                     </td>
                     <td>
                       <div className="row" style={{ gap: 6 }}>
@@ -515,12 +874,41 @@ export default function AccountControlPage() {
               })}
             </tbody>
           </table>
+          </div>
+          {visibleAccounts.length > 0 && (
+            <div className="row between" style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", flexWrap: "wrap", gap: 10 }}>
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                {t("Showing")} {clampedAccountPage * accountPageSize + 1}–{Math.min((clampedAccountPage + 1) * accountPageSize, visibleAccounts.length)} {t("of")} {visibleAccounts.length}
+              </span>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Rows per page")}</span>
+                <select className="select" style={{ width: 76, padding: "4px 8px" }} value={accountPageSize}
+                  onChange={(e) => setAccountPageSize(Number(e.target.value))}>
+                  {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedAccountPage === 0}
+                  onClick={() => setAccountPage((p) => Math.max(0, p - 1))}>
+                  {t("Prev")}
+                </button>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Page")} {clampedAccountPage + 1} {t("of")} {pageCount}</span>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedAccountPage >= pageCount - 1}
+                  onClick={() => setAccountPage((p) => Math.min(pageCount - 1, p + 1))}>
+                  {t("Next")}
+                </button>
+              </div>
+            </div>
+          )}
+          </>
         )}
       </div>
 
       {/* Create / edit modal */}
       {modalOpen && (
-        <div style={S.overlay} onClick={() => !saving && setModalOpen(false)}>
+        <div style={S.overlay}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (!saving && downOnBackdrop.current && e.target === e.currentTarget) setModalOpen(false); }}>
           <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 18 }}>
               <h2 style={{ fontSize: 18 }}>{editingId ? t("Edit account") : t("New account")}</h2>
@@ -537,12 +925,39 @@ export default function AccountControlPage() {
               placeholder={t("e.g. John Tan")}
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
 
+            {/* Compulsory for a brand-new account; optional when editing one
+                that predates this field (2026-07-24). */}
+            <label className="field-label" style={{ marginTop: 14 }}>
+              {t("Email")} {!editingId && <span style={{ color: "var(--scc-red)" }}>*</span>}
+            </label>
+            <input className="input" type="email" value={form.email}
+              placeholder={t("e.g. john.tan@sccci.org.sg")}
+              onChange={(e) => setForm({ ...form, email: e.target.value })} />
+
+            <label className="field-label" style={{ marginTop: 14 }}>
+              {t("Contact number")} <span className="muted">({t("optional")})</span>
+            </label>
+            <input className="input" type="tel" value={form.phone}
+              placeholder={t("e.g. +65 9123 4567")}
+              onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+
             <label className="field-label" style={{ marginTop: 14 }}>
               {t("Password")} {editingId && <span className="muted">({t("leave blank to keep current")})</span>}
             </label>
-            <input className="input" type="password" value={form.password}
-              placeholder={editingId ? "••••••••" : t("Set a password")}
-              onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            <div style={{ position: "relative" }}>
+              <input className="input" type={showPw ? "text" : "password"} value={form.password}
+                placeholder={editingId ? "••••••••" : t("Set a password")}
+                style={{ paddingRight: 42 }}
+                onChange={(e) => setForm({ ...form, password: e.target.value })} />
+              <button
+                type="button"
+                onClick={() => setShowPw((v) => !v)}
+                aria-label={showPw ? t("Hide password") : t("Show password")}
+                style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--scc-red)", display: "flex" }}
+              >
+                {showPw ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
             {(!editingId || form.password) && (
               <p className="muted" style={{ fontSize: 12, marginTop: 6,
                 color: form.password && passwordProblem(form.password) ? "var(--st-missing)" : undefined }}>
@@ -572,66 +987,28 @@ export default function AccountControlPage() {
 
             {form.role === "staff" && (
               <>
-                {PERM_GROUPS.map((g) => {
-                  // adminOnly permissions (e.g. manageAccounts) never render as a
-                  // Staff toggle — only a real Admin should ever grant/revoke
-                  // everyone else's access (see permissions.js's adminOnly doc).
-                  const allPerms = PERMISSIONS.filter((p) => p.group === g.key && !p.adminOnly);
-                  if (allPerms.length === 0) return null;
-                  // Top-level perms render in order; a perm with a `parent`
-                  // renders indented immediately under that parent instead of
-                  // in the main flow (see permissions.js's `parent` doc).
-                  const topLevel = allPerms.filter((p) => !p.parent || !allPerms.some((pp) => pp.key === p.parent));
-                  const childrenOf = (key) => allPerms.filter((p) => p.parent === key);
-                  const collapsed = collapsedGroups.has(g.key);
-                  const allChecked = allPerms.every((p) => !!form.perms[p.key]);
-                  return (
-                    <div key={g.key} style={{ marginTop: 18 }}>
-                      <div className="row between" style={{ alignItems: "flex-start", gap: 8 }}>
-                        <button
-                          type="button"
-                          onClick={() => toggleGroupCollapsed(g.key)}
-                          aria-expanded={!collapsed}
-                          style={{
-                            background: "none", border: "none", padding: 0, cursor: "pointer",
-                            display: "flex", alignItems: "flex-start", gap: 6, textAlign: "left", flex: 1,
-                          }}
-                        >
-                          {collapsed ? <ChevronRight size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />
-                                     : <ChevronDown size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />}
-                          <span>
-                            <span className="field-label" style={{ display: "block" }}>{t(g.title)}</span>
-                            <span className="muted" style={{ fontSize: 12 }}>{t(g.desc)}</span>
-                          </span>
-                        </button>
-                        {g.selectAll && (
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0 }}
-                            onClick={() => setAllInGroup(g.key, !allChecked)}
-                          >
-                            {allChecked ? t("Deselect all") : t("Select all")}
-                          </button>
-                        )}
-                      </div>
-                      {!collapsed && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                          {topLevel.map((p) => (
-                            <PermRow
-                              key={p.key}
-                              perm={p}
-                              form={form}
-                              togglePerm={togglePerm}
-                              childrenOf={childrenOf}
-                              t={t}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                <label className="field-label" style={{ marginTop: 14 }}>{t("Apply an access role")}</label>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  {roleTemplates.map((tpl) => (
+                    <button key={tpl.id} type="button" className="btn btn-ghost" style={{ fontSize: 13 }}
+                      onClick={() => applyTemplate(tpl.id)}>
+                      {tpl.label}
+                    </button>
+                  ))}
+                  {roleTemplates.length === 0 && <span className="muted" style={{ fontSize: 12.5 }}>{t("No role templates yet.")}</span>}
+                </div>
+                <p className="muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>
+                  {t("Fills in the checkboxes below — still fully editable afterward, and nothing is saved until you click Save.")}
+                </p>
+
+                <PermissionCheckboxGroups
+                  perms={form.perms}
+                  onToggle={togglePerm}
+                  collapsedGroups={collapsedGroups}
+                  onToggleCollapsed={toggleGroupCollapsed}
+                  onSelectAllInGroup={setAllInGroup}
+                  t={t}
+                />
               </>
             )}
 
@@ -648,6 +1025,15 @@ export default function AccountControlPage() {
           </div>
         </div>
       )}
+
+      {rolesModalOpen && (
+        <RoleTemplatesModal
+          templates={roleTemplates}
+          onClose={() => setRolesModalOpen(false)}
+          onChanged={loadRoleTemplates}
+          t={t}
+        />
+      )}
     </div>
   );
 }
@@ -655,15 +1041,15 @@ export default function AccountControlPage() {
 // Renders one permission checkbox, then recurses into its children indented
 // underneath — supports any nesting depth (currently 2 levels are used:
 // dashboard -> Delegate -> History logs), not just direct parent/child.
-function PermRow({ perm, form, togglePerm, childrenOf, t }) {
+function PermRow({ perm, perms, onToggle, childrenOf, t }) {
   const kids = childrenOf(perm.key);
   return (
     <div>
       <label style={S.permRow}>
         <input
           type="checkbox"
-          checked={!!form.perms[perm.key]}
-          onChange={() => togglePerm(perm.key)}
+          checked={!!perms[perm.key]}
+          onChange={() => onToggle(perm.key)}
           style={{ marginTop: 3 }}
         />
         <span>
@@ -674,10 +1060,205 @@ function PermRow({ perm, form, togglePerm, childrenOf, t }) {
       {kids.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, marginLeft: 26, borderLeft: "2px solid var(--line)", paddingLeft: 12 }}>
           {kids.map((cp) => (
-            <PermRow key={cp.key} perm={cp} form={form} togglePerm={togglePerm} childrenOf={childrenOf} t={t} />
+            <PermRow key={cp.key} perm={cp} perms={perms} onToggle={onToggle} childrenOf={childrenOf} t={t} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Shared permission-checkbox groups renderer — used by both the account
+ *  modal and the "Manage roles" template editor, so the two don't drift
+ *  into two slightly-different checkbox UIs (2026-07-24 extraction). */
+function PermissionCheckboxGroups({ perms, onToggle, collapsedGroups, onToggleCollapsed, onSelectAllInGroup, t }) {
+  return (
+    <>
+      {PERM_GROUPS.map((g) => {
+        // adminOnly permissions (e.g. manageAccounts) never render as a
+        // toggle here — only a real Admin should ever grant/revoke
+        // everyone else's access (see permissions.js's adminOnly doc).
+        const allPerms = PERMISSIONS.filter((p) => p.group === g.key && !p.adminOnly);
+        if (allPerms.length === 0) return null;
+        const topLevel = allPerms.filter((p) => !p.parent || !allPerms.some((pp) => pp.key === p.parent));
+        const childrenOf = (key) => allPerms.filter((p) => p.parent === key);
+        const collapsed = collapsedGroups.has(g.key);
+        const allChecked = allPerms.every((p) => !!perms[p.key]);
+        return (
+          <div key={g.key} style={{ marginTop: 18 }}>
+            <div className="row between" style={{ alignItems: "flex-start", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => onToggleCollapsed(g.key)}
+                aria-expanded={!collapsed}
+                style={{
+                  background: "none", border: "none", padding: 0, cursor: "pointer",
+                  display: "flex", alignItems: "flex-start", gap: 6, textAlign: "left", flex: 1,
+                }}
+              >
+                {collapsed ? <ChevronRight size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />
+                           : <ChevronDown size={16} style={{ marginTop: 2, flexShrink: 0, color: "var(--ink-3)" }} />}
+                <span>
+                  <span className="field-label" style={{ display: "block" }}>{t(g.title)}</span>
+                  <span className="muted" style={{ fontSize: 12 }}>{t(g.desc)}</span>
+                </span>
+              </button>
+              {g.selectAll && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, padding: "5px 10px", flexShrink: 0 }}
+                  onClick={() => onSelectAllInGroup(g.key, !allChecked)}
+                >
+                  {allChecked ? t("Deselect all") : t("Select all")}
+                </button>
+              )}
+            </div>
+            {!collapsed && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {topLevel.map((p) => (
+                  <PermRow key={p.key} perm={p} perms={perms} onToggle={onToggle} childrenOf={childrenOf} t={t} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** "Manage roles" — create/edit/delete the named access templates (2026-07-24).
+ *  List view + an inline create/edit form (reuses PermissionCheckboxGroups,
+ *  same component the account modal uses, so the two checkbox UIs can never
+ *  drift apart). A template is just a server-stored PRESET — deleting or
+ *  editing one never changes any existing account's actual permissions
+ *  (those live only in accounts.permissions); it only changes what shows up
+ *  as a quick-fill option / which "bucket" an account's permissions
+ *  currently fall into on the Access-role filter. */
+function RoleTemplatesModal({ templates, onClose, onChanged, t }) {
+  const [editing, setEditing] = useState(null); // null | "new" | template object
+  const [form, setForm] = useState({ label: "", perms: {} });
+  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const downOnBackdrop = useRef(false);
+
+  function openNew() {
+    setForm({ label: "", perms: { ...DEFAULT_PERMISSIONS } });
+    setCollapsedGroups(new Set());
+    setError("");
+    setEditing("new");
+  }
+  function openEdit(tpl) {
+    setForm({ label: tpl.label, perms: { ...tpl.permissions } });
+    setCollapsedGroups(new Set());
+    setError("");
+    setEditing(tpl);
+  }
+  function togglePerm(key) {
+    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] } }));
+  }
+  function setAllInGroup(groupKey, value) {
+    setForm((f) => {
+      const perms = { ...f.perms };
+      for (const p of PERMISSIONS) if (p.group === groupKey) perms[p.key] = value;
+      return { ...f, perms };
+    });
+  }
+  function toggleGroupCollapsed(groupKey) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey);
+      return next;
+    });
+  }
+
+  async function save() {
+    if (!form.label.trim()) { setError(t("A role name is required.")); return; }
+    setSaving(true); setError("");
+    try {
+      if (editing === "new") await apiPost("/role-templates", { label: form.label.trim(), permissions: form.perms });
+      else await apiPatch(`/role-templates/${editing.id}`, { label: form.label.trim(), permissions: form.perms });
+      await onChanged();
+      setEditing(null);
+    } catch (e) {
+      setError(e.message || t("Could not save this role."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(tpl) {
+    const msg = t("Delete the \"") + tpl.label + t("\" role template? Accounts already using these permissions keep them — this only removes the quick-fill option and the filter entry.");
+    if (!window.confirm(msg)) return;
+    try {
+      await apiDelete(`/role-templates/${tpl.id}`);
+      await onChanged();
+    } catch (e) {
+      setError(e.message || t("Could not delete this role."));
+    }
+  }
+
+  return (
+    <div style={S.overlay}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
+      <div className="card" style={{ ...S.modal, width: "min(560px, 100%)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="row between" style={{ marginBottom: 14 }}>
+          <h2 style={{ fontSize: 17 }}>{editing ? (editing === "new" ? t("New role") : t("Edit role")) : t("Manage roles")}</h2>
+          <button onClick={editing ? () => setEditing(null) : onClose} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+        </div>
+
+        {!editing ? (
+          <>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 14 }}>
+              {t("Named permission presets for the account form's quick-fill buttons and the Accounts list's Access-role filter.")}
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {templates.map((tpl) => (
+                <div key={tpl.id} className="row between" style={{ padding: "10px 12px", border: "1px solid var(--line)", borderRadius: "var(--r-sm)" }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{tpl.label}</div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button onClick={() => openEdit(tpl)} aria-label={`${t("Edit")} ${tpl.label}`} style={S.iconBtn}><Pencil size={16} /></button>
+                    <button onClick={() => remove(tpl)} aria-label={`${t("Delete")} ${tpl.label}`} style={{ ...S.iconBtn, color: "var(--st-missing)" }}><Trash2 size={16} /></button>
+                  </div>
+                </div>
+              ))}
+              {templates.length === 0 && <div className="muted" style={{ fontSize: 13 }}>{t("No role templates yet.")}</div>}
+            </div>
+            {error && <div style={S.formErr}><AlertTriangle size={15} /> {t(error)}</div>}
+            <div className="row" style={{ gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={onClose}>{t("Close")}</button>
+              <button className="btn btn-primary" onClick={openNew}><UserPlus size={16} /> {t("New role")}</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <label className="field-label">{t("Role name")}</label>
+            <input className="input" autoFocus value={form.label}
+              placeholder={t("e.g. Documents Desk")}
+              onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} />
+
+            <PermissionCheckboxGroups
+              perms={form.perms}
+              onToggle={togglePerm}
+              collapsedGroups={collapsedGroups}
+              onToggleCollapsed={toggleGroupCollapsed}
+              onSelectAllInGroup={setAllInGroup}
+              t={t}
+            />
+
+            {error && <div style={S.formErr}><AlertTriangle size={15} /> {t(error)}</div>}
+            <div className="row" style={{ gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setEditing(null)} disabled={saving}>{t("Cancel")}</button>
+              <button className="btn btn-primary" onClick={save} disabled={saving}>
+                {saving ? t("Saving…") : t("Save role")}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

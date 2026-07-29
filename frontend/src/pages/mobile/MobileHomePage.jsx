@@ -5,7 +5,10 @@ import { apiGet, getUser, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
 
-const TRIP_ID = "t-1";
+// Trip id comes from the mobile trip switcher, not a hardcoded base trip
+// (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
+import { getMobileTripId } from "../../lib/mobileTrip.js";
+const TRIP_ID_FALLBACK = "t-1";
 
 /** "Good morning" / "Good afternoon" / "Good evening", by local hour. */
 function greeting() {
@@ -70,7 +73,7 @@ export default function MobileHomePage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/trips/${TRIP_ID}/dashboard`));
+      setData(await apiGet(`/trips/${getMobileTripId() || TRIP_ID_FALLBACK}/dashboard`));
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {

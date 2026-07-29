@@ -16,21 +16,23 @@ import { useLang } from "../lib/i18n.jsx";
  * Polls `/api/assistant/pulse` (reuses the assistant's cached snapshot) every
  * 15s and fails quietly — renders nothing on error, so it can't break its host.
  */
-export default function TripPulse({ mode = "assistant" }) {
+export default function TripPulse({ mode = "assistant", data: dataOverride }) {
   const { t } = useLang();
   const [data, setData] = useState(null);
   const timer = useRef(null);
 
   useEffect(() => {
+    if (dataOverride) return; // caller is feeding its own live data — skip the assistant poll
     let alive = true;
     const load = () => getTripPulse().then((d) => alive && setData(d)).catch(() => {});
     load();
     timer.current = setInterval(load, 15000); // refresh every 15s
     return () => { alive = false; clearInterval(timer.current); };
-  }, []);
+  }, [dataOverride]);
 
-  if (!data || !data.kpis) return null;
-  const { trip, kpis, risk = [] } = data;
+  const d = dataOverride || data;
+  if (!d || !d.kpis) return null;
+  const { trip, kpis, risk = [] } = d;
 
   const header = (
     <div className="row" style={{ gap: 6, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>

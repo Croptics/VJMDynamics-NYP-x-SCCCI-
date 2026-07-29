@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — desktop Face + QR scanner
+ * ============================================================================= */
 // frontend/src/pages/desktop/UnifiedScannerPage.jsx
 // "Face Scan + QR Code Scan" — a desktop-native entrance-kiosk page.
 // Route:   /scanner (registered in App.jsx — no permission gate, same as
@@ -30,7 +34,24 @@ import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, pla
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
 
-const TRIP_ID = "t-1";
+const DEFAULT_TRIP_ID = "t-1";
+// Which trip this scanner is testing check-in against — its own persisted
+// choice (2026-07-23), separate from the Dashboard's/Settings' own trip
+// pickers, so switching trips here doesn't affect those pages or vice versa.
+const SCANNER_TRIP_KEY = "mg_scanner_trip";
+
+/** Flattens the {days:[{...,checkpoints:[...]}]} shape from
+ *  GET /trips/:id/checkpoints into one ordered list of options for the
+ *  Checkpoint Selector — "Day 1 · 12:00 · Bus Boarding". */
+function flattenCheckpoints(days) {
+  const out = [];
+  for (const day of days || []) {
+    for (const cp of day.checkpoints || []) {
+      out.push({ ...cp, dayNumber: day.dayNumber, dayLabel: day.label });
+    }
+  }
+  return out;
+}
 
 const KIOSK_CSS = `
 @keyframes kiosk-scanline { 0% { top: 6%; } 50% { top: 92%; } 100% { top: 6%; } }
@@ -54,6 +75,24 @@ const KIOSK_CSS = `
 `;
 
 export default function UnifiedScannerPage() {
+  // Trip switcher — lets a shared account test check-in against any trip
+  // (not just the default Beijing one), e.g. the "School Field Trip Test"
+  // trip used to verify the checkpoint feature.
+  const [trips, setTrips] = useState([]);
+  const [tripId, setTripId] = useState(() => {
+    try { return localStorage.getItem(SCANNER_TRIP_KEY) || DEFAULT_TRIP_ID; } catch { return DEFAULT_TRIP_ID; }
+  });
+  function pickTrip(id) {
+    setTripId(id);
+    try { localStorage.setItem(SCANNER_TRIP_KEY, id); } catch { /* ignore */ }
+  }
+  useEffect(() => {
+    // "In progress" only (2026-07-24) — a Planning/Completed trip has no
+    // live check-ins to scan against, same restriction the Dashboard/
+    // Document-parsing trip pickers already apply.
+    apiGet("/all-trips").then((r) => setTrips((r.trips || []).filter((t) => t.status === "In progress"))).catch(() => {});
+  }, []);
+
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);
@@ -81,6 +120,44 @@ export default function UnifiedScannerPage() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceFinal, setVoiceFinal] = useState(false);
 
+  // Multi-day / multi-checkpoint attendance (2026-07-22) — an OPTIONAL
+  // second write layered on top of the existing scan flow (see submitScan()
+  // below). Face/Voice checkpoint-scoped recording only for now — QR and
+  // Manual go through QRScannerPanel.jsx/ManualTrackingPanel.jsx, which call
+  // onCheckedIn() with no delegate info, so wiring those in would mean
+  // editing those shared components rather than staying in this file.
+  const [checkpoints, setCheckpoints] = useState([]); // flattened, see flattenCheckpoints()
+  const [activeCheckpointId, setActiveCheckpointId] = useState("");
+  const [checkpointStats, setCheckpointStats] = useState(null); // { arrived, missing, late, total }
+
+  const fetchCheckpoints = useCallback(async () => {
+    try {
+      const data = await apiGet(`/trips/${tripId}/checkpoints`);
+      const flat = flattenCheckpoints(data.days);
+      setCheckpoints(flat);
+      // Auto-focus on whatever checkpoint is actually relevant right now —
+      // only on first load (nothing picked yet), never overriding a staff
+      // member's own manual choice on a later poll.
+      setActiveCheckpointId((prev) => prev || flat.find((c) => c.timeState === "current")?.id || "");
+    } catch { /* Checkpoint Selector just stays empty — never blocks scanning */ }
+  }, [tripId]);
+  useEffect(() => { setActiveCheckpointId(""); }, [tripId]); // a checkpoint from the old trip can't apply to the new one
+  useEffect(() => { fetchCheckpoints(); }, [fetchCheckpoints]);
+
+  const fetchCheckpointStats = useCallback(async (checkpointId) => {
+    if (!checkpointId) { setCheckpointStats(null); return; }
+    try {
+      const data = await apiGet(`/checkpoints/${checkpointId}/checkins`);
+      setCheckpointStats(data.stats);
+    } catch { setCheckpointStats(null); }
+  }, []);
+  useEffect(() => {
+    fetchCheckpointStats(activeCheckpointId);
+    if (!activeCheckpointId) return;
+    const id = setInterval(() => fetchCheckpointStats(activeCheckpointId), 3000);
+    return () => clearInterval(id);
+  }, [activeCheckpointId, fetchCheckpointStats]);
+
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -89,7 +166,7 @@ export default function UnifiedScannerPage() {
   const fetchCoaches = useCallback(async () => {
     try {
       setLoadErr("");
-      const data = await apiGet("/attendance/coaches");
+      const data = await apiGet(`/attendance/coaches?tripId=${tripId}`);
       setCoaches(data.coaches || []);
       setCoachId((prev) => {
         if (prev && (data.coaches || []).some((c) => c.id === prev)) return prev;
@@ -99,19 +176,30 @@ export default function UnifiedScannerPage() {
     } catch {
       setLoadErr("Could not load live data. Is the backend running on :4000?");
     }
-  }, []);
+  }, [tripId]);
 
   const fetchCoach = useCallback(async (id) => {
     if (!id) { setCoach(null); return; }
     try {
-      setCoach(await apiGet(`/attendance/${TRIP_ID}/coach/${id}`));
+      setCoach(await apiGet(`/attendance/${tripId}/coach/${id}`));
     } catch {
       setCoach(null);
     }
-  }, []);
+  }, [tripId]);
 
+  // Switching trips invalidates the previously-picked coach (it belongs to
+  // the OLD trip) — clear it so fetchCoaches picks a fresh one for the new trip.
+  useEffect(() => { setCoachId(null); setCoach(null); }, [tripId]);
   useEffect(() => { fetchCoaches(); }, [fetchCoaches]);
-  useEffect(() => { fetchCoach(coachId); }, [coachId, fetchCoach]);
+  // 3s poll (2026-07-23) — a status changed elsewhere (e.g. the Dashboard's
+  // Edit delegate form) used to only show up here after a scan or manual
+  // page refresh, so "Still missing / late" and the KPI cards could sit
+  // stale indefinitely. Matches the Dashboard's own live-refresh pattern.
+  useEffect(() => {
+    fetchCoach(coachId);
+    const id = setInterval(() => fetchCoach(coachId), 3000);
+    return () => clearInterval(id);
+  }, [coachId, fetchCoach]);
 
   /* Speech recognition setup for the low-light voice fallback — mirrors
    * QRCheckInPage.jsx's own setup verbatim (browser API, not shareable via
@@ -289,7 +377,7 @@ export default function UnifiedScannerPage() {
       // Demo hook: proves the ">1s -> error tone" SLA path on command.
       if (simulateSlow) await new Promise((r) => setTimeout(r, 1300));
       const res = await apiPost("/attendance/scan", {
-        tripId: TRIP_ID,
+        tripId,
         scanData: token,
         timestamp: new Date().toISOString(),
         coachId: coachId || undefined,
@@ -303,6 +391,18 @@ export default function UnifiedScannerPage() {
       setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s` });
       fetchCoaches();
       fetchCoach(coachId);
+      // Second, separate write — only when a checkpoint is actively
+      // selected. Never blocks or fails the actual check-in above: the
+      // delegate is already marked ARRIVED regardless of whether this
+      // succeeds. "PRESENT" (vimal.js's literal) maps to "ARRIVED" here,
+      // same alias the rest of the app already uses.
+      if (activeCheckpointId) {
+        apiPost(`/checkpoints/${activeCheckpointId}/checkins`, {
+          delegateId: res.delegateId,
+          status: "ARRIVED",
+          method: res.method,
+        }).then(() => fetchCheckpointStats(activeCheckpointId)).catch(() => {});
+      }
       setTimeout(() => setScanResult(null), 3500);
     } catch (e) {
       playErrorTone();
@@ -381,7 +481,25 @@ export default function UnifiedScannerPage() {
   }
 
   const boardedPct = coach && coach.expected > 0 ? Math.round((coach.boarded / coach.expected) * 100) : 0;
-  const missingList = coach && coach.delegates ? coach.delegates.filter((d) => d.status === "MISSING") : [];
+  // Shows LATE alongside MISSING (2026-07-23 — used to be Missing-only, but
+  // a delegate who's Late still needs following up on just as much) sorted
+  // Missing-first since that's the more urgent of the two.
+  const missingList = coach && coach.delegates
+    ? coach.delegates
+        .filter((d) => d.status === "MISSING" || d.status === "LATE")
+        .sort((a, b) => (a.status === b.status ? 0 : a.status === "MISSING" ? -1 : 1))
+    : [];
+  // The 3 KPI cards below (Boarded/Late/Missing) prefer the CHECKPOINT-scoped
+  // count (matches whatever stop is actively selected) and fall back to the
+  // coach's overall counts when no checkpoint is picked — one simplified
+  // stat row instead of a separate checkpoint-badges row + a coach-only one.
+  const kpi = activeCheckpointId && checkpointStats
+    ? { boarded: checkpointStats.arrived, late: checkpointStats.late, missing: checkpointStats.missing }
+    : {
+        boarded: coach ? coach.boarded : null,
+        late: coach && coach.delegates ? coach.delegates.filter((d) => d.status === "LATE").length : null,
+        missing: coach ? coach.missing : null,
+      };
 
   const S = {
     layout: { display: "flex", gap: 24, alignItems: "flex-start", flexWrap: "wrap" },
@@ -502,8 +620,8 @@ export default function UnifiedScannerPage() {
 
               {scanMode === "qr" && (
                 <QRScannerPanel
-                  key={resetTick}
-                  tripId={TRIP_ID}
+                  key={`${resetTick}-${tripId}`}
+                  tripId={tripId}
                   coachId={coachId}
                   coachLabel={coach?.coachLabel}
                   onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
@@ -512,10 +630,14 @@ export default function UnifiedScannerPage() {
 
               {scanMode === "manual" && (
                 <ManualTrackingPanel
-                  key={resetTick}
+                  key={`${resetTick}-${tripId}`}
                   coach={coach}
                   coachLabel={coach?.coachLabel}
-                  onCheckedIn={() => { fetchCoaches(); fetchCoach(coachId); }}
+                  tripId={tripId}
+                  onCheckedIn={() => {
+                    fetchCoaches(); fetchCoach(coachId);
+                    if (activeCheckpointId) fetchCheckpointStats(activeCheckpointId);
+                  }}
                 />
               )}
 
@@ -616,6 +738,23 @@ export default function UnifiedScannerPage() {
         </div>
 
         <div style={S.sideCol}>
+          {/* Trip switcher (2026-07-23) — pick which trip this scanner tests
+              check-in against, e.g. a test trip set up to verify the
+              checkpoint feature, instead of always the default trip. */}
+          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>
+            Trip
+          </div>
+          <select
+            className="input" value={tripId}
+            onChange={(e) => pickTrip(e.target.value)}
+            style={{ width: "100%", marginBottom: 16 }}
+          >
+            <option value="t-1">Beijing study mission</option>
+            {trips.filter((tr) => tr.id !== "t-1").map((tr) => (
+              <option key={tr.id} value={tr.id}>{tr.name}</option>
+            ))}
+          </select>
+
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>
             Coach
           </div>
@@ -632,17 +771,50 @@ export default function UnifiedScannerPage() {
             ))}
           </select>
 
+          {/* Checkpoint Selector (2026-07-22) — optional. Scanning still
+              works with none selected; picking one just adds a second,
+              checkpoint-scoped attendance record per scan (see submitScan()). */}
+          {checkpoints.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 8 }}>
+                Checkpoint
+              </div>
+              <select
+                className="input" value={activeCheckpointId}
+                onChange={(e) => setActiveCheckpointId(e.target.value)}
+                style={{ width: "100%", marginBottom: 16 }}
+              >
+                <option value="">Not scanning for a checkpoint</option>
+                {checkpoints.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.timeState === "current" ? "→ " : ""}
+                    Day {c.dayNumber} · {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{c.label}
+                    {c.status === "delayed" && c.delayMinutes > 0 ? ` (Delayed +${c.delayMinutes}m)` : ""}
+                    {c.status === "moved" ? " (Moved)" : ""}
+                    {c.timeState === "past" ? " (Done)" : c.timeState === "current" ? " (Now)" : ""}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+
           <div style={{ display: "flex", gap: 10 }}>
             <div style={{ ...S.statCard, flex: 1 }}>
               <div className="muted" style={{ fontSize: 11, textTransform: "uppercase" }}>Boarded</div>
               <div className="mono" style={{ fontSize: 26, fontWeight: 800, color: "var(--st-present)" }}>
-                {coach ? coach.boarded : "…"}
+                {kpi.boarded ?? "…"}
+              </div>
+            </div>
+            <div style={{ ...S.statCard, flex: 1 }}>
+              <div className="muted" style={{ fontSize: 11, textTransform: "uppercase" }}>Late</div>
+              <div className="mono" style={{ fontSize: 26, fontWeight: 800, color: "var(--st-late)" }}>
+                {kpi.late ?? "…"}
               </div>
             </div>
             <div style={{ ...S.statCard, flex: 1 }}>
               <div className="muted" style={{ fontSize: 11, textTransform: "uppercase" }}>Missing</div>
               <div className="mono" style={{ fontSize: 26, fontWeight: 800, color: "var(--st-missing)" }}>
-                {coach ? coach.missing : "…"}
+                {kpi.missing ?? "…"}
               </div>
             </div>
           </div>
@@ -655,13 +827,18 @@ export default function UnifiedScannerPage() {
           </div>
 
           <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-3)", marginTop: 20, marginBottom: 8 }}>
-            Still missing
+            Still missing / late
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {missingList.slice(0, 8).map((d) => (
               <div key={d.delegateId} className="card row between" style={{ padding: "10px 12px" }}>
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{d.name}</span>
-                {d.vip && <span className="badge badge-missing">VIP</span>}
+                <div className="row" style={{ gap: 6 }}>
+                  {d.vip && <span className="badge badge-missing">VIP</span>}
+                  <span className={d.status === "LATE" ? "badge badge-late" : "badge badge-missing"}>
+                    {d.status === "LATE" ? "Late" : "Missing"}
+                  </span>
+                </div>
               </div>
             ))}
             {missingList.length === 0 && coach && (

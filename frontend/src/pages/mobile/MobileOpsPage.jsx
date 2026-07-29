@@ -27,7 +27,10 @@ import { useLang } from "../../lib/i18n.jsx";
 import MobileAttendancePage from "./MobileAttendancePage.jsx";
 import MobileTripsPage from "./MobileTripsPage.jsx";
 
-const TRIP_ID = "t-1";
+// Trip id comes from the mobile trip switcher, not a hardcoded base trip
+// (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
+import { getMobileTripId } from "../../lib/mobileTrip.js";
+const TRIP_ID_FALLBACK = "t-1";
 
 export default function MobileOpsPage({ defaultView = "delegates" }) {
   const { t } = useLang();
@@ -51,7 +54,7 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
     busy.current = true;
     setLoading(true);
     try {
-      setData(await apiGet(`/trips/${TRIP_ID}/dashboard`));
+      setData(await apiGet(`/trips/${getMobileTripId() || TRIP_ID_FALLBACK}/dashboard`));
     } catch { /* summary is best-effort; the pages below show their own errors */ }
     finally { setLoading(false); busy.current = false; }
   }

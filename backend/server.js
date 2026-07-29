@@ -26,7 +26,9 @@
 import "dotenv/config"; // loads backend/.env into process.env — MUST be first
 import express from "express";
 import cors from "cors";
-import { initDb, applyLateCutoff } from "./data.js";
+import { initDb } from "./data.js";
+import { applyCheckpointLateCutoff, resetArrivedBeforeNextCheckpoint } from "./routes/checkpoints.js";
+import { syncTripDayOf } from "./db/dashboard.js";
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -72,6 +74,21 @@ app.use(delegatesRouter);
 import historyRouter from "./routes/history.js";
 app.use(historyRouter);
 
+import checkpointsRouter from "./routes/checkpoints.js";
+app.use(checkpointsRouter);
+
+import escalationsRouter from "./routes/escalations.js";
+app.use(escalationsRouter);
+
+import announcementsRouter from "./routes/announcements.js";
+app.use(announcementsRouter);
+
+import guideVideoRouter from "./routes/guideVideo.js";
+app.use(guideVideoRouter);
+
+import roomAssignRouter from "./routes/roomAssign.js";
+app.use(roomAssignRouter);
+
 /* =============================================================================
  *  TEAMMATE ZONE — add your OWN routes below this line.
  *
@@ -115,22 +132,47 @@ app.use(vimalRouter);
 /* ---- Fallback + error handler ------------------------------------------- */
 app.use((req, res) => res.status(404).json({ error: "NOT_FOUND", path: req.originalUrl }));
 app.use((err, _req, res, _next) => {
+  // An over-limit request body is a CLIENT error — express.json() throws
+  // PayloadTooLargeError, which used to fall through to the generic 500 below
+  // (found while pen-testing the MusterChat upload path, 2026-07-28: a 20MB
+  // attachment reported "Something went wrong on the server", so the client
+  // couldn't tell a too-big file from a real outage). Answer 413 honestly.
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({ error: "PAYLOAD_TOO_LARGE", message: "That upload is too large." });
+  }
+  // Malformed JSON is likewise the caller's fault, not ours.
+  if (err?.type === "entity.parse.failed" || (err instanceof SyntaxError && err?.status === 400)) {
+    return res.status(400).json({ error: "BAD_JSON", message: "Request body isn't valid JSON." });
+  }
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "SERVER_ERROR", message: "Something went wrong on the server." });
 });
 
-// Late-status auto-transition: any delegate still ASSIGNED (expected, not
-// yet checked in) once it's past the 10:00 AM cutoff (local server time)
-// gets flipped to LATE — see applyLateCutoff() in data.js. Runs as a real
-// background interval (not piggybacked on request polling, which would
-// mean every open tab's 2s auto-refresh re-running this) so it fires
-// exactly once per minute regardless of traffic. Started only after the
-// DB is confirmed ready, same as the HTTP server itself below.
+// Late-status auto-transition — now itinerary-driven (2026-07-23). Every
+// scheduled stop is its own cutoff (applyCheckpointLateCutoff) and delegates
+// reset ahead of each new stop so they can be freshly scanned in
+// (resetArrivedBeforeNextCheckpoint) — both in routes/checkpoints.js.
+//
+// The ORIGINAL single trip-wide cutoff (applyLateCutoff(), db/delegates.js —
+// still exported, still callable, just no longer SCHEDULED here) is
+// deliberately NOT run anymore: it unconditionally flips any ASSIGNED
+// delegate to LATE once past trips."lateCutoffTime", which defaults to
+// "10:00" and — since the Trip Settings UI that used to let an admin change
+// it was removed the same day this got itinerary-based — can no longer be
+// configured away from that default. Running both meant every delegate this
+// function just reset to ASSIGNED (in the 30-min window before a new stop)
+// got immediately flipped BACK to LATE by the OLD scheduler's very next
+// tick, since it's virtually always long past 10am by then. Confirmed live:
+// reset to ASSIGNED, waited one full 60s tick, delegate was LATE again.
 const LATE_CUTOFF_CHECK_MS = 60000;
 function startLateCutoffScheduler() {
-  applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+  applyCheckpointLateCutoff().catch((err) => console.error("Checkpoint late-cutoff check failed:", err.message));
+  resetArrivedBeforeNextCheckpoint().catch((err) => console.error("Checkpoint reset failed:", err.message));
+  syncTripDayOf().catch((err) => console.error("Trip day-of sync failed:", err.message));
   setInterval(() => {
-    applyLateCutoff().catch((err) => console.error("Late-cutoff check failed:", err.message));
+    applyCheckpointLateCutoff().catch((err) => console.error("Checkpoint late-cutoff check failed:", err.message));
+    resetArrivedBeforeNextCheckpoint().catch((err) => console.error("Checkpoint reset failed:", err.message));
+    syncTripDayOf().catch((err) => console.error("Trip day-of sync failed:", err.message));
   }, LATE_CUTOFF_CHECK_MS);
 }
 

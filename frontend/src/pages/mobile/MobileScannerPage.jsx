@@ -2,9 +2,10 @@
 // Mobile port of the desktop /scanner (UnifiedScannerPage.jsx) — the same
 // three real check-in paths (Face / QR / Manual) that write to the shared
 // delegate list, re-laid-out single-column for a phone held at an entrance.
-// Route: /mobile/scanner (inside MobileLayout — has the mobile topbar + tab
-// bar). Reached primarily from the Login page's "Quick Scanner Access"
-// shortcut (see LoginPage.jsx / App.jsx handleSignIn).
+// Routes: /mobile/scan/qr, /mobile/scan/face, /mobile/scan/manual — one per
+// mode, each passing `lockMode` (inside MobileLayout, so the mobile topbar +
+// tab bar are present). The old combined /mobile/scanner route was removed
+// 2026-07-29 once the three standalone routes covered it.
 //
 // Shares the face vectorizer + validator + error tone with the desktop
 // scanner via lib/faceScan.js (one copy, not three), and mounts Jayden's
@@ -36,8 +37,11 @@ const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
-
-const TRIP_ID = "t-1";
+// Re-applied at integration 2026-07-29: this branch hardcoded
+// `const TRIP_ID = "t-1"` at module scope, which silently pins the scanner to
+// the base trip and undoes the mobile trip switcher. Read per-render instead so
+// switching trips on Home propagates here.
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 // Offline queue — check-ins captured while the phone has no signal (on a
 // highway between venues) are stashed in localStorage and replayed to the
@@ -159,14 +163,19 @@ const SCAN_CSS = `
 `;
 
 /**
- * `lockMode` ("face" | "qr") pins this page to a single scanner and hides the
- * mode switcher — that's what lets Face and QR live as their own bottom-nav
- * tabs instead of being two states of one screen. Left undefined (the legacy
- * /mobile/scanner route) the page keeps its original Face/QR/Manual toggle.
+ * `lockMode` ("face" | "qr" | "manual") pins this page to a single scanner and
+ * swaps the in-page mode toggle for links to the OTHER two modes — that's what
+ * lets each scanner be its own destination rather than three states of one
+ * screen. Every live route now passes it (see App.jsx), so the undefined case
+ * — the original combined toggle — is no longer reachable; the branches are
+ * left in place because they're harmless and re-adding a combined route would
+ * otherwise mean rebuilding them.
  */
 export default function MobileScannerPage({ lockMode }) {
   const { t } = useLang();
   const navigate = useNavigate();
+  // Per-render so the Home trip switcher propagates (see the import note above).
+  const TRIP_ID = getMobileTripId();
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);

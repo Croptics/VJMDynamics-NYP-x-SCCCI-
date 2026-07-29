@@ -10,8 +10,8 @@ import { Router } from "express";
 import multer from "multer";
 import { wrap } from "../lib/wrap.js";
 import { actorOf } from "../lib/actor.js";
-import { requireAuth, requirePermission } from "../auth.js";
-import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../cloudinary.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
+import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../lib/cloudinary.js";
 import {
   resolveTripUuid,
   listDelegates,
@@ -22,7 +22,9 @@ import {
   deleteAllDelegates,
   setDelegatePhoto,
   clearDelegatePhoto,
+  getVisibleCoachIds,
 } from "../data.js";
+import { syncCurrentCheckpointStatus } from "./checkpoints.js";
 
 const router = Router();
 
@@ -42,7 +44,10 @@ const photoUpload = multer({
 });
 
 router.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
-  res.json({ delegates: await listDelegates(await resolveTripUuid(req.params.id)) });
+  const tripUuid = await resolveTripUuid(req.params.id);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  const delegates = await listDelegates(tripUuid);
+  res.json({ delegates: visibleCoachIds ? delegates.filter((d) => visibleCoachIds.has(d.coachId)) : delegates });
 }));
 
 // DELETE all delegates (dashboard "Delete all" button) — scoped to whichever
@@ -62,7 +67,15 @@ router.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wr
   if (body.status && body.status !== "UNASSIGNED" && !body.coachId) {
     return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
   }
-  const delegate = await createDelegate(body, await resolveTripUuid(req.params.id), actorOf(req));
+  const tripUuid = await resolveTripUuid(req.params.id);
+  // Coach-scoped staff (2026-07-27 — see getVisibleCoachIds' doc) can only
+  // add delegates onto a coach they can actually see — otherwise they'd
+  // create someone they immediately can't find again.
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  if (visibleCoachIds && (!body.coachId || !visibleCoachIds.has(body.coachId))) {
+    return res.status(403).json({ error: "FORBIDDEN", message: "You can only add delegates to your own coach." });
+  }
+  const delegate = await createDelegate(body, tripUuid, actorOf(req));
   res.status(201).json(delegate);
 }));
 
@@ -78,13 +91,38 @@ router.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(as
   if (nextStatus !== "UNASSIGNED" && !nextCoachId) {
     return res.status(400).json({ error: "COACH_REQUIRED", message: "Please select a coach, or set status to Unassigned." });
   }
+  // Coach-scoped staff (2026-07-27 — see getVisibleCoachIds' doc) can only
+  // touch a delegate already on a coach they can see, and can't reassign one
+  // OUT to a coach they can't see — releasing to Unassigned (e.g. Cancel) is
+  // still allowed, since that's a legitimate release action, not handing the
+  // delegate to another captain's roster.
+  const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
+  if (visibleCoachIds) {
+    if (!visibleCoachIds.has(existing.coachId)) {
+      return res.status(403).json({ error: "FORBIDDEN", message: "You can only edit delegates on your own coach." });
+    }
+    if (nextCoachId && nextCoachId !== existing.coachId && !visibleCoachIds.has(nextCoachId)) {
+      return res.status(403).json({ error: "FORBIDDEN", message: "You can only reassign delegates to your own coach." });
+    }
+  }
   const updated = await updateDelegate(req.params.id, patch, actorOf(req));
   if (!updated) return res.status(404).json({ error: "NOT_FOUND" });
+  // Keep the checkpoint-scoped view (checkpoint_checkins) honest when staff
+  // manually correct a delegate's status by hand — see
+  // syncCurrentCheckpointStatus() in routes/checkpoints.js for why.
+  if (patch.status !== undefined) {
+    syncCurrentCheckpointStatus(req.params.id, existing.trip_id, updated.status, actorOf(req));
+  }
   res.json(updated);
 }));
 
 router.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
   const existing = await getDelegateById(req.params.id);
+  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
+  if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
+    return res.status(403).json({ error: "FORBIDDEN", message: "You can only delete delegates on your own coach." });
+  }
   const ok = await deleteDelegate(req.params.id, actorOf(req));
   if (!ok) return res.status(404).json({ error: "NOT_FOUND" });
   if (existing?.photoPublicId) await destroyImage(existing.photoPublicId); // clean up Cloudinary too
@@ -112,6 +150,10 @@ router.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (r
   if (!req.file) return res.status(400).json({ error: "FILE_REQUIRED", message: "Please choose an image." });
   const existing = await getDelegateById(req.params.id);
   if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
+  if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
+    return res.status(403).json({ error: "FORBIDDEN", message: "You can only edit delegates on your own coach." });
+  }
 
   const { url, publicId } = await uploadImage(req.file.buffer, "mustergo/delegates");
   const oldPublicId = await setDelegatePhoto(req.params.id, url, publicId);
@@ -121,6 +163,12 @@ router.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (r
 }));
 
 router.delete("/api/delegates/:id/photo", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const existing = await getDelegateById(req.params.id);
+  if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
+  if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
+    return res.status(403).json({ error: "FORBIDDEN", message: "You can only edit delegates on your own coach." });
+  }
   const oldPublicId = await clearDelegatePhoto(req.params.id);
   if (oldPublicId === null) return res.status(404).json({ error: "NOT_FOUND" });
   if (oldPublicId) await destroyImage(oldPublicId);

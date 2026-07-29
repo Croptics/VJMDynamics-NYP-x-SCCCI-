@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — AI Insights store
+ * ============================================================================= */
 /**
  * AI Insights — a store that lives OUTSIDE React's component tree.
  *
@@ -19,7 +23,7 @@
  */
 import { apiPost } from "./api.js";
 
-const EMPTY = { loading: false, insights: null, asOf: null, source: null, error: null };
+const EMPTY = { loading: false, insights: null, asOf: null, source: null, error: null, startedAt: null };
 
 // Keyed by tripId so switching trips never shows one trip's stale insights
 // while another trip's request is still in flight.
@@ -42,7 +46,12 @@ export function getSnapshot(tripId) {
 }
 
 export async function generateInsights(tripId, lang) {
-  state.set(tripId, { ...getSnapshot(tripId), loading: true, error: null });
+  // `startedAt` (not a local component timer) so the elapsed-time display in
+  // AnalyticsPanel.jsx reads correctly even if the panel mounts mid-request
+  // (e.g. switched Dashboard tabs away and back while this was still
+  // running) — same "state must outlive the component" reasoning as the
+  // rest of this store.
+  state.set(tripId, { ...getSnapshot(tripId), loading: true, error: null, startedAt: Date.now() });
   emit();
   try {
     const { insights, asOf, source } = await apiPost(`/trips/${tripId}/insights`, { lang });

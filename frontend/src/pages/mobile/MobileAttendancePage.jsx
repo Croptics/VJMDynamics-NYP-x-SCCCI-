@@ -1,21 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2 } from "lucide-react";
-import { apiGet, apiPatch, getPermissions } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, Crown, Search, MapPin, X, Phone, PencilLine, CheckCircle2, Clock, LocateFixed, Siren, BedDouble, Briefcase } from "lucide-react";
+import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
+import { apiGet, apiPost, apiPatch, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import DelegateAvatar from "../../components/DelegateAvatar.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
+import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 
-const TRIP_ID = "t-1";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
+// Offline-capable delegate writes (2026-07-28) — attendance decisions taken
+// on-site must survive a dead signal. See lib/outbox.js.
+import { patchDelegate, applyQueuedPatches } from "../../lib/delegateWrites.js";
 // UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
 // staff on the desktop admin pages BEFORE the event; mobile's job during the
 // event is tracking who's arrived/late/missing, not doing the assignment
 // itself, so unassigned delegates don't belong on this list or its filters.
 const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
-// Same reasoning as FILTERS above — the "Update status" sheet only offers
-// active operational states during the event, not the pre-event Unassigned
-// state (that's set by staff on desktop before delegates ever board).
-const STATUS_OPTIONS = ["ASSIGNED", "ARRIVED", "LATE", "MISSING"];
+// The "Update status" sheet offers only these two (2026-07-28 — "can remove the
+// assigned, arrived, late for dropdown when update status, it too much stuff").
+// The FILTERS row above deliberately still shows all five, so staff can still
+// VIEW who's assigned/arrived/late — this only trims what they can hand-SET.
+//
+//  - MISSING is the real field judgement this sheet exists for (and it captures
+//    a last-known location as a second step, see StatusSheet below).
+//  - ASSIGNED is kept purely as the UNDO for it: "I marked the wrong person
+//    missing." Without it there was no way back — tapping an already-active
+//    status is a no-op, so a mis-tap could only be fixed from desktop.
+//    changeStatus() clears lastLocation/lastSeen for any non-MISSING status, so
+//    undoing also wipes the stale location, which is what you want.
+//
+// Removed and why they shouldn't come back:
+//  - LATE is computed by the backend, not chosen by a human — the 60s scheduler
+//    in server.js flips ASSIGNED→LATE past each itinerary stop's cutoff
+//    (applyCheckpointLateCutoff), so a hand-set value is transient and gets
+//    overwritten on the next tick.
+//  - ARRIVED belongs to the real check-in paths (a scan, or the scanner's Manual
+//    tab), which write a `check_in_logs` row — who checked them in, when, by
+//    what method. Flipping status straight to ARRIVED here would mark someone
+//    present with NO audit trail, so the head-count and the log would disagree.
+const STATUS_OPTIONS = ["ASSIGNED", "MISSING"];
 // Legacy alias — some check-in routes still write "PRESENT" directly (see
 // normalize() in backend/data.js), not yet migrated to "ARRIVED".
 const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
@@ -51,6 +75,10 @@ export default function MobileAttendancePage() {
   const { t } = useLang();
   const [searchParams] = useSearchParams();
   const canEdit = getPermissions().manageDelegates;
+  // Read fresh on every mount (not module-load time) so navigating here
+  // after switching trips on Home picks up the CURRENT selection, not
+  // whatever was in localStorage when this module first loaded.
+  const TRIP_ID = getMobileTripId();
   const [delegates, setDelegates] = useState([]);
   const [coaches, setCoaches] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +95,40 @@ export default function MobileAttendancePage() {
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
   const [statusSheetFor, setStatusSheetFor] = useState(null); // the delegate being re-statused, or null
+  // Delegate detail sheet — phone/map/escalate in one place (2026-07-25,
+  // mirrors the desktop profile panel) instead of only the separate small
+  // icon buttons in the row above.
+  const [detailDelegate, setDetailDelegate] = useState(null);
+  const [phoneInput, setPhoneInput] = useState("");
+  const [phoneSaving, setPhoneSaving] = useState(false);
+  async function savePhone(d) {
+    const phone = phoneInput.trim();
+    if (!phone) return;
+    setPhoneSaving(true);
+    try {
+      await apiPatch(`/delegates/${d.id}`, { phone });
+      setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, phone } : x)));
+      setDetailDelegate((cur) => (cur && cur.id === d.id ? { ...cur, phone } : cur));
+      setPhoneInput("");
+    } catch (e) {
+      setRowError({ id: d.id, message: e.message || t("Could not save phone number.") });
+    } finally {
+      setPhoneSaving(false);
+    }
+  }
+  const [tripUuid, setTripUuid] = useState(null);
+  // "Escalate to office" — same feature/endpoints as desktop's Alerts modal
+  // (2026-07-25, "staff are the one to escalate" — mobile needs to be able
+  // to RAISE one, not just see the banner for one already raised).
+  const [escalatingDelegate, setEscalatingDelegate] = useState(null);
+  const [escalateMessage, setEscalateMessage] = useState("");
+  const [escalateRecipients, setEscalateRecipients] = useState([]);
+  const [escalateSelected, setEscalateSelected] = useState(new Set());
+  const [escalateSaving, setEscalateSaving] = useState(false);
+  const [escalateErr, setEscalateErr] = useState(null);
+  // Shared by the map/timeline modals below — only dismiss if the WHOLE
+  // click gesture started on the backdrop itself.
+  const downOnBackdrop = useRef(false);
 
   // Guards a poll tick against (a) overlapping with a still-in-flight
   // previous poll, and (b) landing while a row's status edit is mid-save —
@@ -78,9 +140,10 @@ export default function MobileAttendancePage() {
 
   useEffect(() => {
     load();
-    // 2s auto-refresh so a status change made by another signed-in staff
+    // Auto-refresh so a status change made by another signed-in staff
     // member shows up here without needing to tap the manual Refresh button.
-    const id = setInterval(load, 2000);
+    // Was 2s, slowed to 8s (2026-07-24, Neon egress reduction).
+    const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, []);
 
@@ -94,8 +157,12 @@ export default function MobileAttendancePage() {
         apiGet(`/trips/${TRIP_ID}/delegates`),
         apiGet(`/trips/${TRIP_ID}/dashboard`),
       ]);
-      setDelegates(d || []);
+      // Overlay any still-unsynced offline changes on top of the server's copy,
+      // so a reload with no signal doesn't appear to throw away the staff
+      // member's own attendance decisions (2026-07-28).
+      setDelegates(applyQueuedPatches(d || []));
       setCoaches(dash.coaches || []);
+      setTripUuid(dash.trip?.uuid_id || null);
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -135,12 +202,80 @@ export default function MobileAttendancePage() {
     window.location.href = `tel:${phone}`;
   }
 
+  function openEscalate(d) {
+    setEscalatingDelegate(d);
+    setEscalateMessage(t("Not answering phone calls"));
+    setEscalateErr(null);
+    const qs = tripUuid ? `?tripId=${encodeURIComponent(tripUuid)}` : "";
+    apiGet(`/escalations/recipients${qs}`).then((r) => {
+      const list = r.recipients || [];
+      setEscalateRecipients(list);
+      setEscalateSelected(new Set(list.map((p) => p.email)));
+    }).catch(() => { setEscalateRecipients([]); setEscalateSelected(new Set()); });
+  }
+  function toggleEscalateRecipient(email) {
+    setEscalateSelected((prev) => {
+      const next = new Set(prev);
+      next.has(email) ? next.delete(email) : next.add(email);
+      return next;
+    });
+  }
+  async function submitEscalation() {
+    setEscalateSaving(true);
+    setEscalateErr(null);
+    try {
+      const r = await apiPost("/escalations", {
+        tripId: tripUuid || null,
+        delegateId: escalatingDelegate.id,
+        message: escalateMessage.trim(),
+        recipientEmails: [...escalateSelected],
+      });
+      if (r.alreadyOpen) {
+        setEscalateErr(t("This delegate already has an open escalation — no new alert was sent."));
+        setEscalateSaving(false);
+        return;
+      }
+      setEscalatingDelegate(null);
+      setDetailDelegate(null);
+    } catch (e) {
+      setEscalateErr(e.message || t("Couldn't send the escalation. Please try again."));
+    } finally {
+      setEscalateSaving(false);
+    }
+  }
+
   // `location` is only ever passed (and required — see StatusSheet) when
   // status is MISSING; otherwise lastSeen/lastLocation are cleared so a
   // later Missing spell doesn't silently inherit a stale location from a
   // previous one. Mirrors DashboardPage.jsx's saveForm() on desktop.
-  async function changeStatus(d, status, location) {
+  async function changeStatus(d, status, extra) {
     setStatusSheetFor(null);
+    // "CANCELLED" isn't a real status (see backend/db/schema.js's comment on
+    // the `cancelled` column) — a dedicated one-tap action in the field for
+    // "this person isn't coming after all, here's why" ("need to have to be
+    // able to change the delegate status to unassigned, add a textfield
+    // that let staff put what happen" — 2026-07-24). The backend always
+    // forces status back to UNASSIGNED and clears coachId when
+    // cancelled=true, so only that flag + the reason need sending.
+    if (status === "CANCELLED") {
+      setRowError(null);
+      setSavingId(d.id);
+      const prev = delegates;
+      const patch = { cancelled: true, cancelReason: (extra || "").trim() };
+      setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, ...patch, status: "UNASSIGNED", coachId: null } : x)));
+      try {
+        // Queues instead of failing when there's no signal; the optimistic
+        // update above then simply stands (2026-07-28).
+        await patchDelegate(d.id, patch, { label: d.name });
+      } catch (e) {
+        setDelegates(prev);
+        setRowError({ id: d.id, message: e.message || t("Save failed.") });
+      } finally {
+        setSavingId(null);
+      }
+      return;
+    }
+    const location = extra;
     const nextLocation = status === "MISSING" ? (location || "").trim() : "";
     if (status === d.status && nextLocation === (d.lastLocation || "")) return;
     setRowError(null);
@@ -149,7 +284,10 @@ export default function MobileAttendancePage() {
     const patch = { status, lastLocation: nextLocation, lastSeen: status === "MISSING" ? d.lastSeen || "" : "" };
     setDelegates((list) => list.map((x) => (x.id === d.id ? { ...x, ...patch } : x)));
     try {
-      await apiPatch(`/delegates/${d.id}`, patch);
+      // Offline-capable (2026-07-28): with no signal this queues the change and
+      // resolves, so the optimistic update stands and the outbox replays it
+      // later. A real refusal (403/404) still throws and rolls back below.
+      await patchDelegate(d.id, patch, { label: d.name });
     } catch (e) {
       setDelegates(prev); // roll back the optimistic update
       setRowError({ id: d.id, message: e.message || t("Save failed.") });
@@ -174,11 +312,13 @@ export default function MobileAttendancePage() {
   };
 
   return (
-    <div className="m-fade-in">
+    <div>
       <div className="row between" style={{ alignItems: "flex-start", marginBottom: 18 }}>
         <div>
-          <div className="m-eyebrow">{t("Attendance sheet")}</div>
-          <h1 className="m-page-title">{delegates.length} {t("delegates")}</h1>
+          <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+            {t("Attendance sheet")}
+          </div>
+          <h1 style={{ fontSize: 22, margin: "4px 0 2px" }}>{delegates.length} {t("delegates")}</h1>
         </div>
         <button className="btn btn-ghost" onClick={load} aria-label={t("Refresh")} style={{ padding: 8 }}>
           <RefreshCw size={16} className={loading ? "spin" : ""} />
@@ -258,14 +398,8 @@ export default function MobileAttendancePage() {
       {loading && delegates.length === 0 && !error && <div className="muted">{t("Loading…")}</div>}
 
       {!loading && visible.length === 0 && !error && (
-        <div className="m-empty">
-          <span className="m-empty-ic"><Search size={20} /></span>
-          <div style={{ fontWeight: 700, color: "var(--ink)" }}>
-            {delegates.length === 0 ? t("No delegates yet") : t("No matches")}
-          </div>
-          <div style={{ fontSize: 12.5 }}>
-            {delegates.length === 0 ? t("Delegates will appear here once added.") : t("Try a different status or coach filter.")}
-          </div>
+        <div className="mobile-card muted" style={{ textAlign: "center" }}>
+          {delegates.length === 0 ? t("No delegates yet.") : t("No delegates match your filters.")}
         </div>
       )}
 
@@ -278,15 +412,21 @@ export default function MobileAttendancePage() {
         return (
           <div key={d.id} className="mobile-card" style={{ padding: 16 }}>
             <div className="row" style={{ gap: 12, minWidth: 0 }}>
-              <DelegateAvatar delegate={d} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="row" style={{ gap: 6 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
-                  {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
-                </div>
-                <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {coachName(d.coachId)}
-                  {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+              {/* Tap the delegate's own info to open the detail sheet
+                  (phone/map/escalate all in one place, 2026-07-25) — the
+                  small icon buttons to the right stay as fast one-tap
+                  shortcuts, this is the fuller view. */}
+              <div className="row" style={{ gap: 12, minWidth: 0, flex: 1, cursor: "pointer" }} onClick={() => setDetailDelegate(d)}>
+                <DelegateAvatar delegate={d} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="row" style={{ gap: 6 }}>
+                    <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                    {d.vip && <Crown size={14} color="var(--st-review)" style={{ flexShrink: 0 }} />}
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {coachName(d.coachId)}
+                    {missing && <> · {t("last seen")} {d.lastSeen || "—"}</>}
+                  </div>
                 </div>
               </div>
               {callable && (
@@ -303,19 +443,25 @@ export default function MobileAttendancePage() {
                   <Phone size={18} />
                 </button>
               )}
-              <button
-                onClick={() => d.status === "MISSING" && setMapDelegate(d)}
-                disabled={d.status !== "MISSING"}
-                aria-label={`${t("View location")} — ${d.name}`}
-                style={{
-                  background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0,
-                  color: d.status === "MISSING" ? "var(--st-missing)" : "var(--ink-3)",
-                  opacity: d.status === "MISSING" ? 1 : 0.35,
-                  cursor: d.status === "MISSING" ? "pointer" : "not-allowed",
-                }}
-              >
-                <MapPin size={18} />
-              </button>
+              {/* Hidden entirely for Assigned/Arrived/Late (2026-07-23) — a
+                  location only ever gets recorded for a Missing delegate, so
+                  a disabled-but-visible pin for every other status was just
+                  clutter, not a real affordance. */}
+              {d.status === "MISSING" && (
+                <button
+                  onClick={() => setMapDelegate(d)}
+                  aria-label={`${t("View location")} — ${d.name}`}
+                  style={{
+                    background: "none", border: "none", padding: 6, display: "flex", flexShrink: 0,
+                    color: "var(--st-missing)", cursor: "pointer",
+                  }}
+                >
+                  <MapPin size={18} />
+                </button>
+              )}
+              {/* Clock/timeline icon removed (2026-07-25) — the checkpoint
+                  timeline now lives inside the detail sheet (tap the row),
+                  so a separate button/modal for just that was redundant. */}
             </div>
 
             <div className="row between" style={{ marginTop: 10, gap: 8 }}>
@@ -342,7 +488,9 @@ export default function MobileAttendancePage() {
       })}
 
       {mapDelegate && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }} onClick={() => setMapDelegate(null)}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setMapDelegate(null); }}>
           <div className="card" style={{ width: "min(420px, 100%)", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
             <div className="row between" style={{ marginBottom: 12 }}>
               <div>
@@ -360,6 +508,191 @@ export default function MobileAttendancePage() {
                 {t("No location has been recorded for this delegate yet.")}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+
+      {detailDelegate && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setDetailDelegate(null); }}>
+          <div className="card" style={{ width: "min(420px, 100%)", maxHeight: "80vh", overflowY: "auto", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 12 }}>
+              <div className="row" style={{ gap: 10 }}>
+                <DelegateAvatar delegate={detailDelegate} />
+                <div>
+                  <h2 style={{ fontSize: 15 }}>{detailDelegate.name}</h2>
+                  <span className={"badge " + (STATUS_BADGE_CLASS[detailDelegate.status] || "badge-unassigned")} style={{ marginTop: 2 }}>
+                    {t(FILTER_LABEL[effectiveStatus(detailDelegate)] || detailDelegate.status)}
+                  </span>
+                </div>
+              </div>
+              <button onClick={() => setDetailDelegate(null)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>{coachName(detailDelegate.coachId)}</div>
+
+            {detailDelegate.phone ? (
+              <a href={`tel:${detailDelegate.phone}`} className="row" style={{ gap: 8, marginTop: 10, color: "var(--st-missing)", textDecoration: "none" }}>
+                <Phone size={16} /> {detailDelegate.phone}
+              </a>
+            ) : canEdit && (
+              <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                <input
+                  className="input"
+                  style={{ flex: 1, padding: "6px 10px", fontSize: 13.5 }}
+                  placeholder={t("Add a phone number")}
+                  value={phoneInput}
+                  onChange={(e) => setPhoneInput(e.target.value)}
+                />
+                <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12.5 }}
+                  disabled={phoneSaving || !phoneInput.trim()} onClick={() => savePhone(detailDelegate)}>
+                  {phoneSaving ? t("Saving…") : t("Save")}
+                </button>
+              </div>
+            )}
+
+            {/* Company + Room (2026-07-28 — "add the room detail to mobile
+                also"). Desktop's profile has shown these for a while; mobile
+                didn't, so staff on the ground couldn't see which hotel/room a
+                delegate belongs to — exactly the thing you need when you're
+                trying to find a missing person at night. Two compact columns
+                rather than stacked blocks, since both values are short.
+                Room is read-only here: allocation happens on the desktop Room
+                Management tab, which is where the whole-roster view lives. */}
+            {(detailDelegate.company || detailDelegate.hotel_name || detailDelegate.room_number) && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "10px 14px", marginTop: 14 }}>
+                {detailDelegate.company && (
+                  <div>
+                    <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, marginBottom: 2 }}>
+                      <Briefcase size={12} /> {t("Company")}
+                    </div>
+                    <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                      {[detailDelegate.role, detailDelegate.company].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                )}
+                {(detailDelegate.hotel_name || detailDelegate.room_number) && (
+                  <div>
+                    <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, marginBottom: 2 }}>
+                      <BedDouble size={12} /> {t("Room")}
+                    </div>
+                    <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                      {[detailDelegate.hotel_name, detailDelegate.room_number ? `${t("Room")} ${detailDelegate.room_number}` : null].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {detailDelegate.lastLocation ? (
+              <div style={{ marginTop: 14 }}>
+                {/* Labelled like the desktop profile's own block (2026-07-28 —
+                    "maybe can indicate the this is last known location part"):
+                    the address used to be a bare grey line with no clue what it
+                    referred to, sitting between the phone number and a map. */}
+                <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <MapPin size={13} /> {t("Last known location")}
+                </div>
+                <p style={{ fontSize: 13, marginTop: 3, marginBottom: 8 }}>
+                  {[detailDelegate.lastLocation, detailDelegate.lastSeen].filter(Boolean).join(" · ")}
+                </p>
+                <DelegateLocationMap location={detailDelegate.lastLocation} height={180} />
+              </div>
+            ) : (
+              <div className="muted" style={{ fontSize: 13, marginTop: 12 }}>
+                {t("No location has been recorded for this delegate yet.")}
+              </div>
+            )}
+
+            {/* Checkpoint timeline — moved in here from its own separate
+                modal (2026-07-25) so phone/map/timeline/escalate are all
+                one consolidated view instead of scattered across separate
+                row icons. */}
+            <div style={{ marginTop: 16 }}>
+              <div className="row" style={{ gap: 6, marginBottom: 8 }}>
+                <Clock size={14} color="var(--ink-3)" />
+                <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t("Checkpoint timeline")}</span>
+              </div>
+              <DelegateTimeline delegateId={detailDelegate.id} defaultVisible={2} />
+            </div>
+
+            {canEdit && detailDelegate.status === "MISSING" && (
+              <button
+                className="btn btn-dark"
+                style={{ marginTop: 16, width: "100%", background: "var(--st-missing)", borderColor: "var(--st-missing)" }}
+                onClick={() => openEscalate(detailDelegate)}
+              >
+                <Siren size={15} /> {t("Escalate to office")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {escalatingDelegate && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 55 }}
+          onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+          onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) setEscalatingDelegate(null); }}>
+          <div className="card" style={{ width: "min(420px, 100%)", maxHeight: "80vh", overflowY: "auto", padding: 18, background: "var(--surface)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="row between" style={{ marginBottom: 4 }}>
+              <div className="row" style={{ gap: 8, color: "var(--st-missing)" }}>
+                <Siren size={18} />
+                <h2 style={{ fontSize: 15 }}>{t("Escalate to office")}</h2>
+              </div>
+              <button onClick={() => setEscalatingDelegate(null)} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }} aria-label={t("Close")}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="muted" style={{ fontSize: 13, marginTop: 6, marginBottom: 14 }}>
+              {t("This alerts offsite admin/office staff right away — for when a Missing delegate isn't answering their phone.")} <strong>{escalatingDelegate.name}</strong>
+            </p>
+            <label className="field-label">{t("What's happening?")}</label>
+            <textarea
+              className="input"
+              rows={3}
+              style={{ marginTop: 4, resize: "vertical" }}
+              value={escalateMessage}
+              onChange={(e) => setEscalateMessage(e.target.value)}
+            />
+
+            <label className="field-label" style={{ marginTop: 14 }}>{t("Alert who?")}</label>
+            {escalateRecipients.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                {t("No admin accounts have an email on file yet — add one in Account Control to alert someone by email.")}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, maxHeight: 150, overflowY: "auto" }}>
+                {escalateRecipients.map((p) => (
+                  <label key={p.email} className="row" style={{ gap: 8, fontSize: 13, cursor: "pointer" }}>
+                    <input type="checkbox" checked={escalateSelected.has(p.email)} onChange={() => toggleEscalateRecipient(p.email)} />
+                    <span style={{ fontWeight: 600 }}>{p.name || p.username}</span>
+                    <span className="muted">{p.email}</span>
+                    {p.isTripLead && <span className="badge badge-review" style={{ padding: "1px 7px", fontSize: 10.5 }}>{t("Trip lead")}</span>}
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <p className="muted" style={{ fontSize: 11.5, marginTop: 10 }}>
+              {t("Emails can sometimes land in the recipient's Spam folder — ask them to check there and mark it \"Not spam\" the first time.")}
+            </p>
+
+            {escalateErr && <div style={{ color: "var(--st-missing)", fontSize: 12.5, marginTop: 10 }}>{escalateErr}</div>}
+            <div className="row" style={{ gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setEscalatingDelegate(null)} disabled={escalateSaving}>{t("Cancel")}</button>
+              <button
+                className="btn btn-primary"
+                style={{ background: "var(--st-missing)", borderColor: "var(--st-missing)" }}
+                onClick={submitEscalation}
+                disabled={escalateSaving}
+              >
+                <Siren size={15} /> {escalateSaving ? t("Sending…") : t("Escalate now")}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -393,9 +726,38 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
   // before.
   const [askingLocation, setAskingLocation] = useState(false);
   const [location, setLocation] = useState(delegate.lastLocation || "");
+  // "Use my current location" (2026-07-24) — reads the STAFF device's own
+  // GPS as a stand-in for "where I am right now", since this app has no
+  // delegate-side live tracking. locating tri-state so the button can show
+  // a spinner without a separate loading flag.
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState(null);
+  async function useMyLocation() {
+    setLocating(true);
+    setLocateError(null);
+    try {
+      const loc = await getCurrentLocationString();
+      setLocation(loc);
+    } catch (err) {
+      setLocateError(geolocationErrorMessage(err));
+    } finally {
+      setLocating(false);
+    }
+  }
+  // Same second-step pattern as askingLocation/MISSING above, for
+  // "Cancelled" — a dedicated field action for "this person isn't coming
+  // after all, here's why" (2026-07-24). See changeStatus() in the parent
+  // for what actually gets sent (cancelled + cancelReason, not a status).
+  const [askingCancelReason, setAskingCancelReason] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select text in the
+  // "Last known location" field.
+  const downOnBackdrop = useRef(false);
 
   function pick(status) {
     if (status === "MISSING") { setAskingLocation(true); return; }
+    if (status === "CANCELLED") { setAskingCancelReason(true); return; }
     onPick(status);
   }
 
@@ -404,7 +766,8 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
     return (
       <div
         style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-        onClick={onClose}
+        onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+        onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
       >
         <div
           className="card"
@@ -431,6 +794,18 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
             value={location}
             onChange={(e) => setLocation(e.target.value)}
           />
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ marginTop: 8, width: "100%" }}
+            onClick={useMyLocation}
+            disabled={locating}
+          >
+            <LocateFixed size={15} /> {locating ? t("Locating…") : t("Use my current location")}
+          </button>
+          {locateError && (
+            <div className="muted" style={{ fontSize: 12, color: "var(--st-missing)", marginTop: 6 }}>{t(locateError)}</div>
+          )}
           {trimmed && (
             <div style={{ marginTop: 10 }}>
               <DelegateLocationMap location={trimmed} height={140} />
@@ -454,10 +829,62 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
     );
   }
 
+  if (askingCancelReason) {
+    return (
+      <div
+        style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
+        onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+        onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
+      >
+        <div
+          className="card"
+          style={{ width: "100%", borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="row between" style={{ marginBottom: 4 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{t("Mark as cancelled")}</div>
+              <div className="muted" style={{ fontSize: 12.5 }}>{delegate.name}</div>
+            </div>
+            <button onClick={onClose} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+              <X size={18} />
+            </button>
+          </div>
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+            {t("Unassigns them and frees their coach seat.")}
+          </p>
+          <label className="field-label" style={{ marginTop: 10 }}>{t("What happened?")}</label>
+          <textarea
+            autoFocus
+            className="input"
+            rows={3}
+            style={{ marginTop: 6, resize: "vertical", fontFamily: "inherit" }}
+            placeholder={t("e.g. Flight cancelled, called in sick, no longer travelling with the group…")}
+            value={cancelReason}
+            onChange={(e) => setCancelReason(e.target.value)}
+          />
+          <div className="row" style={{ gap: 10, marginTop: 16 }}>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setAskingCancelReason(false)}>
+              {t("Back")}
+            </button>
+            <button
+              className="btn btn-primary"
+              style={{ flex: 1 }}
+              onClick={() => onPick("CANCELLED", cancelReason)}
+            >
+              {t("Confirm")}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "flex", alignItems: "flex-end", zIndex: 60 }}
-      onClick={onClose}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}
     >
       <div
         className="card"
@@ -493,6 +920,23 @@ function StatusSheet({ delegate, onPick, onClose, t }) {
               </button>
             );
           })}
+        </div>
+
+        {/* Visually separated from the 4 operational statuses above — this
+            isn't one of them, it's a distinct "drop out" action (2026-07-24,
+            "need to have to be able to change the delegate status to
+            unassigned, add a textfield that let staff put what happen"). */}
+        <div style={{ borderTop: "1px solid var(--line)", marginTop: 14, paddingTop: 10 }}>
+          <button
+            onClick={() => pick("CANCELLED")}
+            className="row between"
+            style={{
+              width: "100%", padding: "12px 14px", borderRadius: "var(--r-md)", fontSize: 14, fontWeight: 600,
+              border: "1.5px solid var(--line)", background: "var(--surface)", color: "var(--ink-2)",
+            }}
+          >
+            {t("Mark as cancelled")}
+          </button>
         </div>
       </div>
     </div>

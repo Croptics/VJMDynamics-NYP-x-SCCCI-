@@ -5,9 +5,18 @@ import { getPermissions, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "./MobileChatBubble.jsx";
+// Re-added after taking Vimal's mobile UI wholesale (2026-07-29). These three
+// are FUNCTION, not styling, and his branch predates them:
+//   EscalationBanner — the "delegate escalated to office" alert, every route.
+//   SyncStatus       — the offline "N changes waiting to sync" pill. Without it
+//                      the offline attendance queue still works but becomes
+//                      invisible, which is worse than not having it.
+//   getMobileTripId  — the mobile trip switcher; his `const TRIP_ID = "t-1"`
+//                      silently pins the whole mobile app to the Beijing trip.
+import EscalationBanner from "../../components/EscalationBanner.jsx";
+import SyncStatus from "../../components/SyncStatus.jsx";
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 import "../../styles/mobile.css";
-
-const TRIP_ID = "t-1";
 // Light haptic tick on tab taps / actions — a native-app touch. No-op on
 // desktop and iOS Safari (which don't implement the Vibration API).
 const buzz = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } catch { /* unsupported */ } };
@@ -50,7 +59,7 @@ export default function MobileLayout({ onLogout }) {
     let alive = true;
     async function load() {
       try {
-        const dash = await apiGet(`/trips/${TRIP_ID}/dashboard`);
+        const dash = await apiGet(`/trips/${getMobileTripId()}/dashboard`);
         if (!alive) return;
         setMissing(dash.kpis ? dash.kpis.missing || 0 : 0);
         setTrip(dash.trip || null);
@@ -135,6 +144,7 @@ export default function MobileLayout({ onLogout }) {
         )}
       </div>
       <div className="mobile-page">
+        <EscalationBanner />
         <Outlet context={{ onLogout }} />
       </div>
       <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>
@@ -155,6 +165,7 @@ export default function MobileLayout({ onLogout }) {
         ))}
       </nav>
       {perms.viewMobileChatbot && <MobileChatBubble />}
+      <SyncStatus />
     </div>
   );
 }

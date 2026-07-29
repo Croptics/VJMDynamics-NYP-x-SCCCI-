@@ -4,7 +4,7 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw } from "lucide-react";
+import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
 import { apiGet, apiPost, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -12,7 +12,7 @@ import { useLang } from "../../lib/i18n.jsx";
 // eligible entry — matches the patch-shape keys updateDelegate() (backend)
 // accepts/returns, see data.js's PROFILE_FIELDS + the core CRUD fields.
 const FIELD_LABEL = {
-  name: "Name", coachId: "Coach", status: "Status", vip: "VIP",
+  name: "Name", coachId: "Coach", status: "Status", vip: "VIP", cancelled: "Cancelled", cancelReason: "Cancellation reason",
   lastSeen: "Last seen", lastLocation: "Last location",
   company: "Company", role: "Role", industry: "Industry",
   email: "Email", phone: "Phone", website: "Website",
@@ -43,6 +43,16 @@ export default function HistoryLogPage() {
   const [loaded, setLoaded] = useState(false);
   const [rollingBack, setRollingBack] = useState(null); // activity id currently being rolled back
   const loadingRef = useRef(false);
+
+  // Search / filter for this page's mixed-everything feed (2026-07-24) — with
+  // 200+ entries across every trip and coach, finding one specific change
+  // meant scrolling through the whole timeline. Options for the trip/coach
+  // dropdowns are derived straight from whatever's actually in `history`
+  // (same "no separate lookup" approach as other filters in this app, e.g.
+  // Account Control's Access-role filter) rather than a dedicated endpoint.
+  const [hlSearch, setHlSearch] = useState("");
+  const [hlTripFilter, setHlTripFilter] = useState("ALL");
+  const [hlCoachFilter, setHlCoachFilter] = useState("ALL");
 
   const load = useCallback(async () => {
     if (loadingRef.current) return;
@@ -104,12 +114,46 @@ export default function HistoryLogPage() {
     }
   }
 
+  // Distinct trip/coach names actually present in the loaded history, for
+  // the two filter dropdowns — sorted for a stable, predictable order.
+  const tripOptions = useMemo(() => {
+    const names = new Set(history.map((a) => a.tripName).filter(Boolean));
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [history]);
+  const coachOptions = useMemo(() => {
+    const names = new Set(history.map((a) => a.coachName).filter(Boolean));
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [history]);
+
+  // Search matches the entry's subject/actor text (case-insensitive
+  // substring) — covers delegate name, "All delegates removed", and who
+  // made the change all in one box, rather than separate fields for each.
+  const filteredHistory = useMemo(() => {
+    const q = hlSearch.trim().toLowerCase();
+    return history.filter((a) => {
+      if (hlTripFilter !== "ALL" && a.tripName !== hlTripFilter) return false;
+      if (hlCoachFilter !== "ALL" && a.coachName !== hlCoachFilter) return false;
+      if (q) {
+        const hay = `${a.text || ""} ${a.via || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [history, hlSearch, hlTripFilter, hlCoachFilter]);
+
+  const filtersActive = hlSearch.trim() !== "" || hlTripFilter !== "ALL" || hlCoachFilter !== "ALL";
+  function clearHlFilters() {
+    setHlSearch("");
+    setHlTripFilter("ALL");
+    setHlCoachFilter("ALL");
+  }
+
   // Group entries into calendar days (newest first). Each entry already carries
   // a full `createdAt` timestamp from the backend (rowToActivity in data.js).
   const groups = useMemo(() => {
     const locale = lang === "zh" ? "zh-CN" : "en-GB";
     const byDay = new Map();
-    for (const a of history) {
+    for (const a of filteredHistory) {
       const d = a.createdAt ? new Date(a.createdAt) : null;
       const key = d && !isNaN(d) ? d.toDateString() : "unknown";
       if (!byDay.has(key)) byDay.set(key, { date: d, items: [] });
@@ -125,9 +169,10 @@ export default function HistoryLogPage() {
       else label = t("Unknown date");
       return { key, label, sub, items: g.items };
     });
-  }, [history, lang, t]);
+  }, [filteredHistory, lang, t]);
 
   const totalCount = history.length;
+  const filteredCount = filteredHistory.length;
 
   return (
     <div className="page">
@@ -156,6 +201,43 @@ export default function HistoryLogPage() {
         {totalCount > 0 && <> · <strong>{totalCount}</strong> {totalCount === 1 ? t("entry") : t("entries")}</>}
       </p>
 
+      {totalCount > 0 && (
+        <div className="row" style={{ gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ position: "relative", maxWidth: 260, flex: "1 1 200px" }}>
+            <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
+            <input
+              className="input"
+              style={{ paddingLeft: 32 }}
+              placeholder={t("Search name or actor…")}
+              value={hlSearch}
+              onChange={(e) => setHlSearch(e.target.value)}
+            />
+          </div>
+          {tripOptions.length > 1 && (
+            <select className="select" style={{ maxWidth: 200 }} value={hlTripFilter} onChange={(e) => setHlTripFilter(e.target.value)}>
+              <option value="ALL">{t("All trips")}</option>
+              {tripOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          )}
+          {coachOptions.length > 0 && (
+            <select className="select" style={{ maxWidth: 200 }} value={hlCoachFilter} onChange={(e) => setHlCoachFilter(e.target.value)}>
+              <option value="ALL">{t("All coaches")}</option>
+              {coachOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          )}
+          {filtersActive && (
+            <button className="btn btn-ghost" style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={clearHlFilters}>
+              {t("Clear filters")}
+            </button>
+          )}
+          {filtersActive && (
+            <span className="muted" style={{ fontSize: 12.5 }}>
+              {filteredCount} {t("of")} {totalCount}
+            </span>
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="card" style={{ marginTop: 16, padding: 16, borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>
           <div className="row" style={{ gap: 10, color: "var(--st-missing)", fontWeight: 600 }}>
@@ -169,6 +251,15 @@ export default function HistoryLogPage() {
           <CalendarDays size={30} color="var(--ink-3)" style={{ marginBottom: 10 }} />
           <div className="muted" style={{ fontSize: 14 }}>
             {t("No activity yet. Add or update a delegate to see events here.")}
+          </div>
+        </div>
+      )}
+
+      {loaded && totalCount > 0 && filteredCount === 0 && !error && (
+        <div className="card" style={{ marginTop: 20, padding: "40px 24px", textAlign: "center" }}>
+          <Search size={30} color="var(--ink-3)" style={{ marginBottom: 10 }} />
+          <div className="muted" style={{ fontSize: 14 }}>
+            {t("No entries match your filters.")}
           </div>
         </div>
       )}
@@ -206,6 +297,25 @@ export default function HistoryLogPage() {
                         {m.label && (
                           <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", color: m.color, background: m.bg, padding: "2px 7px", borderRadius: 5 }}>
                             {m.label}
+                          </span>
+                        )}
+                        {/* This page always shows every trip mixed together (unlike
+                            the Dashboard's own History tracker, which is already
+                            scoped to one trip) — a name tag next to each entry is
+                            the only way to tell which trip it belongs to (2026-07-24). */}
+                        {a.tripName && (
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", background: "var(--surface-2)", border: "1px solid var(--line)", padding: "2px 8px", borderRadius: 999 }}>
+                            {a.tripName}
+                          </span>
+                        )}
+                        {/* Which coach the affected delegate is CURRENTLY on
+                            (2026-07-27, "show the coach assigned") — same
+                            data the "All coaches" filter dropdown already
+                            reads (a.coachName), just also shown inline per
+                            entry so it's visible without having to filter. */}
+                        {a.coachName && (
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", background: "var(--surface-2)", border: "1px solid var(--line)", padding: "2px 8px", borderRadius: 999 }}>
+                            {a.coachName}
                           </span>
                         )}
                       </div>
@@ -298,5 +408,9 @@ function styleForKind(kind) {
   if (kind === "exception") return { color: "var(--st-missing)", bg: "var(--st-missing-bg)", Icon: AlertTriangle };
   if (kind === "reassign") return { color: "var(--st-unassigned)", bg: "var(--st-unassigned-bg)", Icon: Pencil };
   if (kind === "checkin") return { color: "var(--st-present)", bg: "var(--st-present-bg)", Icon: UserPlus };
+  // 2026-07-27 — escalations (create/acknowledge/resolve) now log to the
+  // History Log too; own colour/icon so they read as distinct from a
+  // routine delegate edit.
+  if (kind === "escalation") return { color: "var(--st-missing)", bg: "var(--st-missing-bg)", Icon: Siren };
   return VERB_STYLE.default;
 }

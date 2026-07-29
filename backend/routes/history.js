@@ -15,14 +15,24 @@
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
 import { actorOf } from "../lib/actor.js";
-import { requireAuth, requirePermission } from "../auth.js";
-import { getActivity, deleteActivity, deleteAllActivity, rollbackActivity, applyLateCutoff } from "../data.js";
+import { requireAuth, requirePermission } from "../lib/auth.js";
+import { getActivity, deleteActivity, deleteAllActivity, rollbackActivity, applyLateCutoff, resolveTripUuid, getVisibleCoachIds } from "../data.js";
 
 const router = Router();
 
+// ?tripId= scopes to one trip's own activity (2026-07-24 — was always
+// global). Omit, or "t-1", for the old "every trip mixed together" view.
 router.get("/api/activity", requireAuth(), wrap(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 1000);
-  res.json({ activity: await getActivity(limit) });
+  const tripUuid = await resolveTripUuid(req.query.tripId);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  let activity = await getActivity(limit, tripUuid);
+  // Coach-scoped staff (2026-07-27 — see getVisibleCoachIds' doc) only sees
+  // History Log entries for delegates on a coach they can see; entries with
+  // no resolvable coach (a deleted delegate, a trip-level event) still show,
+  // since they aren't clearly someone else's territory.
+  if (visibleCoachIds) activity = activity.filter((a) => !a.coachId || visibleCoachIds.has(a.coachId));
+  res.json({ activity });
 }));
 
 router.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
@@ -31,8 +41,11 @@ router.delete("/api/activity/:id", requirePermission("manageDelegates"), wrap(as
   res.json({ deleted: true });
 }));
 
-router.delete("/api/activity", requirePermission("manageDelegates"), wrap(async (_req, res) => {
-  const deleted = await deleteAllActivity();
+// Scoped to ?tripId= when given, so "Clear all" while viewing one trip's
+// history doesn't silently wipe every other trip's too.
+router.delete("/api/activity", requirePermission("manageDelegates"), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.query.tripId);
+  const deleted = await deleteAllActivity(tripUuid);
   res.json({ deleted });
 }));
 

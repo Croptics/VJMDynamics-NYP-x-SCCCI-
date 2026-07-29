@@ -40,6 +40,7 @@ export * from "./db/accounts.js";
 export * from "./db/delegates.js";
 export * from "./db/dashboard.js";
 export * from "./db/history.js";
+export * from "./db/escalations.js";
 
 /** Connect to Postgres, then create the schema and seed data — in that
  *  order, since schema/seed both need the pool connect() sets up. */

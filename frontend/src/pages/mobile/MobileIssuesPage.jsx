@@ -5,7 +5,10 @@ import { useLang } from "../../lib/i18n.jsx";
 import IssuesPanel from "../../components/IssuesPanel.jsx";
 import { getDelegates } from "../../lib/exceptionsApi.js";
 
-const TRIP_ID = "t-1";
+// Trip id comes from the mobile trip switcher, not a hardcoded base trip
+// (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
+import { getMobileTripId } from "../../lib/mobileTrip.js";
+const TRIP_ID_FALLBACK = "t-1";
 
 /**
  * Dedicated mobile Issues/Exceptions page (/mobile/issues).
@@ -55,7 +58,7 @@ export default function MobileIssuesPage() {
       </div>
 
       <div style={{ marginTop: 12 }}>
-        <IssuesPanel tripId={TRIP_ID} coach={{ delegates }} onLogged={loadDelegates} />
+        <IssuesPanel tripId={getMobileTripId() || TRIP_ID_FALLBACK} coach={{ delegates }} onLogged={loadDelegates} />
       </div>
     </div>
   );

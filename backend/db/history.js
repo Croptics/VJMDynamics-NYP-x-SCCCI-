@@ -24,9 +24,10 @@ export async function logActivity(text, kind, actor = null, meta = null) {
   const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const delegateId = meta?.delegateId || null;
   const changes = meta?.changes && Object.keys(meta.changes).length ? meta.changes : null;
+  const tripUuid = meta?.tripUuid || null;
   await run(
-    `INSERT INTO activity_log (id, text, kind, actor, delegate_id, changes) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [id, text, kind, actor || null, delegateId, changes ? JSON.stringify(changes) : null]
+    `INSERT INTO activity_log (id, text, kind, actor, delegate_id, changes, trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, text, kind, actor || null, delegateId, changes ? JSON.stringify(changes) : null, tripUuid]
   );
 }
 
@@ -45,14 +46,48 @@ function rowToActivity(row) {
     // frontend only offers a Rollback button when both are set.
     delegateId: row.delegate_id || null,
     changes: row.changes || null,
+    // Which trip this entry belongs to — only meaningful in the "All trips"
+    // view (a single-trip-scoped fetch already implies the trip); joined in
+    // rather than a separate lookup per row. Older rows written before
+    // trip_id existed (or ones logged with no resolvable trip) have neither
+    // (2026-07-24).
+    tripId: row.trip_id || null,
+    tripName: row.trip_name || null,
+    // Which coach the affected delegate is CURRENTLY assigned to (not
+    // necessarily who they were assigned to at the moment of this specific
+    // event) — same "derive fresh, don't store a stale snapshot" approach
+    // used elsewhere in this app (e.g. role-template matching). Only
+    // resolvable for entries that carry a delegate_id and whose delegate
+    // still exists; used for the History Log page's "Filter by coach"
+    // (2026-07-24).
+    coachId: row.coach_id || null,
+    coachName: row.coach_name || null,
   };
 }
 
 /** Most recent activity entries, newest first. `limit` defaults to a small
  *  preview (matches the old in-memory cap) — the Dashboard's History tracker
- *  card asks for a much larger limit to show real history. */
-export async function getActivity(limit = 8) {
-  const rows = await all(`SELECT * FROM activity_log ORDER BY "createdAt" DESC LIMIT $1`, [limit]);
+ *  card asks for a much larger limit to show real history.
+ *  `tripUuid` scopes to just that trip's own entries (2026-07-24 — was
+ *  always global, so any trip with real activity drowned out every other
+ *  trip's history in one mixed feed). Omit/null for the old "everything"
+ *  behavior — matches every other trip-scoped read in this app
+ *  ("t-1"/no filter = unfiltered), so existing callers keep working as-is. */
+const ACTIVITY_SELECT = `
+  SELECT a.*, t.name AS trip_name, c.id AS coach_id, COALESCE(c.name, c.label) AS coach_name
+  FROM activity_log a
+  LEFT JOIN trips t ON t.uuid_id = a.trip_id
+  LEFT JOIN delegates d ON d.id = a.delegate_id
+  LEFT JOIN coaches c ON c.id = d."coachId"
+`;
+
+export async function getActivity(limit = 8, tripUuid = null) {
+  // LEFT JOINs throughout (not INNER) so an entry whose trip_id is null, or
+  // whose trip/delegate/coach has since been deleted, still comes back — it
+  // just has no tripName/coachName.
+  const rows = tripUuid
+    ? await all(`${ACTIVITY_SELECT} WHERE a.trip_id = $1 ORDER BY a."createdAt" DESC LIMIT $2`, [tripUuid, limit])
+    : await all(`${ACTIVITY_SELECT} ORDER BY a."createdAt" DESC LIMIT $1`, [limit]);
   return rows.map(rowToActivity);
 }
 
@@ -63,8 +98,13 @@ export async function deleteActivity(id) {
   return true;
 }
 
-export async function deleteAllActivity() {
-  const count = Number((await get("SELECT COUNT(*) AS c FROM activity_log"))?.c || 0);
-  await run("DELETE FROM activity_log");
+/** `tripUuid` scopes the wipe to just that trip's own entries — "Clear all"
+ *  while viewing one trip's history shouldn't silently wipe every OTHER
+ *  trip's history too. Omit/null clears everything (the "All trips" view). */
+export async function deleteAllActivity(tripUuid = null) {
+  const where = tripUuid ? "WHERE trip_id = $1" : "";
+  const params = tripUuid ? [tripUuid] : [];
+  const count = Number((await get(`SELECT COUNT(*) AS c FROM activity_log ${where}`, params))?.c || 0);
+  await run(`DELETE FROM activity_log ${where}`, params);
   return count;
 }

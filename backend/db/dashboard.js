@@ -14,7 +14,7 @@
  * depends back on this file.
  */
 
-import { all, get } from "./connection.js";
+import { all, get, run } from "./connection.js";
 import { TRIP } from "./constants.js";
 import { listDelegates } from "./delegates.js";
 import { getActivity } from "./history.js";
@@ -25,6 +25,30 @@ export async function getTrip(tripUuid = null) {
     if (t) return t;
   }
   return (await get("SELECT * FROM trips LIMIT 1")) || TRIP;
+}
+
+/** Recomputes "dayOf" from the real calendar date for every trip that has a
+ *  "startDate" set and hasn't been manually overridden (see schema.js's
+ *  comment on both columns). Called on the same 60s tick as the checkpoint
+ *  scheduler (server.js) so "Day X of Y" stays correct across midnight
+ *  without anyone editing it by hand — and also called once immediately
+ *  after a trip's startDate changes or its override is cleared (see
+ *  routes/desmond.js), so the UI doesn't have to wait for the next tick.
+ *  Pass a tripUuid to scope to one trip; omit to sync every trip.
+ *
+ *  Uses Asia/Singapore, NOT the database session's default timezone (Neon
+ *  defaults to UTC) — every delegation is Singapore-organised and travelling
+ *  within China, both UTC+8. Rolling this over at CURRENT_DATE (UTC
+ *  midnight) would have flipped the day 8 hours late, at 8am local time, not
+ *  actual local midnight. */
+export async function syncTripDayOf(tripUuid = null) {
+  await run(
+    `UPDATE trips
+        SET "dayOf" = LEAST("totalDays", GREATEST(1, ((NOW() AT TIME ZONE 'Asia/Singapore')::date - "startDate"::date) + 1))
+      WHERE "startDate" IS NOT NULL AND COALESCE("dayOfIsManual", false) = false
+        ${tripUuid ? `AND uuid_id = $1` : ""}`,
+    tripUuid ? [tripUuid] : []
+  );
 }
 
 /** Resolve a dashboard :id param to the trip uuid to scope every read/write by.
@@ -70,18 +94,62 @@ export async function resolveTripUuid(tripId) {
 // undercount every delegate checked in after the ARRIVED migration.
 const isBoarded = (x) => x.status === "PRESENT" || x.status === "ARRIVED";
 
-export async function getDashboard(tripUuid = null) {
-  const d = await listDelegates(tripUuid);
-  const activity = await getActivity(8); // small preview — full history lives on its own endpoint
+/** Staff-scoped visibility (2026-07-27 — "for staff permission is to see
+ *  their assigned coach delegate... limited ui access for staff base on the
+ *  trip coach assigned"). Built on the EXISTING "Coach captain" field
+ *  (coaches.account_id — added by Desmond's Trips board for TransitFlow's
+ *  Switch-staff modal) which was previously just stored/displayed with no
+ *  actual enforcement anywhere — this is the first place it's actually
+ *  enforced. A Staff account only sees delegates/coaches for coaches THEY
+ *  personally captain. A coach with no captain assigned is hidden from
+ *  Staff entirely (2026-07-27 revision — "if a bus is not assign to any
+ *  staff, should be hidden for staff account"; the original plan treated an
+ *  uncaptained coach as "open to everyone", but that let a scoped Staff
+ *  account still see every not-yet-assigned coach). Admin bypasses
+ *  entirely, same as every other permission check in this app.
+ *
+ *  Returns null for "no restriction" — either the account is an Admin, or a
+ *  Staff account that doesn't captain ANY coach on this trip (falls back to
+ *  today's unrestricted behaviour rather than silently locking out every
+ *  existing staff account the moment this ships — an admin opts a specific
+ *  account IN by assigning them a coach, rather than everyone being opted
+ *  out by default). Otherwise returns a Set of ONLY the coach ids this
+ *  account captains. */
+export async function getVisibleCoachIds(tripUuid, account) {
+  if (!account || account.role === "admin") return null;
+  const coaches = tripUuid
+    ? await all(`SELECT id, account_id AS "accountId" FROM coaches WHERE trip_id = $1`, [tripUuid])
+    : await all(`SELECT id, account_id AS "accountId" FROM coaches`);
+  const mine = coaches.filter((c) => c.accountId === account.id).map((c) => c.id);
+  if (mine.length === 0) return null;
+  return new Set(mine);
+}
+
+export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
+  let d = await listDelegates(tripUuid);
+  // Unassigned delegates (coachId null) aren't part of any coach, so a
+  // captain-scoped staff account has no reason to see them — they only ever
+  // show up again once assigned to a coach that account can see.
+  if (visibleCoachIds) d = d.filter((x) => visibleCoachIds.has(x.coachId));
+  let activity = await getActivity(8); // small preview — full history lives on its own endpoint
+  if (visibleCoachIds) activity = activity.filter((a) => !a.coachId || visibleCoachIds.has(a.coachId));
   const present = d.filter(isBoarded).length;
   const missing = d.filter((x) => x.status === "MISSING").length;
   const late = d.filter((x) => x.status === "LATE").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
   const assigned = d.filter((x) => x.status === "ASSIGNED").length;
+  // Delegates actually on a coach's roster right now — everyone EXCEPT
+  // Unassigned (2026-07-24). Unassigned covers two cases that can never
+  // meaningfully be "missing": a delegate who hasn't been given a coach yet,
+  // and a Cancelled delegate (forced to Unassigned — see normalize() in
+  // db/delegates.js). Counting either in the "Missing right now: X of N"
+  // denominator made N overstate who's actually being tracked on this trip.
+  const trackable = present + missing + late + assigned;
 
-  const coachRows = tripUuid
+  let coachRows = tripUuid
     ? await all("SELECT * FROM coaches WHERE trip_id = $1 ORDER BY sort_order NULLS LAST, id", [tripUuid])
     : await all("SELECT * FROM coaches ORDER BY id");
+  if (visibleCoachIds) coachRows = coachRows.filter((c) => visibleCoachIds.has(c.id));
   const coaches = coachRows.map((c) => {
     const assigned = d.filter((x) => x.coachId === c.id);
     return {
@@ -103,6 +171,7 @@ export async function getDashboard(tripUuid = null) {
     trip: await getTrip(tripUuid),
     kpis: {
       total: d.length,
+      trackable,
       present,
       missing,
       late,
@@ -118,10 +187,11 @@ export async function getDashboard(tripUuid = null) {
   };
 }
 
-export async function getMissing(tripUuid = null) {
+export async function getMissing(tripUuid = null, visibleCoachIds = null) {
   const coaches = await all("SELECT * FROM coaches");
   return (await listDelegates(tripUuid))
     .filter((x) => x.status === "MISSING")
+    .filter((x) => !visibleCoachIds || visibleCoachIds.has(x.coachId))
     .map((x) => {
       const coach = coaches.find((c) => c.id === x.coachId);
       return {

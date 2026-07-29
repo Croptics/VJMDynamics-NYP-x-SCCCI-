@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — Delegate widgets
+ * ============================================================================= */
 /**
  * Full 5-state status → color mapping for profile-card-style elements (this
  * avatar, and the delegate Edit modal's photo/status header in

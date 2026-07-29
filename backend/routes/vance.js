@@ -37,10 +37,11 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
-  getMissing,
   COACHES,
+  accountPermissions,
+  getVisibleCoachIds,
 } from "../data.js";
-import { requireAuth, requirePermission, requireKioskOrPermission } from "../auth.js";
+import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -129,7 +130,69 @@ async function init() {
   await q(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
-  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages");
+
+  // MusterChat: direct human↔human messages (staff↔staff two-way, staff→delegate
+  // log), plus video-call entries and shared-document cards. The AI assistant
+  // keeps its own chat_sessions tables above; this is the person-to-person layer
+  // that sits beside it in the same inbox. `convo_key` is an order-independent
+  // key for the pair so A→B and B→A share one thread. `media` holds a data URL
+  // for a video clip, or JSON for a doc-share / call summary.
+  // (Integrated from Vance's v2 branch 2026-07-27 — tables are all-additive,
+  // CREATE/ALTER IF NOT EXISTS only, no existing table is touched.)
+  await q(`CREATE TABLE IF NOT EXISTS dm_messages (
+    id             VARCHAR(64) PRIMARY KEY,
+    convo_key      VARCHAR(200) NOT NULL,
+    sender_id      VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    recipient_kind VARCHAR(16) NOT NULL,
+    recipient_id   VARCHAR(64) NOT NULL,
+    kind           VARCHAR(16) NOT NULL DEFAULT 'text',
+    body           TEXT,
+    media          TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    read_at        TIMESTAMPTZ
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_convo ON dm_messages(convo_key, created_at)`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_inbox ON dm_messages(recipient_kind, recipient_id, read_at)`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_dm_sender ON dm_messages(sender_id, created_at)`);
+  // WhatsApp-style edit / delete (additive). `edited_at` stamps an edited text;
+  // `deleted_at` soft-deletes (the row stays for ordering, but body/media are
+  // blanked on read so the content is gone — "This message was deleted").
+  await q(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS edited_at  TIMESTAMPTZ`);
+  await q(`ALTER TABLE dm_messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
+
+  // MusterChat calling: WebRTC signaling relay. Two staff exchange offer/answer/
+  // ICE via these rows (polled), so a real peer-to-peer audio/video call
+  // connects without any dedicated signaling server. Rows are short-lived.
+  await q(`CREATE TABLE IF NOT EXISTS call_signals (
+    id          VARCHAR(64) PRIMARY KEY,
+    call_id     VARCHAR(64) NOT NULL,
+    from_id     VARCHAR(64) NOT NULL,
+    from_name   VARCHAR(255),
+    to_id       VARCHAR(64) NOT NULL,
+    kind        VARCHAR(16) NOT NULL,
+    payload     TEXT,
+    mode        VARCHAR(8),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_call_signals_to ON call_signals(to_id, created_at)`);
+
+  // MusterChat group chats. A group's messages reuse dm_messages with convo_key
+  // = 'g:<groupId>' (recipient_kind 'group'), so no message-schema change — just
+  // the group + membership tables here.
+  await q(`CREATE TABLE IF NOT EXISTS chat_groups (
+    id          VARCHAR(64) PRIMARY KEY,
+    name        VARCHAR(255) NOT NULL,
+    created_by  VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS chat_group_members (
+    group_id    VARCHAR(64) NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+    account_id  VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, account_id)
+  )`);
+  await q(`CREATE INDEX IF NOT EXISTS idx_group_members_acct ON chat_group_members(account_id)`);
+
+  console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages, dm_messages, call_signals, chat_groups");
   warmUpModel(); // preload the chat model so the first question isn't a cold start
 }
 
@@ -779,12 +842,19 @@ router.post(
       // yet checked in → MISSING (so they show on the coach board); otherwise
       // UNASSIGNED. VIP flag carries through.
       const coachId = r.coachId || null;
+      // tripUuid passed directly now (2026-07-24) — this used to call
+      // createDelegate() with none, then patch trip_id on with a separate
+      // UPDATE below, which meant logActivity() (fired inside createDelegate)
+      // always recorded trip_id NULL for every onboarded delegate, so the
+      // Dashboard's per-trip History tracker never showed onboarding activity
+      // at all. The UPDATE below still runs but is now a harmless no-op on
+      // trip_id (COALESCE keeps whatever's already there).
       const delegate = await createDelegate({
         name,
         status: coachId ? "MISSING" : "UNASSIGNED",
         vip: !!r.vip,
         coachId,
-      });
+      }, tripUuid);
       await q(
         `UPDATE delegates
            SET passport_no = $1, nationality = $2, passport_expiry = $3,
@@ -829,12 +899,13 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   const tripId = req.query.tripId;
   const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
-  const cols = `id, name, company, role, "coachId" AS coach_id, status, vip, qr_code`;
+  const cols = `id, name, company, role, industry, "coachId" AS coach_id, status, vip, qr_code`;
   const r = tripUuid
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
   const coaches = (await q(`SELECT id, label, name, city FROM coaches ORDER BY sort_order NULLS LAST, id`)).rows;
-  const present = r.rows.filter((d) => d.status === "PRESENT").length;
+  // PRESENT (legacy) and ARRIVED (the team's 5-status value) both mean "boarded".
+  const present = r.rows.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
 }));
 
@@ -916,7 +987,7 @@ router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner")
   invalidateSnapshot(); // a delegate just boarded — refresh the assistant's view
 
   const counts = await q(
-    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status='PRESENT')::int AS present
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present
        FROM delegates WHERE trip_id = (SELECT uuid_id FROM trips WHERE id = $1)`, [tripId]);
   res.json({
     ok: true,
@@ -946,13 +1017,24 @@ function checkPassportExpiry(expiry, now = new Date()) {
 }
 
 async function buildSnapshot() {
-  const [trip, dashboard, missing] = await Promise.all([getTrip(), getDashboard(), getMissing()]);
+  // The assistant is scoped to the Beijing study mission (t-1). Resolve its uuid
+  // once and scope every read to it, so the snapshot never mixes trips — JQ's
+  // getTrip/getDashboard/getMissing otherwise default to an arbitrary "LIMIT 1"
+  // (no ORDER BY) trip, which made the assistant + pulse show a different trip
+  // and counts than the dashboard. (Vance's fix, integrated 2026-07-27.)
+  const tripUuid = await resolveTripUuid("t-1");
+  const [trip, dashboard] = await Promise.all([
+    getTrip(tripUuid), getDashboard(tripUuid),
+  ]);
 
-  /* Rich delegate roster (drives company/industry/VIP analytics + lookups). */
+  /* Rich delegate roster (scoped to the same trip; drives company/industry/VIP
+   * analytics + look-ups). */
   let roster = [];
   try {
-    const r = await q(`SELECT name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry
-                         FROM delegates ORDER BY name`);
+    const cols = `name, company, industry, role, status, vip, "coachId" AS coach_id, email, passport_expiry`;
+    const r = tripUuid
+      ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
+      : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
     roster = r.rows;
   } catch { /* delegate doc columns not present yet */ }
 
@@ -967,6 +1049,38 @@ async function buildSnapshot() {
   const byIndustry = tally(roster, "industry");
   const byCompany = tally(roster, "company");
   const vips = roster.filter((x) => x.vip);
+
+  /* 5-status-aware, SINGLE-SOURCE KPIs + lists (Vance's fix, integrated
+   * 2026-07-27). Every delegate is exactly one of:
+   *   boarded    = PRESENT / ARRIVED
+   *   missing    = on a coach, not boarded
+   *   unassigned = no coach, not boarded
+   * Deriving the missing LIST and the missing COUNT from this one partition keeps
+   * the assistant, Trip Pulse and boarding passes perfectly consistent. Before,
+   * the count was roster-derived while the list came from JQ's getMissing(), so
+   * "how many are missing?" and "who's missing?" gave different numbers. */
+  const isBoarded = (d) => d.status === "PRESENT" || d.status === "ARRIVED";
+  const coachLabelById = new Map((dashboard.coaches || []).map((c) => [c.id, c.label || c.name || c.id]));
+  const boardedRoster = roster.filter(isBoarded);
+  const missingRoster = roster.filter((d) => !isBoarded(d) && d.coach_id);
+  const unassignedRoster = roster.filter((d) => !isBoarded(d) && !d.coach_id);
+  const missingList = missingRoster.map((d) => ({
+    name: d.name, vip: !!d.vip, status: d.status, company: d.company,
+    coach_id: d.coach_id, coach: coachLabelById.get(d.coach_id) || null,
+  }));
+  const kpis = {
+    total: roster.length,
+    present: boardedRoster.length,
+    unassigned: unassignedRoster.length,
+    missing: missingList.length,
+  };
+  // Per-coach counts recomputed from the SAME partition, so "which coach has the
+  // most missing" and a coach-scoped "who's missing on Coach 2" always agree.
+  const coaches = (dashboard.coaches?.length ? dashboard.coaches : COACHES).map((c) => ({
+    ...c,
+    boarded: boardedRoster.filter((d) => d.coach_id === c.id).length,
+    missing: missingRoster.filter((d) => d.coach_id === c.id).length,
+  }));
 
   /* Passport validity — delegates whose passport is expired or expires within
    * 6 months. Soonest-to-expire / most-overdue first. */
@@ -1012,9 +1126,8 @@ async function buildSnapshot() {
 
   return {
     asOf: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-    trip, kpis: dashboard.kpis,
-    coaches: dashboard.coaches.length ? dashboard.coaches : COACHES,
-    missing, exceptions, checkins, itinerary,
+    trip, kpis, coaches,
+    missing: missingList, exceptions, checkins, itinerary,
     roster, byIndustry, byCompany, vips, passportIssues,
   };
 }
@@ -1288,6 +1401,21 @@ function computeRisk(snapshot) {
   return items.sort((a, b) => b.score - a.score);
 }
 
+/* Detect a coach referenced in a question — "coach 2", or a coach's label /
+ * name / city — so a missing/present look-up can be scoped to it. Returns the
+ * coach object, or null when the question isn't about a specific coach. */
+function findCoachInText(q, coaches = []) {
+  for (const c of coaches) {
+    for (const cand of [c.label, c.name, c.city].filter(Boolean)) {
+      const s = String(cand).toLowerCase();
+      if (s.length >= 2 && q.includes(s)) return c;
+    }
+    const num = String(c.label ?? c.name ?? "").match(/\d+/)?.[0];
+    if (num && new RegExp(`\\bcoach\\s*0*${num}\\b`).test(q)) return c;
+  }
+  return null;
+}
+
 function answerLocally(question, snapshot) {
   if (!snapshot) return null;
   const q = (question || "").toLowerCase().trim();
@@ -1317,7 +1445,7 @@ function answerLocally(question, snapshot) {
   //    aggregate + breakdown intents so "what company is X from" isn't misread.
   const named = findDelegateInText(q, roster);
   if (named && /\b(who|what|which|where|whose|is|are|does|has|from|on|about|status|company|industry|role|coach|bus|here|present|missing|checked|arrived|boarded)\b/.test(q)) {
-    const statusText = named.status === "PRESENT" ? "checked in"
+    const statusText = (named.status === "PRESENT" || named.status === "ARRIVED") ? "checked in"
       : named.status === "MISSING" ? "missing" : "not on a coach yet";
     const facts = [];
     if (named.role) facts.push(named.role);
@@ -1350,19 +1478,34 @@ function answerLocally(question, snapshot) {
     return `${kpis.total} delegates total — ${kpis.present} present, ${kpis.missing} missing, ${kpis.unassigned} unassigned (not yet on a coach).`;
   }
 
-  // 4) Present / checked-in count
+  // 4) Present / checked-in count — coach-scoped when a coach is named.
   if (!named && (/\b(present|checked[- ]?in|turnout|arrived)\b/.test(q) || has("here yet", "how many are here"))) {
+    const coach = findCoachInText(q, coaches);
+    if (coach) {
+      const cname = coach.label || coach.name;
+      const onCoach = roster.filter((d) => d.coach_id === coach.id);
+      const boarded = onCoach.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
+      return `${bold(boarded)} of ${bold(onCoach.length)} on ${cname} have boarded — ${onCoach.length - boarded} still to go.`;
+    }
     return `${bold(kpis.present)} of ${bold(kpis.total)} delegates are checked in — ${kpis.missing} still missing, ${kpis.unassigned} not yet on a coach.`;
   }
 
-  // 5) Missing (count or list)
+  // 5) Missing (count or list) — scoped to a coach if the question names one, so
+  //    "who is missing from Coach 2?" answers about Coach 2, not the whole trip.
   if (!named && has("missing", "not checked in", "not here", "haven't arrived", "havent arrived", "unaccounted", "who's left", "still to board", "not boarded")) {
-    if (asksCount && !asksWho) return `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
-    if (!missing.length) return "Nobody is currently marked missing — everyone expected is accounted for.";
-    const ordered = [...missing].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
-    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${m.coach ? ` · ${m.coach}` : ""}`);
-    const more = missing.length > 15 ? `\n…and ${missing.length - 15} more.` : "";
-    return `${bold(missing.length)} missing:\n${lines.join("\n")}${more}`;
+    const coach = findCoachInText(q, coaches);
+    const cname = coach ? (coach.label || coach.name) : null;
+    const list = coach ? missing.filter((m) => m.coach_id === coach.id) : missing;
+    // Global count cites kpis.missing (now equal to the list length — both come
+    // from the one buildSnapshot partition); coach-scoped cites the filtered list.
+    if (asksCount && !asksWho) return cname
+      ? `${bold(list.length)} on ${cname} are missing (expected but not yet checked in).`
+      : `${bold(kpis.missing)} delegates are missing (expected but not yet checked in).`;
+    if (!list.length) return cname ? `Everyone on ${cname} has boarded — nobody missing there.` : "Nobody is currently marked missing — everyone expected is accounted for.";
+    const ordered = [...list].sort((a, b) => (b.vip ? 1 : 0) - (a.vip ? 1 : 0));
+    const lines = ordered.slice(0, 15).map((m) => `- ${m.name}${m.vip ? " (VIP)" : ""}${!cname && m.coach ? ` · ${m.coach}` : ""}`);
+    const more = list.length > 15 ? `\n…and ${list.length - 15} more.` : "";
+    return `${bold(list.length)} missing${cname ? ` on ${cname}` : ""}:\n${lines.join("\n")}${more}`;
   }
 
   // 6) Unassigned (not on any coach yet)
@@ -1392,7 +1535,7 @@ function answerLocally(question, snapshot) {
   if (has("vip", "important", "priority guest", "priority delegate")) {
     if (!vips.length) return "No delegates are flagged as VIPs.";
     const missingVips = vips.filter((v) => v.status === "MISSING");
-    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${v.status === "PRESENT" ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
+    const lines = vips.slice(0, 15).map((v) => `- ${v.name}${v.company ? ` · ${v.company}` : ""} — ${(v.status === "PRESENT" || v.status === "ARRIVED") ? "checked in" : v.status === "MISSING" ? "missing" : "not on a coach"}`);
     const head = `${bold(vips.length)} VIP${vips.length > 1 ? "s" : ""}${missingVips.length ? `, ${bold(missingVips.length)} still missing` : ""}:`;
     return `${head}\n${lines.join("\n")}`;
   }
@@ -1650,13 +1793,27 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
 /* Delegate roster with details — powers clickable delegate cards in the chat. */
 router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
+  // Coach-captain scoping added 2026-07-28 (audit finding): this returned EVERY
+  // delegate — including their email — to any signed-in account, with no
+  // scoping at all, which made it the widest delegate-PII surface in the app.
+  // Now scoped to the assistant's own trip (t-1, same as buildSnapshot) and to
+  // the coaches the caller can actually see, matching every other
+  // delegate-reading route.
+  const tripUuid = await resolveTripUuid("t-1");
   const r = await q(`
     SELECT d.name, d.company, d.role, d.industry, d.status, d.vip, d.email,
+           d."coachId" AS coach_id,
            c.name AS coach, c.city AS coach_city
       FROM delegates d
       LEFT JOIN coaches c ON c.id = d."coachId"
-     ORDER BY d.name`);
-  res.json({ delegates: r.rows });
+     WHERE ($1::uuid IS NULL OR d.trip_id = $1)
+     ORDER BY d.name`, [tripUuid]);
+  const visibleCoachIds = tripUuid ? await getVisibleCoachIds(tripUuid, req.account) : null;
+  const rows = visibleCoachIds
+    ? r.rows.filter((d) => d.coach_id && visibleCoachIds.has(d.coach_id))
+    : r.rows;
+  // coach_id was only needed for the filter — not part of the public shape.
+  res.json({ delegates: rows.map(({ coach_id, ...rest }) => rest) });
 }));
 
 /* Compact live "trip pulse" for the page headers (Onboarding + Assistant):
@@ -1680,6 +1837,497 @@ router.delete("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => 
   res.json({ deleted: true });
 }));
 
+/* =============================================================================
+ *  MUSTERCHAT — person-to-person messaging (lives beside the AI assistant in
+ *  the same inbox). Only staff accounts authenticate, so the SENDER is always
+ *  an account; the peer is another account (fully two-way) or a delegate (a
+ *  staff→delegate log, since delegates never log in). Messages persist and are
+ *  polled via /updates for near-real-time delivery.
+ * ========================================================================== */
+
+// Order-independent key for a conversation's two parties, so A→B and B→A share
+// one thread. Account↔account sorts the ids; account↔delegate is per-staffer
+// (each staff member keeps their own thread with a given delegate).
+function convoKey(meAcctId, peerKind, peerId) {
+  if (peerKind === "delegate") return `a:${meAcctId}|d:${peerId}`;
+  const [lo, hi] = [String(meAcctId), String(peerId)].sort();
+  return `a:${lo}|a:${hi}`;
+}
+
+const MSG_KINDS = new Set(["text", "video", "doc", "call", "sticker"]);
+
+// Media allowlist (JQ, added at integration time 2026-07-27): `media` is
+// rendered straight into <img>/<video> src on the client, so only inline data:
+// payloads of the right type (or JSON for doc/call cards) are accepted — a
+// remote http(s) URL stored here would beacon every viewer's IP to whoever
+// sent it.
+// Tightened 2026-07-28 after pen-testing: a bare startsWith("data:video/")
+// prefix check also accepted junk like "data:video/..%2f..%2fetc". Require a
+// real, well-formed inline data URL — subtype of safe chars, then the
+// base64/comma separator — so only something a browser would actually decode
+// as media can be stored.
+const DATA_VIDEO_RE = /^data:video\/[a-z0-9][a-z0-9.+-]*(;[a-z0-9-]+=[^,;]*)*(;base64)?,/i;
+const DATA_IMAGE_RE = /^data:image\/[a-z0-9][a-z0-9.+-]*(;[a-z0-9-]+=[^,;]*)*(;base64)?,/i;
+function validMedia(kind, media) {
+  if (media === null || media === undefined || media === "") return true;
+  const s = String(media);
+  if (kind === "video") return DATA_VIDEO_RE.test(s);
+  // SVG is excluded deliberately: it's the one image type that can carry
+  // script, and nothing here needs it.
+  if (kind === "sticker") return DATA_IMAGE_RE.test(s) && !/^data:image\/svg/i.test(s);
+  if (kind === "doc" || kind === "call") { try { JSON.parse(s); return true; } catch { return false; } }
+  return false; // plain text messages carry no media
+}
+
+/* Per-account send throttle (JQ, 2026-07-28 pen-test finding: 50 rapid sends
+ * were all accepted, and each may carry ~12MB of base64 media — that's a
+ * trivial way for one signed-in account to flood the shared DB). In-memory
+ * sliding window: fine for this single-process app, and it fails OPEN on
+ * restart rather than locking anyone out. Generous enough that real
+ * conversation never hits it. */
+const SEND_WINDOW_MS = 10_000;
+const SEND_MAX_TEXT = 25;   // messages per window per account
+const SEND_MAX_MEDIA = 5;   // of which, at most this many carrying media
+const sendLog = new Map();  // accountId -> [{ at, media }]
+function throttleSend(accountId, hasMedia) {
+  const now = Date.now();
+  const recent = (sendLog.get(accountId) || []).filter((e) => now - e.at < SEND_WINDOW_MS);
+  if (recent.length >= SEND_MAX_TEXT) return false;
+  if (hasMedia && recent.filter((e) => e.media).length >= SEND_MAX_MEDIA) return false;
+  recent.push({ at: now, media: hasMedia });
+  sendLog.set(accountId, recent);
+  // Keep the map from growing forever on a long-running server.
+  if (sendLog.size > 500) {
+    for (const [k, v] of sendLog) if (!v.some((e) => now - e.at < SEND_WINDOW_MS)) sendLog.delete(k);
+  }
+  return true;
+}
+const MAX_BODY = 8000;                 // chars of text / caption
+const MAX_MEDIA = 12 * 1024 * 1024;    // ~12MB base64 (short clips / small docs)
+
+// Shape a dm_messages row for the client. A soft-deleted message keeps its slot
+// (for ordering) but its content is blanked so it can never leak — the client
+// shows "This message was deleted" from the `deleted` flag. `edited` tags edits.
+function mapMessageRow(me) {
+  return (m) => {
+    const deleted = !!m.deleted_at;
+    return {
+      id: m.id,
+      kind: m.kind,
+      body: deleted ? null : m.body,
+      media: deleted ? null : m.media,
+      at: m.created_at,
+      mine: m.sender_id === me,
+      read: !!m.read_at,
+      edited: !!m.edited_at,
+      deleted,
+    };
+  };
+}
+
+// Restriction point: staff are always contactable; delegate contacts require
+// the same delegate visibility the rest of the app gates on. Tighten here.
+function canSeeDelegates(account) {
+  const p = accountPermissions(account) || {};
+  return !!(p.viewDocuments || p.viewDashboard || p.manageDelegates);
+}
+
+async function resolvePeer(peerKind, peerId, account) {
+  if (peerKind === "account") {
+    return (await q(`SELECT id, name, username FROM accounts WHERE id = $1`, [peerId])).rows[0] || null;
+  }
+  if (peerKind === "delegate") {
+    if (!canSeeDelegates(account)) return null;
+    const row = (await q(`SELECT id, name, company, trip_id, "coachId" FROM delegates WHERE id = $1`, [peerId])).rows[0];
+    if (!row) return null;
+    // Coach-captain scoping (JQ, 2026-07-28 pen-test finding). The CONTACTS
+    // list was already scoped, but this lookup wasn't — so a scoped Staff
+    // account could still read any delegate's name/company, and open a thread
+    // against them, just by asking for the id directly (ids are sequential
+    // "d-N", so the whole roster was walkable). Same rule, enforced at the
+    // point the record is actually read.
+    if (row.trip_id) {
+      const visibleCoachIds = await getVisibleCoachIds(row.trip_id, account);
+      if (visibleCoachIds && !(row.coachId && visibleCoachIds.has(row.coachId))) return null;
+    }
+    return { id: row.id, name: row.name, company: row.company };
+  }
+  return null;
+}
+
+const previewOf = (m) =>
+  !m ? null
+  : m.deleted_at ? "🚫 Message deleted"
+  : m.kind === "sticker" ? "💟 Sticker"
+  : m.kind === "video" ? "📹 Video message"
+  : m.kind === "doc" ? "📄 Document"
+  : m.kind === "call" ? (m.body || "📞 Call")
+  : (m.body || "").slice(0, 80);
+
+// GET /api/messages/contacts — everyone I can message, each with last-message
+// preview, unread count and presence; conversations with history float to top.
+router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+
+  const accounts = (await q(
+    `SELECT id, name, username, role,
+            (last_seen_at IS NOT NULL AND last_seen_at > now() - interval '45 seconds') AS online
+       FROM accounts WHERE id <> $1 ORDER BY name NULLS LAST, username`, [me]
+  )).rows;
+
+  let delegates = [];
+  if (canSeeDelegates(req.account)) {
+    const tripUuid = await resolveTripUuid("t-1");
+    delegates = (await q(
+      `SELECT id, name, company, "coachId" FROM delegates
+        WHERE ($1::uuid IS NULL OR trip_id = $1) ORDER BY name`, [tripUuid]
+    )).rows;
+    // Coach-captain Staff scoping (JQ, added at integration time 2026-07-27):
+    // the delegate CONTACTS list respects the same visibility rule as every
+    // other delegate-reading route — a scoped Staff account only sees (and can
+    // only message) delegates on coaches they captain. Admin sees everyone.
+    const visibleCoachIds = tripUuid ? await getVisibleCoachIds(tripUuid, req.account) : null;
+    if (visibleCoachIds) delegates = delegates.filter((d) => d.coachId && visibleCoachIds.has(d.coachId));
+    delegates = delegates.map(({ coachId, ...rest }) => rest);
+  }
+
+  // All my messages, oldest→newest, so the last write per convo wins the preview.
+  const mine = (await q(
+    `SELECT convo_key, sender_id, recipient_kind, recipient_id, kind, body, created_at, read_at, deleted_at
+       FROM dm_messages
+      WHERE sender_id = $1 OR (recipient_kind = 'account' AND recipient_id = $1)
+      ORDER BY created_at`, [me]
+  )).rows;
+
+  const lastByConvo = new Map();
+  const unreadByConvo = new Map();
+  for (const m of mine) {
+    lastByConvo.set(m.convo_key, m);
+    if (m.recipient_kind === "account" && m.recipient_id === me && !m.read_at) {
+      unreadByConvo.set(m.convo_key, (unreadByConvo.get(m.convo_key) || 0) + 1);
+    }
+  }
+
+  const build = (kind, row, subtitle, online) => {
+    const key = convoKey(me, kind, row.id);
+    const last = lastByConvo.get(key);
+    return {
+      kind, id: row.id, name: row.name || row.username || "Unknown", subtitle,
+      online: !!online,
+      lastMessage: previewOf(last), lastAt: last?.created_at || null,
+      lastMine: last ? last.sender_id === me : false,
+      unread: unreadByConvo.get(key) || 0,
+    };
+  };
+
+  const contacts = [
+    ...accounts.map((a) => build("account", a, a.role === "admin" ? "Staff · admin" : "Staff", a.online)),
+    ...delegates.map((d) => build("delegate", d, d.company || "Delegate", false)),
+  ];
+  contacts.sort((a, b) => {
+    if (a.lastAt && b.lastAt) return new Date(b.lastAt) - new Date(a.lastAt);
+    if (a.lastAt) return -1;
+    if (b.lastAt) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  res.json({ me: { id: me, name: req.account.name, username: req.account.username }, contacts });
+}));
+
+// GET /api/messages/thread?peerKind=&peerId= — full history with one peer,
+// marking everything they sent me as read.
+router.get("/api/messages/thread", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const peerKind = (req.query.peerKind || "account").toString();
+  const peerId = (req.query.peerId || "").toString();
+  const peer = await resolvePeer(peerKind, peerId, req.account);
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
+
+  const key = convoKey(me, peerKind, peerId);
+  await q(`UPDATE dm_messages SET read_at = now()
+            WHERE convo_key = $1 AND recipient_kind = 'account' AND recipient_id = $2 AND read_at IS NULL`,
+          [key, me]);
+
+  const rows = (await q(
+    `SELECT id, sender_id, kind, body, media, created_at, read_at, edited_at, deleted_at
+       FROM dm_messages WHERE convo_key = $1 ORDER BY created_at`, [key]
+  )).rows;
+
+  res.json({
+    peer: { kind: peerKind, id: peerId, name: peer.name || peer.username, subtitle: peer.company || null },
+    messages: rows.map(mapMessageRow(me)),
+  });
+}));
+
+// POST /api/messages/thread — send a message (text | video clip | doc share | call log).
+router.post("/api/messages/thread", requireAuth(), express.json({ limit: "16mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const { peerKind = "account", peerId, kind = "text", body = null, media = null } = req.body || {};
+  if (!peerId) return res.status(400).json({ error: "NO_PEER" });
+  if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
+  if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
+  if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE", message: "That attachment is too large — keep clips short." });
+  if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
+  if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
+  if (!throttleSend(me, !!media)) return res.status(429).json({ error: "TOO_FAST", message: "Slow down a moment — too many messages at once." });
+
+  const peer = await resolvePeer(peerKind, peerId, req.account);
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That contact isn't available." });
+
+  const id = randomUUID();
+  const key = convoKey(me, peerKind, peerId);
+  await q(
+    `INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [id, key, me, peerKind, peerId, kind, body, media]
+  );
+  res.json({ message: { id, kind, body, media, at: new Date().toISOString(), mine: true, read: false } });
+}));
+
+// GET /api/messages/updates?since=ISO — incoming messages addressed to me since
+// a timestamp (lightweight polling) + my total unread across all threads.
+router.get("/api/messages/updates", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const since = req.query.since ? new Date(req.query.since.toString()) : new Date(Date.now() - 60000);
+  const rows = (await q(
+    `SELECT id, convo_key, sender_id, kind, body, created_at, deleted_at
+       FROM dm_messages
+      WHERE recipient_kind = 'account' AND recipient_id = $1 AND created_at > $2
+      ORDER BY created_at`, [me, since.toISOString()]
+  )).rows;
+  const unread = (await q(
+    `SELECT COUNT(*)::int AS n FROM dm_messages
+      WHERE recipient_kind = 'account' AND recipient_id = $1 AND read_at IS NULL`, [me]
+  )).rows[0].n;
+  res.json({
+    now: new Date().toISOString(),
+    unread,
+    incoming: rows.map((m) => ({ id: m.id, convoKey: m.convo_key, senderId: m.sender_id, kind: m.kind, preview: previewOf(m), at: m.created_at })),
+  });
+}));
+
+// POST /api/messages/read — mark a whole thread read.
+router.post("/api/messages/read", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const { peerKind = "account", peerId } = req.body || {};
+  if (!peerId) return res.status(400).json({ error: "NO_PEER" });
+  const key = convoKey(me, peerKind, peerId);
+  await q(`UPDATE dm_messages SET read_at = now()
+            WHERE convo_key = $1 AND recipient_kind = 'account' AND recipient_id = $2 AND read_at IS NULL`, [key, me]);
+  res.json({ ok: true });
+}));
+
+// PATCH /api/messages/:id — edit your OWN text message (DMs or groups; keyed by
+// message id, so one endpoint covers both). Stamps `edited_at`.
+router.patch("/api/messages/:id", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const id = req.params.id;
+  const body = (req.body?.body ?? "").toString();
+  const row = (await q(`SELECT sender_id, kind, deleted_at FROM dm_messages WHERE id = $1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: "NO_MESSAGE" });
+  if (row.sender_id !== me) return res.status(403).json({ error: "NOT_YOURS", message: "You can only edit your own messages." });
+  if (row.deleted_at) return res.status(409).json({ error: "DELETED", message: "That message was deleted." });
+  if (row.kind !== "text") return res.status(400).json({ error: "NOT_EDITABLE", message: "Only text messages can be edited." });
+  if (!body.trim()) return res.status(400).json({ error: "EMPTY" });
+  if (body.length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
+  await q(`UPDATE dm_messages SET body = $1, edited_at = now() WHERE id = $2`, [body, id]);
+  res.json({ ok: true, id, body, edited: true });
+}));
+
+// DELETE /api/messages/:id — soft-delete your OWN message (any kind). The row
+// stays for ordering but body/media are wiped so the content is truly gone.
+router.delete("/api/messages/:id", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const id = req.params.id;
+  const row = (await q(`SELECT sender_id FROM dm_messages WHERE id = $1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: "NO_MESSAGE" });
+  if (row.sender_id !== me) return res.status(403).json({ error: "NOT_YOURS", message: "You can only delete your own messages." });
+  await q(`UPDATE dm_messages SET deleted_at = now(), body = NULL, media = NULL WHERE id = $1`, [id]);
+  res.json({ ok: true, id, deleted: true });
+}));
+
+/* =============================================================================
+ *  MUSTERCHAT CALLING — WebRTC signaling relay (staff↔staff). The two peers
+ *  exchange invite / offer / answer / ICE / hangup through these rows, polled
+ *  by the client, so a real peer-to-peer audio/video call connects with just a
+ *  public STUN server — no dedicated signaling server needed.
+ * ========================================================================== */
+// 1:1 kinds + group-mesh kinds (ginvite = ring a member into a group call;
+// gjoin/gpresence = mesh roster discovery; gleave = a member left the room).
+const CALL_SIGNAL_KINDS = new Set([
+  // "accept" was in this allowlist but is never sent or handled — accepting a
+  // call emits "answer" (see callManager.accept). Dropped 2026-07-28.
+  "invite", "offer", "answer", "ice", "reject", "hangup", "busy",
+  "ginvite", "gjoin", "gpresence", "gleave",
+]);
+
+// POST /api/calls/signal — relay one signal to a peer (another staff account).
+router.post("/api/calls/signal", requireAuth(), express.json({ limit: "1mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const { callId, toId, kind, payload = null, mode = null } = req.body || {};
+  if (!callId || !toId || !CALL_SIGNAL_KINDS.has(kind)) return res.status(400).json({ error: "BAD_SIGNAL" });
+  if (toId === req.account.id) return res.status(400).json({ error: "BAD_SIGNAL", message: "You can't call yourself." });
+  const peer = (await q(`SELECT id FROM accounts WHERE id = $1`, [toId])).rows[0];
+  if (!peer) return res.status(404).json({ error: "NO_PEER", message: "That teammate isn't reachable." });
+
+  // Group-call signals must come from an ACTUAL member of that group (JQ,
+  // 2026-07-28 pen-test finding): `ginvite`/`gjoin`/`gpresence`/`gleave` carry
+  // a groupId in the payload and were relayed with no membership check at all,
+  // so any account could ring anyone into a fabricated "group" and pick its
+  // display name. The group-call callId is the groupId (see callManager's
+  // startGroupCall), so verify against whichever the client supplied.
+  if (kind.startsWith("g")) {
+    const gid = payload?.groupId || callId;
+    if (!gid || !(await isGroupMember(gid, req.account.id))) {
+      return res.status(403).json({ error: "NOT_MEMBER", message: "You're not in that group." });
+    }
+    // Never trust a client-supplied group NAME — read the real one, so a ring
+    // can't be labelled with attacker-chosen text.
+    const g = (await q(`SELECT name FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+    if (g && payload && typeof payload === "object") payload.groupName = g.name;
+  }
+
+  // Cap the relayed payload. It's WebRTC SDP/ICE (a few KB at most); without a
+  // bound, `call_signals` doubles as a 1MB-per-row scratch store any two
+  // accounts could stuff arbitrary data into.
+  const payloadText = payload ? JSON.stringify(payload) : null;
+  if (payloadText && payloadText.length > 64 * 1024) {
+    return res.status(413).json({ error: "PAYLOAD_TOO_LARGE", message: "Signal payload too large." });
+  }
+  await q(
+    `INSERT INTO call_signals (id, call_id, from_id, from_name, to_id, kind, payload, mode)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [randomUUID(), callId, req.account.id, req.account.name || req.account.username, toId, kind, payloadText, mode]
+  );
+  res.json({ ok: true });
+}));
+
+// GET /api/calls/poll?since=ISO — signals addressed to me since a timestamp.
+router.get("/api/calls/poll", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const since = req.query.since ? new Date(req.query.since.toString()) : new Date(Date.now() - 20000);
+  const rows = (await q(
+    `SELECT id, call_id, from_id, from_name, kind, payload, mode, created_at
+       FROM call_signals WHERE to_id = $1 AND created_at > $2 ORDER BY created_at`,
+    [req.account.id, since.toISOString()]
+  )).rows;
+  // Opportunistic cleanup so the relay table never grows unbounded.
+  q(`DELETE FROM call_signals WHERE created_at < now() - interval '5 minutes'`).catch(() => {});
+  res.json({
+    now: new Date().toISOString(),
+    meId: req.account.id, // lets the client know its own id (needed to order WebRTC mesh offers)
+    signals: rows.map((r) => ({
+      id: r.id, callId: r.call_id, fromId: r.from_id, fromName: r.from_name,
+      kind: r.kind, payload: r.payload ? JSON.parse(r.payload) : null, mode: r.mode, at: r.created_at,
+    })),
+  });
+}));
+
+/* =============================================================================
+ *  MUSTERCHAT GROUPS — group chats. Messages reuse dm_messages with
+ *  convo_key = 'g:<groupId>' (recipient_kind 'group'), so all the media/kind
+ *  handling is shared; only membership lives in its own tables.
+ * ========================================================================== */
+async function isGroupMember(groupId, accountId) {
+  return (await q(`SELECT 1 FROM chat_group_members WHERE group_id = $1 AND account_id = $2`, [groupId, accountId])).rows.length > 0;
+}
+
+// POST /api/groups — create a group (creator + chosen staff members).
+router.post("/api/groups", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const name = (req.body?.name || "").toString().trim();
+  const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds : [];
+  if (!name) return res.status(400).json({ error: "NO_NAME", message: "Give the group a name." });
+  const ids = Array.from(new Set([me, ...memberIds])).filter(Boolean);
+  const valid = (await q(`SELECT id FROM accounts WHERE id = ANY($1)`, [ids])).rows.map((r) => r.id);
+  if (valid.length < 2) return res.status(400).json({ error: "TOO_FEW", message: "Add at least one other member." });
+  const id = randomUUID();
+  await q(`INSERT INTO chat_groups (id, name, created_by) VALUES ($1,$2,$3)`, [id, name, me]);
+  for (const aid of valid) await q(`INSERT INTO chat_group_members (group_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [id, aid]);
+  res.json({ group: { id, name, memberCount: valid.length } });
+}));
+
+// GET /api/groups — groups I'm in, with member count + last-message preview.
+router.get("/api/groups", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id;
+  const groups = (await q(
+    `SELECT g.id, g.name,
+            (SELECT COUNT(*)::int FROM chat_group_members m WHERE m.group_id = g.id) AS member_count
+       FROM chat_groups g
+       JOIN chat_group_members mine ON mine.group_id = g.id AND mine.account_id = $1
+      ORDER BY g.created_at DESC`, [me]
+  )).rows;
+  const out = [];
+  for (const g of groups) {
+    const last = (await q(`SELECT sender_id, kind, body, created_at, deleted_at FROM dm_messages WHERE convo_key = $1 ORDER BY created_at DESC LIMIT 1`, [`g:${g.id}`])).rows[0];
+    out.push({
+      id: g.id, name: g.name, memberCount: g.member_count,
+      lastMessage: last ? previewOf(last) : null, lastAt: last?.created_at || null,
+      lastMine: last ? last.sender_id === me : false,
+    });
+  }
+  out.sort((a, b) => (a.lastAt && b.lastAt) ? new Date(b.lastAt) - new Date(a.lastAt) : a.lastAt ? -1 : b.lastAt ? 1 : a.name.localeCompare(b.name));
+  res.json({ groups: out });
+}));
+
+// GET /api/groups/:id/thread — messages with sender names.
+router.get("/api/groups/:id/thread", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id, gid = req.params.id;
+  if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const g = (await q(`SELECT id, name FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+  if (!g) return res.status(404).json({ error: "NO_GROUP" });
+  const rows = (await q(
+    `SELECT d.id, d.sender_id, a.name AS sender_name, d.kind, d.body, d.media, d.created_at, d.read_at, d.edited_at, d.deleted_at
+       FROM dm_messages d LEFT JOIN accounts a ON a.id = d.sender_id
+      WHERE d.convo_key = $1 ORDER BY d.created_at`, [`g:${gid}`]
+  )).rows;
+  const mapRow = mapMessageRow(me);
+  res.json({
+    group: { id: g.id, name: g.name },
+    messages: rows.map((m) => ({ ...mapRow(m), sender: m.sender_name || "?" })),
+  });
+}));
+
+// POST /api/groups/:id/messages — send to the group.
+router.post("/api/groups/:id/messages", requireAuth(), express.json({ limit: "16mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const me = req.account.id, gid = req.params.id;
+  if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const { kind = "text", body = null, media = null } = req.body || {};
+  if (!MSG_KINDS.has(kind)) return res.status(400).json({ error: "BAD_KIND" });
+  if ((kind === "text" || kind === "sticker") && !String(body || "").trim() && !media) return res.status(400).json({ error: "EMPTY" });
+  // MAX_BODY was enforced on the DM path and the edit path but NOT here
+  // (2026-07-28 audit) — a group member could store a ~16MB text body, capped
+  // only by the express JSON limit.
+  if (body && String(body).length > MAX_BODY) return res.status(413).json({ error: "BODY_TOO_LONG" });
+  if (media && String(media).length > MAX_MEDIA) return res.status(413).json({ error: "MEDIA_TOO_LARGE" });
+  if (!validMedia(kind, media)) return res.status(400).json({ error: "BAD_MEDIA", message: "Attachments must be inline media of the right type." });
+  if (!throttleSend(me, !!media)) return res.status(429).json({ error: "TOO_FAST", message: "Slow down a moment — too many messages at once." });
+  const id = randomUUID();
+  await q(`INSERT INTO dm_messages (id, convo_key, sender_id, recipient_kind, recipient_id, kind, body, media)
+           VALUES ($1,$2,$3,'group',$4,$5,$6,$7)`, [id, `g:${gid}`, me, gid, kind, body, media]);
+  res.json({ message: { id, kind, body, media, at: new Date().toISOString(), mine: true, sender: req.account.name || req.account.username } });
+}));
+
+// GET /api/groups/:id/members
+router.get("/api/groups/:id/members", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const gid = req.params.id;
+  if (!(await isGroupMember(gid, req.account.id))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const rows = (await q(`SELECT a.id, a.name, a.username FROM chat_group_members m JOIN accounts a ON a.id = m.account_id WHERE m.group_id = $1 ORDER BY a.name`, [gid])).rows;
+  res.json({ members: rows.map((r) => ({ id: r.id, name: r.name || r.username })) });
+}));
+
 export default router;
 
 /* ---- Exposed for unit testing (tests/vance/) ----------------------------- *
@@ -1698,4 +2346,5 @@ export {
   answerLocally,
   computeRisk,
   checkPassportExpiry,
+  convoKey,
 };

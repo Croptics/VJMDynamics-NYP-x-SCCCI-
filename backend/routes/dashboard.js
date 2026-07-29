@@ -18,8 +18,8 @@
  */
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
-import { requireAuth } from "../auth.js";
-import { getTrip, getDashboard, getMissing, resolveTripUuid } from "../data.js";
+import { requireAuth } from "../lib/auth.js";
+import { getTrip, getDashboard, getMissing, getVisibleCoachIds, resolveTripUuid } from "../data.js";
 
 const router = Router();
 
@@ -27,10 +27,14 @@ router.get("/api/trips", requireAuth(), wrap(async (_req, res) => res.json([awai
 router.get("/api/trips/:id", requireAuth(), wrap(async (_req, res) => res.json(await getTrip())));
 
 router.get("/api/trips/:id/dashboard", requireAuth(), wrap(async (req, res) => {
-  res.json(await getDashboard(await resolveTripUuid(req.params.id)));
+  const tripUuid = await resolveTripUuid(req.params.id);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  res.json(await getDashboard(tripUuid, visibleCoachIds));
 }));
 router.get("/api/trips/:id/missing", requireAuth(), wrap(async (req, res) => {
-  res.json({ missing: await getMissing(await resolveTripUuid(req.params.id)) });
+  const tripUuid = await resolveTripUuid(req.params.id);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  res.json({ missing: await getMissing(tripUuid, visibleCoachIds) });
 }));
 
 export default router;

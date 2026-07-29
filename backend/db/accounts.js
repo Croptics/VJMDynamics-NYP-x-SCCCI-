@@ -108,7 +108,25 @@ async function countAdmins() {
 function accountPublic(row) {
   if (!row) return null;
   const { password, permissions, token_version, ...rest } = row; // never expose password / raw JSON / session counter
-  return { ...rest, role: cleanRole(row.role), permissions: accountPermissions(row) };
+  return { ...rest, role: cleanRole(row.role), permissions: accountPermissions(row), status: row.status || "approved" };
+}
+
+/* ---- Email (2026-07-24, self-service registration) -----------------------
+ * Plain text, not hashed — see accountPublic() above; only the password
+ * field ever gets bcrypt'd. A simple, deliberately permissive RFC-5322-ish
+ * check (not a full spec parser) — good enough to reject obvious garbage
+ * ("asdf") without rejecting a real address over some pedantic edge case. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export function emailProblem(email) {
+  const s = String(email || "").trim();
+  if (!s) return "Email is required.";
+  if (!EMAIL_RE.test(s)) return "Please enter a valid email address.";
+  return null;
+}
+export async function getAccountByEmail(email) {
+  const s = String(email || "").trim().toLowerCase();
+  if (!s) return null;
+  return get("SELECT * FROM accounts WHERE lower(email) = $1", [s]);
 }
 
 /**
@@ -173,6 +191,8 @@ export async function listAccounts() {
 export async function createAccount(input) {
   const username = String(input.username || "").trim();
   const password = String(input.password || "");
+  const email = String(input.email || "").trim();
+  const phone = String(input.phone || "").trim();
   const name = String(input.name || "").trim() || username;
   // Role is now an independent, explicit field (the Account control role
   // picker) — NOT derived from whichever permission checkboxes are ticked.
@@ -186,13 +206,96 @@ export async function createAccount(input) {
   if (!password) return { error: "PASSWORD_REQUIRED" };
   const pwProblem = passwordProblem(password);
   if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
+  // Required going forward for every NEW account (admin-created here, or
+  // self-registered via registerAccount() below) — existing pre-2026-07-24
+  // accounts are untouched and keep working with no email on file.
+  const emailErr = emailProblem(email);
+  if (emailErr) return { error: "EMAIL_REQUIRED", message: emailErr };
   if (await getAccountByUsername(username)) return { error: "USERNAME_TAKEN" };
+  if (await getAccountByEmail(email)) return { error: "EMAIL_TAKEN" };
 
   const id = await nextAccountId();
-  await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
-    id, username, name, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
+  // status defaults to 'approved' (see schema.js) — an admin creating an
+  // account directly on Account control IS the approval, unlike a public
+  // self-registration (see registerAccount()), which starts 'pending'.
+  await run(`INSERT INTO accounts (id, username, name, email, phone, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [
+    id, username, name, email, phone || null, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/**
+ * Public self-service sign-up (2026-07-24) — "new staff who haven't created
+ * an account yet" fill in email + username + password themselves. Always
+ * role="staff" (self-registration can never mint an admin — that stays an
+ * admin-only action on Account control) and always starts status="pending":
+ * the account exists in the DB but CANNOT log in (see the status check in
+ * routes/auth.js's login route) until an admin approves it there. Reuses
+ * the exact same validation/hashing/uniqueness rules as createAccount()
+ * above — the only real differences are the fixed role and pending status.
+ */
+export async function registerAccount(input) {
+  const username = String(input.username || "").trim();
+  const password = String(input.password || "");
+  const email = String(input.email || "").trim();
+  const name = username;
+
+  if (!username) return { error: "USERNAME_REQUIRED" };
+  if (!password) return { error: "PASSWORD_REQUIRED" };
+  const pwProblem = passwordProblem(password);
+  if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
+  const emailErr = emailProblem(email);
+  if (emailErr) return { error: "EMAIL_REQUIRED", message: emailErr };
+  if (await getAccountByUsername(username)) return { error: "USERNAME_TAKEN" };
+  if (await getAccountByEmail(email)) return { error: "EMAIL_TAKEN" };
+
+  const id = await nextAccountId();
+  const perms = defaultPermsForRole("staff");
+  await run(
+    `INSERT INTO accounts (id, username, name, email, password, role, permissions, "createdAt", status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')`,
+    [id, username, name, email, await hashPassword(password), "staff", JSON.stringify(perms), new Date().toISOString()]
+  );
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/** Accounts awaiting admin review, oldest first — the "Pending approval"
+ *  list on Account control. */
+export async function listPendingAccounts() {
+  return (await all("SELECT * FROM accounts WHERE status = 'pending' ORDER BY \"createdAt\" ASC")).map(accountPublic);
+}
+
+export async function approveAccount(id) {
+  const existing = await get("SELECT id FROM accounts WHERE id = $1", [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  await run("UPDATE accounts SET status = 'approved' WHERE id = $1", [id]);
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/** Rejecting keeps the row (for an audit trail of who applied and was
+ *  turned down) rather than deleting it — a rejected account can never log
+ *  in (see routes/auth.js), and an admin can still hard-delete it via the
+ *  existing DELETE /api/accounts/:id if they want it gone entirely. */
+export async function rejectAccount(id) {
+  const existing = await get("SELECT id FROM accounts WHERE id = $1", [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  await run("UPDATE accounts SET status = 'rejected' WHERE id = $1", [id]);
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/** Bulk approve/reject every currently-pending account in one query, for the
+ *  Pending approval card's "Approve all"/"Reject all" buttons (2026-07-24) —
+ *  a single UPDATE rather than looping the single-account version N times,
+ *  since a bulk action can cover dozens of rows at once. Returns how many
+ *  rows were actually flipped, so the UI can show a real count even if the
+ *  pending list changed underneath (e.g. another admin acted first). */
+export async function approveAllPending() {
+  const rows = await all("UPDATE accounts SET status = 'approved' WHERE status = 'pending' RETURNING id");
+  return { count: rows.length };
+}
+
+export async function rejectAllPending() {
+  const rows = await all("UPDATE accounts SET status = 'rejected' WHERE status = 'pending' RETURNING id");
+  return { count: rows.length };
 }
 
 export async function updateAccount(id, patch) {
@@ -213,19 +316,108 @@ export async function updateAccount(id, patch) {
     password = await hashPassword(String(patch.password));
   }
 
+  // Email is only validated/changed if explicitly included in the patch —
+  // NOT force-required here, so a pre-2026-07-24 account with no email on
+  // file can still be edited (e.g. changing its role) without also being
+  // made to add one right that moment.
+  let email = existing.email;
+  if (patch.email !== undefined) {
+    const nextEmail = String(patch.email).trim();
+    const emailErr = emailProblem(nextEmail);
+    if (emailErr) return { error: "EMAIL_REQUIRED", message: emailErr };
+    email = nextEmail;
+  }
+
+  const phone = patch.phone !== undefined ? String(patch.phone).trim() : existing.phone;
+
   if (!username) return { error: "USERNAME_REQUIRED" };
   const clash = await getAccountByUsername(username);
   if (clash && clash.id !== id) return { error: "USERNAME_TAKEN" };
+  if (email && email !== existing.email) {
+    const emailClash = await getAccountByEmail(email);
+    if (emailClash && emailClash.id !== id) return { error: "EMAIL_TAKEN" };
+  }
 
   // Block demoting the last admin — would lock everyone out of Account control.
   if (cleanRole(existing.role) === "admin" && role !== "admin" && (await countAdmins()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 
-  await run(`UPDATE accounts SET username=$1, name=$2, password=$3, role=$4, permissions=$5 WHERE id=$6`, [
-    username, name, password, role, JSON.stringify(perms), id,
+  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5, role=$6, permissions=$7 WHERE id=$8`, [
+    username, name, email, phone || null, password, role, JSON.stringify(perms), id,
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/**
+ * Self-service "edit my own profile" (2026-07-24, Settings page) — DELIBERATELY
+ * separate from updateAccount() above, not a thinner wrapper around it: this
+ * one is reachable by ANY signed-in account (requireAuth only, no
+ * manageAccounts permission — see routes/auth.js's PATCH /api/auth/me), so it
+ * must NEVER be able to touch role or permissions, unlike the admin-only
+ * updateAccount(). Name/username/email are optional per-field like
+ * updateAccount(); changing the password additionally requires the CURRENT
+ * password to verify identity — a real security check the admin-side
+ * updateAccount() and the no-questions-asked resetPassword() below don't
+ * have, since here the caller is already a live, signed-in session that
+ * could simply be hijacked by someone at an unlocked device otherwise.
+ */
+export async function updateOwnAccount(id, patch) {
+  const existing = await get("SELECT * FROM accounts WHERE id = $1", [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+
+  const username = patch.username !== undefined ? String(patch.username).trim() : existing.username;
+  const name = patch.name !== undefined ? String(patch.name).trim() || username : existing.name;
+
+  let email = existing.email;
+  if (patch.email !== undefined) {
+    const nextEmail = String(patch.email).trim();
+    const emailErr = emailProblem(nextEmail);
+    if (emailErr) return { error: "EMAIL_REQUIRED", message: emailErr };
+    email = nextEmail;
+  }
+
+  const phone = patch.phone !== undefined ? String(patch.phone).trim() : existing.phone;
+
+  let password = existing.password;
+  if (patch.newPassword) {
+    if (!(await verifyPassword(patch.currentPassword, existing.password))) {
+      return { error: "CURRENT_PASSWORD_INCORRECT" };
+    }
+    const pwProblem = passwordProblem(String(patch.newPassword));
+    if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
+    password = await hashPassword(String(patch.newPassword));
+  }
+
+  if (!username) return { error: "USERNAME_REQUIRED" };
+  const clash = await getAccountByUsername(username);
+  if (clash && clash.id !== id) return { error: "USERNAME_TAKEN" };
+  if (email && email !== existing.email) {
+    const emailClash = await getAccountByEmail(email);
+    if (emailClash && emailClash.id !== id) return { error: "EMAIL_TAKEN" };
+  }
+
+  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5 WHERE id=$6`, [
+    username, name, email, phone || null, password, id,
+  ]);
+  return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
+}
+
+/** Own-profile photo (Settings page) — mirrors setDelegatePhoto()/
+ *  clearDelegatePhoto() in db/delegates.js exactly, just on the accounts
+ *  table. Returns the previous photoPublicId (or null) so the caller can
+ *  clean up the old Cloudinary asset on replace/remove. */
+export async function setAccountPhoto(id, url, publicId) {
+  const existing = await get('SELECT "photoPublicId" FROM accounts WHERE id = $1', [id]);
+  if (!existing) return null;
+  await run('UPDATE accounts SET "photoUrl" = $1, "photoPublicId" = $2 WHERE id = $3', [url, publicId, id]);
+  return existing.photoPublicId || null;
+}
+export async function clearAccountPhoto(id) {
+  const existing = await get('SELECT "photoPublicId" FROM accounts WHERE id = $1', [id]);
+  if (!existing) return null;
+  await run('UPDATE accounts SET "photoUrl" = NULL, "photoPublicId" = NULL WHERE id = $1', [id]);
+  return existing.photoPublicId || null;
 }
 
 /**
@@ -262,4 +454,75 @@ export async function deleteAccount(id) {
 
   await run("DELETE FROM accounts WHERE id = $1", [id]);
   return { deleted: true };
+}
+
+/* ---- Role templates (2026-07-24) -----------------------------------------
+ * Admin-managed named permission presets — Account control's "Apply
+ * template" quick-fill + "Access role" filter. Deliberately just a
+ * convenience preset, never a stored tag on an account: matchRoleTemplate()
+ * below always compares an account's CURRENT stored permissions fresh
+ * against whatever templates exist right now, so editing/deleting a
+ * template can never retroactively change what an existing account can do —
+ * it only changes what shows up as a quick-fill option / which "bucket" that
+ * account's permissions currently fall into.
+ * -------------------------------------------------------------------------- */
+function roleTemplatePublic(row) {
+  if (!row) return null;
+  let permissions = {};
+  try { permissions = JSON.parse(row.permissions || "{}"); } catch { /* corrupt row — treat as empty */ }
+  return { id: row.id, label: row.label, permissions: cleanPermissions(permissions), createdAt: row.createdAt };
+}
+
+export async function listRoleTemplates() {
+  return (await all(`SELECT * FROM role_templates ORDER BY "createdAt"`)).map(roleTemplatePublic);
+}
+
+async function nextRoleTemplateId() {
+  const base = "role";
+  const existing = new Set((await all(`SELECT id FROM role_templates`)).map((r) => r.id));
+  let n = 1;
+  while (existing.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+export async function createRoleTemplate(input) {
+  const label = String(input?.label || "").trim();
+  if (!label) return { error: "LABEL_REQUIRED" };
+  const id = await nextRoleTemplateId();
+  const permissions = cleanPermissions(input?.permissions);
+  await run(`INSERT INTO role_templates (id, label, permissions, "createdAt") VALUES ($1,$2,$3,$4)`, [
+    id, label, JSON.stringify(permissions), new Date().toISOString(),
+  ]);
+  return { template: roleTemplatePublic(await get(`SELECT * FROM role_templates WHERE id = $1`, [id])) };
+}
+
+export async function updateRoleTemplate(id, patch) {
+  const existing = await get(`SELECT * FROM role_templates WHERE id = $1`, [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  const label = patch?.label !== undefined ? String(patch.label).trim() : existing.label;
+  if (!label) return { error: "LABEL_REQUIRED" };
+  const permissions = patch?.permissions !== undefined
+    ? cleanPermissions(patch.permissions)
+    : JSON.parse(existing.permissions || "{}");
+  await run(`UPDATE role_templates SET label = $1, permissions = $2 WHERE id = $3`, [label, JSON.stringify(permissions), id]);
+  return { template: roleTemplatePublic(await get(`SELECT * FROM role_templates WHERE id = $1`, [id])) };
+}
+
+export async function deleteRoleTemplate(id) {
+  const existing = await get(`SELECT id FROM role_templates WHERE id = $1`, [id]);
+  if (!existing) return { error: "NOT_FOUND" };
+  await run(`DELETE FROM role_templates WHERE id = $1`, [id]);
+  return { deleted: true };
+}
+
+/** Which template (if any) a STAFF account's CURRENT permissions exactly
+ *  match — powers Account control's "Access role" filter/badge. Returns null
+ *  ("Custom") if none match. Only meaningful for role="staff" — an admin
+ *  account bypasses permissions entirely, a separate concept from these
+ *  staff-only templates (callers should skip admin accounts themselves). */
+export function matchRoleTemplate(permissions, templates) {
+  for (const tpl of templates) {
+    if (Object.entries(tpl.permissions).every(([k, v]) => !!permissions?.[k] === v)) return tpl.id;
+  }
+  return null;
 }

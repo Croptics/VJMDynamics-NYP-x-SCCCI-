@@ -6,7 +6,7 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
@@ -134,6 +134,10 @@ export default function LoginPage({ onSignIn }) {
         setError("Too many attempts. Please wait a few minutes and try again.");
       } else if (e?.status === 400) {
         setError("Please enter your Staff ID and password.");
+      } else if (e?.code === "ACCOUNT_PENDING") {
+        setError("Your account is awaiting admin approval.");
+      } else if (e?.code === "ACCOUNT_REJECTED") {
+        setError("Your registration was not approved. Contact an admin.");
       } else {
         setError("Can't reach the server. Make sure the backend is running.");
       }
@@ -268,6 +272,20 @@ export default function LoginPage({ onSignIn }) {
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
             {t("By signing in, you accept the SCCCI data handling policy.")}
           </p>
+
+          {/* Self-service registration (2026-07-24) — new accounts start
+              "pending" and need an admin's approval before they can sign
+              in, see RegisterPage.jsx / Account control. */}
+          <p className="muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
+            {t("New staff?")}{" "}
+            <button
+              type="button"
+              onClick={() => navigate("/register")}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--scc-red)", fontSize: 13, fontWeight: 600 }}
+            >
+              {t("Create an account")}
+            </button>
+          </p>
         </form>
       </div>
 
@@ -302,6 +320,10 @@ function ForgotPasswordModal({ onClose }) {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
+  // not wherever the mouse was released after dragging to select text in a
+  // password field.
+  const downOnBackdrop = useRef(false);
 
   async function handleSubmit() {
     setError("");
@@ -329,7 +351,9 @@ function ForgotPasswordModal({ onClose }) {
   }
 
   return (
-    <div style={S.overlay} onClick={() => !submitting && onClose()}>
+    <div style={S.overlay}
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (!submitting && downOnBackdrop.current && e.target === e.currentTarget) onClose(); }}>
       <div className="card" style={S.modal} onClick={(e) => e.stopPropagation()}>
         <div className="row between" style={{ marginBottom: 18 }}>
           <h2 style={{ fontSize: 18 }}>{t("Reset password")}</h2>

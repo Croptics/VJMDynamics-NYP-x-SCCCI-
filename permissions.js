@@ -77,6 +77,20 @@ export const PERMISSIONS = [
     parent: "manageDelegates",
   },
   {
+    key: "viewDelegateDetails",
+    label: "View delegate details",
+    desc: "Open a delegate's full profile — phone number, last known location, and checkpoint timeline",
+    chip: "Delegate details",
+    // This view had no dedicated gate at all before (anyone who could see the
+    // roster row could open the full profile too) — default TRUE so no
+    // existing staff account silently loses access the moment this
+    // permission starts being checked; an admin narrows it per-account
+    // going forward (2026-07-25).
+    default: true,
+    group: "action",
+    parent: "manageDelegates",
+  },
+  {
     key: "manageTrips",
     label: "Manage trips",
     desc: "Edit trips, coaches and itineraries on the Trips board",
@@ -116,6 +130,20 @@ export const PERMISSIONS = [
     group: "action",
   },
   {
+    key: "manageAnnouncements",
+    label: "Manage announcements",
+    desc: "Post, edit and delete trip announcements",
+    chip: "Announcements",
+    // Genuinely new capability (2026-07-27 — "set permission so only admin
+    // can update/delete, staff can only view, but give the permission
+    // access") — default FALSE, same reasoning as manageTrips/
+    // manageExceptions above: a Staff account starts view-only (viewAnnouncements
+    // already covers that) and an admin opts specific accounts IN to also
+    // post/edit/delete, rather than this being hardcoded admin-only.
+    default: false,
+    group: "action",
+  },
+  {
     key: "manageAccounts",
     label: "Manage accounts",
     desc: "Access Account control — create, edit and delete accounts",
@@ -146,19 +174,13 @@ export const PERMISSIONS = [
     group: "desktopView",
     parent: "viewDashboard",
   },
-  {
-    key: "viewAnalytics",
-    label: "Analytics",
-    desc: "See the Dashboard's Analytics tab (charts + AI insights)",
-    chip: "Analytics",
-    // Was hardcoded role==="admin" only, never a toggle at all — this is a
-    // genuinely NEW capability being made grantable to Staff, so (unlike
-    // manageDocuments/manageScanner above) default FALSE is correct here:
-    // nothing regresses, an admin opts specific staff IN.
-    default: false,
-    group: "desktopView",
-    parent: "viewDashboard",
-  },
+  // NOTE: "viewAnalytics" was removed 2026-07-27 ("staff can view delegate +
+  // checkpoint, admin views all, regardless of account control — so remove
+  // analytics from permission"). The Dashboard's Analytics / Room Management /
+  // Staff operations tabs are now role-based (admin only), not per-account
+  // toggles. cleanPermissions() below only keeps keys listed here, so any
+  // stored viewAnalytics value is silently dropped on next read — no
+  // migration needed.
   {
     key: "viewTrips",
     label: "Trips",
@@ -172,6 +194,18 @@ export const PERMISSIONS = [
     label: "Documents",
     desc: "See document parsing + boarding passes (Onboarding)",
     chip: "Documents",
+    default: true,
+    group: "desktopView",
+  },
+  {
+    key: "viewAnnouncements",
+    label: "Announcements",
+    desc: "See the trip Announcements page",
+    chip: "Announcements",
+    // Brand-new page/capability (2026-07-26) — default TRUE per the original
+    // requirement ("all logged-in Staff and Admin accounts can view"); an
+    // admin can still narrow it per-account afterwards, same as every other
+    // view toggle here.
     default: true,
     group: "desktopView",
   },

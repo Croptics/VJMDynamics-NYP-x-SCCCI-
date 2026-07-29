@@ -27,7 +27,10 @@
  * ============================================================================= */
 
 import { Router } from "express";
-import { requireAuth, requireKioskOrPermission } from "../auth.js";
+// `../lib/auth.js`, not `../auth.js` (re-applied at integration 2026-07-29):
+// JQ's server.js split moved auth into lib/, so this branch's original path no
+// longer resolves and the whole router would fail to load.
+import { requireAuth, requireKioskOrPermission } from "../lib/auth.js";
 import {
   listDelegates,
   getDelegateById,
@@ -35,6 +38,8 @@ import {
   createDelegate,
   getTrip,
   getDashboard,
+  // Needed by the trip-scoping below — also re-applied at integration.
+  resolveTripUuid,
 } from "../data.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
@@ -285,18 +290,26 @@ const timeNow = () =>
 
 /* Live coach list (id/label/name/city/capacity/boarded/missing/total) —
  * sourced from JQ's own getDashboard() so dynamically added coaches are
- * always included. */
-async function liveDashboard() {
-  return getDashboard();
+ * always included. Optional tripUuid scopes it to one trip (2026-07-23,
+ * additive — omitting it keeps the original single-trip default behaviour)
+ * so the scanner's trip switcher can test check-in against any trip, not
+ * just the base one. Re-applied at integration 2026-07-29: this branch
+ * predated it and dropping it would have broken the scanner's trip switcher. */
+async function liveDashboard(tripUuid = null) {
+  return getDashboard(tripUuid);
 }
 
 /* ============================================================================
  * GET /api/attendance/coaches
  * Mobile-dashboard source: trip meta + every coach with live counts + the
  * unassigned pool size, so the staff app can pick which coach to muster.
+ * Optional ?tripId= (a "t-1"/uuid, resolved the same way the dashboard does)
+ * scopes the coach list to that trip instead of the default base trip.
+ * Re-applied at integration 2026-07-29 — see liveDashboard() above.
  * ========================================================================== */
-router.get("/api/attendance/coaches", requireAuth(), wrap(async (_req, res) => {
-  const dash = await liveDashboard();
+router.get("/api/attendance/coaches", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  const dash = await liveDashboard(tripUuid);
   const trip = dash.trip || (await getTrip());
   res.json({
     trip: {
@@ -786,9 +799,9 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
   // delegate, and only while the token is still valid.
   const invite = String((req.query && req.query.t) || "").trim();
   const id = invite
-    ? (verifyEnrolToken(invite) || " no-match")
+    ? (verifyEnrolToken(invite) || "\u0000no-match")
     : String((req.query && req.query.id) || "").trim();
-  if (invite && id === " no-match") {
+  if (invite && id === "\u0000no-match") {
     return fail(res, 410, "INVITE_EXPIRED", "That enrolment link has expired. Ask staff to send a new one.");
   }
   const q = String((req.query && req.query.name) || "").trim().toLowerCase();

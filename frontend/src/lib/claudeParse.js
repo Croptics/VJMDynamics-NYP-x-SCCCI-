@@ -136,9 +136,17 @@ export function getTripPulse() {
  * all-trips list so the option values are the ACTUAL trip ids in the database.
  * The old hardcoded t-1/t-2/t-3 list only matched the seed trip — the other two
  * matched no row and silently orphaned every delegate onboarded to them. */
+// Restricted to "In progress" trips (2026-07-24) — a Planning/Completed trip
+// has no live delegates to onboard/print passes for. Same restriction
+// MobileHomePage.jsx already applies to its own trip picker. Both callers
+// (OnboardingPage.jsx, BoardingPassesView.jsx) already reset their selection
+// if the previously-picked trip id no longer appears in this list, so a trip
+// that finishes mid-session falls back cleanly instead of staying selected
+// with no rows to show.
 export async function getTrips() {
-  const data = await apiGet("/all-trips"); // { trips: [{ id, name, dateRange, ... }] }
-  return Array.isArray(data?.trips) ? data.trips : [];
+  const data = await apiGet("/all-trips"); // { trips: [{ id, name, dateRange, status, ... }] }
+  const trips = Array.isArray(data?.trips) ? data.trips : [];
+  return trips.filter((t) => t.status === "In progress");
 }
 
 /* ---- Boarding passes (QR) + check-in ------------------------------------ *

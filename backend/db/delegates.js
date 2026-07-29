@@ -30,7 +30,17 @@ function initialsOf(name) {
 }
 
 function rowToDelegate(row) {
-  return { ...row, vip: !!row.vip };
+  return {
+    ...row, vip: !!row.vip, cancelled: !!row.cancelled,
+    // Derived from the escalations LEFT JOIN in listDelegates() below — a
+    // delegate is "escalated" for as long as they have an open/acknowledged
+    // escalation, mirroring the `cancelled` flag's shape (2026-07-25, "make
+    // escalated a status under missing, similar to cancel status") but NOT
+    // stored on this row — it's read live off the escalations table, so
+    // acknowledging/resolving an escalation there is the only source of
+    // truth (no separate flag here to keep in sync).
+    escalated: !!row.escalationId,
+  };
 }
 
 const VALID_STATUSES = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
@@ -41,7 +51,15 @@ function normalize(input, id) {
   // a legacy alias for ARRIVED so those rows/writes keep working instead of
   // silently falling back to UNASSIGNED.
   const raw = input.status === "PRESENT" ? "ARRIVED" : input.status;
-  const status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
+  let status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
+  const cancelled = !!input.cancelled;
+  // Cancelling a delegate (Assigned but won't make it after all, usually
+  // found out day-of — 2026-07-24) always forces them back to UNASSIGNED
+  // and frees their coach seat, regardless of whatever status/coachId was
+  // also in the same patch — enforced here, server-side, so the frontend
+  // can't accidentally leave a delegate ARRIVED/LATE/MISSING AND cancelled
+  // at the same time.
+  if (cancelled) status = "UNASSIGNED";
   return {
     id,
     name: (input.name || "").trim() || "Unnamed delegate",
@@ -49,6 +67,7 @@ function normalize(input, id) {
     coachId: status === "UNASSIGNED" ? null : input.coachId || null,
     status,
     vip: !!input.vip,
+    cancelled,
     lastSeen: (input.lastSeen || "").trim() || null,
     lastLocation: (input.lastLocation || "").trim() || null,
   };
@@ -59,12 +78,24 @@ async function nextId() {
   return `d-${Number(row?.m || 0) + 1}`;
 }
 
+// LEFT JOIN escalations (2026-07-25) — surfaces each delegate's own currently
+// open/acknowledged escalation (if any) so the Dashboard profile/table can
+// show "Escalated" without a separate round-trip per delegate. The dedupe
+// guard in createEscalation() (db/escalations.js) never lets a delegate have
+// more than one open/acknowledged escalation at once, so this join can never
+// fan out into duplicate rows per delegate.
+const DELEGATES_SELECT = `
+  SELECT d.*, e.id AS "escalationId", e.message AS "escalationMessage", e.created_by AS "escalatedBy"
+  FROM delegates d
+  LEFT JOIN escalations e ON e.delegate_id = d.id AND e.status IN ('open', 'acknowledged')
+`;
+
 /* ---- Delegate CRUD ------------------------------------------------------ */
 export async function listDelegates(tripUuid = null) {
   if (tripUuid) {
-    return (await all('SELECT * FROM delegates WHERE trip_id = $1 ORDER BY id', [tripUuid])).map(rowToDelegate);
+    return (await all(`${DELEGATES_SELECT} WHERE d.trip_id = $1 ORDER BY d.id`, [tripUuid])).map(rowToDelegate);
   }
-  return (await all('SELECT * FROM delegates ORDER BY id')).map(rowToDelegate);
+  return (await all(`${DELEGATES_SELECT} ORDER BY d.id`)).map(rowToDelegate);
 }
 
 export async function getDelegateById(id) {
@@ -81,23 +112,29 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
   // send them directly instead of needing a separate follow-up PATCH.
   const profile = {};
   for (const [key, col] of PROFILE_FIELDS) profile[col] = input[key] || null;
+  // Only meaningful while cancelled is actually true — see the schema.js
+  // comment on this column for why it's cleared otherwise.
+  const cancelReason = d.cancelled ? (input.cancelReason || "").trim() || null : null;
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", trip_id, "createdBy",
-       company, role, industry, email, phone, website, passport_no, nationality, passport_expiry, accessibility_notes, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, cancelled, cancel_reason, "lastSeen", "lastLocation", trip_id, "createdBy",
+       company, role, industry, email, phone, website, passport_no, nationality, passport_expiry, accessibility_notes, notes,
+       hotel_name, room_number)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
     [
-      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.lastSeen, d.lastLocation, tripUuid, actor,
+      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.cancelled, cancelReason, d.lastSeen, d.lastLocation, tripUuid, actor,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
+      profile.hotel_name, profile.room_number,
     ]
   );
-  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor);
+  await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor, { tripUuid });
   return {
-    ...d, createdBy: actor,
+    ...d, createdBy: actor, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
     accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+    hotelName: profile.hotel_name, roomNumber: profile.room_number,
   };
 }
 
@@ -118,6 +155,9 @@ const PROFILE_FIELDS = [
   ["passportNumber", "passport_no"], ["nationality", "nationality"],
   ["passportExpiry", "passport_expiry"],
   ["accessibilityNotes", "accessibility_notes"], ["notes", "notes"],
+  // Room allocation (2026-07-26) — same "only touch what's provided" pattern
+  // as every other profile field here.
+  ["hotelName", "hotel_name"], ["roomNumber", "room_number"],
 ];
 
 export async function updateDelegate(id, patch, actor = null) {
@@ -128,15 +168,23 @@ export async function updateDelegate(id, patch, actor = null) {
   for (const [key, col] of PROFILE_FIELDS) {
     profile[col] = patch[key] !== undefined ? (patch[key] || null) : existing[col];
   }
+  // Same "only meaningful while cancelled" clearing rule as schema.js's
+  // comment on this column — forced null the instant cancelled flips false,
+  // regardless of what (if anything) the patch said about cancelReason.
+  const cancelReason = merged.cancelled
+    ? (patch.cancelReason !== undefined ? (patch.cancelReason || "").trim() || null : existing.cancel_reason)
+    : null;
   await run(
-    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, "lastSeen"=$6, "lastLocation"=$7,
-       company=$8, role=$9, industry=$10, email=$11, phone=$12, website=$13,
-       passport_no=$14, nationality=$15, passport_expiry=$16, accessibility_notes=$17, notes=$18
-     WHERE id=$19`,
+    `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, cancelled=$6, cancel_reason=$7, "lastSeen"=$8, "lastLocation"=$9,
+       company=$10, role=$11, industry=$12, email=$13, phone=$14, website=$15,
+       passport_no=$16, nationality=$17, passport_expiry=$18, accessibility_notes=$19, notes=$20,
+       hotel_name=$21, room_number=$22
+     WHERE id=$23`,
     [
-      merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.lastSeen, merged.lastLocation,
+      merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.cancelled, cancelReason, merged.lastSeen, merged.lastLocation,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
+      profile.hotel_name, profile.room_number,
       id,
     ]
   );
@@ -149,31 +197,59 @@ export async function updateDelegate(id, patch, actor = null) {
   // else.
   const before = {
     name: existing.name, coachId: existing.coachId, status: existing.status, vip: existing.vip,
+    cancelled: !!existing.cancelled, cancelReason: existing.cancel_reason,
     lastSeen: existing.lastSeen, lastLocation: existing.lastLocation,
     company: existing.company, role: existing.role, industry: existing.industry,
     email: existing.email, phone: existing.phone, website: existing.website,
     passportNumber: existing.passport_no, nationality: existing.nationality, passportExpiry: existing.passport_expiry,
     accessibilityNotes: existing.accessibility_notes, notes: existing.notes,
+    hotelName: existing.hotel_name, roomNumber: existing.room_number,
   };
   const after = {
     name: merged.name, coachId: merged.coachId, status: merged.status, vip: merged.vip,
+    cancelled: merged.cancelled, cancelReason,
     lastSeen: merged.lastSeen, lastLocation: merged.lastLocation,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
     accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+    hotelName: profile.hotel_name, roomNumber: profile.room_number,
   };
   const changes = {};
   for (const key of Object.keys(before)) {
     if (String(before[key] ?? "") !== String(after[key] ?? "")) changes[key] = { from: before[key], to: after[key] };
   }
-  await logActivity(`${merged.name} updated`, "reassign", actor, { delegateId: id, changes });
+  // A coach reassignment (Trips board drag-and-drop or "Move to coach") was
+  // always logged here already — logActivity() fires unconditionally below
+  // regardless of which fields changed — but with a generic "<name> updated"
+  // text, so it read the same as any other edit (2026-07-27 — "since right
+  // now i already remove the coach changeable from my page... can you link
+  // if the delegate is moved to another coach in trip page, so in history
+  // log can track that"). Build a specific "moved from X to Y" message when
+  // coachId is the field that changed, same "derive fresh, don't store a
+  // stale snapshot" approach used elsewhere (e.g. HistoryLogPage's own coach
+  // badge) — one small extra query, only when actually needed.
+  let text = `${merged.name} updated`;
+  if (changes.coachId) {
+    const ids = [changes.coachId.from, changes.coachId.to].filter(Boolean);
+    const rows = ids.length ? await all(`SELECT id, COALESCE(name, label) AS label FROM coaches WHERE id = ANY($1)`, [ids]) : [];
+    const labelFor = (cid) => rows.find((r) => r.id === cid)?.label || cid;
+    if (changes.coachId.from && changes.coachId.to) {
+      text = `${merged.name} moved from ${labelFor(changes.coachId.from)} to ${labelFor(changes.coachId.to)}`;
+    } else if (changes.coachId.to) {
+      text = `${merged.name} assigned to ${labelFor(changes.coachId.to)}`;
+    } else if (changes.coachId.from) {
+      text = `${merged.name} unassigned from ${labelFor(changes.coachId.from)}`;
+    }
+  }
+  await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
   return {
-    ...merged,
+    ...merged, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
     accessibilityNotes: profile.accessibility_notes, notes: profile.notes,
+    hotelName: profile.hotel_name, roomNumber: profile.room_number,
   };
 }
 
@@ -246,7 +322,7 @@ export async function deleteDelegate(id, actor = null) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return false;
   await run("DELETE FROM delegates WHERE id = $1", [id]);
-  await logActivity(`${existing.name} removed`, "exception", actor);
+  await logActivity(`${existing.name} removed`, "exception", actor, { tripUuid: existing.trip_id });
   return true;
 }
 
@@ -254,7 +330,7 @@ export async function deleteDelegate(id, actor = null) {
  * Deliberately separate from updateDelegate/normalize — see the comment on
  * the "photoUrl" column in db/schema.js for why the plain JSON PATCH route
  * must never be able to set these fields. The actual Cloudinary upload/
- * destroy calls live in backend/cloudinary.js and are made by the route
+ * destroy calls live in backend/lib/cloudinary.js and are made by the route
  * handler in server.js; these two just persist the resulting URL/id (or
  * clear them) and return the old publicId so the caller can clean it up. */
 export async function setDelegatePhoto(id, url, publicId) {
@@ -302,6 +378,6 @@ export async function deleteAllDelegates(tripUuid = null, actor = null) {
   const params = tripUuid ? [tripUuid] : [];
   const count = Number((await get(`SELECT COUNT(*) AS c FROM delegates ${where}`, params))?.c || 0);
   await run(`DELETE FROM delegates ${where}`, params);
-  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor);
+  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor, { tripUuid });
   return count;
 }
