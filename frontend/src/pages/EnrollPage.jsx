@@ -122,15 +122,23 @@ export default function EnrollPage({ embedded = false }) {
     })();
   }, []);
 
-  /* ---- deep-link pre-identify: /enroll?d=<delegateId> from the notification ---- */
+  /* ---- deep-link pre-identify ----------------------------------------------
+   * ?t=<signed token>  the emailed invite — personal and expiring
+   * ?d=<delegateId>    staff shortcut (e.g. from the enrolment coverage view)
+   * Either lands the delegate straight on their own capture step. */
   useEffect(() => {
+    const invite = params.get("t");
     const id = params.get("d") || params.get("delegate");
-    if (!id) return;
+    if (!invite && !id) return;
     (async () => {
       try {
-        const { matches: m } = await apiGet(`/enroll/lookup?id=${encodeURIComponent(id)}`);
+        const qs = invite ? `t=${encodeURIComponent(invite)}` : `id=${encodeURIComponent(id)}`;
+        const { matches: m } = await apiGet(`/enroll/lookup?${qs}`);
         if (m && m[0]) pickDelegate(m[0]);
-      } catch { /* fall back to manual search */ }
+        else if (invite) setFindErr("That enrolment link didn't match anyone. Ask staff for a new one.");
+      } catch (e) {
+        if (invite) setFindErr(e.message || "That enrolment link has expired. Ask staff to send a new one.");
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

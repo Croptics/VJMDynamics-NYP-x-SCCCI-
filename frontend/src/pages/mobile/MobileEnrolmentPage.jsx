@@ -10,8 +10,8 @@
 // GET /enroll/lookup (full roster + per-delegate enrolled status).
 
 import { useEffect, useState, useCallback } from "react";
-import { RefreshCw, AlertTriangle, ScanFace, Mic, Bus, ChevronRight, CheckCircle2 } from "lucide-react";
-import { apiGet } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, ScanFace, Mic, Bus, ChevronRight, CheckCircle2, Mail, Send, Loader2, Eye } from "lucide-react";
+import { apiGet, apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
@@ -31,6 +31,8 @@ export default function MobileEnrolmentPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState("all");
+  const [inviting, setInviting] = useState("");      // delegateId currently sending, or "all"
+  const [inviteMsg, setInviteMsg] = useState(null);  // { tone, text }
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
@@ -47,6 +49,50 @@ export default function MobileEnrolmentPage() {
     const id = setInterval(load, 5000); // live: reflects delegates enrolling right now
     return () => clearInterval(id);
   }, [load]);
+
+  /* Invite one delegate. Prompts for an email when none is on file, so staff
+   * can fill it in and send in a single action. */
+  async function invite(d) {
+    let email = d.email || "";
+    if (!email) {
+      email = (window.prompt(`${t("Email address for")} ${d.name}:`) || "").trim();
+      if (!email) return;
+    }
+    setInviting(d.delegateId); setInviteMsg(null);
+    try {
+      const r = await apiPost("/enroll/invite", { delegateId: d.delegateId, email });
+      setInviteMsg(r.dryRun
+        ? { tone: "review", text: `${t("Preview only (dry run) — no email sent to")} ${r.to}` }
+        : r.sent
+          ? { tone: "present", text: `${t("Invite sent to")} ${r.to}` }
+          : { tone: "missing", text: r.error || t("Could not send that invite.") });
+      load();
+    } catch (e) {
+      setInviteMsg({ tone: "missing", text: e.message || t("Could not send that invite.") });
+    } finally { setInviting(""); }
+  }
+
+  /* Bulk-invite everyone not yet enrolled who has an email on file. */
+  async function inviteAll() {
+    const outstanding = roster.filter((d) => !d.enrolled?.face && !d.enrolled?.voice);
+    if (!outstanding.length) { setInviteMsg({ tone: "present", text: t("Everyone's already enrolled.") }); return; }
+    if (!window.confirm(`${t("Email an enrolment link to")} ${outstanding.length} ${t("delegate(s) who haven't enrolled?")}`)) return;
+    setInviting("all"); setInviteMsg(null);
+    try {
+      const r = await apiPost("/enroll/invite-all", { onlyMissing: true });
+      const skipped = (r.skippedNoEmail || []).length;
+      const base = r.dryRun
+        ? `${t("Preview only (dry run)")} — ${r.previewed} ${t("would be emailed")}`
+        : `${r.sent} ${t("invite(s) sent")}${r.failed ? `, ${r.failed} ${t("failed")}` : ""}`;
+      setInviteMsg({
+        tone: r.dryRun ? "review" : r.failed ? "missing" : "present",
+        text: base + (skipped ? ` · ${skipped} ${t("skipped (no email)")}` : ""),
+      });
+      load();
+    } catch (e) {
+      setInviteMsg({ tone: "missing", text: e.message || t("Could not send invites.") });
+    } finally { setInviting(""); }
+  }
 
   const match = (d) =>
     filter === "todo" ? !d.enrolled?.face && !d.enrolled?.voice
@@ -112,6 +158,27 @@ export default function MobileEnrolmentPage() {
         </div>
       )}
 
+      {/* Bulk invite */}
+      <button
+        className="btn btn-primary btn-block"
+        style={{ marginTop: 14, padding: "12px 0" }}
+        onClick={inviteAll}
+        disabled={inviting !== ""}
+      >
+        {inviting === "all"
+          ? <><Loader2 size={16} className="spin" /> {t("Sending…")}</>
+          : <><Send size={16} /> {t("Email invites to everyone outstanding")}</>}
+      </button>
+
+      {inviteMsg && (
+        <div style={{
+          marginTop: 10, padding: "10px 12px", borderRadius: "var(--r-sm)", fontSize: 13, fontWeight: 600,
+          background: `var(--st-${inviteMsg.tone}-bg)`, color: `var(--st-${inviteMsg.tone})`,
+        }}>
+          {inviteMsg.text}
+        </div>
+      )}
+
       {/* Filter chips */}
       <div className="m-chip-row" style={{ marginTop: 14 }}>
         {FILTERS.map((f) => (
@@ -150,25 +217,37 @@ export default function MobileEnrolmentPage() {
               {byCoach[k].map((d) => {
                 const done = d.enrolled?.face || d.enrolled?.voice;
                 return (
-                  <button
-                    key={d.delegateId}
-                    className="m-row"
-                    onClick={() => { window.location.assign(`/enroll?d=${encodeURIComponent(d.delegateId)}`); }}
-                    title={t("Enrol this delegate")}
-                  >
-                    <span className="avatar" style={{ background: done ? "var(--st-present-bg)" : "var(--surface)", color: done ? "var(--st-present)" : "var(--ink-3)", border: done ? "none" : "1px solid var(--line)" }}>
-                      {initials(d.name)}
-                    </span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {d.name}
-                    </span>
+                  <div key={d.delegateId} className="m-row" style={{ gap: 8 }}>
+                    <button
+                      onClick={() => { window.location.assign(`/enroll?d=${encodeURIComponent(d.delegateId)}`); }}
+                      title={t("Enrol this delegate")}
+                      style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", padding: 0, textAlign: "left", color: "inherit", font: "inherit" }}
+                    >
+                      <span className="avatar" style={{ background: done ? "var(--st-present-bg)" : "var(--surface)", color: done ? "var(--st-present)" : "var(--ink-3)", border: done ? "none" : "1px solid var(--line)" }}>
+                        {initials(d.name)}
+                      </span>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                        <span style={{ display: "block", fontSize: 11, color: d.email ? "var(--ink-3)" : "var(--st-late)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {d.email || t("No email on file")}
+                        </span>
+                      </span>
+                    </button>
                     <span className="row" style={{ gap: 6, flexShrink: 0 }}>
                       {d.enrolled?.face && <span className="badge badge-present" title={t("Face enrolled")}><ScanFace size={11} /></span>}
                       {d.enrolled?.voice && <span className="badge badge-assigned" title={t("Voice enrolled")}><Mic size={11} /></span>}
                       {!done && <span className="badge badge-missing">{t("To do")}</span>}
-                      <ChevronRight size={15} style={{ color: "var(--ink-3)" }} />
+                      <button
+                        onClick={() => invite(d)}
+                        disabled={inviting !== ""}
+                        aria-label={`${t("Email enrolment invite to")} ${d.name}`}
+                        title={d.email ? `${t("Email invite to")} ${d.email}` : t("Add an email and invite")}
+                        style={{ background: "none", border: "none", padding: 5, display: "flex", color: "var(--scc-red)" }}
+                      >
+                        {inviting === d.delegateId ? <Loader2 size={16} className="spin" /> : <Mail size={16} />}
+                      </button>
                     </span>
-                  </button>
+                  </div>
                 );
               })}
             </div>

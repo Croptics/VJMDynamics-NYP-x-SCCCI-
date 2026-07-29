@@ -40,8 +40,36 @@ import {
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
 // Aliased: several handlers below use a local `all` for the delegate list.
 import { all as dbAll, get as dbGet, run as dbRun } from "../db/connection.js";
+import jwt from "jsonwebtoken";
+import { sendMail, enrolInviteEmail, appBaseUrl, isDryRun, mailConfigured } from "../lib/mailer.js";
 
 const router = Router();
+
+/* ---------------------------------------------------------------------------
+ * Enrolment invite links.
+ *
+ * The invite carries a SIGNED, EXPIRING token rather than a bare delegate id,
+ * so a link can't be guessed (or a stranger's id typed in) to enrol as someone
+ * else. It is deliberately NOT an auth token: it carries no `username`, so
+ * accountFromReq() in auth.js resolves no account and requireAuth() rejects it
+ * outright — exactly like the kiosk token pattern. Its only power is to
+ * pre-identify one delegate on the public /enroll page.
+ * ------------------------------------------------------------------------- */
+const ENROL_TOKEN_DAYS = 14;
+const JWT_SECRET = process.env.JWT_SECRET || "mustergo-dev-insecure-default-change-me";
+
+function signEnrolToken(delegateId) {
+  return jwt.sign({ enrol: delegateId }, JWT_SECRET, { expiresIn: `${ENROL_TOKEN_DAYS}d` });
+}
+function verifyEnrolToken(token) {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    return payload && typeof payload.enrol === "string" ? payload.enrol : null;
+  } catch {
+    return null; // expired / tampered / not an invite token
+  }
+}
+const enrolLink = (delegateId) => `${appBaseUrl()}/enroll?t=${encodeURIComponent(signEnrolToken(delegateId))}`;
 
 /* ---------------------------------------------------------------------------
  * PERSISTENT biometric enrollment storage.
@@ -754,7 +782,15 @@ router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) =>
  *   (neither)         the full roster, so the enrol page can show a browsable
  *                     picker with everyone's coach instead of a blind search. */
 router.get("/api/enroll/lookup", wrap(async (req, res) => {
-  const id = String((req.query && req.query.id) || "").trim();
+  // ?t=<signed invite token> — the emailed link. Resolves to exactly one
+  // delegate, and only while the token is still valid.
+  const invite = String((req.query && req.query.t) || "").trim();
+  const id = invite
+    ? (verifyEnrolToken(invite) || " no-match")
+    : String((req.query && req.query.id) || "").trim();
+  if (invite && id === " no-match") {
+    return fail(res, 410, "INVITE_EXPIRED", "That enrolment link has expired. Ask staff to send a new one.");
+  }
   const q = String((req.query && req.query.name) || "").trim().toLowerCase();
   const all = await listDelegates();
   const dash = await liveDashboard();
@@ -770,6 +806,7 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
       name: d.name,
       coachId: d.coachId || null,
       coachLabel: coachName(d.coachId),
+      email: d.email || null, // lets the staff view show who still needs an address
       enrolled: {
         face: !!(row && asVector(row.face_vector)),
         voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
@@ -849,6 +886,101 @@ router.post("/api/enroll", wrap(async (req, res) => {
       voice: !!(voiceVector || voiceHash !== null),
       voiceType: voiceVector ? "acoustic" : voiceHash !== null ? "passphrase" : null,
     },
+  });
+}));
+
+/* ============================================================================
+ * ENROLMENT INVITES — email delegates a personal link to enrol their face and
+ * voice before the trip.
+ *
+ * Staff-only (requireAuth): sending mail is an outward-facing side effect, so
+ * it is never reachable from the public enrolment surface. The mailer itself
+ * fails closed — with SMTP unconfigured or MAIL_DRY_RUN=true nothing is
+ * transmitted and the response reports dryRun, so this can be exercised safely
+ * before you ever point it at real delegates.
+ * ========================================================================== */
+
+/* GET /api/enroll/invite/preview?delegateId=… — render the invite WITHOUT
+ * sending, so staff (and tests) can see exactly what a delegate would get. */
+router.get("/api/enroll/invite/preview", requireAuth(), wrap(async (req, res) => {
+  const delegateId = String((req.query && req.query.delegateId) || "").trim();
+  const delegate = delegateId ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+  const trip = await getTrip();
+  const link = enrolLink(delegate.id);
+  const mail = enrolInviteEmail({
+    name: delegate.name, tripName: trip && trip.name, link, expiresInDays: ENROL_TOKEN_DAYS,
+  });
+  res.json({
+    delegateId: delegate.id, name: delegate.name, to: delegate.email || null,
+    dryRun: isDryRun(), mailConfigured: mailConfigured(),
+    subject: mail.subject, html: mail.html, text: mail.text, link,
+  });
+}));
+
+/* POST /api/enroll/invite  { delegateId, email? }
+ * Emails ONE delegate their personal enrolment link. An email passed here is
+ * saved onto the delegate first, so staff can fill in a missing address and
+ * invite in a single action. */
+router.post("/api/enroll/invite", requireAuth(), wrap(async (req, res) => {
+  const { delegateId, email } = req.body || {};
+  const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
+  if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
+
+  let to = (typeof email === "string" ? email : delegate.email || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return fail(res, 400, "NO_EMAIL", "That delegate has no valid email address yet.");
+  }
+  if (typeof email === "string" && email.trim() && email.trim() !== delegate.email) {
+    await updateDelegate(delegate.id, { email: to });
+  }
+
+  const trip = await getTrip();
+  const link = enrolLink(delegate.id);
+  const mail = enrolInviteEmail({
+    name: delegate.name, tripName: trip && trip.name, link, expiresInDays: ENROL_TOKEN_DAYS,
+  });
+  const result = await sendMail({ to, ...mail });
+  res.json({ delegateId: delegate.id, name: delegate.name, ...result });
+}));
+
+/* POST /api/enroll/invite-all  { onlyMissing = true }
+ * Bulk-invites the roster. Defaults to only those NOT yet enrolled, and skips
+ * anyone with no email on file (reported back so staff can fill them in). */
+router.post("/api/enroll/invite-all", requireAuth(), wrap(async (req, res) => {
+  const onlyMissing = (req.body || {}).onlyMissing !== false;
+  const all = await listDelegates();
+  const bios = await bioMap();
+  const trip = await getTrip();
+
+  const enrolled = (d) => {
+    const row = bios.get(d.id);
+    if (!row || consentOf(row) !== "GRANTED") return false;
+    return !!(asVector(row.face_vector) || asVector(row.voice_vector) || row.voice_hash !== null);
+  };
+
+  const targets = all.filter((d) => (onlyMissing ? !enrolled(d) : true));
+  const noEmail = targets.filter((d) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((d.email || "").trim()));
+  const sendable = targets.filter((d) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((d.email || "").trim()));
+
+  const results = [];
+  for (const d of sendable) {
+    const mail = enrolInviteEmail({
+      name: d.name, tripName: trip && trip.name, link: enrolLink(d.id), expiresInDays: ENROL_TOKEN_DAYS,
+    });
+    // Sequential on purpose: a burst of parallel sends is what gets an SMTP
+    // account rate-limited or flagged as spam.
+    results.push({ delegateId: d.id, name: d.name, ...(await sendMail({ to: d.email.trim(), ...mail })) });
+  }
+
+  res.json({
+    dryRun: isDryRun(),
+    considered: targets.length,
+    sent: results.filter((r) => r.sent).length,
+    previewed: results.filter((r) => r.dryRun).length,
+    failed: results.filter((r) => !r.sent && !r.dryRun).length,
+    skippedNoEmail: noEmail.map((d) => ({ delegateId: d.id, name: d.name })),
+    results,
   });
 }));
 
