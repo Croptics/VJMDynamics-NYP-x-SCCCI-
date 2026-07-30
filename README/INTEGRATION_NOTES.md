@@ -147,6 +147,78 @@ message (e.g. the 429 "slow down"). Every fix was re-tested, legitimate
 group calls / uploads / conversation still work, and all 82 of Vance's unit
 tests still pass.
 
+## Vance post-v2 merge (2026-07-31) — physical pass linking, boarding-pass email, quick chat
+
+JQ merged Vance's continuing work from the `integration/` checkout's
+`v2DocuSync-AI-(Vance)` branch (commits after the `c609da8` merge-point above,
+i.e. everything from "Vance: real WebRTC calls..." onward through "include
+email in /onboarding/badges") into main. Applied as a careful hand-merge, not
+a blind branch merge — main had since diverged with its own fixes (the
+history-log audit trail on `vance.js`'s routes, the QR logo-overlay scan-
+reliability fix, several `ChatBubble`/`MobileChatBubble` UX fixes) that this
+merge preserved rather than overwrote. Cross-teammate facts:
+
+- **New `backend/routes/vance.js` surface**: `external_badge_code` column +
+  unique index on `delegates` (Feature 4b — a delegate's SCCCI physical pass,
+  linked via `POST /api/onboarding/delegates/:id/badge`); check-in
+  (`POST /api/onboarding/checkin`) now matches EITHER `qr_code` OR
+  `external_badge_code`. `POST /api/onboarding/delegates/:id/email-pass`
+  (nodemailer, same `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` env vars as JQ's own
+  `lib/notify.js` escalation mailer, but its own transporter instance — stays
+  self-contained). **New PUBLIC route** `GET /api/badge/:code` (no auth — the
+  code in the URL is the shared secret, like an e-ticket link) backs the new
+  public `/badge/:code` page (`BadgePage.jsx`) opened from the emailed pass.
+  New `chat_group_reads` table (per-member last-read for group chats, powers
+  the group unread badge on `/api/messages/updates` and the chat bubbles).
+- **QR scan-reliability fix PRESERVED, not overwritten.** Main had already
+  shrunk the branded QR's logo-overlay size (`box: s*0.15`, was `s*0.22`) after
+  a real "can't scan it on the laptop" report — Vance's later commits didn't
+  touch that sizing at all, they just replaced the monogram-only overlay with
+  a real-logo-fetch-then-monogram-fallback. The merge kept the smaller sizing
+  and layered the real-logo fetch on top of it; **if this file's QR ever
+  becomes hard to scan again, check `box`/`pad` in `brandedQrDataUrl()`
+  (`BoardingPassesView.jsx`) first, not the logo-fetch logic** — they're
+  independent concerns that happen to share the same function.
+- **New file** `frontend/src/components/mchat/QuickChat.jsx` — a compact
+  messaging surface (groups + people, inline mini-thread) for the floating
+  chat bubbles (desktop `ChatBubble.jsx` and mobile `MobileChatBubble.jsx`,
+  both now tabbed "Assistant | Messages" instead of AI-only). Does **not**
+  import `markThreadRead()` from `messagesApi.js` — that wrapper was removed
+  in a 2026-07-28 dead-code audit (main's `HumanThread.jsx` already relies on
+  `getThread()`'s own server-side mark-read side effect); `QuickChat.jsx`
+  does the same, calling `loadLists()` directly to refresh unread badges.
+- **New file** `frontend/src/pages/BadgePage.jsx` — public, unauthenticated,
+  same top-level `pages/` placement as `KioskScannerPage.jsx`/`EnrollPage.jsx`
+  (not under `pages/desktop/`, since it has no app-shell/auth requirement).
+  Mounted in `App.jsx` at `/badge/:code`, reachable in both the logged-out and
+  logged-in route trees, same pattern as `/enroll`.
+- **`MobileAssistantPage.jsx` was intentionally NOT touched** — Vance's later
+  commit added its own suggested-prompts UI + `--ink-solid` avatar fix, but
+  main's copy had *already* independently gained an equivalent feature (its
+  own quick-start prompt buttons using the established `m-row`/`m-eyebrow`
+  mobile design classes, `--ink-solid` already applied, `send()` already
+  accepting a preset argument). Re-applying Vance's version would have
+  regressed main's already-integrated, differently-styled equivalent for no
+  gain — left as-is.
+- **`claudeParse.js`'s `qrCheckin()` contract is UNCHANGED** — the "do not
+  remove, this is what Jayden's `QRScannerPanel.jsx` calls" comment and
+  function are untouched; only two new, separate functions
+  (`linkPhysicalBadge`, `emailPass`) were added after it.
+- Dependencies used: `nodemailer` (already installed — JQ's own escalation
+  mailer already depends on it) and `jsqr` (already installed — used
+  elsewhere for the entrance-kiosk QR scan) — **no new npm installs needed**
+  for this merge.
+- **Not yet done**: Chinese (`zh`) translations for the new UI strings
+  (physical-pass linking, email-pass, the Assistant/Messages tabs, QuickChat's
+  own strings). `useLang()`'s `t()` falls back to the English string when a
+  `zh` key is missing (`DICT[s] || s`), so nothing is broken — it just reads
+  in English under 中文 mode until translated.
+- **Verified**: `npx vite build` and `node --check` on every touched backend
+  file pass clean. Not yet live-tested against a running server/real SMTP
+  config — the physical-pass scan camera, email-pass send, and the public
+  `/badge/:code` page should get a real pass before being trusted as
+  fully working.
+
 ## Vimal FaceCheck-Pro integration (2026-07-29) — mobile UI, real face recognition, enrolment app
 
 Merged from Vimal's `FaceCheck-Pro-(Vimal)` branch (16 feature commits after his

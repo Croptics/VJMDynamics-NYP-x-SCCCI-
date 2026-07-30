@@ -162,6 +162,18 @@ export function qrCheckin({ code, tripId, coachId }) {
   return apiPost("/onboarding/checkin", { code, tripId, coachId }); // { ok, alreadyBoarded, delegate, total, present }
 }
 
+/* Link (or clear) a delegate's EXTERNAL physical pass code (Feature 4b). Pass an
+ * empty string to unlink. Check-in then resolves EITHER this or our qr_code. */
+export function linkPhysicalBadge(delegateId, code) {
+  return apiPost(`/onboarding/delegates/${delegateId}/badge`, { code }); // { ok, id, external_badge_code }
+}
+
+/* Email a delegate their branded boarding pass. `qrDataUrl` is the client-rendered
+ * QR-with-logo PNG (embedded inline in the email). Returns { ok, to }. */
+export function emailPass(delegateId, qrDataUrl) {
+  return apiPost(`/onboarding/delegates/${delegateId}/email-pass`, { qrDataUrl });
+}
+
 /* ---- CSV export (opens in Excel) ---------------------------------------- */
 const CSV_COLUMNS = [
   ["fullName", "Name"], ["role", "Role"], ["company", "Company"], ["industry", "Industry"],

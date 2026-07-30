@@ -3,14 +3,22 @@
  *  PART OF:   MusterGo base — chat shell (hosts Vance's MusterChat assistant)
  * ============================================================================= */
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { MessageCircle, X, MessageSquare } from "lucide-react";
 import { useLang } from "../lib/i18n.jsx";
 import { getToken } from "../lib/api.js";
 import { pollUpdates } from "../lib/messagesApi.js";
 import callManager from "../lib/callManager.js";
 import AssistantConversation from "./mchat/AssistantConversation.jsx";
+import QuickChat from "./mchat/QuickChat.jsx";
 import VideoCallOverlay from "./mchat/VideoCallOverlay.jsx";
+
+// Segmented "Assistant | Messages" tab button inside the bubble panel.
+const tabBtnStyle = (active) => ({
+  border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 600, padding: "5px 14px", borderRadius: 7,
+  background: active ? "var(--surface, #fff)" : "transparent", color: active ? "var(--scc-red)" : "var(--ink-2)",
+  boxShadow: active ? "0 1px 2px rgba(0,0,0,0.1)" : "none", display: "inline-flex", alignItems: "center",
+});
 
 // Always visible (2026-07-28 — "can you unhide the chat?"). This bubble used
 // to auto-hide until the page was scrolled (an earlier fix for it covering
@@ -39,7 +47,9 @@ const CORNERS = {
 export default function ChatBubble() {
   const { t } = useLang();
   const navigate = useNavigate();
+  const location = useLocation();
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState("assistant"); // "assistant" (AI) | "messages" (quick chat)
   const [unread, setUnread] = useState(0);
   const [corner, setCorner] = useState(() => {
     try { return localStorage.getItem(CORNER_KEY) || "br"; } catch { return "br"; }
@@ -103,6 +113,9 @@ export default function ChatBubble() {
   };
 
   if (!getToken()) return null; // hidden on the login screen
+  // Redundant on the full MusterChat page (/assistant) — that page IS the inbox
+  // and mounts its own call overlay + poll, so hide the floating bubble there.
+  if (location.pathname === "/assistant") return null;
 
   const goMessages = () => { setOpen(false); navigate("/assistant"); };
 
@@ -121,32 +134,31 @@ export default function ChatBubble() {
 
       {open && (
         <div className="mg-chatbubble-panel card" style={panelPosStyle}>
-          <div className="row between" style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>{t("Trip assistant")}</div>
-            <div className="row" style={{ gap: 4 }}>
-              {/* Always-visible jump to the full MusterChat inbox (2026-07-28 —
-                  "where the chat?": without this, /assistant was only linked
-                  when unread > 0, so team messaging was undiscoverable). */}
-              <button className="btn btn-ghost" onClick={goMessages} style={{ fontSize: 12, padding: "4px 10px" }}>
-                <MessageSquare size={14} /> {t("Messages")}
-              </button>
-              <button onClick={() => setOpen(false)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
-                <X size={18} />
+          {/* Assistant | Messages tabs — the bubble is the AI chatbot by default;
+              the Messages tab is a simplified quick-chat for incoming team DMs. */}
+          <div className="row between" style={{ padding: "10px 12px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
+            <div style={{ display: "flex", gap: 3, background: "var(--surface-2)", borderRadius: 9, padding: 3 }}>
+              <button onClick={() => setTab("assistant")} style={tabBtnStyle(tab === "assistant")}>{t("Assistant")}</button>
+              <button onClick={() => setTab("messages")} style={tabBtnStyle(tab === "messages")}>
+                <MessageSquare size={13} style={{ marginRight: 5 }} /> {t("Messages")}
+                {unread > 0 && <span style={{ marginLeft: 6, background: "var(--scc-red)", color: "#fff", fontSize: 10, fontWeight: 800, borderRadius: 9, padding: "1px 6px" }}>{unread > 99 ? "99+" : unread}</span>}
               </button>
             </div>
-          </div>
-          {unread > 0 && (
-            <button className="mg-chatbubble-msgbar" onClick={goMessages}>
-              <MessageSquare size={14} />
-              {unread} {unread > 1 ? t("new team messages") : t("new team message")} — {t("open Messages")} →
+            <button onClick={() => setOpen(false)} aria-label={t("Close")} style={{ background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4 }}>
+              <X size={18} />
             </button>
-          )}
-          {/* AssistantConversation's root card is a fixed 560px tall — give it
-              a scrolling wrapper so its input row stays reachable when the
-              viewport clamps the panel shorter than that. */}
-          <div style={{ flex: 1, minHeight: 0, padding: 12, overflowY: "auto" }}>
-            <AssistantConversation />
           </div>
+          {tab === "assistant" ? (
+            // AssistantConversation's root card is a fixed 560px tall — give it a
+            // scrolling wrapper so its input row stays reachable when clamped.
+            <div style={{ flex: 1, minHeight: 0, padding: 12, overflowY: "auto" }}>
+              <AssistantConversation />
+            </div>
+          ) : (
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <QuickChat onOpenFull={goMessages} />
+            </div>
+          )}
         </div>
       )}
 

@@ -87,6 +87,9 @@ export default function OnboardingPage() {
   const [trips, setTrips] = useState([]);
   const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
   const [rows, setRows] = useState([]);
+  const [elapsed, setElapsed] = useState(0); // seconds the current parse has run (live) / took (frozen when done)
+  const startRef = useRef(0);
+  const fmtMMSS = (s) => `${Math.floor(s / 60)}:${String(Math.max(0, s) % 60).padStart(2, "0")}`;
   const [editAll, setEditAll] = useState(false);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
@@ -194,10 +197,19 @@ export default function OnboardingPage() {
     const savedRows = JSON.parse(localStorage.getItem(LS_ROWS) || "[]");
     if (savedRows.length) setRows(savedRows);
     const saved = JSON.parse(localStorage.getItem(LS_JOB) || "null");
-    if (saved?.id) { setJob(saved); startPolling(saved.id); }
+    if (saved?.id) { startRef.current = Date.now(); setJob(saved); startPolling(saved.id); }
     return () => clearInterval(pollRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ---- live elapsed timer while a parse runs (freezes at the total when done) */
+  useEffect(() => {
+    if (job?.status !== "running") return;
+    const tick = () => setElapsed(Math.max(0, Math.round((Date.now() - startRef.current) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [job?.status]);
 
   /* ---- upload / start a job -------------------------------------------- */
   const ingest = useCallback(async (fileList) => {
@@ -207,6 +219,7 @@ export default function OnboardingPage() {
     setRows([]);
     setSearch("");
     setEditAll(false);
+    startRef.current = Date.now(); setElapsed(0);
     setJob({ id: null, fileName: file.name, status: "running", done: 0, total: 0, method: null, error: null });
     try {
       const { jobId } = await startParseJob(file);
@@ -383,6 +396,7 @@ export default function OnboardingPage() {
                   <div style={{ flex: 1, minWidth: 0, fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {job.fileName}
                   </div>
+                  {job.status === "running" && <span className="muted" style={{ fontSize: 12.5, fontWeight: 600, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{fmtMMSS(elapsed)}</span>}
                   {job.method && <span className="badge badge-present" style={{ fontSize: 11 }}>{job.method}</span>}
                   <button className="mg-iconbtn" title={job.status === "running" ? t("Cancel parse") : t("Clear")} onClick={cancelJob} style={{ color: "var(--ink-3)" }}>
                     <X size={15} />
@@ -404,7 +418,7 @@ export default function OnboardingPage() {
                 )}
                 {job.status === "done" && (
                   <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                    {rows.length} {t("delegates extracted")}{reviewNeeded ? ` · ${reviewNeeded} ${t("need review")}` : ""}
+                    {rows.length} {t("delegates extracted")}{reviewNeeded ? ` · ${reviewNeeded} ${t("need review")}` : ""}{elapsed > 0 ? ` · ${t("done in")} ${fmtMMSS(elapsed)}` : ""}
                   </div>
                 )}
                 {job.status === "error" && (
