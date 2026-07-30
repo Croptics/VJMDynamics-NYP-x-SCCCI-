@@ -61,6 +61,7 @@ class CallManager {
     this.micOn = true;
     this.camOn = true;
     this.error = null;
+    this._retry = null;           // fn to re-attempt after a media failure
     this.startedAt = 0;
     this.pendingIce = [];         // 1:1 ICE queued before remoteDescription
     this._incomingOffer = null;
@@ -75,7 +76,7 @@ class CallManager {
   snapshot() {
     return {
       status: this.status, peer: this.peer, mode: this.mode,
-      micOn: this.micOn, camOn: this.camOn, error: this.error,
+      micOn: this.micOn, camOn: this.camOn, error: this.error, canRetry: !!this._retry,
       startedAt: this.startedAt, isInitiator: this.isInitiator,
       localStream: this.localStream, remoteStream: this.remoteStream,
       isGroup: this.isGroup, groupName: this.groupName,
@@ -101,14 +102,69 @@ class CallManager {
   }
 
   /* ---- media ------------------------------------------------------------- */
-  async _getMedia() {
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: this.mode === "video" ? { facingMode: this._facing } : false,
-    });
-    this.localStream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
-    this.localStream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
+  // Human-readable, ACTIONABLE reason a getUserMedia call failed — so the user
+  // knows what to actually do (allow permission / close the other app / …)
+  // instead of a dead-end "blocked".
+  _mediaErrorMessage(e) {
+    switch (e?.name) {
+      case "NotAllowedError":
+      case "SecurityError":
+        return "Camera & mic are blocked. Click the camera icon in your browser's address bar, choose Allow, then Retry.";
+      case "NotFoundError":
+      case "OverconstrainedError":
+        return "No camera or microphone was found on this device.";
+      case "NotReadableError":
+      case "AbortError":
+        return "Your camera/mic is busy in another app (Zoom, Teams, another tab). Close it, then Retry.";
+      default:
+        return "Couldn't access your camera/mic. Check the browser permission, then Retry.";
+    }
   }
+
+  // Acquire local media with progressive fallback so a call still connects when
+  // possible: ideal (facingMode) video+audio → plain video+audio → AUDIO-ONLY.
+  // A video call on a device with no/blocked camera thus degrades to voice
+  // instead of failing outright. Only a hard permission denial (mic AND cam) or
+  // "no devices at all" throws — surfaced with an actionable message + Retry.
+  async _getMedia() {
+    const wantVideo = this.mode === "video";
+    const attempts = wantVideo
+      ? [{ audio: true, video: { facingMode: this._facing } }, { audio: true, video: true }, { audio: true, video: false }]
+      : [{ audio: true, video: false }];
+
+    let lastErr = null;
+    for (const constraints of attempts) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        this.localStream = stream;
+        // Wanted video but only got audio (no camera / camera blocked but mic ok)
+        // → run as a voice call so the UI stops promising video we can't send.
+        if (wantVideo && stream.getVideoTracks().length === 0) { this.mode = "voice"; this.camOn = false; }
+        stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
+        stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
+        return;
+      } catch (e) {
+        lastErr = e;
+        // Fall through to the next, looser constraint set. Even on a permission
+        // denial we still try audio-only, in case ONLY the camera was blocked
+        // (mic ok) → the call degrades to voice instead of failing.
+      }
+    }
+    throw lastErr || new DOMException("No media", "NotFoundError");
+  }
+
+  // Media couldn't be acquired: park in idle with an actionable error + a Retry
+  // that re-runs the exact action the user attempted (kept alive across the reset).
+  _failMedia(e, retryFn) {
+    try { this.localStream && this.localStream.getTracks().forEach((t) => t.stop()); } catch { /* */ }
+    const msg = this._mediaErrorMessage(e);
+    this._reset();
+    this.error = msg;
+    this._retry = retryFn || null;
+    this._emit();
+  }
+  retry() { const fn = this._retry; this.error = null; this._retry = null; this._emit(); if (fn) fn(); }
+  dismissError() { this.error = null; this._retry = null; this._emit(); }
 
   /* =========================================================================
    *  1:1 CALLS
@@ -135,8 +191,9 @@ class CallManager {
     this.peer = { id: peer.id, name: peer.name };
     this.mode = mode; this.isInitiator = true; this.callId = uuid();
     this.status = "outgoing"; this._emit();
+    try { await this._getMedia(); }
+    catch (e) { return this._failMedia(e, () => this.startCall(peer, mode)); }
     try {
-      await this._getMedia();
       this.pc = this._newPc();
       this.localStream.getTracks().forEach((t) => this.pc.addTrack(t, this.localStream));
       const offer = await this.pc.createOffer();
@@ -144,8 +201,8 @@ class CallManager {
       await this._signal("invite", offer);
       this.sentInvite = true;
       this._emit();
-    } catch (e) {
-      this.error = e?.name === "NotAllowedError" ? "Camera / microphone was blocked." : "Couldn't start the call.";
+    } catch {
+      this.error = "Couldn't start the call.";
       this._emit(); this._end();
     }
   }
@@ -200,31 +257,39 @@ class CallManager {
     this.isGroup = true; this.groupId = group.id; this.groupName = group.name;
     this.mode = mode; this.isInitiator = true; this.callId = uuid();
     this.status = "connecting"; this._emit();
+    try { await this._ensureMeId(); await this._getMedia(); }
+    catch (e) { return this._failMedia(e, () => this.startGroupCall(group, mode)); }
     try {
-      await this._ensureMeId();
-      await this._getMedia();
       this.status = "connected"; this.startedAt = Date.now(); this.sentInvite = true; this._emit();
       const { members } = await getGroupMembers(group.id);
       const others = (members || []).filter((m) => String(m.id) !== String(this.meId));
       for (const m of others) await this._signalTo(m.id, "ginvite", { groupId: group.id, groupName: group.name });
-    } catch (e) {
-      this.error = e?.name === "NotAllowedError" ? "Camera / microphone was blocked." : "Couldn't start the group call.";
+    } catch {
+      this.error = "Couldn't start the group call.";
       this._emit(); this._end();
     }
   }
 
   async _acceptGroup() {
+    const snap = { callId: this.callId, groupId: this.groupId, groupName: this.groupName, mode: this.mode, peer: this.peer };
     this.status = "connecting"; this._emit();
+    try { await this._ensureMeId(); await this._getMedia(); }
+    catch (e) {
+      return this._failMedia(e, () => {
+        this._reset();
+        this.isGroup = true; this.status = "incoming";
+        this.callId = snap.callId; this.groupId = snap.groupId; this.groupName = snap.groupName; this.mode = snap.mode; this.peer = snap.peer;
+        this._emit(); this.accept();
+      });
+    }
     try {
-      await this._ensureMeId();
-      await this._getMedia();
       this.status = "connected"; this.startedAt = Date.now(); this._emit();
       // Announce myself to every member; those already in the room will reply.
       const { members } = await getGroupMembers(this.groupId);
       const others = (members || []).filter((m) => String(m.id) !== String(this.meId));
       for (const m of others) await this._signalTo(m.id, "gjoin", null);
-    } catch (e) {
-      this.error = e?.name === "NotAllowedError" ? "Camera / microphone was blocked." : "Couldn't join the group call.";
+    } catch {
+      this.error = "Couldn't join the group call.";
       this._emit(); this._end();
     }
   }
@@ -234,9 +299,17 @@ class CallManager {
     if (this.status !== "incoming") return;
     if (this.isGroup) return this._acceptGroup();
     if (!this._incomingOffer) return;
+    const snap = { offer: this._incomingOffer, peer: this.peer, callId: this.callId, mode: this.mode };
     this.status = "connecting"; this._emit();
+    try { await this._getMedia(); }
+    catch (e) {
+      return this._failMedia(e, () => {
+        this._reset();
+        this.status = "incoming"; this.peer = snap.peer; this.callId = snap.callId; this.mode = snap.mode; this._incomingOffer = snap.offer;
+        this._emit(); this.accept();
+      });
+    }
     try {
-      await this._getMedia();
       this.pc = this._newPc();
       this.localStream.getTracks().forEach((t) => this.pc.addTrack(t, this.localStream));
       await this.pc.setRemoteDescription(this._incomingOffer);
@@ -245,8 +318,8 @@ class CallManager {
       await this.pc.setLocalDescription(answer);
       await this._signal("answer", answer);
       this._emit();
-    } catch (e) {
-      this.error = e?.name === "NotAllowedError" ? "Camera / microphone was blocked." : "Couldn't join the call.";
+    } catch {
+      this.error = "Couldn't join the call.";
       this._emit(); this._end();
     }
   }

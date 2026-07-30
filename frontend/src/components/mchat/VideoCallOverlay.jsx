@@ -50,12 +50,23 @@ export default function VideoCallOverlay() {
     return () => clearInterval(id);
   }, [s.status, s.startedAt]);
 
-  // Brief error toast (declined / blocked) after a call ends.
+  // Error card after a call ends (declined) OR couldn't start (camera/mic).
+  // When the failure is recoverable (media permission), keep it up with a Retry
+  // that re-runs the exact call — no need to re-navigate — plus a Dismiss.
   if (s.status === "idle") {
     if (!s.error) return null;
     return (
-      <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 95, background: "#111", color: "#fff", padding: "10px 16px", borderRadius: 999, fontSize: 13, boxShadow: "0 10px 30px rgba(0,0,0,0.35)" }}>
-        {s.error}
+      <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 95, maxWidth: 440, width: "calc(100% - 32px)", background: "#16161f", color: "#fff", padding: "14px 16px", borderRadius: 16, fontSize: 13.5, lineHeight: 1.45, boxShadow: "0 16px 44px rgba(0,0,0,0.45)", border: "1px solid rgba(255,255,255,0.1)" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <span style={{ width: 30, height: 30, flexShrink: 0, borderRadius: "50%", background: "rgba(239,68,68,0.16)", color: "#f87171", display: "flex", alignItems: "center", justifyContent: "center" }}><VideoOff size={16} /></span>
+          <div style={{ flex: 1, minWidth: 0 }}>{s.error}</div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+          <button onClick={() => callManager.dismissError()} style={{ background: "rgba(255,255,255,0.1)", color: "#fff", border: "none", borderRadius: 999, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Dismiss</button>
+          {s.canRetry && (
+            <button onClick={() => callManager.retry()} style={{ background: "var(--scc-red, #E1232A)", color: "#fff", border: "none", borderRadius: 999, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Retry</button>
+          )}
+        </div>
       </div>
     );
   }

@@ -971,50 +971,61 @@ function passBrandColor(name) {
   let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return PASS_BRAND_COLORS[h % PASS_BRAND_COLORS.length];
 }
-function passDomain(website) {
-  if (!website) return null;
-  const w = String(website).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[/?#\s]/)[0];
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(w) ? w : null;
-}
 function escHtml(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
-function passEmailHtml({ name, role, company, industry, code, coachLabel, logoUrl, badgeUrl }) {
+// Company initials for the identity chip — always renders (pure text on a
+// coloured cell), so it survives even when a client blocks images (e.g. Gmail
+// hiding images on a message it filed as spam).
+const PASS_STOP = new Set(["pte", "ltd", "llp", "inc", "co", "corp", "the", "and", "group", "holdings", "limited"]);
+function passInitials(company) {
+  const words = String(company || "").trim().split(/\s+/).map((w) => w.replace(/[^\p{L}\p{N}]/gu, "")).filter(Boolean);
+  const sig = words.filter((w) => !PASS_STOP.has(w.toLowerCase()));
+  const src = (sig.length ? sig : words).slice(0, 2).map((w) => w[0]).join("");
+  return (src || String(company || "?")[0] || "?").toUpperCase();
+}
+
+// A single-face, table-based pass. No CSS flip / <style> block: Gmail strips
+// <style>, which turned the old flip card into two stacked faces with a
+// misleading "hover to flip". The QR is the essential thing, so it leads; the
+// interactive flip + real company logo live on the hosted /badge page (button).
+function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl }) {
   const brand = passBrandColor(company);
+  const initials = passInitials(company);
   return `
   <div style="margin:0;background:#f4f4f6;font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px 12px">
-    <div style="max-width:480px;margin:0 auto">
-      <div style="background:#e1232a;color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;font-weight:800;font-size:17px;letter-spacing:.3px">MusterGo · Boarding Pass</div>
-      <div style="background:#fff;border:1px solid #e6e6ea;border-top:none;border-radius:0 0 14px 14px;padding:22px 20px;text-align:center">
-        <p style="margin:0 0 16px;color:#555;font-size:13.5px">Hi ${escHtml(name)}, here's your QR boarding pass for the SCCCI study mission. <span style="color:#999">(Hover the badge to flip it.)</span></p>
-        <style>
-          .mgflip{perspective:1100px;width:250px;margin:0 auto}
-          .mgflip-in{position:relative;width:250px;height:314px;transition:transform .7s;transform-style:preserve-3d}
-          .mgflip:hover .mgflip-in{transform:rotateY(180deg)}
-          .mgface{position:absolute;top:0;left:0;width:250px;height:314px;-webkit-backface-visibility:hidden;backface-visibility:hidden;border-radius:16px;border:1px solid #e6e6ea;overflow:hidden;background:#fff}
-          .mgback{transform:rotateY(180deg)}
-        </style>
-        <div class="mgflip"><div class="mgflip-in">
-          <div class="mgface">
-            <div style="background:${brand};height:8px;width:100%"></div>
-            <img src="cid:passqr" width="188" height="188" alt="QR" style="display:block;margin:14px auto 6px;border-radius:10px"/>
-            <div style="font-weight:800;font-size:16px;color:#1a1a1a">${escHtml(name)}</div>
-            <div style="color:#666;font-size:12px;margin-top:2px">${escHtml(role || "Delegate")}</div>
-            <div style="font-family:monospace;font-size:12px;color:#aaa;margin-top:8px">${escHtml(code || "")}</div>
-          </div>
-          <div class="mgface mgback" style="background:${brand};color:#fff">
-            <table width="100%" height="100%"><tr><td align="center" valign="middle" style="padding:20px">
-              ${logoUrl ? `<img src="${escHtml(logoUrl)}" width="76" height="76" alt="" style="border-radius:16px;background:#fff;padding:6px;margin-bottom:12px"/>` : ""}
-              <div style="font-weight:800;font-size:19px">${escHtml(name)}</div>
-              <div style="opacity:.92;font-size:13px;margin-top:4px">${escHtml(company || "")}</div>
-              ${industry ? `<div style="opacity:.8;font-size:12px;margin-top:8px">${escHtml(industry)}</div>` : ""}
-              <div style="opacity:.8;font-size:12px;margin-top:2px">${escHtml(coachLabel || "")}</div>
-            </td></tr></table>
-          </div>
-        </div></div>
-        ${badgeUrl ? `<div style="margin-top:18px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:10px">View &amp; flip your badge →</a></div>` : ""}
-        <p style="margin:18px 0 0;color:#aaa;font-size:11px">Show this QR at muster to board. A Singapore Chinese Chamber of Commerce &amp; Industry initiative.</p>
-      </div>
-    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;border-collapse:separate">
+      <tr><td style="background:#e1232a;color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;font-weight:800;font-size:17px;letter-spacing:.3px">MusterGo &middot; Boarding Pass</td></tr>
+      <tr><td style="background:#fff;border:1px solid #e6e6ea;border-top:none;border-radius:0 0 14px 14px;padding:22px 20px">
+        <p style="margin:0 0 18px;color:#555;font-size:13.5px;text-align:center;line-height:1.5">Hi ${escHtml(name)}, here's your QR boarding pass for the SCCCI study mission. Show it at muster to board.</p>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e6e6ea;border-radius:16px;border-collapse:separate;overflow:hidden">
+          <tr><td style="background:${brand};height:8px;line-height:8px;font-size:0">&nbsp;</td></tr>
+          <tr><td align="center" style="padding:22px 20px 8px">
+            <img src="cid:passqr" width="204" height="204" alt="Boarding QR ${escHtml(code || "")}" style="display:block;border-radius:10px;border:1px solid #eee"/>
+            <div style="font-family:'Courier New',monospace;font-size:15px;color:#333;margin-top:12px;letter-spacing:1.5px">${escHtml(code || "")}</div>
+          </td></tr>
+          <tr><td style="padding:8px 20px 22px">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+              <td width="48" valign="middle">
+                <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                  <td width="46" height="46" align="center" valign="middle" bgcolor="${brand}" style="background:${brand};color:#ffffff;font-weight:800;font-size:16px;border-radius:12px">${escHtml(initials)}</td>
+                </tr></table>
+              </td>
+              <td valign="middle" style="padding-left:12px">
+                <div style="font-weight:800;font-size:16px;color:#1a1a1a">${escHtml(name)}</div>
+                <div style="color:#666;font-size:13px;margin-top:1px">${escHtml(role || "Delegate")}${company ? ` &middot; ${escHtml(company)}` : ""}</div>
+                ${industry ? `<div style="color:#999;font-size:12px;margin-top:3px">${escHtml(industry)}</div>` : ""}
+                <div style="color:#999;font-size:12px;margin-top:1px">${escHtml(coachLabel || "")}</div>
+              </td>
+            </tr></table>
+          </td></tr>
+        </table>
+
+        ${badgeUrl ? `<div style="text-align:center;margin-top:20px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px">View &amp; flip your badge &rarr;</a></div>
+        <p style="margin:10px 0 0;color:#aaa;font-size:11.5px;text-align:center">Tap for your interactive badge with your company logo.</p>` : ""}
+        <p style="margin:18px 0 0;color:#bbb;font-size:11px;text-align:center">A Singapore Chinese Chamber of Commerce &amp; Industry initiative.</p>
+      </td></tr>
+    </table>
   </div>`;
 }
 
@@ -1037,20 +1048,20 @@ router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manag
   const m = /^data:image\/(png|jpe?g);base64,(.+)$/.exec(qrDataUrl);
   if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), cid: "passqr" });
 
-  const domain = passDomain(del.website);
   const coachLabel = del.coach_name ? `${del.coach_name}${del.coach_city ? ` · ${del.coach_city}` : ""}` : "No coach assigned";
   const base = (process.env.FRONTEND_URL || "https://localhost:5173").replace(/\/+$/, "");
+  const badgeUrl = `${base}/badge/${encodeURIComponent(del.qr_code)}`;
   const html = passEmailHtml({
     name: del.name, role: del.role, company: del.company, industry: del.industry,
-    code: del.qr_code, coachLabel, logoUrl: domain ? `https://unavatar.io/${domain}` : null,
-    badgeUrl: `${base}/badge/${encodeURIComponent(del.qr_code)}`,
+    code: del.qr_code, coachLabel, badgeUrl,
   });
+  const fromAddr = process.env.SMTP_FROM || process.env.SMTP_USER;
   try {
     await t.sendMail({
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: /</.test(fromAddr) ? fromAddr : `MusterGo · SCCCI <${fromAddr}>`,
       to: del.email,
       subject: `Your MusterGo boarding pass — ${del.name}`,
-      text: `Hi ${del.name}, your QR boarding pass code is ${del.qr_code}. Show it at muster to board.`,
+      text: `Hi ${del.name},\n\nHere's your QR boarding pass for the SCCCI study mission.\nBoarding code: ${del.qr_code}\n${del.company ? `Company: ${del.company}\n` : ""}${del.role ? `Role: ${del.role}\n` : ""}\nShow the QR (attached / in the HTML view) at muster to board, or open your interactive badge:\n${badgeUrl}\n\n— MusterGo, a Singapore Chinese Chamber of Commerce & Industry initiative`,
       html, attachments,
     });
     res.json({ ok: true, to: del.email });
