@@ -1,16 +1,18 @@
 /* =============================================================================
- *  OWNED BY:  Vance — MusterChat "quick chat". A compact person-to-person
- *  messaging surface for the floating chat bubbles (desktop + mobile): a recent-
- *  conversation list that opens an inline mini-thread. Supports text, stickers
- *  (emoji + image), inline document parse-&-share (with "Add to trip"), and video
- *  clips — the same send features as the full inbox, just space-optimised.
- *  "Open full inbox" (desktop) jumps to /assistant for calls / groups / edit.
- *  Reuses the same /api/messages/* backend.
+ *  OWNED BY:  Vance — MusterChat "quick chat". A compact messaging surface for
+ *  the floating chat bubbles (desktop + mobile). Shows GROUPS and PEOPLE; opens
+ *  an inline mini-thread for either. Supports text, stickers (emoji + image),
+ *  inline document parse-&-share ("Add to trip"), video clips, per-message
+ *  timestamps, and edit/delete of your own messages — the same as the full inbox,
+ *  just space-optimised. Groups sync with the desktop inbox (same backend).
  * ============================================================================= */
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Search, Send, ArrowLeft, ExternalLink, Paperclip, Smile, FileText, Film, X } from "lucide-react";
+import { Search, Send, ArrowLeft, ExternalLink, Paperclip, Smile, FileText, Film, X, Pencil, Trash2, Check, Users } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
-import { listContacts, getThread, sendMessage, markThreadRead } from "../../lib/messagesApi.js";
+import {
+  listContacts, getThread, sendMessage, markThreadRead, editMessage, deleteMessage,
+  listGroups, getGroupThread, sendGroupMessage,
+} from "../../lib/messagesApi.js";
 import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import { TRIP_ID } from "../../lib/exceptionsApi.js";
 import DocShareCard from "./DocShareCard.jsx";
@@ -25,8 +27,9 @@ const parseDoc = (m) => { try { return JSON.parse(m.media || "{}"); } catch { re
 export default function QuickChat({ onOpenFull }) {
   const { t } = useLang();
   const [contacts, setContacts] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [filter, setFilter] = useState("");
-  const [active, setActive] = useState(null);   // peer { kind, id, name } or null (list view)
+  const [active, setActive] = useState(null);   // { kind: "account"|"delegate"|"group", id, name }
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -34,35 +37,46 @@ export default function QuickChat({ onOpenFull }) {
   const [stickerOpen, setStickerOpen] = useState(false);
   const [added, setAdded] = useState({});
   const [error, setError] = useState(null);
+  const [editing, setEditing] = useState(null);
   const listRef = useRef(null);
   const docInputRef = useRef(null);
   const videoInputRef = useRef(null);
 
-  const loadContacts = useCallback(async () => {
-    try { const { contacts } = await listContacts(); setContacts(contacts || []); } catch { /* transient */ }
-  }, []);
-  useEffect(() => { loadContacts(); const id = setInterval(loadContacts, 4000); return () => clearInterval(id); }, [loadContacts]);
+  const isGroup = active?.kind === "group";
 
-  // Load + poll the open thread, and mark it read so the bubble badge clears.
+  const loadLists = useCallback(async () => {
+    try {
+      const [c, g] = await Promise.all([listContacts(), listGroups()]);
+      setContacts(c.contacts || []); setGroups(g.groups || []);
+    } catch { /* transient */ }
+  }, []);
+  useEffect(() => { loadLists(); const id = setInterval(loadLists, 4000); return () => clearInterval(id); }, [loadLists]);
+
+  // Load + poll the open thread (1:1 or group), and mark it read.
   useEffect(() => {
     if (!active) return;
     let alive = true;
-    setMessages([]); setAttachOpen(false); setStickerOpen(false); setError(null);
+    const grp = active.kind === "group";
+    setMessages([]); setAttachOpen(false); setStickerOpen(false); setError(null); setEditing(null);
     const pull = async () => {
-      try { const r = await getThread(active.kind, active.id); if (alive) setMessages(r.messages || []); }
+      try { const r = grp ? await getGroupThread(active.id) : await getThread(active.kind, active.id); if (alive) setMessages(r.messages || []); }
       catch { /* transient */ }
     };
     pull();
-    markThreadRead(active.kind, active.id).then(loadContacts).catch(() => {});
+    // 1:1 read is marked via the endpoint; group read is marked server-side by
+    // getGroupThread (chat_group_reads). Refresh lists so previews/badges update.
+    if (!grp) markThreadRead(active.kind, active.id).then(loadLists).catch(() => {});
+    else loadLists();
     const id = setInterval(pull, 1800);
     return () => { alive = false; clearInterval(id); };
-  }, [active, loadContacts]);
+  }, [active, loadLists]);
 
   useEffect(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight; }, [messages]);
 
-  /* ---- send helpers ----------------------------------------------------- */
+  /* ---- send helpers (branch 1:1 vs group) ------------------------------- */
+  const sendTo = (payload) => (active.kind === "group" ? sendGroupMessage(active.id, payload) : sendMessage(active.kind, active.id, payload));
   const pushOpt = (partial) => {
-    const opt = { id: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), mine: true, pending: true, ...partial };
+    const opt = { id: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, at: new Date().toISOString(), mine: true, sender: "You", pending: true, ...partial };
     setMessages((m) => [...m, opt]);
     return opt;
   };
@@ -74,7 +88,7 @@ export default function QuickChat({ onOpenFull }) {
     if (!body || sending || !active) return;
     setDraft(""); setSending(true);
     const opt = pushOpt({ kind: "text", body });
-    try { const { message } = await sendMessage(active.kind, active.id, { kind: "text", body }); settle(opt.id, message); loadContacts(); }
+    try { const { message } = await sendTo({ kind: "text", body }); settle(opt.id, message); loadLists(); }
     catch { fail(opt.id); }
     finally { setSending(false); }
   };
@@ -84,7 +98,7 @@ export default function QuickChat({ onOpenFull }) {
     if (payload.error) { setError(payload.error); return; }
     if (!active) return;
     const opt = pushOpt({ kind: "sticker", body: payload.body || null, media: payload.media || null });
-    try { const { message } = await sendMessage(active.kind, active.id, { kind: "sticker", body: payload.body || null, media: payload.media || null }); settle(opt.id, message); loadContacts(); }
+    try { const { message } = await sendTo({ kind: "sticker", body: payload.body || null, media: payload.media || null }); settle(opt.id, message); loadLists(); }
     catch { fail(opt.id); }
   }
 
@@ -95,8 +109,8 @@ export default function QuickChat({ onOpenFull }) {
     try {
       const { rows } = await parseDocument(file);
       const media = JSON.stringify({ filename: file.name, rows: rows || [] });
-      const { message } = await sendMessage(active.kind, active.id, { kind: "doc", body: file.name, media });
-      settle(opt.id, message); loadContacts();
+      const { message } = await sendTo({ kind: "doc", body: file.name, media });
+      settle(opt.id, message); loadLists();
     } catch (err) { setError(err?.message || "Couldn't read that document."); fail(opt.id); }
   }
 
@@ -107,8 +121,8 @@ export default function QuickChat({ onOpenFull }) {
     const opt = pushOpt({ kind: "video", body: file.name, media: null, uploading: true });
     try {
       const dataUrl = await fileToDataUrl(file);
-      const { message } = await sendMessage(active.kind, active.id, { kind: "video", body: file.name, media: dataUrl });
-      settle(opt.id, message); loadContacts();
+      const { message } = await sendTo({ kind: "video", body: file.name, media: dataUrl });
+      settle(opt.id, message); loadLists();
     } catch (err) { setError(err?.message || "Couldn't send that clip."); fail(opt.id); }
   }
 
@@ -120,12 +134,29 @@ export default function QuickChat({ onOpenFull }) {
     catch (err) { setError(err?.message || "Couldn't add those delegates."); setAdded((a) => { const n = { ...a }; delete n[msg.id]; return n; }); }
   }
 
+  async function saveEdit() {
+    const cur = editing; setEditing(null);
+    if (!cur) return;
+    const body = cur.value.trim();
+    if (!body) return;
+    setMessages((ms) => ms.map((x) => (x.id === cur.id ? { ...x, body, edited: true } : x)));
+    try { await editMessage(cur.id, body); loadLists(); }
+    catch (e) { setError(e?.message || t("Couldn't edit that message.")); }
+  }
+  async function doDelete(m) {
+    setMessages((ms) => ms.map((x) => (x.id === m.id ? { ...x, deleted: true, body: null, media: null } : x)));
+    try { await deleteMessage(m.id); loadLists(); }
+    catch (e) { setError(e?.message || t("Couldn't delete that message.")); }
+  }
+
   const openFull = () => onOpenFull?.();
 
   /* ---- list view -------------------------------------------------------- */
   if (!active) {
-    const visible = contacts.filter((c) => c.name.toLowerCase().includes(filter.toLowerCase()));
-    const sorted = [...visible].sort((a, b) => (b.lastAt ? new Date(b.lastAt) : 0) - (a.lastAt ? new Date(a.lastAt) : 0));
+    const f = filter.toLowerCase();
+    const gVisible = groups.filter((g) => g.name.toLowerCase().includes(f));
+    const cVisible = contacts.filter((c) => c.name.toLowerCase().includes(f))
+      .sort((a, b) => (b.lastAt ? new Date(b.lastAt) : 0) - (a.lastAt ? new Date(a.lastAt) : 0));
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
         <div style={{ padding: 10, borderBottom: "1px solid var(--line)", flexShrink: 0, position: "relative" }}>
@@ -133,8 +164,27 @@ export default function QuickChat({ onOpenFull }) {
           <input className="input" placeholder={t("Search people…")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ paddingLeft: 30, padding: "7px 8px 7px 30px", fontSize: 13 }} />
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 6 }}>
-          {sorted.length === 0 && <div className="muted" style={{ fontSize: 12.5, textAlign: "center", padding: 20 }}>{t("No contacts found.")}</div>}
-          {sorted.map((c) => (
+          {gVisible.length > 0 && <div className="page-eyebrow" style={{ padding: "6px 8px 2px", display: "flex", alignItems: "center", gap: 5 }}><Users size={12} /> {t("Groups")}</div>}
+          {gVisible.map((g) => (
+            <button key={`group:${g.id}`} onClick={() => setActive({ kind: "group", id: g.id, name: g.name })}
+              style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <span className="avatar" style={{ background: "var(--scc-red)", color: "#fff", flexShrink: 0 }}><Users size={15} /></span>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div className="row between" style={{ gap: 6 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
+                  {g.lastAt && <div className="muted" style={{ fontSize: 10, flexShrink: 0 }}>{hhmm(g.lastAt)}</div>}
+                </div>
+                <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {g.lastMessage ? `${g.lastMine ? "You: " : ""}${g.lastMessage}` : `${g.memberCount} ${t("members")}`}
+                </div>
+              </div>
+            </button>
+          ))}
+
+          <div className="page-eyebrow" style={{ padding: "10px 8px 2px", display: "flex", alignItems: "center", gap: 5 }}><Users size={12} /> {t("People")}</div>
+          {cVisible.length === 0 && <div className="muted" style={{ fontSize: 12.5, textAlign: "center", padding: 12 }}>{t("No contacts found.")}</div>}
+          {cVisible.map((c) => (
             <button key={`${c.kind}:${c.id}`} onClick={() => setActive({ kind: c.kind, id: c.id, name: c.name })}
               style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
               onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
@@ -172,7 +222,7 @@ export default function QuickChat({ onOpenFull }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative" }}>
       <div className="row" style={{ gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--line)", flexShrink: 0, alignItems: "center" }}>
         <button className="btn btn-ghost" style={{ padding: 5 }} onClick={() => setActive(null)}><ArrowLeft size={16} /></button>
-        <span className="avatar" style={{ background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", flexShrink: 0, width: 30, height: 30, fontSize: 12 }}>{initialsOf(active.name)}</span>
+        <span className="avatar" style={{ background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", flexShrink: 0, width: 30, height: 30, fontSize: 12 }}>{isGroup ? <Users size={15} /> : initialsOf(active.name)}</span>
         <div style={{ fontWeight: 600, fontSize: 13.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{active.name}</div>
         {onOpenFull && <button className="btn btn-ghost" title={t("Open full inbox")} style={{ padding: 5 }} onClick={openFull}><ExternalLink size={15} /></button>}
       </div>
@@ -180,26 +230,67 @@ export default function QuickChat({ onOpenFull }) {
       <div ref={listRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
         {messages.length === 0 && <div className="muted" style={{ margin: "auto", fontSize: 12.5, textAlign: "center", padding: "0 16px" }}>{t("No messages yet. Say hello.")}</div>}
         {messages.map((m) => {
-          if (m.kind === "call") return <div key={m.id} style={{ alignSelf: "center", fontSize: 11, color: "var(--ink-3)" }}>{m.body} · {hhmm(m.at)}</div>;
+          if (m.kind === "call") return <div key={m.id} style={{ alignSelf: "center", fontSize: 11, color: "var(--ink-3)" }}>{isGroup && m.sender && !m.mine ? `${m.sender} · ` : ""}{m.body} · {hhmm(m.at)}</div>;
           const mine = m.mine;
           if (m.deleted) return (
             <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", fontStyle: "italic", color: "var(--ink-3)", fontSize: 12.5, border: "1px dashed var(--line)", borderRadius: 10, padding: "5px 10px" }}>🚫 {t("This message was deleted")}</div>
           );
-          if (m.kind === "sticker") return (
-            <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", opacity: m.pending ? 0.7 : 1 }}>
-              {m.media ? <img src={m.media} alt="sticker" style={{ width: 88, height: 88, objectFit: "contain" }} /> : <span style={{ fontSize: 46, lineHeight: 1 }}>{m.body}</span>}
+          const canEdit = mine && m.kind === "text" && !m.pending;
+          const canDelete = mine && !m.pending;
+          const senderLabel = isGroup && !mine ? <div className="muted" style={{ fontSize: 10.5, fontWeight: 600, padding: "0 6px", color: "var(--scc-red)" }}>{m.sender}</div> : null;
+          const meta = (
+            <div className="muted" style={{ fontSize: 10, padding: "0 3px" }}>
+              {hhmm(m.at)}{m.edited ? ` · ${t("edited")}` : ""}{m.failed ? <span style={{ color: "#ef4444" }}> · {t("failed")}</span> : ""}
             </div>
           );
+
+          if (editing?.id === m.id) return (
+            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+              <div className="row" style={{ gap: 5, alignItems: "flex-end", maxWidth: "90%" }}>
+                <input autoFocus className="input" value={editing.value} onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
+                  style={{ fontSize: 13, padding: "6px 9px" }} />
+                <button className="btn btn-primary" style={{ padding: 7 }} onClick={saveEdit}><Check size={14} /></button>
+                <button className="btn btn-ghost" style={{ padding: 7 }} onClick={() => setEditing(null)}><X size={14} /></button>
+              </div>
+              <div className="muted" style={{ fontSize: 10 }}>{t("Enter to save · Esc to cancel")}</div>
+            </div>
+          );
+
+          if (m.kind === "sticker") return (
+            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
+              {senderLabel}
+              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
+                {m.media ? <img src={m.media} alt="sticker" style={{ width: 88, height: 88, objectFit: "contain" }} /> : <span style={{ fontSize: 46, lineHeight: 1 }}>{m.body}</span>}
+                {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3, opacity: 0.6 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
+              </div>
+              {meta}
+            </div>
+          );
+
           const isDoc = m.kind === "doc";
+          const bubble = { maxWidth: "100%", background: mine ? "var(--scc-red)" : "var(--surface,#fff)", color: mine ? "#fff" : "var(--ink)", border: mine ? "none" : "1px solid var(--line)", borderRadius: mine ? "12px 12px 3px 12px" : "12px 12px 12px 3px", padding: isDoc ? 0 : "6px 10px", fontSize: 13, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: m.pending ? 0.7 : 1 };
           return (
-            <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "84%", background: mine ? "var(--scc-red)" : "var(--surface,#fff)", color: mine ? "#fff" : "var(--ink)", border: mine ? "none" : "1px solid var(--line)", borderRadius: mine ? "12px 12px 3px 12px" : "12px 12px 12px 3px", padding: isDoc ? 0 : "6px 10px", fontSize: 13, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: m.pending ? 0.7 : 1 }}>
-              {m.kind === "text" && m.body}
-              {m.kind === "video" && (m.media
-                ? <video src={m.media} controls playsInline style={{ width: 190, maxWidth: "100%", borderRadius: 8, display: "block" }} />
-                : <span style={{ padding: "6px 10px", display: "inline-block" }}>{m.uploading ? t("Uploading clip…") : (m.body || "Video")}</span>)}
-              {isDoc && (m.parsing
-                ? <div style={{ padding: "8px 12px", fontSize: 12.5 }}>📄 {t("Reading")} {m.body}…</div>
-                : <DocShareCard doc={parseDoc(m)} mine={mine} onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />)}
+            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
+              {senderLabel}
+              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "84%" }}>
+                <div style={bubble}>
+                  {m.kind === "text" && m.body}
+                  {m.kind === "video" && (m.media
+                    ? <video src={m.media} controls playsInline style={{ width: 190, maxWidth: "100%", borderRadius: 8, display: "block" }} />
+                    : <span style={{ padding: "6px 10px", display: "inline-block" }}>{m.uploading ? t("Uploading clip…") : (m.body || "Video")}</span>)}
+                  {isDoc && (m.parsing
+                    ? <div style={{ padding: "8px 12px", fontSize: 12.5 }}>📄 {t("Reading")} {m.body}…</div>
+                    : <DocShareCard doc={parseDoc(m)} mine={mine} onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />)}
+                </div>
+                {(canEdit || canDelete) && !isDoc && (
+                  <span style={{ display: "flex", gap: 1, opacity: 0.55 }}>
+                    {canEdit && <button className="btn btn-ghost" title={t("Edit")} style={{ padding: 3 }} onClick={() => setEditing({ id: m.id, value: m.body || "" })}><Pencil size={12} /></button>}
+                    {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
+                  </span>
+                )}
+              </div>
+              {meta}
             </div>
           );
         })}

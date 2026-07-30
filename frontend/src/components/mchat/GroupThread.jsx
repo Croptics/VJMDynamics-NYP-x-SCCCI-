@@ -233,7 +233,7 @@ export default function GroupThread({ group, onActivity }) {
           }
 
           const bubble = {
-            maxWidth: "78%",
+            maxWidth: "100%",
             background: mine ? "var(--scc-red)" : "var(--surface, #fff)", color: mine ? "#fff" : "var(--ink)",
             border: mine ? "none" : "1px solid var(--line)", padding: m.kind === "doc" ? 0 : "8px 12px",
             borderRadius: mine ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
@@ -243,7 +243,7 @@ export default function GroupThread({ group, onActivity }) {
           return (
             <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
               {!mine && <div className="muted" style={{ fontSize: 11, fontWeight: 600, padding: "0 8px", color: "var(--scc-red)" }}>{m.sender}</div>}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "100%" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "78%" }}>
                 <div style={bubble}>
                   {m.kind === "text" && m.body}
                   {m.kind === "video" && (

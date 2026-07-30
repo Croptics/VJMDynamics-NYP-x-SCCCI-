@@ -42,6 +42,7 @@ import {
   getVisibleCoachIds,
 } from "../data.js";
 import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
+import nodemailer from "nodemailer";
 
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -111,6 +112,11 @@ async function init() {
   // resolved by the on-site scanner to check them in.
   await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS qr_code         VARCHAR(64)`);
   await q(`CREATE UNIQUE INDEX IF NOT EXISTS idx_delegates_qr ON delegates(qr_code) WHERE qr_code IS NOT NULL`);
+  // Optional EXTERNAL badge (Feature 4b): a code from SCCCI's own physical pass,
+  // linked at the boarding-pass desk. Check-in resolves EITHER this or qr_code,
+  // so a delegate can be scanned in with their existing pass instead of ours.
+  await q(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS external_badge_code VARCHAR(128)`);
+  await q(`CREATE UNIQUE INDEX IF NOT EXISTS idx_delegates_extbadge ON delegates(external_badge_code) WHERE external_badge_code IS NOT NULL`);
 
   // Saved assistant chats for the desktop sidebar.
   await q(`CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -191,6 +197,15 @@ async function init() {
     PRIMARY KEY (group_id, account_id)
   )`);
   await q(`CREATE INDEX IF NOT EXISTS idx_group_members_acct ON chat_group_members(account_id)`);
+  // Per-member last-read for group chats (1:1 uses dm_messages.read_at; groups
+  // need their own since one message has many recipients). Powers the unread
+  // count that lights up the chat-bubble badge on group activity.
+  await q(`CREATE TABLE IF NOT EXISTS chat_group_reads (
+    group_id     VARCHAR(64) NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+    account_id   VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    last_read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (group_id, account_id)
+  )`);
 
   console.log("  DocuSync/Assistant module ready -> delegate doc fields, chat_sessions, chat_messages, dm_messages, call_signals, chat_groups");
   warmUpModel(); // preload the chat model so the first question isn't a cold start
@@ -899,7 +914,7 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   const tripId = req.query.tripId;
   const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
-  const cols = `id, name, company, role, industry, website, "coachId" AS coach_id, status, vip, qr_code`;
+  const cols = `id, name, company, role, industry, website, "coachId" AS coach_id, status, vip, qr_code, external_badge_code`;
   const r = tripUuid
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
@@ -907,6 +922,165 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   // PRESENT (legacy) and ARRIVED (the team's 5-status value) both mean "boarded".
   const present = r.rows.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length;
   res.json({ delegates: r.rows, coaches, total: r.rows.length, present });
+}));
+
+// POST /api/onboarding/delegates/:id/badge — link (or clear) a delegate's
+// EXTERNAL physical pass code (Feature 4b). An empty code unlinks. Enforces the
+// same uniqueness the scanner relies on: the code can't collide with another
+// delegate's qr_code or external_badge_code.
+router.post("/api/onboarding/delegates/:id/badge", requirePermission("manageDocuments"), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const id = req.params.id;
+  const code = (req.body?.code || "").toString().trim();
+  const del = (await q(`SELECT id FROM delegates WHERE id = $1`, [id])).rows[0];
+  if (!del) return res.status(404).json({ error: "NO_DELEGATE", message: "That delegate isn't found." });
+  if (!code) {
+    await q(`UPDATE delegates SET external_badge_code = NULL WHERE id = $1`, [id]);
+    return res.json({ ok: true, id, external_badge_code: null });
+  }
+  const clash = (await q(
+    `SELECT id FROM delegates WHERE id <> $1 AND (qr_code = $2 OR external_badge_code = $2) LIMIT 1`,
+    [id, code]
+  )).rows[0];
+  if (clash) return res.status(409).json({ error: "CODE_TAKEN", message: "That pass code is already linked to another delegate." });
+  await q(`UPDATE delegates SET external_badge_code = $1 WHERE id = $2`, [code, id]);
+  res.json({ ok: true, id, external_badge_code: code });
+}));
+
+/* ---- Boarding-pass email (Feature 4c) ------------------------------------ *
+ * Emails a delegate their branded QR boarding pass — a website-styled message
+ * with a flip-card badge (front = QR + name, back = company logo/identity). The
+ * QR (with the company logo in its centre) is rendered client-side and posted
+ * here, then embedded as an inline CID image so it renders even in Gmail. Uses
+ * the same SendGrid/SMTP config as the escalation mailer (SMTP_* in .env). */
+let _passMailer = null;
+function passMailer() {
+  if (_passMailer) return _passMailer;
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
+  _passMailer = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: Number(process.env.SMTP_PORT) === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  return _passMailer;
+}
+const PASS_BRAND_COLORS = ["#1f6feb", "#8250df", "#0f766e", "#b91c1c", "#b45309", "#0e7490", "#4d7c0f", "#9d174d", "#3f3f9e", "#7c3aed"];
+function passBrandColor(name) {
+  const s = (name || "").trim(); if (!s) return "#64748b";
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return PASS_BRAND_COLORS[h % PASS_BRAND_COLORS.length];
+}
+function passDomain(website) {
+  if (!website) return null;
+  const w = String(website).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[/?#\s]/)[0];
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(w) ? w : null;
+}
+function escHtml(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function passEmailHtml({ name, role, company, industry, code, coachLabel, logoUrl, badgeUrl }) {
+  const brand = passBrandColor(company);
+  return `
+  <div style="margin:0;background:#f4f4f6;font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px 12px">
+    <div style="max-width:480px;margin:0 auto">
+      <div style="background:#e1232a;color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;font-weight:800;font-size:17px;letter-spacing:.3px">MusterGo · Boarding Pass</div>
+      <div style="background:#fff;border:1px solid #e6e6ea;border-top:none;border-radius:0 0 14px 14px;padding:22px 20px;text-align:center">
+        <p style="margin:0 0 16px;color:#555;font-size:13.5px">Hi ${escHtml(name)}, here's your QR boarding pass for the SCCCI study mission. <span style="color:#999">(Hover the badge to flip it.)</span></p>
+        <style>
+          .mgflip{perspective:1100px;width:250px;margin:0 auto}
+          .mgflip-in{position:relative;width:250px;height:314px;transition:transform .7s;transform-style:preserve-3d}
+          .mgflip:hover .mgflip-in{transform:rotateY(180deg)}
+          .mgface{position:absolute;top:0;left:0;width:250px;height:314px;-webkit-backface-visibility:hidden;backface-visibility:hidden;border-radius:16px;border:1px solid #e6e6ea;overflow:hidden;background:#fff}
+          .mgback{transform:rotateY(180deg)}
+        </style>
+        <div class="mgflip"><div class="mgflip-in">
+          <div class="mgface">
+            <div style="background:${brand};height:8px;width:100%"></div>
+            <img src="cid:passqr" width="188" height="188" alt="QR" style="display:block;margin:14px auto 6px;border-radius:10px"/>
+            <div style="font-weight:800;font-size:16px;color:#1a1a1a">${escHtml(name)}</div>
+            <div style="color:#666;font-size:12px;margin-top:2px">${escHtml(role || "Delegate")}</div>
+            <div style="font-family:monospace;font-size:12px;color:#aaa;margin-top:8px">${escHtml(code || "")}</div>
+          </div>
+          <div class="mgface mgback" style="background:${brand};color:#fff">
+            <table width="100%" height="100%"><tr><td align="center" valign="middle" style="padding:20px">
+              ${logoUrl ? `<img src="${escHtml(logoUrl)}" width="76" height="76" alt="" style="border-radius:16px;background:#fff;padding:6px;margin-bottom:12px"/>` : ""}
+              <div style="font-weight:800;font-size:19px">${escHtml(name)}</div>
+              <div style="opacity:.92;font-size:13px;margin-top:4px">${escHtml(company || "")}</div>
+              ${industry ? `<div style="opacity:.8;font-size:12px;margin-top:8px">${escHtml(industry)}</div>` : ""}
+              <div style="opacity:.8;font-size:12px;margin-top:2px">${escHtml(coachLabel || "")}</div>
+            </td></tr></table>
+          </div>
+        </div></div>
+        ${badgeUrl ? `<div style="margin-top:18px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 22px;border-radius:10px">View &amp; flip your badge →</a></div>` : ""}
+        <p style="margin:18px 0 0;color:#aaa;font-size:11px">Show this QR at muster to board. A Singapore Chinese Chamber of Commerce &amp; Industry initiative.</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manageDocuments"), express.json({ limit: "8mb" }), wrap(async (req, res) => {
+  await ensureReady();
+  const id = req.params.id;
+  const qrDataUrl = (req.body?.qrDataUrl || "").toString();
+  const del = (await q(
+    `SELECT dg.id, dg.name, dg.email, dg.company, dg.role, dg.industry, dg.website, dg.qr_code,
+            c.name AS coach_name, c.city AS coach_city
+       FROM delegates dg LEFT JOIN coaches c ON c.id = dg."coachId"
+      WHERE dg.id = $1`, [id]
+  )).rows[0];
+  if (!del) return res.status(404).json({ error: "NO_DELEGATE", message: "That delegate isn't found." });
+  if (!del.email) return res.status(400).json({ error: "NO_EMAIL", message: `${del.name} has no email on file.` });
+  const t = passMailer();
+  if (!t) return res.status(503).json({ error: "EMAIL_NOT_CONFIGURED", message: "Email (SMTP) isn't configured on the server." });
+
+  const attachments = [];
+  const m = /^data:image\/(png|jpe?g);base64,(.+)$/.exec(qrDataUrl);
+  if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), cid: "passqr" });
+
+  const domain = passDomain(del.website);
+  const coachLabel = del.coach_name ? `${del.coach_name}${del.coach_city ? ` · ${del.coach_city}` : ""}` : "No coach assigned";
+  const base = (process.env.FRONTEND_URL || "https://localhost:5173").replace(/\/+$/, "");
+  const html = passEmailHtml({
+    name: del.name, role: del.role, company: del.company, industry: del.industry,
+    code: del.qr_code, coachLabel, logoUrl: domain ? `https://unavatar.io/${domain}` : null,
+    badgeUrl: `${base}/badge/${encodeURIComponent(del.qr_code)}`,
+  });
+  try {
+    await t.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: del.email,
+      subject: `Your MusterGo boarding pass — ${del.name}`,
+      text: `Hi ${del.name}, your QR boarding pass code is ${del.qr_code}. Show it at muster to board.`,
+      html, attachments,
+    });
+    res.json({ ok: true, to: del.email });
+  } catch (err) {
+    console.error("  email-pass failed:", err.message || err);
+    res.status(502).json({ error: "SEND_FAILED", message: "Couldn't send the email — check the SMTP settings." });
+  }
+}));
+
+// GET /api/badge/:code — PUBLIC pass lookup for the emailed flip-card page
+// (/badge/:code). The code (our MG-xxxx or a linked physical code) is the
+// shared secret, like an e-ticket link; returns only badge display fields.
+router.get("/api/badge/:code", wrap(async (req, res) => {
+  await ensureReady();
+  const code = (req.params.code || "").toString().trim();
+  if (!code) return res.status(400).json({ error: "NO_CODE" });
+  const d = (await q(
+    `SELECT dg.name, dg.role, dg.company, dg.industry, dg.website, dg.qr_code, dg.vip,
+            c.name AS coach_name, c.city AS coach_city, t.name AS trip_name
+       FROM delegates dg
+       LEFT JOIN coaches c ON c.id = dg."coachId"
+       LEFT JOIN trips t ON t.uuid_id = dg.trip_id
+      WHERE dg.qr_code = $1 OR dg.external_badge_code = $1`, [code]
+  )).rows[0];
+  if (!d) return res.status(404).json({ error: "UNKNOWN_CODE", message: "Badge not found." });
+  res.json({
+    name: d.name, role: d.role, company: d.company, industry: d.industry, website: d.website,
+    code: d.qr_code, vip: d.vip, tripName: d.trip_name || null,
+    coach: d.coach_name ? `${d.coach_name}${d.coach_city ? ` · ${d.coach_city}` : ""}` : null,
+  });
 }));
 
 // Scan → board. Resolve a QR token, mark the delegate PRESENT (+ coach), and log
@@ -932,7 +1106,7 @@ router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner")
     `SELECT dg.id, dg.name, dg."coachId" AS coach_id, dg.status, t.id AS trip_str
        FROM delegates dg
        LEFT JOIN trips t ON t.uuid_id = dg.trip_id
-      WHERE dg.qr_code = $1`,
+      WHERE dg.qr_code = $1 OR dg.external_badge_code = $1`,
     [code]
   );
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
@@ -2039,13 +2213,25 @@ router.get("/api/messages/updates", requireAuth(), wrap(async (req, res) => {
       WHERE recipient_kind = 'account' AND recipient_id = $1 AND created_at > $2
       ORDER BY created_at`, [me, since.toISOString()]
   )).rows;
-  const unread = (await q(
+  const dmUnread = (await q(
     `SELECT COUNT(*)::int AS n FROM dm_messages
       WHERE recipient_kind = 'account' AND recipient_id = $1 AND read_at IS NULL`, [me]
   )).rows[0].n;
+  // Group unread: messages in my groups, from someone else, newer than my last
+  // read of that group (or all, if I've never opened it). Groups have no
+  // per-message read_at, so we track it in chat_group_reads.
+  const groupUnread = (await q(
+    `SELECT COUNT(*)::int AS n
+       FROM dm_messages d
+       JOIN chat_group_members m ON m.group_id = d.recipient_id AND m.account_id = $1
+       LEFT JOIN chat_group_reads r ON r.group_id = d.recipient_id AND r.account_id = $1
+      WHERE d.recipient_kind = 'group' AND d.sender_id <> $1 AND d.deleted_at IS NULL
+        AND (r.last_read_at IS NULL OR d.created_at > r.last_read_at)`, [me]
+  )).rows[0].n;
   res.json({
     now: new Date().toISOString(),
-    unread,
+    unread: dmUnread + groupUnread,
+    dmUnread, groupUnread,
     incoming: rows.map((m) => ({ id: m.id, convoKey: m.convo_key, senderId: m.sender_id, kind: m.kind, preview: previewOf(m), at: m.created_at })),
   });
 }));
@@ -2203,6 +2389,12 @@ router.get("/api/groups/:id/thread", requireAuth(), wrap(async (req, res) => {
        FROM dm_messages d LEFT JOIN accounts a ON a.id = d.sender_id
       WHERE d.convo_key = $1 ORDER BY d.created_at`, [`g:${gid}`]
   )).rows;
+  // Opening the thread marks the group read for me → clears the unread badge.
+  await q(
+    `INSERT INTO chat_group_reads (group_id, account_id, last_read_at) VALUES ($1, $2, now())
+     ON CONFLICT (group_id, account_id) DO UPDATE SET last_read_at = now()`,
+    [gid, me]
+  );
   const mapRow = mapMessageRow(me);
   res.json({
     group: { id: g.id, name: g.name },

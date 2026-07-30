@@ -34,6 +34,7 @@ import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
+import BadgePage from "./pages/BadgePage.jsx"; // Vance — public flip-card badge (from emailed pass)
 
 // Which UI (desktop or mobile) to land in — derived automatically at login
 // time from the account's own permissions (see pickModeFromPermissions
@@ -203,6 +204,8 @@ export default function App() {
         <Route path="/kiosk-scan" element={<KioskScannerPage />} />
         {/* Public delegate self-enrollment (Vimal) — no login, like the kiosk. */}
         <Route path="/enroll" element={<EnrollPage />} />
+        {/* Public flip-card badge from the emailed boarding pass (Vance) — no auth. */}
+        <Route path="/badge/:code" element={<BadgePage />} />
         <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname }} />} />
       </Routes>
     );
@@ -218,6 +221,7 @@ export default function App() {
       <Route path="/kiosk-scan" element={<KioskScannerPage />} />
       {/* Public delegate self-enrollment — reachable while authed too, no chrome. */}
       <Route path="/enroll" element={<EnrollPage />} />
+      <Route path="/badge/:code" element={<BadgePage />} />
 
       <Route element={<Layout onLogout={handleLogout} />}>
         <Route index element={<Navigate to={pickHomeRoute()} replace />} />

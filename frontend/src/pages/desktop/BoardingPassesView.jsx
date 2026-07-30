@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
-import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode } from "lucide-react";
-import { getBadges, getTrips } from "../../lib/claudeParse.js";
+import jsQR from "jsqr";
+import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail } from "lucide-react";
+import { getBadges, getTrips, linkPhysicalBadge, emailPass } from "../../lib/claudeParse.js";
 import { useLang } from "../../lib/i18n.jsx";
 
 /**
@@ -97,9 +98,23 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-/** Generate a QR with the company monogram in its centre (high error-correction
- *  so the logo overlay never breaks scannability). Falls back to a plain QR. */
-async function brandedQrDataUrl(code, company, size = 280) {
+/** Load an image cross-origin (unavatar sends ACAO:* so the canvas doesn't
+ *  taint → toDataURL still works). Rejects on error / no logo. */
+function loadCorsImage(src) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.crossOrigin = "anonymous";
+    im.onload = () => resolve(im);
+    im.onerror = reject;
+    im.src = src;
+  });
+}
+
+/** Generate a QR with the company's REAL logo in its centre (from the website
+ *  domain via unavatar), falling back to the coloured monogram when there's no
+ *  logo / it won't load. High error-correction so the overlay never breaks
+ *  scannability; falls back to a plain QR on any failure. */
+async function brandedQrDataUrl(code, company, website, size = 280) {
   try {
     const canvas = document.createElement("canvas");
     await QRCode.toCanvas(canvas, code, { width: size, margin: 1, errorCorrectionLevel: "H", color: { dark: "#111111", light: "#ffffff" } });
@@ -112,15 +127,124 @@ async function brandedQrDataUrl(code, company, size = 280) {
     ctx.fillStyle = "#ffffff";
     roundRect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, Math.round(pad * 0.24));
     ctx.fill();
-    ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.fillStyle = b.bg; ctx.fill();
-    ctx.fillStyle = b.fg;
-    ctx.font = `700 ${Math.round(box * 0.42)}px system-ui, -apple-system, Segoe UI, sans-serif`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(b.initials, cx, cy + 1);
+
+    const domain = domainOf(website);
+    let drewLogo = false;
+    if (domain) {
+      try {
+        const img = await loadCorsImage(`https://unavatar.io/${domain}?fallback=false`);
+        ctx.save();
+        ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
+        ctx.fillStyle = "#fff"; ctx.fillRect(cx - box / 2, cy - box / 2, box, box);
+        ctx.drawImage(img, cx - box / 2, cy - box / 2, box, box);
+        ctx.restore();
+        drewLogo = true;
+      } catch { /* no logo — monogram below */ }
+    }
+    if (!drewLogo) {
+      ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.fillStyle = b.bg; ctx.fill();
+      ctx.fillStyle = b.fg;
+      ctx.font = `700 ${Math.round(box * 0.42)}px system-ui, -apple-system, Segoe UI, sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(b.initials, cx, cy + 1);
+    }
     return canvas.toDataURL("image/png");
   } catch {
     return QRCode.toDataURL(code, { width: size, margin: 1 });
   }
+}
+
+/* Link a delegate's EXTERNAL physical pass (Feature 4b). Scans the pass's
+ * QR/barcode with the camera (jsQR, HTTPS-only) OR takes a typed code. Calls
+ * onLink(code) — which may throw (e.g. code already taken) — and shows the error. */
+function PassLinker({ delegate, onLink, onClose }) {
+  const { t } = useLang();
+  const [mode, setMode] = useState("scan");   // "scan" | "manual"
+  const [manual, setManual] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const videoRef = useRef(null);
+  const rafRef = useRef(0);
+  const streamRef = useRef(null);
+  const doneRef = useRef(false);
+
+  const submit = useCallback(async (raw) => {
+    const c = (raw || "").toString().trim();
+    if (!c || doneRef.current) return;
+    doneRef.current = true; setBusy(true); setErr(null);
+    try { await onLink(c); }
+    catch (e) { setErr(e?.message || t("Couldn't link that pass.")); doneRef.current = false; setBusy(false); }
+  }, [onLink, t]);
+
+  // Camera + jsQR decode loop while in scan mode.
+  useEffect(() => {
+    if (mode !== "scan") return;
+    let alive = true;
+    const canvas = document.createElement("canvas");
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (!alive) { stream.getTracks().forEach((tr) => tr.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => {}); }
+        const tick = () => {
+          if (!alive) return;
+          const v = videoRef.current;
+          if (v && v.readyState >= 2 && v.videoWidth) {
+            canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+            const ctx = canvas.getContext("2d", { willReadFrequently: true });
+            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+            const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const found = jsQR(img.data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
+            if (found?.data) { submit(found.data); return; }
+          }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+      } catch {
+        if (alive) { setErr(t("Camera unavailable — type the code instead.")); setMode("manual"); }
+      }
+    })();
+    return () => { alive = false; cancelAnimationFrame(rafRef.current); streamRef.current?.getTracks().forEach((tr) => tr.stop()); streamRef.current = null; };
+  }, [mode, submit, t]);
+
+  return (
+    <div className="mg-screen-only" onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()} style={{ padding: 0, width: 380, maxWidth: "92%", overflow: "hidden" }}>
+        <div className="row between" style={{ padding: "14px 18px", borderBottom: "1px solid var(--line)" }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{t("Link physical pass")} · {delegate.name}</div>
+          <span role="button" onClick={onClose} style={{ cursor: "pointer", color: "var(--ink-3)", display: "flex" }}><X size={18} /></span>
+        </div>
+        {mode === "scan" ? (
+          <div style={{ padding: 16 }}>
+            <div style={{ position: "relative", width: "100%", aspectRatio: "1", background: "#000", borderRadius: 12, overflow: "hidden" }}>
+              <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              <div style={{ position: "absolute", inset: "18%", border: "3px solid rgba(255,255,255,0.85)", borderRadius: 12 }} />
+            </div>
+            <div className="muted" style={{ fontSize: 12.5, textAlign: "center", marginTop: 10 }}>{t("Point the camera at the QR/barcode on the physical pass.")}</div>
+          </div>
+        ) : (
+          <div style={{ padding: 16 }}>
+            <label className="page-eyebrow" style={{ padding: 0 }}>{t("Physical pass code")}</label>
+            <input autoFocus className="input" placeholder="e.g. SCCCI-00842" value={manual} onChange={(e) => setManual(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(manual); }} style={{ marginTop: 6 }} />
+          </div>
+        )}
+        {err && <div style={{ margin: "0 16px", color: "var(--st-missing)", fontSize: 12.5 }}>{err}</div>}
+        <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
+          <button className="btn btn-ghost btn-block" onClick={() => { doneRef.current = false; setErr(null); setMode(mode === "scan" ? "manual" : "scan"); }}>
+            {mode === "scan" ? <><Keyboard size={15} /> {t("Type code")}</> : <><ScanLine size={15} /> {t("Scan")}</>}
+          </button>
+          {mode === "manual" && (
+            <button className="btn btn-primary btn-block" disabled={busy || !manual.trim()} onClick={() => submit(manual)}>
+              <Link2 size={15} /> {busy ? t("Linking…") : t("Link")}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function BoardingPassesView({ tripId, onKpiChange }) {
@@ -132,6 +256,9 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
   const [open, setOpen] = useState(null);      // delegate shown in the pass modal
+  const [linking, setLinking] = useState(null); // delegate whose physical pass is being linked
+  const [emailing, setEmailing] = useState(false);
+  const [emailMsg, setEmailMsg] = useState(null); // { ok, text } after an email attempt
   // Only dismiss if the WHOLE click gesture started on the backdrop itself.
   const downOnBackdrop = useRef(false);
   const [copied, setCopied] = useState(false);
@@ -154,7 +281,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
       // on every poll, and it scales to large trips (no full re-render each time).
       const need = res.delegates.filter((d) => d.qr_code && !qrRef.current[d.id]);
       if (need.length) {
-        const entries = await Promise.all(need.map(async (d) => [d.id, await brandedQrDataUrl(d.qr_code, d.company)]));
+        const entries = await Promise.all(need.map(async (d) => [d.id, await brandedQrDataUrl(d.qr_code, d.company, d.website)]));
         qrRef.current = { ...qrRef.current, ...Object.fromEntries(entries) };
         setQr(qrRef.current);
       }
@@ -215,6 +342,35 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+
+  // Link / unlink a delegate's external physical pass. doLink throws on a taken
+  // code so the PassLinker can surface the message; both refresh the list.
+  const doLink = async (delegateId, code) => {
+    await linkPhysicalBadge(delegateId, code);
+    setOpen((o) => (o && o.id === delegateId ? { ...o, external_badge_code: code || null } : o));
+    setLinking(null);
+    load(true);
+  };
+  const doUnlink = async (delegateId) => {
+    try {
+      await linkPhysicalBadge(delegateId, "");
+      setOpen((o) => (o && o.id === delegateId ? { ...o, external_badge_code: null } : o));
+      load(true);
+    } catch { /* ignore — list refresh will reconcile */ }
+  };
+
+  // Email a delegate their branded pass (sends the client-rendered QR-with-logo).
+  const doEmailPass = async (d) => {
+    setEmailing(true); setEmailMsg(null);
+    try {
+      const dataUrl = qr[d.id] || await brandedQrDataUrl(d.qr_code, d.company, d.website);
+      const r = await emailPass(d.id, dataUrl);
+      setEmailMsg({ ok: true, text: `${t("Sent to")} ${r.to}` });
+    } catch (e) {
+      setEmailMsg({ ok: false, text: e?.message || t("Couldn't send the email.") });
+    } finally { setEmailing(false); }
+  };
+  useEffect(() => { setEmailMsg(null); }, [open?.id]);
 
   const FILTERS = [
     ["all", t("All"), data.total],
@@ -360,6 +516,26 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                 {coachLabel(coachOf(open.coach_id))} · {t((STATUS_META[open.status] || STATUS_META.UNASSIGNED).label)}
               </div>
             </div>
+            {/* Physical pass (Feature 4b) — link SCCCI's own pass; check-in accepts either code */}
+            <div style={{ padding: "12px 18px", borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div className="page-eyebrow" style={{ padding: 0 }}>{t("Physical pass")}</div>
+                {open.external_badge_code
+                  ? <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{open.external_badge_code}</div>
+                  : <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("Not linked — using our QR")}</div>}
+              </div>
+              {open.external_badge_code
+                ? <button className="btn btn-ghost" style={{ fontSize: 12.5 }} onClick={() => doUnlink(open.id)}>{t("Unlink")}</button>
+                : <button className="btn btn-ghost" style={{ fontSize: 12.5 }} onClick={() => setLinking(open)}><Link2 size={14} /> {t("Link")}</button>}
+            </div>
+            {open.email && (
+              <div style={{ padding: "10px 12px 0" }}>
+                <button className="btn btn-ghost btn-block" disabled={emailing} onClick={() => doEmailPass(open)} style={{ justifyContent: "center" }}>
+                  <Mail size={15} /> {emailing ? t("Sending…") : t("Email pass")}
+                </button>
+                {emailMsg && <div style={{ fontSize: 12, marginTop: 5, textAlign: "center", color: emailMsg.ok ? "var(--st-present)" : "var(--st-missing)" }}>{emailMsg.text}</div>}
+              </div>
+            )}
             <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
               <button className="btn btn-ghost btn-block" onClick={() => copyCode(open.qr_code)}>
                 {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? t("Copied") : t("Copy code")}
@@ -370,6 +546,10 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             </div>
           </div>
         </div>
+      )}
+
+      {linking && (
+        <PassLinker delegate={linking} onLink={(code) => doLink(linking.id, code)} onClose={() => setLinking(null)} />
       )}
 
       {/* Print-only sheet (all passes, or just one when printing a single pass) */}

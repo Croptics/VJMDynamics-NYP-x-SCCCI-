@@ -300,7 +300,7 @@ export default function HumanThread({ peer, onActivity, onBack }) {
           }
 
           const bubble = {
-            maxWidth: "78%",
+            maxWidth: "100%",
             background: mine ? "var(--scc-red)" : "var(--surface, #fff)",
             color: mine ? "#fff" : "var(--ink)",
             border: mine ? "none" : "1px solid var(--line)",
@@ -312,7 +312,7 @@ export default function HumanThread({ peer, onActivity, onBack }) {
           };
           return (
             <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "100%" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "78%" }}>
                 <div style={bubble}>
                   {m.kind === "text" && m.body}
                   {m.kind === "video" && (

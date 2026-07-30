@@ -3,6 +3,14 @@ import { Send, Bot } from "lucide-react";
 import { apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 
+// Same suggested prompts as the desktop assistant (AssistantConversation.jsx).
+const STARTERS = [
+  "Who is missing from Coach 2?",
+  "Give me an attendance summary.",
+  "What open exceptions are there right now?",
+  "What's on today's itinerary?",
+];
+
 /**
  * Mobile Assistant — thin mobile-styled wrapper around the same
  * POST /api/chat/messages endpoint used by the desktop ChatAssistantPage.
@@ -19,8 +27,8 @@ export default function MobileAssistantPage({ embedded = false }) {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, sending]);
 
-  async function send() {
-    const text = draft.trim();
+  async function send(preset) {
+    const text = (typeof preset === "string" ? preset : draft).trim();
     if (!text || sending) return;
     const history = [...messages, { role: "USER", content: text }];
     setMessages(history);
@@ -48,8 +56,19 @@ export default function MobileAssistantPage({ embedded = false }) {
 
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 8 }}>
         {messages.length === 0 && (
-          <div className="mobile-card muted" style={{ fontSize: 13 }}>
-            {t('Try: "Who is missing from Coach 2?" or "Generate an attendance report."')}
+          <div style={{ textAlign: "center", padding: "18px 6px" }}>
+            <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", width: 42, height: 42, margin: "0 auto 10px", display: "flex", alignItems: "center", justifyContent: "center" }}><Bot size={20} /></span>
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{t("Ask about the trip")}</div>
+            <p className="muted" style={{ fontSize: 12.5, margin: "0 auto 14px", maxWidth: 300, lineHeight: 1.5 }}>
+              {t("Live attendance, missing delegates, coach status, open exceptions or today's itinerary — in English or 中文.")}
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {STARTERS.map((s) => (
+                <button key={s} className="btn btn-ghost" style={{ fontSize: 13, justifyContent: "flex-start", textAlign: "left" }} onClick={() => send(s)}>
+                  {t(s)}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m, i) =>
