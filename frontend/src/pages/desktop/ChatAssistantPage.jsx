@@ -10,24 +10,30 @@
  *  standalone AI-chat page; import paths adjusted for pages/desktop/ depth.)
  * ============================================================================= */
 import { useLang } from "../../lib/i18n.jsx";
-import TripPulse from "../../components/TripPulse.jsx";
+import { useLocation } from "react-router-dom";
 import MusterChatInbox from "../../components/mchat/MusterChatInbox.jsx";
 
 export default function ChatAssistantPage() {
   const { t } = useLang();
+  // Deep-link support (2026-07-31) — the floating ChatBubble's "open full
+  // inbox" button, when a specific person/group thread is already open there,
+  // navigates here with { state: { openThread } } instead of always landing
+  // on the generic pinned AI tab. See ChatBubble.jsx's goMessages().
+  const location = useLocation();
+  const openThread = location.state?.openThread || null;
   return (
     <div className="page" style={{ maxWidth: 1200 }}>
-      <div className="row between" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-        <div>
-          <div className="page-eyebrow">{t("Assistant")}</div>
-          <h1 className="page-title">MusterChat</h1>
-          <p className="page-sub">{t("AI assistant + team messaging, video calls and document sharing — in one inbox.")}</p>
-        </div>
-        <TripPulse mode="assistant" />
+      <div>
+        <div className="page-eyebrow">{t("Assistant")}</div>
+        <h1 className="page-title">MusterChat</h1>
+        <p className="page-sub">{t("AI assistant + team messaging, video calls and document sharing — in one inbox.")}</p>
       </div>
 
+      {/* TripPulse ("What to watch") moved 2026-07-31 into AssistantConversation.jsx
+          itself — a toggleable "Watch" button in its own header, instead of a
+          separate card sitting above the whole inbox — see that file. */}
       <div style={{ marginTop: 20 }}>
-        <MusterChatInbox />
+        <MusterChatInbox initialActive={openThread} />
       </div>
     </div>
   );

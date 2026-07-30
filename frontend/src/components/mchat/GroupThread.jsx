@@ -5,9 +5,12 @@
  *  document parse-&-share ("Add to trip"), video clips, edit/delete of your own
  *  messages, and group voice/video calls (real WebRTC mesh via callManager).
  * ============================================================================= */
-import { useState, useEffect, useRef, useCallback } from "react";
-import { Send, Users, Paperclip, Phone, Video, FileText, Film, X, Smile, Pencil, Trash2, Ban, Check } from "lucide-react";
-import { getGroupThread, sendGroupMessage, editMessage, deleteMessage } from "../../lib/messagesApi.js";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
+import { Send, Users, Paperclip, Phone, Video, FileText, Film, X, Smile, Pencil, Trash2, Ban, Check, MoreVertical, UserPlus, UserMinus } from "lucide-react";
+import {
+  getGroupThread, sendGroupMessage, editMessage, deleteMessage,
+  listContacts, getGroupMembers, editGroup, deleteGroup,
+} from "../../lib/messagesApi.js";
 import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
@@ -16,14 +19,16 @@ import callManager from "../../lib/callManager.js";
 // local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
 // exactly that duplication.
 import { TRIP_ID } from "../../lib/exceptionsApi.js";
+import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/chatTime.js";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024;
-
-const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 const fileToDataUrl = (file) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
 const parseDoc = (m) => { try { return JSON.parse(m.media || "{}"); } catch { return {}; } };
 
-export default function GroupThread({ group, onActivity }) {
+// group edit/delete (2026-07-31 — "allow me to edit and delete the
+// groupchat"). Any member can rename/add/remove members; only the creator can
+// delete the whole thing (backend-enforced too — this just hides the button).
+export default function GroupThread({ group, onActivity, onUpdated, onDeleted }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
@@ -33,6 +38,12 @@ export default function GroupThread({ group, onActivity }) {
   const [editing, setEditing] = useState(null);
   const [added, setAdded] = useState({});
   const [error, setError] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [gName, setGName] = useState(group.name);
+  const [members, setMembers] = useState([]); // current members [{id,name}]
+  const [staffContacts, setStaffContacts] = useState([]); // everyone addable
+  const [savingSettings, setSavingSettings] = useState(false);
+  const isCreator = !!group.createdByMe;
   const listRef = useRef(null);
   const taRef = useRef(null);
   const docInputRef = useRef(null);
@@ -68,6 +79,55 @@ export default function GroupThread({ group, onActivity }) {
     }
   }, [messages]);
   useEffect(() => { const el = taRef.current; if (el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; } }, [draft]);
+  useEffect(() => { setGName(group.name); setSettingsOpen(false); }, [group.id, group.name]);
+
+  /* ---- settings (rename / members / delete) ------------------------------ */
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let alive = true;
+    Promise.all([getGroupMembers(group.id), listContacts()]).then(([m, c]) => {
+      if (!alive) return;
+      setMembers(m.members || []);
+      setStaffContacts((c.contacts || []).filter((x) => x.kind === "account"));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [settingsOpen, group.id]);
+
+  async function saveSettings(memberIdToToggle) {
+    setSavingSettings(true);
+    setError(null);
+    try {
+      const memberIds = new Set(members.map((m) => m.id));
+      const wasMember = memberIdToToggle ? memberIds.has(memberIdToToggle) : null;
+      const payload = {};
+      if (gName.trim() && gName.trim() !== group.name) payload.name = gName.trim();
+      if (memberIdToToggle) {
+        if (wasMember) payload.removeMemberIds = [memberIdToToggle];
+        else payload.addMemberIds = [memberIdToToggle];
+      }
+      if (!Object.keys(payload).length) return;
+      const { group: updated } = await editGroup(group.id, payload);
+      onUpdated?.(updated);
+      // Refresh the member list in-place so the popover reflects the change
+      // immediately instead of waiting for a re-open.
+      const m = await getGroupMembers(group.id);
+      setMembers(m.members || []);
+    } catch (e) {
+      setError(e?.message || "Couldn't update the group.");
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
+  async function confirmDeleteGroup() {
+    if (!window.confirm(`Delete "${group.name}" for everyone? This can't be undone.`)) return;
+    try {
+      await deleteGroup(group.id);
+      onDeleted?.();
+    } catch (e) {
+      setError(e?.message || "Couldn't delete the group.");
+    }
+  }
 
   /* ---- send helpers ----------------------------------------------------- */
   const pushOptimistic = useCallback((partial) => {
@@ -162,7 +222,70 @@ export default function GroupThread({ group, onActivity }) {
         </div>
         <button className="btn btn-ghost" title="Group voice call" style={{ padding: 8 }} onClick={() => callManager.startGroupCall(group, "voice")}><Phone size={17} /></button>
         <button className="btn btn-ghost" title="Group video call" style={{ padding: 8 }} onClick={() => callManager.startGroupCall(group, "video")}><Video size={17} /></button>
+        <button className="btn btn-ghost" title="Group settings" style={{ padding: 8 }} onClick={() => setSettingsOpen((v) => !v)}><MoreVertical size={17} /></button>
       </div>
+
+      {/* Group settings popover (2026-07-31 — "allow me to edit and delete
+          the groupchat"): rename, add/remove members, and (creator-only)
+          delete the whole group. */}
+      {settingsOpen && (
+        <div className="card" style={{ position: "absolute", top: 56, right: 12, width: 280, maxHeight: 420, display: "flex", flexDirection: "column", padding: 0, zIndex: 20, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", overflow: "hidden" }}>
+          <div className="row between" style={{ padding: "10px 12px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Group settings</div>
+            <span role="button" onClick={() => setSettingsOpen(false)} style={{ cursor: "pointer", color: "var(--ink-3)", display: "flex" }}><X size={16} /></span>
+          </div>
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10, overflowY: "auto", minHeight: 0 }}>
+            <div>
+              <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>Name</div>
+              <div className="row" style={{ gap: 6 }}>
+                <input className="input" value={gName} onChange={(e) => setGName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveSettings(); }}
+                  style={{ padding: "6px 10px", fontSize: 13 }} />
+                <button className="btn btn-ghost" disabled={savingSettings || !gName.trim() || gName.trim() === group.name} onClick={() => saveSettings()} style={{ padding: 8, flexShrink: 0 }}>
+                  <Check size={15} />
+                </button>
+              </div>
+            </div>
+            <div>
+              <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>Members ({members.length})</div>
+              <div style={{ display: "grid", gap: 2 }}>
+                {members.map((m) => (
+                  <div key={m.id} className="row between" style={{ padding: "5px 6px", borderRadius: 8 }}>
+                    <span style={{ fontSize: 13 }}>{m.name}</span>
+                    {members.length > 2 && (
+                      <button className="btn btn-ghost" title="Remove" disabled={savingSettings} onClick={() => saveSettings(m.id)} style={{ padding: 4 }}>
+                        <UserMinus size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            {staffContacts.some((c) => !members.some((m) => m.id === c.id)) && (
+              <div>
+                <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>Add someone</div>
+                <div style={{ display: "grid", gap: 2 }}>
+                  {staffContacts.filter((c) => !members.some((m) => m.id === c.id)).map((c) => (
+                    <div key={c.id} className="row between" style={{ padding: "5px 6px", borderRadius: 8 }}>
+                      <span style={{ fontSize: 13 }}>{c.name}</span>
+                      <button className="btn btn-ghost" title="Add" disabled={savingSettings} onClick={() => saveSettings(c.id)} style={{ padding: 4 }}>
+                        <UserPlus size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          {isCreator && (
+            <div style={{ padding: 10, borderTop: "1px solid var(--line)", flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-block" style={{ color: "var(--st-missing)", justifyContent: "center", gap: 6 }} onClick={confirmDeleteGroup}>
+                <Trash2 size={14} /> Delete group
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={listRef} style={{
@@ -178,21 +301,35 @@ export default function GroupThread({ group, onActivity }) {
           </div>
         )}
 
-        {messages.map((m) => {
+        {messages.map((m, i) => {
+          // Date separator (2026-07-31, "set like date like ytd etc to know").
+          const showDateSep = i === 0 || !isSameDay(m.at, messages[i - 1].at);
+          const dateSep = showDateSep && (
+            <div key={`sep-${m.id}`} style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "3px 12px", fontSize: 11.5, fontWeight: 600, color: "var(--ink-3)" }}>
+              {dayLabel(m.at)}
+            </div>
+          );
+
           if (m.deleted) {
             return (
-              <div key={m.id} style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
-                <div style={{ fontStyle: "italic", color: "var(--ink-3)", fontSize: 13, border: "1px dashed var(--line)", borderRadius: 12, padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <Ban size={13} /> This message was deleted
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
+                  <div style={{ fontStyle: "italic", color: "var(--ink-3)", fontSize: 13, border: "1px dashed var(--line)", borderRadius: 12, padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Ban size={13} /> This message was deleted
+                  </div>
                 </div>
-              </div>
+              </Fragment>
             );
           }
           if (m.kind === "call") {
             return (
-              <div key={m.id} style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "5px 12px", fontSize: 12, color: "var(--ink-2)" }}>
-                {m.sender && !m.mine ? `${m.sender} · ` : ""}{m.body} · {hhmm(m.at)}
-              </div>
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "5px 12px", fontSize: 12, color: "var(--ink-2)" }}>
+                  {m.sender && !m.mine ? `${m.sender} · ` : ""}{m.body} · {hhmm(m.at)}
+                </div>
+              </Fragment>
             );
           }
           const mine = m.mine;
@@ -207,32 +344,38 @@ export default function GroupThread({ group, onActivity }) {
 
           if (editing?.id === m.id) {
             return (
-              <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-end", maxWidth: "85%" }}>
-                  <textarea autoFocus className="input" rows={1} value={editing.value}
-                    onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
-                    style={{ resize: "none", minWidth: 160, lineHeight: 1.4, padding: "7px 10px" }} />
-                  <button className="btn btn-primary" style={{ padding: 8 }} onClick={saveEdit}><Check size={15} /></button>
-                  <button className="btn btn-ghost" style={{ padding: 8 }} onClick={() => setEditing(null)}><X size={15} /></button>
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "flex-end", maxWidth: "85%" }}>
+                    <textarea autoFocus className="input" rows={1} value={editing.value}
+                      onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
+                      style={{ resize: "none", minWidth: 160, lineHeight: 1.4, padding: "7px 10px" }} />
+                    <button className="btn btn-primary" style={{ padding: 8 }} onClick={saveEdit}><Check size={15} /></button>
+                    <button className="btn btn-ghost" style={{ padding: 8 }} onClick={() => setEditing(null)}><X size={15} /></button>
+                  </div>
+                  <div className="muted" style={{ fontSize: 10.5, padding: "0 4px" }}>Enter to save · Esc to cancel</div>
                 </div>
-                <div className="muted" style={{ fontSize: 10.5, padding: "0 4px" }}>Enter to save · Esc to cancel</div>
-              </div>
+              </Fragment>
             );
           }
 
           if (m.kind === "sticker") {
             return (
-              <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
-                {!mine && <div className="muted" style={{ fontSize: 11, fontWeight: 600, padding: "0 8px", color: "var(--scc-red)" }}>{m.sender}</div>}
-                <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
-                  {m.media
-                    ? (m.media.startsWith("data:image/") ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} /> : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>)
-                    : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
-                  {canDelete && <span className="mc-actions"><button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button></span>}
+              <Fragment key={m.id}>
+                {dateSep}
+                <div className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
+                  {!mine && <div className="muted" style={{ fontSize: 11, fontWeight: 600, padding: "0 8px", color: "var(--scc-red)" }}>{m.sender}</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
+                    {m.media
+                      ? (m.media.startsWith("data:image/") ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} /> : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>)
+                      : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
+                    {canDelete && <span className="mc-actions"><button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button></span>}
+                  </div>
+                  {meta}
                 </div>
-                {meta}
-              </div>
+              </Fragment>
             );
           }
 

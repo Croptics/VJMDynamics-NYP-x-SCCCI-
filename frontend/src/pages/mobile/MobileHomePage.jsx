@@ -1,12 +1,18 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail } from "lucide-react";
+import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail, ChevronDown } from "lucide-react";
 import { apiGet, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { getTrips } from "../../lib/claudeParse.js";
 
 // Trip id comes from the mobile trip switcher, not a hardcoded base trip
 // (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
-import { getMobileTripId } from "../../lib/mobileTrip.js";
+// The switcher itself didn't actually exist anywhere yet (2026-07-31 —
+// "as admin, i should be able to switch trip on mobile") — setMobileTripId()
+// had no caller in the whole frontend; this page renders it (admin-only, in
+// the red Active Trip hero) and every other mobile page picks it up for free
+// since they all already read getMobileTripId().
+import { getMobileTripId, setMobileTripId } from "../../lib/mobileTrip.js";
 const TRIP_ID_FALLBACK = "t-1";
 
 // trip.departsIn ("04:53") is a COUNTDOWN duration, not a clock time —
@@ -74,6 +80,39 @@ export default function MobileHomePage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const isAdmin = getUser()?.role === "admin";
+  const [trips, setTrips] = useState([]);
+  const [tripId, setTripId] = useState(() => getMobileTripId() || TRIP_ID_FALLBACK);
+  const [tripMenuOpen, setTripMenuOpen] = useState(false);
+  const tripMenuRef = useRef(null);
+  useEffect(() => {
+    if (!tripMenuOpen) return;
+    const onDocClick = (e) => { if (tripMenuRef.current && !tripMenuRef.current.contains(e.target)) setTripMenuOpen(false); };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [tripMenuOpen]);
+  useEffect(() => {
+    if (!isAdmin) return; // only admins get the switcher; nothing to fetch otherwise
+    getTrips().then((list) => {
+      setTrips(list);
+      // /all-trips returns real uuids, never the legacy "t-1" short id this
+      // page (and getMobileTripId()) defaults to — so without this, the
+      // <select> would silently show whichever trip sorts first while the
+      // rest of the page (fetched via the working "t-1" fallback) correctly
+      // showed Beijing, a visible mismatch. Same fix as the desktop
+      // assistant's trip switcher (AssistantConversation.jsx).
+      if (list.length && !list.some((tr) => tr.id === tripId)) {
+        const seed = list.find((tr) => (tr.name || "").toLowerCase().includes("beijing"));
+        setTripId(seed?.id || list[0].id);
+      }
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  function switchTrip(id) {
+    if (id === tripId) return;
+    setTripId(id);
+    setMobileTripId(id);
+  }
 
   // Live wall clock for the "Active trip" hero (2026-07-29 — "can you fix this
   // for time 14:26 to show the current time"). It was rendering `trip.localTime`,
@@ -105,7 +144,10 @@ export default function MobileHomePage() {
     // shows up here without needing to tap the manual Refresh button.
     const id = setInterval(load, 2000);
     return () => clearInterval(id);
-  }, []);
+    // Re-runs on tripId change (admin switches trip) so the very next tick
+    // fetches the NEW trip immediately instead of waiting up to 2s.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tripId]);
 
   async function load() {
     if (loadingRef.current) return;
@@ -113,7 +155,7 @@ export default function MobileHomePage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/trips/${getMobileTripId() || TRIP_ID_FALLBACK}/dashboard`));
+      setData(await apiGet(`/trips/${tripId || TRIP_ID_FALLBACK}/dashboard`));
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -167,8 +209,49 @@ export default function MobileHomePage() {
 
       {/* Active trip — signature red hero. */}
       {trip && (
-        <div className="m-hero" style={{ marginTop: 18 }}>
+        <div className="m-hero" style={{ marginTop: 18, position: "relative" }}>
           <div className="m-hero-glow" />
+          {/* Trip switcher (2026-07-31, "as admin, i should be able to switch
+              trip on mobile ... add it in the red box") — admin-only, and only
+              shown once there's more than one trip to pick from. Every other
+              mobile page already reads getMobileTripId(), so switching here is
+              enough to re-scope the whole app — no other page needed changes.
+              An icon-only button (2026-07-31, "improve the switcher ...
+              remove the text") — a native <select> squeezed into the hero's
+              corner had no room for a real trip name ("Yunnan Cross-Bo",
+              arrow overlapping) and there's no good width to give it here
+              alongside the trip's own (already long) name on the line below.
+              A menu below the button shows every name in full instead. */}
+          {isAdmin && trips.length > 1 && (
+            <div style={{ position: "absolute", top: 14, right: 14, zIndex: 2 }} ref={tripMenuRef}>
+              <button
+                onClick={() => setTripMenuOpen((v) => !v)}
+                aria-label={t("Switch trip")}
+                title={t("Switch trip")}
+                style={{ width: 30, height: 30, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.4)", background: "rgba(0,0,0,0.2)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
+              >
+                <ChevronDown size={15} style={{ transform: tripMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+              </button>
+              {tripMenuOpen && (
+                <div className="card" style={{ position: "absolute", top: 36, right: 0, minWidth: 200, padding: 6, zIndex: 3, boxShadow: "0 12px 32px rgba(0,0,0,0.25)" }}>
+                  {trips.map((tr) => (
+                    <button
+                      key={tr.id}
+                      onClick={() => { switchTrip(tr.id); setTripMenuOpen(false); }}
+                      style={{
+                        display: "block", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 8, border: "none",
+                        background: tr.id === tripId ? "var(--scc-red-tint)" : "transparent",
+                        color: tr.id === tripId ? "var(--scc-red)" : "var(--ink)",
+                        fontSize: 13, fontWeight: tr.id === tripId ? 700 : 500, cursor: "pointer",
+                      }}
+                    >
+                      {tr.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="m-hero-eyebrow">{t("Active trip")}</div>
           <div style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 19, marginTop: 4, position: "relative" }}>
             {trip.name}{trip.countryTo ? ` (${trip.countryTo})` : ""}

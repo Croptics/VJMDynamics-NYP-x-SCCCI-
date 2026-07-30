@@ -127,9 +127,12 @@ export function getOnboardingContext(tripId) {
 }
 
 /* Live "trip pulse" for the page headers — trip context, attendance KPIs, and
- * the top ranked risks. Cheap (reuses the assistant's cached snapshot). */
-export function getTripPulse() {
-  return apiGet("/assistant/pulse"); // { trip, kpis, risk, asOf }
+ * the top ranked risks. Cheap (reuses the assistant's cached snapshot).
+ * tripId (2026-07-31, multi-trip support) scopes it to the assistant's
+ * currently-selected trip instead of always Beijing. */
+export function getTripPulse(tripId) {
+  const qs = tripId ? `?tripId=${encodeURIComponent(tripId)}` : "";
+  return apiGet(`/assistant/pulse${qs}`); // { trip, kpis, risk, asOf }
 }
 
 /* Real trips for the onboarding "Assign to trip" picker. Reads the shared

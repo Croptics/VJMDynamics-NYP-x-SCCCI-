@@ -7,9 +7,19 @@
  *  the inbox's own contact list owns the left rail.
  * ============================================================================= */
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X, History } from "lucide-react";
+import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X, History, AlertTriangle } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import { getTrips } from "../../lib/claudeParse.js";
+import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
+import { formatClock as hhmm } from "../../lib/chatTime.js";
+import TripPulse from "../TripPulse.jsx";
+
+// Which trip the assistant is currently scoped to (2026-07-31, multi-trip
+// support — "we have different trips and the chatbot is only for beijing").
+// Persisted so the choice survives a reload, same pattern as the onboarding
+// trip picker's own storage key.
+const TRIP_KEY = "mg_assistant_trip";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -113,10 +123,13 @@ function groupByDay(sessions) {
   return Object.entries(groups).filter(([, items]) => items.length);
 }
 
-const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 const iconBtn = { background: "none", border: "none", cursor: "pointer", color: "var(--ink-3)", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, padding: 0 };
 
-export default function AssistantConversation() {
+// compact (2026-07-31): the floating ChatBubble embeds this at ~360px wide —
+// too narrow for History + Watch + New + Download all in one row (it was
+// pushing the "MusterChat" status label off-screen, cut down to just "M").
+// Hides the "Watch" button there; the full inbox page keeps it.
+export default function AssistantConversation({ compact = false }) {
   const { t, lang } = useLang();
   const [sessions, setSessions] = useState([]);
   const [currentId, setCurrentId] = useState(null);
@@ -129,9 +142,89 @@ export default function AssistantConversation() {
   const [card, setCard] = useState(null);
   const [renaming, setRenaming] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
+  // "What to watch" (TripPulse) — moved IN here (2026-07-31, "move the kpi
+  // ... to somewhere inside the chat instead") from ChatAssistantPage.jsx's
+  // own page header, where it sat as a separate card above the whole
+  // conversation. Now a toggleable popover off the header, same pattern as
+  // History, so it doesn't eat into the chat's own fixed height.
+  const [showPulse, setShowPulse] = useState(false);
   const [slowHint, setSlowHint] = useState(false);
+  // Real reachability (2026-07-31 — "is the text green because it live/
+  // synced? ... yes [wire it up]"), not a hardcoded color. Polls the
+  // backend's own health check, and also drops immediately if the last
+  // send/regenerate actually failed (the same `catch` that sets a message's
+  // `notice: true` below) — so a genuinely down backend OR a failed reply
+  // both read as unhealthy, not just one or the other.
+  const [healthy, setHealthy] = useState(true);
+  const [trips, setTrips] = useState([]);
+  // compact (the floating ChatBubble, 2026-07-31 — "automatic change the trip
+  // for me if I use the chat bubble instead of manual dropdown") auto-follows
+  // whichever trip is currently on-screen (Dashboard's own trip switcher,
+  // shared via lib/activeTrip.js) instead of keeping its own independent
+  // choice — you're already looking at that trip, so asking the bubble about
+  // "it" should mean the same one, with no extra picker to touch. The full
+  // /assistant page keeps its own manual switcher (mg_assistant_trip) since
+  // there it IS the primary view, not a floating helper over another page —
+  // but (2026-07-31, "default-from-Dashboard, but still manually switchable")
+  // the FIRST time it has no saved choice of its own yet, it starts in sync
+  // with whatever Dashboard currently shows rather than always Beijing. Once
+  // you deliberately switch here, that manual choice is what's remembered on
+  // your next visit — it doesn't keep re-syncing to Dashboard afterwards.
+  const [tripId, setTripId] = useState(() => {
+    if (compact) return getActiveTripId();
+    try { return localStorage.getItem(TRIP_KEY) || getActiveTripId(); } catch { return getActiveTripId(); }
+  });
   const messagesRef = useRef(null);
   const taRef = useRef(null);
+
+  useEffect(() => {
+    getTrips().then((list) => {
+      setTrips(list);
+      // /all-trips returns real uuids, never the legacy "t-1" short id this
+      // component defaults to — so the naive "does the list contain tripId"
+      // check below would ALWAYS miss on first load and fall back to
+      // whichever trip happens to sort first (not necessarily Beijing). Match
+      // the seed trip by name instead, same identity this codebase already
+      // hardcodes everywhere else (buildSnapshot's own "t-1" default).
+      if (list.length && !list.some((tr) => tr.id === tripId)) {
+        const seed = list.find((tr) => (tr.name || "").toLowerCase().includes("beijing"));
+        setTripId(seed?.id || list[0].id);
+      }
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Follow Dashboard's trip switcher live while the bubble stays mounted
+  // (it never unmounts across routes — see ChatBubble.jsx). The custom event
+  // fires immediately on a same-tab switch; `storage` covers another tab.
+  useEffect(() => {
+    if (!compact) return;
+    const sync = () => setTripId(getActiveTripId());
+    window.addEventListener(ACTIVE_TRIP_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(ACTIVE_TRIP_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, [compact]);
+
+  function switchTrip(id) {
+    if (id === tripId) return;
+    setTripId(id);
+    try { localStorage.setItem(TRIP_KEY, id); } catch { /* ignore */ }
+    // The tripId-keyed effect below reloads that trip's own chat list and
+    // opens its most recent session (or starts fresh if it has none) — so a
+    // continued conversation always answers about the trip it was created
+    // for, matching backend chat_sessions.trip_id.
+  }
+
+  useEffect(() => {
+    let alive = true;
+    const check = () => apiGet("/health").then(() => { if (alive) setHealthy(true); }).catch(() => { if (alive) setHealthy(false); });
+    check();
+    const id = setInterval(check, 15000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   const copyMsg = (i, text) => {
     navigator.clipboard?.writeText(text);
@@ -142,7 +235,7 @@ export default function AssistantConversation() {
   useEffect(() => { const el = messagesRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages, sending]);
   useEffect(() => { const el = taRef.current; if (el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; } }, [draft]);
 
-  useEffect(() => { apiGet("/assistant/roster").then((r) => setRoster(r.delegates || [])).catch(() => {}); }, []);
+  useEffect(() => { apiGet(`/assistant/roster?tripId=${encodeURIComponent(tripId)}`).then((r) => setRoster(r.delegates || [])).catch(() => {}); }, [tripId]);
   const nameCtx = useMemo(() => {
     const nameMap = new Map();
     const names = [];
@@ -159,14 +252,14 @@ export default function AssistantConversation() {
   }, [roster]);
 
   const loadSessions = useCallback(async () => {
-    try { const { sessions } = await apiGet("/chat/sessions"); setSessions(sessions); return sessions; }
+    try { const { sessions } = await apiGet(`/chat/sessions?tripId=${encodeURIComponent(tripId)}`); setSessions(sessions); return sessions; }
     catch { return []; }
-  }, []);
+  }, [tripId]);
 
   useEffect(() => {
-    (async () => { const list = await loadSessions(); if (list.length) openSession(list[0].id); })();
+    (async () => { const list = await loadSessions(); if (list.length) openSession(list[0].id); else newChat(); })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tripId]);
 
   async function openSession(id) {
     setCurrentId(id);
@@ -246,10 +339,12 @@ export default function AssistantConversation() {
     const hintTimer = setTimeout(() => setSlowHint(true), 4000);
     try {
       let sessionId = currentId;
-      if (!sessionId) { const created = await apiPost("/chat/sessions", {}); sessionId = created.id; setCurrentId(sessionId); await loadSessions(); }
+      if (!sessionId) { const created = await apiPost("/chat/sessions", { tripId }); sessionId = created.id; setCurrentId(sessionId); await loadSessions(); }
       await streamReply(sessionId, content);
       loadSessions();
+      setHealthy(true);
     } catch (err) {
+      setHealthy(false);
       setMessages((m) => { const copy = [...m]; copy[copy.length - 1] = { role: "ASSISTANT", content: err.message || t("The assistant is temporarily unavailable."), notice: true }; return copy; });
     } finally { clearTimeout(hintTimer); setSlowHint(false); setSending(false); }
   }
@@ -268,7 +363,9 @@ export default function AssistantConversation() {
       if (!res.ok || !res.body) { const j = await res.json().catch(() => ({})); throw new Error(j.message || "Couldn't regenerate."); }
       await consumeStream(res, appendToLast);
       loadSessions();
+      setHealthy(true);
     } catch (err) {
+      setHealthy(false);
       setMessages((m) => { const copy = [...m]; copy[copy.length - 1] = { role: "ASSISTANT", content: err.message, notice: true }; return copy; });
     } finally { setSending(false); }
   }
@@ -276,20 +373,60 @@ export default function AssistantConversation() {
   const visible = sessions.filter((s) => s.title.toLowerCase().includes(filter.toLowerCase()));
 
   return (
-    <div className="card" style={{ display: "flex", flexDirection: "column", height: 560, position: "relative" }}>
-      {/* Header */}
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative" }}>
+      {/* Header — simplified (2026-07-31, "remove the ... text, make it one or
+          two text") from a full title + "Beijing study mission · Eng/中文"
+          subtitle down to just the status dot; redundant otherwise since the
+          floating bubble's own "Assistant" tab and the full inbox's sidebar
+          row both already label this as the assistant. */}
       <div className="row" style={{ gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--line)", alignItems: "center" }}>
         <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={16} /></span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Trip assistant")}</div>
-          <div className="muted" style={{ fontSize: 12 }}>
-            <span style={{ color: "var(--st-present)" }}>● {t("Ready")}</span> · Beijing study mission · Eng/中文
-          </div>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: healthy ? "var(--st-present)" : "var(--st-missing)" }}>
+          ● {t("MusterChat")}
         </div>
-        <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setShowHistory((v) => !v)}><History size={14} /> {t("History")}</button>
+        {/* Trip switcher (2026-07-31, multi-trip support) — only shown once
+            there's more than one trip to switch between. Switching starts a
+            fresh (or that trip's own) chat, so history never mixes trips.
+            compact (the ChatBubble) auto-follows Dashboard's trip instead of
+            offering its own control (see the tripId effect above) — and
+            (2026-07-31, "hide the trip text") shows no label for it at all;
+            the compact header is too narrow for one without crowding/
+            overlapping the "MusterChat" status line above it. */}
+        {compact ? null : (
+          trips.length > 1 && (
+            <select
+              value={tripId}
+              onChange={(e) => switchTrip(e.target.value)}
+              // Wide enough for a typical trip name in full (2026-07-31 —
+              // "improve this dropdown so user can see it": 150px was cutting
+              // names like "Manila Innovation Summit" down to "Manila
+              // Innovation Summi" with the native arrow overlapping the last
+              // letter). Falls back to the current trip's own full name as
+              // the tooltip for anything still too long to fit.
+              title={trips.find((tr) => tr.id === tripId)?.name || t("Trip")}
+              style={{ fontSize: 12, maxWidth: 210, border: "1px solid var(--line)", borderRadius: 6, padding: "4px 24px 4px 8px", background: "var(--surface)", color: "var(--ink)", textOverflow: "ellipsis" }}
+            >
+              {trips.map((tr) => <option key={tr.id} value={tr.id}>{tr.name}</option>)}
+            </select>
+          )
+        )}
+        <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => { setShowPulse(false); setShowHistory((v) => !v); }}><History size={14} /> {t("History")}</button>
+        {!compact && (
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => { setShowHistory(false); setShowPulse((v) => !v); }}><AlertTriangle size={14} /> {t("Watch")}</button>
+        )}
         <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={newChat}><Plus size={14} /> {t("New")}</button>
         <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={!messages.length} onClick={exportChat}><Download size={14} /></button>
       </div>
+
+      {/* "What to watch" popover — the relocated TripPulse. TripPulse renders
+          its own .card wrapper (padding/border already included), so this is
+          just a positioning shell, same slot the History popover uses (only
+          one of the two is ever open at a time — see the header buttons). */}
+      {showPulse && (
+        <div style={{ position: "absolute", top: 56, right: 12, width: 300, zIndex: 20, filter: "drop-shadow(0 12px 32px rgba(0,0,0,0.16))" }}>
+          <TripPulse mode="assistant" tripId={tripId} />
+        </div>
+      )}
 
       {/* History popover */}
       {showHistory && (

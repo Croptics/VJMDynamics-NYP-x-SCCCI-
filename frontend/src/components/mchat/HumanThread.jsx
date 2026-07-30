@@ -5,7 +5,7 @@
  *  adds delegates to the trip — the same messaging surface the AI assistant
  *  lives beside, so the whole inbox feels like one app.
  * ============================================================================= */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import {
   Send, Paperclip, Phone, Video, FileText, Film, Check, CheckCheck, X,
   Smile, Pencil, Trash2, Ban,
@@ -19,11 +19,11 @@ import callManager from "../../lib/callManager.js";
 // local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
 // exactly that duplication.
 import { TRIP_ID } from "../../lib/exceptionsApi.js";
+import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/chatTime.js";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024; // ~8MB clip → ~11MB base64 (under backend cap)
 
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
-const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   const r = new FileReader();
   r.onload = () => resolve(r.result);
@@ -238,22 +238,38 @@ export default function HumanThread({ peer, onActivity }) {
           </div>
         )}
 
-        {messages.map((m) => {
+        {messages.map((m, i) => {
+          // Date separator (2026-07-31, "set like date like ytd etc to know")
+          // — a centered pill whenever this message starts a new calendar day
+          // relative to the one before it (or it's the very first message).
+          const showDateSep = i === 0 || !isSameDay(m.at, messages[i - 1].at);
+          const dateSep = showDateSep && (
+            <div key={`sep-${m.id}`} style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "3px 12px", fontSize: 11.5, fontWeight: 600, color: "var(--ink-3)" }}>
+              {dayLabel(m.at)}
+            </div>
+          );
+
           // Soft-deleted — content is gone; show a tombstone.
           if (m.deleted) {
             return (
-              <div key={m.id} style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
-                <div style={{ fontStyle: "italic", color: "var(--ink-3)", fontSize: 13, border: "1px dashed var(--line)", borderRadius: 12, padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <Ban size={13} /> This message was deleted
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ display: "flex", justifyContent: m.mine ? "flex-end" : "flex-start" }}>
+                  <div style={{ fontStyle: "italic", color: "var(--ink-3)", fontSize: 13, border: "1px dashed var(--line)", borderRadius: 12, padding: "6px 12px", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Ban size={13} /> This message was deleted
+                  </div>
                 </div>
-              </div>
+              </Fragment>
             );
           }
           if (m.kind === "call") {
             return (
-              <div key={m.id} style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "5px 12px", fontSize: 12, color: "var(--ink-2)" }}>
-                {m.body} · {hhmm(m.at)}
-              </div>
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "5px 12px", fontSize: 12, color: "var(--ink-2)" }}>
+                  {m.body} · {hhmm(m.at)}
+                </div>
+              </Fragment>
             );
           }
           const mine = m.mine;
@@ -272,36 +288,42 @@ export default function HumanThread({ peer, onActivity }) {
           // Inline editor
           if (editing?.id === m.id) {
             return (
-              <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "flex-end", maxWidth: "85%" }}>
-                  <textarea autoFocus className="input" rows={1} value={editing.value}
-                    onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
-                    style={{ resize: "none", minWidth: 160, lineHeight: 1.4, padding: "7px 10px" }} />
-                  <button className="btn btn-primary" style={{ padding: 8 }} onClick={saveEdit}><Check size={15} /></button>
-                  <button className="btn btn-ghost" style={{ padding: 8 }} onClick={() => setEditing(null)}><X size={15} /></button>
+              <Fragment key={m.id}>
+                {dateSep}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "flex-end", maxWidth: "85%" }}>
+                    <textarea autoFocus className="input" rows={1} value={editing.value}
+                      onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
+                      style={{ resize: "none", minWidth: 160, lineHeight: 1.4, padding: "7px 10px" }} />
+                    <button className="btn btn-primary" style={{ padding: 8 }} onClick={saveEdit}><Check size={15} /></button>
+                    <button className="btn btn-ghost" style={{ padding: 8 }} onClick={() => setEditing(null)}><X size={15} /></button>
+                  </div>
+                  <div className="muted" style={{ fontSize: 10.5, padding: "0 4px" }}>Enter to save · Esc to cancel</div>
                 </div>
-                <div className="muted" style={{ fontSize: 10.5, padding: "0 4px" }}>Enter to save · Esc to cancel</div>
-              </div>
+              </Fragment>
             );
           }
 
           // Sticker — large, no bubble
           if (m.kind === "sticker") {
             return (
-              <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
-                  {m.media && m.media.startsWith("data:image/")
-                    ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} />
-                    : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
-                  {canDelete && (
-                    <span className="mc-actions">
-                      <button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button>
-                    </span>
-                  )}
+              <Fragment key={m.id}>
+                {dateSep}
+                <div className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
+                    {m.media && m.media.startsWith("data:image/")
+                      ? <img src={m.media} alt="sticker" style={{ width: 120, height: 120, objectFit: "contain" }} />
+                      : <span style={{ fontSize: 60, lineHeight: 1 }}>{m.body}</span>}
+                    {canDelete && (
+                      <span className="mc-actions">
+                        <button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button>
+                      </span>
+                    )}
+                  </div>
+                  {meta}
                 </div>
-                {meta}
-              </div>
+              </Fragment>
             );
           }
 
@@ -317,35 +339,38 @@ export default function HumanThread({ peer, onActivity }) {
             opacity: m.pending ? 0.7 : 1,
           };
           return (
-            <div key={m.id} className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "78%" }}>
-                <div style={bubble}>
-                  {m.kind === "text" && m.body}
-                  {m.kind === "video" && (
-                    m.media && m.media.startsWith("data:video/")
-                      ? <video src={m.media} controls playsInline style={{ width: 240, maxWidth: "100%", borderRadius: 10, display: "block" }} />
-                      : <span style={{ padding: "8px 12px", display: "inline-block" }}>{m.uploading ? "Uploading clip…" : (m.body || "Video")}</span>
-                  )}
-                  {m.kind === "doc" && (
-                    m.parsing
-                      ? <div style={{ padding: "10px 14px", fontSize: 13 }}>📄 Reading {m.body}…</div>
-                      : <DocShareCard
-                          doc={parseDoc(m)}
-                          onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined}
-                          adding={added[m.id] === "adding"}
-                          added={added[m.id] === "added"}
-                        />
+            <Fragment key={m.id}>
+              {dateSep}
+              <div className="mc-msg" style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 2 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "78%" }}>
+                  <div style={bubble}>
+                    {m.kind === "text" && m.body}
+                    {m.kind === "video" && (
+                      m.media && m.media.startsWith("data:video/")
+                        ? <video src={m.media} controls playsInline style={{ width: 240, maxWidth: "100%", borderRadius: 10, display: "block" }} />
+                        : <span style={{ padding: "8px 12px", display: "inline-block" }}>{m.uploading ? "Uploading clip…" : (m.body || "Video")}</span>
+                    )}
+                    {m.kind === "doc" && (
+                      m.parsing
+                        ? <div style={{ padding: "10px 14px", fontSize: 13 }}>📄 Reading {m.body}…</div>
+                        : <DocShareCard
+                            doc={parseDoc(m)}
+                            onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined}
+                            adding={added[m.id] === "adding"}
+                            added={added[m.id] === "added"}
+                          />
+                    )}
+                  </div>
+                  {(canEdit || canDelete) && m.kind !== "doc" && (
+                    <span className="mc-actions" style={{ gap: 2 }}>
+                      {canEdit && <button className="btn btn-ghost" title="Edit" style={{ padding: 4 }} onClick={() => setEditing({ id: m.id, value: m.body || "" })}><Pencil size={13} /></button>}
+                      {canDelete && <button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button>}
+                    </span>
                   )}
                 </div>
-                {(canEdit || canDelete) && m.kind !== "doc" && (
-                  <span className="mc-actions" style={{ gap: 2 }}>
-                    {canEdit && <button className="btn btn-ghost" title="Edit" style={{ padding: 4 }} onClick={() => setEditing({ id: m.id, value: m.body || "" })}><Pencil size={13} /></button>}
-                    {canDelete && <button className="btn btn-ghost" title="Delete" style={{ padding: 4 }} onClick={() => doDelete(m)}><Trash2 size={13} /></button>}
-                  </span>
-                )}
+                {meta}
               </div>
-              {meta}
-            </div>
+            </Fragment>
           );
         })}
       </div>

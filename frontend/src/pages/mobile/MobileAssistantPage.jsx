@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { Send, Bot, Sparkles } from "lucide-react";
 import { apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+// Auto-follow the mobile trip switcher (2026-07-31, "the ai chatbot auto
+// logic add to mobile") — this always asked about Beijing (the backend's
+// own "t-1" default) regardless of which trip MobileHomePage's switcher had
+// selected, same gap the desktop ChatBubble had before it started reading
+// lib/activeTrip.js. Mirrors that fix using mobile's own trip-scope module.
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 /**
  * Mobile Assistant — thin mobile-styled wrapper around the same
@@ -27,7 +33,7 @@ export default function MobileAssistantPage({ embedded = false }) {
     setDraft("");
     setSending(true);
     try {
-      const { reply } = await apiPost("/chat/messages", { messages: history });
+      const { reply } = await apiPost("/chat/messages", { messages: history, tripId: getMobileTripId() });
       setMessages((m) => [...m, { role: "ASSISTANT", content: reply.content }]);
     } catch (e) {
       const notice = e.message || "The AI assistant is temporarily unavailable.";

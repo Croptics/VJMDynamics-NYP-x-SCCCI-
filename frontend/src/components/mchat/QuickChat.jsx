@@ -11,7 +11,7 @@
  *  server-side, same as HumanThread.jsx relies on) — this file just calls
  *  loadLists() directly after pulling the thread to refresh unread badges.
  * ============================================================================= */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { Search, Send, ArrowLeft, ExternalLink, Paperclip, Smile, FileText, Film, X, Pencil, Trash2, Check, Users } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import {
@@ -20,12 +20,12 @@ import {
 } from "../../lib/messagesApi.js";
 import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import { TRIP_ID } from "../../lib/exceptionsApi.js";
+import { formatClock as hhmm, formatListStamp, dayLabel, isSameDay } from "../../lib/chatTime.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024;
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
-const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 const fileToDataUrl = (file) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
 const parseDoc = (m) => { try { return JSON.parse(m.media || "{}"); } catch { return {}; } };
 
@@ -152,7 +152,11 @@ export default function QuickChat({ onOpenFull }) {
     catch (e) { setError(e?.message || t("Couldn't delete that message.")); }
   }
 
-  const openFull = () => onOpenFull?.();
+  // Passes the currently-open thread (null in the list view) so the caller
+  // can deep-link the full inbox straight into THIS conversation instead of
+  // always landing on the generic AI tab (2026-07-31 — "the button link to
+  // the correct stuff chat, currently it's the same link as open full inbox").
+  const openFull = () => onOpenFull?.(active);
 
   /* ---- list view -------------------------------------------------------- */
   if (!active) {
@@ -176,7 +180,7 @@ export default function QuickChat({ onOpenFull }) {
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div className="row between" style={{ gap: 6 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
-                  {g.lastAt && <div className="muted" style={{ fontSize: 10, flexShrink: 0 }}>{hhmm(g.lastAt)}</div>}
+                  {g.lastAt && <div className="muted" style={{ fontSize: 10, flexShrink: 0 }}>{formatListStamp(g.lastAt)}</div>}
                 </div>
                 <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {g.lastMessage ? `${g.lastMine ? "You: " : ""}${g.lastMessage}` : `${g.memberCount} ${t("members")}`}
@@ -198,7 +202,7 @@ export default function QuickChat({ onOpenFull }) {
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div className="row between" style={{ gap: 6 }}>
                   <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
-                  {c.lastAt && <div className="muted" style={{ fontSize: 10, flexShrink: 0 }}>{hhmm(c.lastAt)}</div>}
+                  {c.lastAt && <div className="muted" style={{ fontSize: 10, flexShrink: 0 }}>{formatListStamp(c.lastAt)}</div>}
                 </div>
                 <div className="row between" style={{ gap: 6 }}>
                   <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
@@ -232,11 +236,21 @@ export default function QuickChat({ onOpenFull }) {
 
       <div ref={listRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
         {messages.length === 0 && <div className="muted" style={{ margin: "auto", fontSize: 12.5, textAlign: "center", padding: "0 16px" }}>{t("No messages yet. Say hello.")}</div>}
-        {messages.map((m) => {
-          if (m.kind === "call") return <div key={m.id} style={{ alignSelf: "center", fontSize: 11, color: "var(--ink-3)" }}>{isGroup && m.sender && !m.mine ? `${m.sender} · ` : ""}{m.body} · {hhmm(m.at)}</div>;
+        {messages.map((m, i) => {
+          // Date separator (2026-07-31, "put date for mobile message page").
+          const showDateSep = i === 0 || !isSameDay(m.at, messages[i - 1].at);
+          const dateSep = showDateSep && (
+            <div key={`sep-${m.id}`} style={{ alignSelf: "center", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: 999, padding: "2px 10px", fontSize: 10.5, fontWeight: 600, color: "var(--ink-3)" }}>
+              {dayLabel(m.at)}
+            </div>
+          );
+          if (m.kind === "call") return <Fragment key={m.id}>{dateSep}<div style={{ alignSelf: "center", fontSize: 11, color: "var(--ink-3)" }}>{isGroup && m.sender && !m.mine ? `${m.sender} · ` : ""}{m.body} · {hhmm(m.at)}</div></Fragment>;
           const mine = m.mine;
           if (m.deleted) return (
-            <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", fontStyle: "italic", color: "var(--ink-3)", fontSize: 12.5, border: "1px dashed var(--line)", borderRadius: 10, padding: "5px 10px" }}>🚫 {t("This message was deleted")}</div>
+            <Fragment key={m.id}>
+              {dateSep}
+              <div style={{ alignSelf: mine ? "flex-end" : "flex-start", fontStyle: "italic", color: "var(--ink-3)", fontSize: 12.5, border: "1px dashed var(--line)", borderRadius: 10, padding: "5px 10px" }}>🚫 {t("This message was deleted")}</div>
+            </Fragment>
           );
           const canEdit = mine && m.kind === "text" && !m.pending;
           const canDelete = mine && !m.pending;
@@ -248,53 +262,62 @@ export default function QuickChat({ onOpenFull }) {
           );
 
           if (editing?.id === m.id) return (
-            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-              <div className="row" style={{ gap: 5, alignItems: "flex-end", maxWidth: "90%" }}>
-                <input autoFocus className="input" value={editing.value} onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
-                  style={{ fontSize: 13, padding: "6px 9px" }} />
-                <button className="btn btn-primary" style={{ padding: 7 }} onClick={saveEdit}><Check size={14} /></button>
-                <button className="btn btn-ghost" style={{ padding: 7 }} onClick={() => setEditing(null)}><X size={14} /></button>
+            <Fragment key={m.id}>
+              {dateSep}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                <div className="row" style={{ gap: 5, alignItems: "flex-end", maxWidth: "90%" }}>
+                  <input autoFocus className="input" value={editing.value} onChange={(e) => setEditing({ id: m.id, value: e.target.value })}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveEdit(); } if (e.key === "Escape") setEditing(null); }}
+                    style={{ fontSize: 13, padding: "6px 9px" }} />
+                  <button className="btn btn-primary" style={{ padding: 7 }} onClick={saveEdit}><Check size={14} /></button>
+                  <button className="btn btn-ghost" style={{ padding: 7 }} onClick={() => setEditing(null)}><X size={14} /></button>
+                </div>
+                <div className="muted" style={{ fontSize: 10 }}>{t("Enter to save · Esc to cancel")}</div>
               </div>
-              <div className="muted" style={{ fontSize: 10 }}>{t("Enter to save · Esc to cancel")}</div>
-            </div>
+            </Fragment>
           );
 
           if (m.kind === "sticker") return (
-            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
-              {senderLabel}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
-                {m.media ? <img src={m.media} alt="sticker" style={{ width: 88, height: 88, objectFit: "contain" }} /> : <span style={{ fontSize: 46, lineHeight: 1 }}>{m.body}</span>}
-                {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3, opacity: 0.6 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
+            <Fragment key={m.id}>
+              {dateSep}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
+                {senderLabel}
+                <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", opacity: m.pending ? 0.7 : 1 }}>
+                  {m.media ? <img src={m.media} alt="sticker" style={{ width: 88, height: 88, objectFit: "contain" }} /> : <span style={{ fontSize: 46, lineHeight: 1 }}>{m.body}</span>}
+                  {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3, opacity: 0.6 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
+                </div>
+                {meta}
               </div>
-              {meta}
-            </div>
+            </Fragment>
           );
 
           const isDoc = m.kind === "doc";
           const bubble = { maxWidth: "100%", background: mine ? "var(--scc-red)" : "var(--surface,#fff)", color: mine ? "#fff" : "var(--ink)", border: mine ? "none" : "1px solid var(--line)", borderRadius: mine ? "12px 12px 3px 12px" : "12px 12px 12px 3px", padding: isDoc ? 0 : "6px 10px", fontSize: 13, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: m.pending ? 0.7 : 1 };
           return (
-            <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
-              {senderLabel}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "84%" }}>
-                <div style={bubble}>
-                  {m.kind === "text" && m.body}
-                  {m.kind === "video" && (m.media
-                    ? <video src={m.media} controls playsInline style={{ width: 190, maxWidth: "100%", borderRadius: 8, display: "block" }} />
-                    : <span style={{ padding: "6px 10px", display: "inline-block" }}>{m.uploading ? t("Uploading clip…") : (m.body || "Video")}</span>)}
-                  {isDoc && (m.parsing
-                    ? <div style={{ padding: "8px 12px", fontSize: 12.5 }}>📄 {t("Reading")} {m.body}…</div>
-                    : <DocShareCard doc={parseDoc(m)} mine={mine} onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />)}
+            <Fragment key={m.id}>
+              {dateSep}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 1 }}>
+                {senderLabel}
+                <div style={{ display: "flex", alignItems: "center", gap: 4, flexDirection: mine ? "row-reverse" : "row", maxWidth: "84%" }}>
+                  <div style={bubble}>
+                    {m.kind === "text" && m.body}
+                    {m.kind === "video" && (m.media
+                      ? <video src={m.media} controls playsInline style={{ width: 190, maxWidth: "100%", borderRadius: 8, display: "block" }} />
+                      : <span style={{ padding: "6px 10px", display: "inline-block" }}>{m.uploading ? t("Uploading clip…") : (m.body || "Video")}</span>)}
+                    {isDoc && (m.parsing
+                      ? <div style={{ padding: "8px 12px", fontSize: 12.5 }}>📄 {t("Reading")} {m.body}…</div>
+                      : <DocShareCard doc={parseDoc(m)} mine={mine} onAddToTrip={!isDelegate ? () => addDocToTrip(m) : undefined} adding={added[m.id] === "adding"} added={added[m.id] === "added"} />)}
+                  </div>
+                  {(canEdit || canDelete) && !isDoc && (
+                    <span style={{ display: "flex", gap: 1, opacity: 0.55 }}>
+                      {canEdit && <button className="btn btn-ghost" title={t("Edit")} style={{ padding: 3 }} onClick={() => setEditing({ id: m.id, value: m.body || "" })}><Pencil size={12} /></button>}
+                      {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
+                    </span>
+                  )}
                 </div>
-                {(canEdit || canDelete) && !isDoc && (
-                  <span style={{ display: "flex", gap: 1, opacity: 0.55 }}>
-                    {canEdit && <button className="btn btn-ghost" title={t("Edit")} style={{ padding: 3 }} onClick={() => setEditing({ id: m.id, value: m.body || "" })}><Pencil size={12} /></button>}
-                    {canDelete && <button className="btn btn-ghost" title={t("Delete")} style={{ padding: 3 }} onClick={() => doDelete(m)}><Trash2 size={12} /></button>}
-                  </span>
-                )}
+                {meta}
               </div>
-              {meta}
-            </div>
+            </Fragment>
           );
         })}
       </div>

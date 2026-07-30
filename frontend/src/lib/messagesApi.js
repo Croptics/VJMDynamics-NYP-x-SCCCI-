@@ -40,3 +40,12 @@ export const getGroupThread = (id) => apiGet(`/groups/${id}/thread`);
 export const sendGroupMessage = (id, { kind = "text", body = null, media = null }) =>
   apiPost(`/groups/${id}/messages`, { kind, body, media });
 export const getGroupMembers = (id) => apiGet(`/groups/${id}/members`);
+
+/** Rename and/or add/remove members (2026-07-31 — "allow me to edit and
+ *  delete the groupchat"). Any current member may call this. */
+export const editGroup = (id, { name, addMemberIds, removeMemberIds } = {}) =>
+  apiPatch(`/groups/${id}`, { name, addMemberIds, removeMemberIds });
+
+/** Delete the whole group — creator-only (backend-enforced). Irreversible:
+ *  wipes the group's message history for everyone, not just the caller. */
+export const deleteGroup = (id) => apiDelete(`/groups/${id}`);

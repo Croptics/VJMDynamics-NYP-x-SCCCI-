@@ -49,6 +49,7 @@ import {
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
+import { ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
 import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
@@ -89,6 +90,12 @@ function loadSelectedTripId() {
 }
 function saveSelectedTripId(id) {
   try { localStorage.setItem(DASHBOARD_TRIP_KEY, id); } catch { /* ignore */ }
+  // Notify same-tab listeners (2026-07-31) — the floating ChatBubble assistant
+  // auto-follows whichever trip is on-screen here (see lib/activeTrip.js) so
+  // it needs to hear about a switch immediately, not just on its own reload. A
+  // bare localStorage write only fires the browser's `storage` event in OTHER
+  // tabs, never this one.
+  window.dispatchEvent(new CustomEvent(ACTIVE_TRIP_EVENT, { detail: id }));
 }
 
 const EMPTY_FORM = {

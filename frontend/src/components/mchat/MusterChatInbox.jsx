@@ -12,17 +12,20 @@ import HumanThread from "./HumanThread.jsx";
 import GroupThread from "./GroupThread.jsx";
 import VideoCallOverlay from "./VideoCallOverlay.jsx";
 import callManager from "../../lib/callManager.js";
+import { formatListStamp as hhmm } from "../../lib/chatTime.js";
 
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
-const hhmm = (iso) => { try { return new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 
 const AI = { kind: "ai", id: "assistant", name: "Trip Assistant" };
 
-export default function MusterChatInbox({ railWidth = 300 }) {
+export default function MusterChatInbox({ railWidth = 300, initialActive = null }) {
   const { t } = useLang();
   const [contacts, setContacts] = useState([]);
   const [groups, setGroups] = useState([]);
-  const [active, setActive] = useState(AI);
+  // Deep-link (2026-07-31): opens straight into a specific thread when the
+  // caller passes one (ChatAssistantPage.jsx, from ChatBubble's "open full
+  // inbox"); falls back to the pinned AI tab otherwise, same as before.
+  const [active, setActive] = useState(() => initialActive || AI);
   const [filter, setFilter] = useState("");
   const [failed, setFailed] = useState(false);
   // Create-group modal
@@ -30,6 +33,7 @@ export default function MusterChatInbox({ railWidth = 300 }) {
   const [gName, setGName] = useState("");
   const [gMembers, setGMembers] = useState(() => new Set());
   const [creating, setCreating] = useState(false);
+  const [gCoachFilter, setGCoachFilter] = useState("all"); // "all" | a coachId
 
   const refresh = useCallback(async () => {
     try {
@@ -51,6 +55,14 @@ export default function MusterChatInbox({ railWidth = 300 }) {
   const isActive = (kind, id) => active.kind === kind && active.id === id;
   const visible = contacts.filter((c) => c.name.toLowerCase().includes(filter.toLowerCase()));
   const staff = contacts.filter((c) => c.kind === "account");
+  // Coaches represented among the staff list (2026-07-31, "add filter by
+  // coach assigned" — the New Group modal's member picker), so a group can be
+  // quickly built out of one coach's team instead of scrolling every staff
+  // account. Only staff who currently captain a coach show up here.
+  const staffCoaches = Array.from(
+    new Map(staff.filter((c) => c.coachId).map((c) => [c.coachId, c.coachLabel || c.coachId])).entries()
+  ).sort((a, b) => a[1].localeCompare(b[1]));
+  const staffVisible = gCoachFilter === "all" ? staff : staff.filter((c) => c.coachId === gCoachFilter);
 
   const rowStyle = (on) => ({
     cursor: "pointer",
@@ -67,16 +79,30 @@ export default function MusterChatInbox({ railWidth = 300 }) {
     setCreating(true);
     try {
       const { group } = await createGroup(name, [...gMembers]);
-      setNewOpen(false); setGName(""); setGMembers(new Set());
+      setNewOpen(false); setGName(""); setGMembers(new Set()); setGCoachFilter("all");
       await refresh();
-      setActive({ kind: "group", id: group.id, name: group.name, memberCount: group.memberCount });
+      setActive({ kind: "group", id: group.id, name: group.name, memberCount: group.memberCount, createdByMe: group.createdByMe });
     } catch { /* keep modal open */ } finally { setCreating(false); }
   }
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: `${railWidth}px 1fr`, gap: 16, minHeight: 0 }}>
+    // FIX (2026-07-31, "the chat conversation is longer than the chat list"):
+    // AssistantConversation.jsx's root is now height:"100%" (was a fixed 560,
+    // changed so it fits the floating bubble's shorter panel without a double
+    // scrollbar — see ChatBubble.jsx). A first attempt just set `height: 560`
+    // on this grid CONTAINER, which was wrong — a grid container's own outer
+    // height doesn't constrain its implicit ROW track size, which still
+    // sizes to content (the sidebar wanting height:"100%" of an unconstrained
+    // row, plus the conversation's own content) — so the container clipped at
+    // 560 while its single row actually grew to ~990px+ underneath, which is
+    // exactly the "list way longer than it should be, chat looks squashed"
+    // symptom reported. Setting `gridTemplateRows` (not just `height`) pins
+    // the row itself to 560px, so BOTH cells' height:"100%"/560 now resolve
+    // against a real, fixed 560px row — matching the original reference
+    // layout (Vance's un-modified /assistant page).
+    <div style={{ display: "grid", gridTemplateColumns: `${railWidth}px 1fr`, gridTemplateRows: "560px", gap: 16, minHeight: 0, height: 560 }}>
       {/* Contact rail */}
-      <div className="card" style={{ padding: 12, height: 560, overflowY: "auto" }}>
+      <div className="card" style={{ padding: 12, height: "100%", minHeight: 0, overflowY: "auto" }}>
         <div style={{ position: "relative", marginBottom: 12 }}>
           <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: "var(--ink-3)" }} />
           <input className="input" placeholder={t("Search people…")} value={filter}
@@ -101,7 +127,7 @@ export default function MusterChatInbox({ railWidth = 300 }) {
         {groups.filter((g) => g.name.toLowerCase().includes(filter.toLowerCase())).map((g) => {
           const on = isActive("group", g.id);
           return (
-            <div key={`group:${g.id}`} onClick={() => setActive({ kind: "group", id: g.id, name: g.name, memberCount: g.memberCount })} style={rowStyle(on)}>
+            <div key={`group:${g.id}`} onClick={() => setActive({ kind: "group", id: g.id, name: g.name, memberCount: g.memberCount, createdByMe: g.createdByMe })} style={rowStyle(on)}>
               <span className="avatar" style={{ background: "var(--scc-red)", color: "#fff", flexShrink: 0 }}><Users size={15} /></span>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div className="row between" style={{ gap: 6 }}>
@@ -152,7 +178,15 @@ export default function MusterChatInbox({ railWidth = 300 }) {
 
       {/* Conversation pane */}
       {active.kind === "ai" ? <AssistantConversation />
-        : active.kind === "group" ? <GroupThread key={`group:${active.id}`} group={active} onActivity={refresh} />
+        : active.kind === "group" ? (
+          <GroupThread
+            key={`group:${active.id}`}
+            group={active}
+            onActivity={refresh}
+            onUpdated={(g) => { setActive((a) => (a.id === g.id ? { ...a, ...g } : a)); refresh(); }}
+            onDeleted={() => { setActive(AI); refresh(); }}
+          />
+        )
         : <HumanThread key={`${active.kind}:${active.id}`} peer={active} onActivity={refresh} />}
 
       {/* New-group modal */}
@@ -165,15 +199,45 @@ export default function MusterChatInbox({ railWidth = 300 }) {
             </div>
             <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
               <input className="input" autoFocus placeholder={t("Group name")} value={gName} onChange={(e) => setGName(e.target.value)} />
-              <div className="page-eyebrow" style={{ padding: 0 }}>{t("Add members")}</div>
+              <div className="row between" style={{ padding: 0 }}>
+                <div className="page-eyebrow" style={{ padding: 0 }}>{t("Add members")}</div>
+                {gMembers.size > 0 && <div className="muted" style={{ fontSize: 11.5 }}>{gMembers.size} {t("selected")}</div>}
+              </div>
+              {/* Coach filter (2026-07-31, "add filter by coach assigned") — lets
+                  a group be built quickly out of one coach's own team instead of
+                  scrolling every staff account. Only shown when at least one
+                  staff contact actually captains a coach. */}
+              {staffCoaches.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  <button
+                    onClick={() => setGCoachFilter("all")}
+                    style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 10px", borderRadius: 999, border: `1px solid ${gCoachFilter === "all" ? "var(--scc-red)" : "var(--line)"}`, background: gCoachFilter === "all" ? "var(--scc-red-tint)" : "transparent", color: gCoachFilter === "all" ? "var(--scc-red)" : "var(--ink-2)", cursor: "pointer" }}
+                  >
+                    {t("All staff")}
+                  </button>
+                  {staffCoaches.map(([coachId, label]) => (
+                    <button
+                      key={coachId}
+                      onClick={() => setGCoachFilter(coachId)}
+                      style={{ fontSize: 11.5, fontWeight: 600, padding: "4px 10px", borderRadius: 999, border: `1px solid ${gCoachFilter === coachId ? "var(--scc-red)" : "var(--line)"}`, background: gCoachFilter === coachId ? "var(--scc-red-tint)" : "transparent", color: gCoachFilter === coachId ? "var(--scc-red)" : "var(--ink-2)", cursor: "pointer" }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div style={{ overflowY: "auto", display: "grid", gap: 4, maxHeight: 260 }}>
                 {staff.length === 0 && <div className="muted" style={{ fontSize: 12 }}>{t("No teammates to add.")}</div>}
-                {staff.map((c) => {
+                {staff.length > 0 && staffVisible.length === 0 && <div className="muted" style={{ fontSize: 12 }}>{t("No teammates on that coach.")}</div>}
+                {staffVisible.map((c) => {
                   const checked = gMembers.has(c.id);
                   return (
                     <div key={c.id} onClick={() => toggleMember(c.id)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, background: checked ? "var(--scc-red-tint)" : "transparent" }}>
                       <span className="avatar" style={{ background: "var(--scc-red)", color: "#fff" }}>{initialsOf(c.name)}</span>
-                      <div style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{c.name}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 500 }}>{c.name}</div>
+                        {c.coachLabel && <div className="muted" style={{ fontSize: 11 }}>{c.coachLabel}</div>}
+                      </div>
                       <span style={{ width: 20, height: 20, borderRadius: 6, border: `1.5px solid ${checked ? "var(--scc-red)" : "var(--line)"}`, background: checked ? "var(--scc-red)" : "transparent", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         {checked && <Check size={13} />}
                       </span>

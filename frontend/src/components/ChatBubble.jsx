@@ -4,7 +4,7 @@
  * ============================================================================= */
 import { useState, useEffect, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { MessageCircle, X, MessageSquare } from "lucide-react";
+import { MessageCircle, X, MessageSquare, ExternalLink } from "lucide-react";
 import { useLang } from "../lib/i18n.jsx";
 import { getToken } from "../lib/api.js";
 import { pollUpdates } from "../lib/messagesApi.js";
@@ -117,7 +117,17 @@ export default function ChatBubble() {
   // and mounts its own call overlay + poll, so hide the floating bubble there.
   if (location.pathname === "/assistant") return null;
 
-  const goMessages = () => { setOpen(false); navigate("/assistant"); };
+  // `peer` (optional) is the specific thread to deep-link into — passed by
+  // QuickChat's own "open full inbox" button when a conversation is already
+  // open. Guarded on `peer?.kind` because this same function is also wired
+  // straight to plain onClick={goMessages} elsewhere (the notif badge, the
+  // Assistant tab's own "Open full inbox"), where React passes the raw click
+  // event as the first arg — that has no `.kind`, so it's correctly ignored
+  // rather than stashed as a fake "thread".
+  const goMessages = (peer) => {
+    setOpen(false);
+    navigate("/assistant", peer?.kind ? { state: { openThread: peer } } : undefined);
+  };
 
   const fabPosStyle = dragPos
     ? { left: dragPos.x - FAB_SIZE / 2, top: dragPos.y - FAB_SIZE / 2, right: "auto", bottom: "auto" }
@@ -149,10 +159,17 @@ export default function ChatBubble() {
             </button>
           </div>
           {tab === "assistant" ? (
-            // AssistantConversation's root card is a fixed 560px tall — give it a
-            // scrolling wrapper so its input row stays reachable when clamped.
-            <div style={{ flex: 1, minHeight: 0, padding: 12, overflowY: "auto" }}>
-              <AssistantConversation />
+            // AssistantConversation now fills whatever height it's given
+            // (height:"100%", not a fixed 560px) and owns its OWN internal
+            // scroll (its messages list) — no outer overflowY here, or the
+            // panel got a second, redundant outer scrollbar on top of it.
+            <div style={{ flex: 1, minHeight: 0, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <AssistantConversation compact />
+              </div>
+              <button className="btn btn-ghost" onClick={goMessages} style={{ flexShrink: 0, fontSize: 12.5, justifyContent: "center" }}>
+                <ExternalLink size={13} /> {t("Open full inbox")}
+              </button>
             </div>
           ) : (
             <div style={{ flex: 1, minHeight: 0 }}>

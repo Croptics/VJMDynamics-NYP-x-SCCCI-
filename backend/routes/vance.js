@@ -151,6 +151,16 @@ async function init() {
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   await q(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);
+  // Multi-trip assistant support (2026-07-31 — "we have different trips and the
+  // chatbot is only for beijing"): each chat is now scoped to the trip it was
+  // started for, so continuing an existing chat always answers about the SAME
+  // trip it began with, regardless of which trip is currently selected in the
+  // switcher. Existing rows predate trips entirely — backfill them to Beijing
+  // (t-1), matching this codebase's established backfill convention (see
+  // coaches/delegates trip_id backfill in db/schema.js).
+  await q(`ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS trip_id UUID REFERENCES trips(uuid_id)`);
+  await q(`UPDATE chat_sessions SET trip_id = (SELECT uuid_id FROM trips WHERE id = 't-1')
+           WHERE trip_id IS NULL AND EXISTS (SELECT 1 FROM trips WHERE id = 't-1')`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_sessions_acct ON chat_sessions(account_id, updated_at DESC)`);
   await q(`CREATE INDEX IF NOT EXISTS idx_chat_messages_sess ON chat_messages(session_id, created_at)`);
 
@@ -1227,13 +1237,16 @@ function checkPassportExpiry(expiry, now = new Date()) {
   return { status: "ok", daysLeft };
 }
 
-async function buildSnapshot() {
-  // The assistant is scoped to the Beijing study mission (t-1). Resolve its uuid
-  // once and scope every read to it, so the snapshot never mixes trips — JQ's
-  // getTrip/getDashboard/getMissing otherwise default to an arbitrary "LIMIT 1"
-  // (no ORDER BY) trip, which made the assistant + pulse show a different trip
-  // and counts than the dashboard. (Vance's fix, integrated 2026-07-27.)
-  const tripUuid = await resolveTripUuid("t-1");
+async function buildSnapshot(tripUuid) {
+  // The assistant used to be hardcoded to the Beijing study mission (t-1) —
+  // resolving its uuid once and scoping every read to it, so the snapshot never
+  // mixed trips (JQ's getTrip/getDashboard/getMissing otherwise default to an
+  // arbitrary "LIMIT 1" (no ORDER BY) trip). Multi-trip support (2026-07-31,
+  // "let me ask about other trips") makes that trip a caller-supplied param
+  // instead, defaulting to t-1 so every pre-existing call site (which never
+  // passed one) keeps behaving exactly as before. (Vance's original fix,
+  // integrated 2026-07-27.)
+  if (!tripUuid) tripUuid = await resolveTripUuid("t-1");
   const [trip, dashboard] = await Promise.all([
     getTrip(tripUuid), getDashboard(tripUuid),
   ]);
@@ -1326,12 +1339,15 @@ async function buildSnapshot() {
 
   let itinerary = [];
   try {
+    // BUG FIX (2026-07-31): this compared against the trip's legacy short id
+    // ('t-1') instead of the resolved tripUuid actually used everywhere else in
+    // this function — so itinerary data never resolved for any non-Beijing
+    // trip, and coincidentally "worked" for Beijing only because it IS t-1.
     const r = await q(`
       SELECT i.day_number, to_char(i.start_time,'HH24:MI') AS start_time, i.title, i.location, i.category
         FROM itinerary_items i
-        JOIN trips t ON t.uuid_id = i.trip_id
-       WHERE t.id = 't-1' AND i.day_number = $1
-       ORDER BY i.sort_order, i.start_time`, [trip?.dayOf || 1]);
+       WHERE i.trip_id = $1 AND i.day_number = $2
+       ORDER BY i.sort_order, i.start_time`, [tripUuid, trip?.dayOf || 1]);
     itinerary = r.rows;
   } catch { /* itinerary not present yet */ }
 
@@ -1346,17 +1362,22 @@ async function buildSnapshot() {
 /* Short-TTL cache over buildSnapshot(). Every chat turn rebuilds the snapshot
  * from ~6 DB queries; within a few seconds the data barely changes, so caching
  * it makes rapid follow-up questions (and the fast-path below) much cheaper.
- * Writes that change the picture (confirm, check-in) call invalidateSnapshot(). */
-let _snapshotCache = { at: 0, data: null };
+ * Writes that change the picture (confirm, check-in) call invalidateSnapshot().
+ * Keyed per trip (2026-07-31, multi-trip support) — a single global entry used
+ * to mean switching trips could still serve another trip's cached snapshot for
+ * up to 5s. */
+let _snapshotCache = new Map(); // tripUuid ("" for the null/default case) -> { at, data }
 const SNAPSHOT_TTL_MS = 5000;
-async function getSnapshot() {
+async function getSnapshot(tripUuid) {
+  const key = tripUuid || "";
   const now = Date.now();
-  if (_snapshotCache.data && now - _snapshotCache.at < SNAPSHOT_TTL_MS) return _snapshotCache.data;
-  const data = await buildSnapshot();
-  _snapshotCache = { at: now, data };
+  const entry = _snapshotCache.get(key);
+  if (entry && now - entry.at < SNAPSHOT_TTL_MS) return entry.data;
+  const data = await buildSnapshot(tripUuid);
+  _snapshotCache.set(key, { at: now, data });
   return data;
 }
-function invalidateSnapshot() { _snapshotCache = { at: 0, data: null }; }
+function invalidateSnapshot() { _snapshotCache.clear(); }
 
 function buildSystemPrompt(snapshot, lang) {
   const languageLine = lang === "zh"
@@ -1783,8 +1804,8 @@ function answerLocally(question, snapshot) {
   return null; // no confident match → let the model answer
 }
 
-async function answer(messages, lang) {
-  const snapshot = await getSnapshot();
+async function answer(messages, lang, tripUuid) {
+  const snapshot = await getSnapshot(tripUuid);
   const history = normaliseHistory(messages);
   if (history.length === 0 || history[history.length - 1].role !== "user") {
     return { content: "What would you like to know about the trip?", source: "none" };
@@ -1828,7 +1849,8 @@ async function answer(messages, lang) {
 router.post("/api/chat/messages", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   try {
-    const reply = await answer(req.body?.messages, req.body?.lang);
+    const tripUuid = await resolveTripUuid(req.body?.tripId || "t-1");
+    const reply = await answer(req.body?.messages, req.body?.lang, tripUuid);
     res.json({ reply: { content: reply.content }, source: reply.source });
   } catch (err) {
     res.status(err.status || 500).json({ error: "ASSISTANT_ERROR", message: err.message });
@@ -1838,12 +1860,18 @@ router.post("/api/chat/messages", requireAuth(), express.json(), wrap(async (req
 /* ---- Saved chat history (desktop sidebar) -------------------------------- */
 router.get("/api/chat/sessions", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
+  // Optional ?tripId= (2026-07-31, multi-trip support) scopes the sidebar list
+  // to whichever trip is currently selected in the assistant's trip switcher,
+  // so switching trips shows that trip's own chat history instead of every
+  // trip's chats mixed together. Omitted entirely = every chat (back-compat).
+  const wantScoped = !!req.query.tripId;
+  const tripUuid = wantScoped ? await resolveTripUuid(req.query.tripId) : null;
   const r = await q(`
     SELECT s.id, s.title, s.updated_at, s.pinned,
            (SELECT COUNT(*)::int FROM chat_messages m WHERE m.session_id = s.id) AS message_count
       FROM chat_sessions s
-     WHERE s.account_id = $1
-     ORDER BY s.pinned DESC, s.updated_at DESC LIMIT 50`, [req.account.id]);
+     WHERE s.account_id = $1 AND ($2::boolean IS NOT TRUE OR s.trip_id = $3)
+     ORDER BY s.pinned DESC, s.updated_at DESC LIMIT 50`, [req.account.id, wantScoped, tripUuid]);
   res.json({ sessions: r.rows });
 }));
 
@@ -1870,7 +1898,13 @@ router.patch("/api/chat/sessions/:id", requireAuth(), express.json(), wrap(async
 router.post("/api/chat/sessions", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const id = randomUUID();
-  await q(`INSERT INTO chat_sessions (id, account_id, title) VALUES ($1, $2, 'New chat')`, [id, req.account.id]);
+  // The trip a chat is created for sticks for its whole life (2026-07-31,
+  // multi-trip support) — continuing it later always answers about THIS trip,
+  // not whatever the switcher currently shows. Defaults to Beijing (t-1) so a
+  // caller that never passes tripId (e.g. any pre-existing client) behaves
+  // exactly as before.
+  const tripUuid = await resolveTripUuid(req.body?.tripId || "t-1");
+  await q(`INSERT INTO chat_sessions (id, account_id, title, trip_id) VALUES ($1, $2, 'New chat', $3)`, [id, req.account.id, tripUuid]);
   res.status(201).json({ id, title: "New chat", messages: [] });
 }));
 
@@ -1885,7 +1919,7 @@ router.get("/api/chat/sessions/:id", requireAuth(), wrap(async (req, res) => {
 router.post("/api/chat/sessions/:id/messages", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const sessionId = req.params.id;
-  const owned = await q(`SELECT id, title FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
+  const owned = await q(`SELECT id, title, trip_id FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
   if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
   const userText = (req.body?.content || "").toString().trim();
   if (!userText) return res.status(400).json({ error: "EMPTY", message: "Type a question first." });
@@ -1894,7 +1928,7 @@ router.post("/api/chat/sessions/:id/messages", requireAuth(), express.json(), wr
   const history = [...prior.rows, { role: "user", content: userText }];
   let reply;
   try {
-    reply = await answer(history, req.body?.lang);
+    reply = await answer(history, req.body?.lang, owned.rows[0].trip_id);
   } catch (err) {
     return res.status(err.status || 500).json({ error: "ASSISTANT_ERROR", message: err.message });
   }
@@ -1913,7 +1947,7 @@ router.post("/api/chat/sessions/:id/messages", requireAuth(), express.json(), wr
 router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const sessionId = req.params.id;
-  const owned = await q(`SELECT id, title FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
+  const owned = await q(`SELECT id, title, trip_id FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
   if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
   const userText = (req.body?.content || "").toString().trim();
   if (!userText) return res.status(400).json({ error: "EMPTY", message: "Type a question first." });
@@ -1921,7 +1955,8 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
   const prior = await q(`SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId]);
   const priorRows = prior.rows;
   const history = normaliseHistory([...priorRows, { role: "user", content: userText }]);
-  const snapshot = await getSnapshot();
+  const tripUuid = owned.rows[0].trip_id;
+  const snapshot = await getSnapshot(tripUuid);
   const lang = req.body?.lang === "zh" ? "zh" : "en";
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -1943,7 +1978,7 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
     // non-streaming path (Claude, or a clear error message).
     if (full == null) {
       try {
-        const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang);
+        const r = await answer([...priorRows, { role: "user", content: userText }], req.body?.lang, tripUuid);
         full = r.content;
         sse({ token: full });
       } catch (err) {
@@ -1967,7 +2002,7 @@ router.post("/api/chat/sessions/:id/stream", requireAuth(), express.json(), wrap
 router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), wrap(async (req, res) => {
   await ensureReady();
   const sessionId = req.params.id;
-  const owned = await q(`SELECT id, title FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
+  const owned = await q(`SELECT id, title, trip_id FROM chat_sessions WHERE id = $1 AND account_id = $2`, [sessionId, req.account.id]);
   if (!owned.rows[0]) return res.status(404).json({ error: "NOT_FOUND" });
 
   const msgs = (await q(`SELECT id, role, content FROM chat_messages WHERE session_id = $1 ORDER BY created_at`, [sessionId])).rows;
@@ -1979,8 +2014,9 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
     return res.status(400).json({ error: "NOTHING_TO_REGENERATE", message: "There's no question to regenerate." });
   }
 
+  const tripUuid = owned.rows[0].trip_id;
   const history = normaliseHistory(msgs);
-  const snapshot = await getSnapshot();
+  const snapshot = await getSnapshot(tripUuid);
   const system = buildSystemPrompt(snapshot, req.body?.lang === "zh" ? "zh" : "en");
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -1992,7 +2028,7 @@ router.post("/api/chat/sessions/:id/regenerate", requireAuth(), express.json(), 
 
   let full = await ollamaStream(history, system, (tok) => sse({ token: tok }));
   if (full == null) {
-    try { const r = await answer(msgs, req.body?.lang); full = r.content; sse({ token: full }); }
+    try { const r = await answer(msgs, req.body?.lang, tripUuid); full = r.content; sse({ token: full }); }
     catch (err) { sse({ error: err.message }); return res.end(); }
   }
   await q(`INSERT INTO chat_messages (id, session_id, role, content) VALUES ($1,$2,'assistant',$3)`, [randomUUID(), sessionId, full]);
@@ -2007,10 +2043,11 @@ router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
   // Coach-captain scoping added 2026-07-28 (audit finding): this returned EVERY
   // delegate — including their email — to any signed-in account, with no
   // scoping at all, which made it the widest delegate-PII surface in the app.
-  // Now scoped to the assistant's own trip (t-1, same as buildSnapshot) and to
-  // the coaches the caller can actually see, matching every other
-  // delegate-reading route.
-  const tripUuid = await resolveTripUuid("t-1");
+  // Now scoped to the assistant's own trip (same as buildSnapshot, defaulting
+  // to Beijing/t-1; ?tripId= added 2026-07-31 for the assistant's trip
+  // switcher) and to the coaches the caller can actually see, matching every
+  // other delegate-reading route.
+  const tripUuid = await resolveTripUuid(req.query.tripId || "t-1");
   const r = await q(`
     SELECT d.name, d.company, d.role, d.industry, d.status, d.vip, d.email,
            d."coachId" AS coach_id,
@@ -2032,7 +2069,8 @@ router.get("/api/assistant/roster", requireAuth(), wrap(async (req, res) => {
  * assistant snapshot and computeRisk(), so repeated polls are cheap. */
 router.get("/api/assistant/pulse", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
-  const s = await getSnapshot();
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : undefined;
+  const s = await getSnapshot(tripUuid);
   res.json({
     trip: { name: s.trip?.name || null, dayOf: s.trip?.dayOf ?? null, totalDays: s.trip?.totalDays ?? null, departsIn: s.trip?.departsIn || null },
     kpis: s.kpis || { total: 0, present: 0, missing: 0, unassigned: 0 },
@@ -2181,10 +2219,19 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const me = req.account.id;
 
+  // Coach each staff contact currently captains, on the assistant's default
+  // trip (2026-07-31, "add filter by coach assigned" — the New Group modal's
+  // member picker) — a coach's `account_id` is the captain assigned to it,
+  // same linkage getVisibleCoachIds() already reads elsewhere. Not trip-scoped
+  // any further than that default since contacts themselves aren't per-trip;
+  // an account with no coach on this trip just shows no coach filter chip.
   const accounts = (await q(
-    `SELECT id, name, username, role,
-            (last_seen_at IS NOT NULL AND last_seen_at > now() - interval '45 seconds') AS online
-       FROM accounts WHERE id <> $1 ORDER BY name NULLS LAST, username`, [me]
+    `SELECT a.id, a.name, a.username, a.role,
+            (a.last_seen_at IS NOT NULL AND a.last_seen_at > now() - interval '45 seconds') AS online,
+            c.id AS coach_id, COALESCE(c.label, c.name) AS coach_label
+       FROM accounts a
+       LEFT JOIN coaches c ON c.account_id = a.id
+      WHERE a.id <> $1 ORDER BY a.name NULLS LAST, a.username`, [me]
   )).rows;
 
   let delegates = [];
@@ -2233,7 +2280,10 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
   };
 
   const contacts = [
-    ...accounts.map((a) => build("account", a, a.role === "admin" ? "Staff · admin" : "Staff", a.online)),
+    ...accounts.map((a) => ({
+      ...build("account", a, a.role === "admin" ? "Staff · admin" : "Staff", a.online),
+      coachId: a.coach_id || null, coachLabel: a.coach_label || null,
+    })),
     ...delegates.map((d) => build("delegate", d, d.company || "Delegate", false)),
   ];
   contacts.sort((a, b) => {
@@ -2475,7 +2525,11 @@ router.post("/api/groups", requireAuth(), express.json(), wrap(async (req, res) 
   const id = randomUUID();
   await q(`INSERT INTO chat_groups (id, name, created_by) VALUES ($1,$2,$3)`, [id, name, me]);
   for (const aid of valid) await q(`INSERT INTO chat_group_members (group_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [id, aid]);
-  res.json({ group: { id, name, memberCount: valid.length } });
+  // createdByMe (not the raw account id — the frontend's cached session has no
+  // account id to compare against, only staffId/username; computing the flag
+  // server-side sidesteps that entirely) drives whether the Delete button
+  // shows at all in GroupThread.jsx.
+  res.json({ group: { id, name, memberCount: valid.length, createdByMe: true } });
 }));
 
 // GET /api/groups — groups I'm in, with member count + last-message preview.
@@ -2483,7 +2537,7 @@ router.get("/api/groups", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const me = req.account.id;
   const groups = (await q(
-    `SELECT g.id, g.name,
+    `SELECT g.id, g.name, g.created_by,
             (SELECT COUNT(*)::int FROM chat_group_members m WHERE m.group_id = g.id) AS member_count
        FROM chat_groups g
        JOIN chat_group_members mine ON mine.group_id = g.id AND mine.account_id = $1
@@ -2493,7 +2547,7 @@ router.get("/api/groups", requireAuth(), wrap(async (req, res) => {
   for (const g of groups) {
     const last = (await q(`SELECT sender_id, kind, body, created_at, deleted_at FROM dm_messages WHERE convo_key = $1 ORDER BY created_at DESC LIMIT 1`, [`g:${g.id}`])).rows[0];
     out.push({
-      id: g.id, name: g.name, memberCount: g.member_count,
+      id: g.id, name: g.name, memberCount: g.member_count, createdByMe: g.created_by === me,
       lastMessage: last ? previewOf(last) : null, lastAt: last?.created_at || null,
       lastMine: last ? last.sender_id === me : false,
     });
@@ -2507,8 +2561,9 @@ router.get("/api/groups/:id/thread", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const me = req.account.id, gid = req.params.id;
   if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
-  const g = (await q(`SELECT id, name FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+  const g = (await q(`SELECT id, name, created_by FROM chat_groups WHERE id = $1`, [gid])).rows[0];
   if (!g) return res.status(404).json({ error: "NO_GROUP" });
+  const memberCount = (await q(`SELECT COUNT(*)::int AS n FROM chat_group_members WHERE group_id = $1`, [gid])).rows[0]?.n || 0;
   const rows = (await q(
     `SELECT d.id, d.sender_id, a.name AS sender_name, d.kind, d.body, d.media, d.created_at, d.read_at, d.edited_at, d.deleted_at
        FROM dm_messages d LEFT JOIN accounts a ON a.id = d.sender_id
@@ -2522,7 +2577,7 @@ router.get("/api/groups/:id/thread", requireAuth(), wrap(async (req, res) => {
   );
   const mapRow = mapMessageRow(me);
   res.json({
-    group: { id: g.id, name: g.name },
+    group: { id: g.id, name: g.name, memberCount, createdByMe: g.created_by === me },
     messages: rows.map((m) => ({ ...mapRow(m), sender: m.sender_name || "?" })),
   });
 }));
@@ -2555,6 +2610,65 @@ router.get("/api/groups/:id/members", requireAuth(), wrap(async (req, res) => {
   if (!(await isGroupMember(gid, req.account.id))) return res.status(403).json({ error: "NOT_MEMBER" });
   const rows = (await q(`SELECT a.id, a.name, a.username FROM chat_group_members m JOIN accounts a ON a.id = m.account_id WHERE m.group_id = $1 ORDER BY a.name`, [gid])).rows;
   res.json({ members: rows.map((r) => ({ id: r.id, name: r.name || r.username })) });
+}));
+
+// PATCH /api/groups/:id — rename and/or add/remove members (2026-07-31, "allow
+// me to edit and delete the groupchat"). Any current member can edit — this is
+// an internal staff tool, not a public chat app, so there's no separate
+// "admin" concept per group; deleting the whole group is more sensitive and
+// stays creator-only below.
+router.patch("/api/groups/:id", requireAuth(), express.json(), wrap(async (req, res) => {
+  await ensureReady();
+  const gid = req.params.id;
+  const me = req.account.id;
+  if (!(await isGroupMember(gid, me))) return res.status(403).json({ error: "NOT_MEMBER" });
+  const g = (await q(`SELECT id, name, created_by FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+  if (!g) return res.status(404).json({ error: "NO_GROUP" });
+
+  if (typeof req.body?.name === "string") {
+    const name = req.body.name.trim();
+    if (!name) return res.status(400).json({ error: "NO_NAME", message: "Give the group a name." });
+    await q(`UPDATE chat_groups SET name = $2 WHERE id = $1`, [gid, name]);
+  }
+
+  const addIds = Array.isArray(req.body?.addMemberIds) ? req.body.addMemberIds : [];
+  if (addIds.length) {
+    const valid = (await q(`SELECT id FROM accounts WHERE id = ANY($1)`, [addIds])).rows.map((r) => r.id);
+    for (const aid of valid) await q(`INSERT INTO chat_group_members (group_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [gid, aid]);
+  }
+
+  const removeIds = Array.isArray(req.body?.removeMemberIds) ? req.body.removeMemberIds : [];
+  if (removeIds.length) {
+    // Leave at least 2 members (creator + one other) — a "group" of one isn't
+    // a group anymore, and it'd otherwise strand the thread with no one able
+    // to message it.
+    const countRow = (await q(`SELECT COUNT(*)::int AS n FROM chat_group_members WHERE group_id = $1`, [gid])).rows[0];
+    const remaining = (countRow?.n || 0) - removeIds.length;
+    if (remaining < 2) return res.status(400).json({ error: "TOO_FEW", message: "A group needs at least 2 members." });
+    await q(`DELETE FROM chat_group_members WHERE group_id = $1 AND account_id = ANY($2)`, [gid, removeIds]);
+  }
+
+  const memberCount = (await q(`SELECT COUNT(*)::int AS n FROM chat_group_members WHERE group_id = $1`, [gid])).rows[0]?.n || 0;
+  const name = (await q(`SELECT name FROM chat_groups WHERE id = $1`, [gid])).rows[0]?.name;
+  res.json({ group: { id: gid, name, memberCount, createdByMe: g.created_by === me } });
+}));
+
+// DELETE /api/groups/:id — creator-only (2026-07-31): unlike renaming/
+// membership, deleting the whole group (and its message history for
+// everyone) is irreversible, so it's restricted to whoever made it rather
+// than any member.
+router.delete("/api/groups/:id", requireAuth(), wrap(async (req, res) => {
+  await ensureReady();
+  const gid = req.params.id;
+  const g = (await q(`SELECT id, created_by FROM chat_groups WHERE id = $1`, [gid])).rows[0];
+  if (!g) return res.status(404).json({ error: "NO_GROUP" });
+  if (g.created_by !== req.account.id) return res.status(403).json({ error: "NOT_CREATOR", message: "Only the person who created this group can delete it." });
+  // dm_messages has no FK to chat_groups (convo_key is a plain string shared
+  // with 1:1 DMs), so it isn't covered by chat_groups' ON DELETE CASCADE —
+  // clean it up explicitly or the group's messages would be orphaned forever.
+  await q(`DELETE FROM dm_messages WHERE convo_key = $1`, [`g:${gid}`]);
+  await q(`DELETE FROM chat_groups WHERE id = $1`, [gid]);
+  res.json({ deleted: true });
 }));
 
 export default router;
