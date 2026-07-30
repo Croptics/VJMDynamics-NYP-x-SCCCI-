@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail } from "lucide-react";
+import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail, Download, FileText } from "lucide-react";
 import { getBadges, getTrips, linkPhysicalBadge, emailPass } from "../../lib/claudeParse.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -263,6 +263,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const downOnBackdrop = useRef(false);
   const [copied, setCopied] = useState(false);
   const [printOne, setPrintOne] = useState(null);
+  const [selected, setSelected] = useState(() => new Set()); // ids picked for export
 
   // ---- Trip switcher (view/print another trip's passes without leaving
   // this screen) — local to this view, doesn't touch the parent's own trip
@@ -327,14 +328,42 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, data.coaches]);
 
-  /* ---- printing --------------------------------------------------------- */
+  /* ---- selection + printing / export ------------------------------------ */
   // "Print all" prints whatever the list is currently showing — so filtering to
   // e.g. "Not boarded" and printing gives just those passes, not the whole trip.
+  // When rows are ticked, print/export narrows to just those (select-all or a
+  // specific individual → one PDF).
   const filtered = search.trim() !== "" || filter !== "all";
-  const printList = printOne ? [printOne] : visible;
+  const selCount = selected.size;
+  const allVisibleSelected = visible.length > 0 && visible.every((d) => selected.has(d.id));
+  const toggleSel = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSelected((s) => {
+    if (visible.length && visible.every((d) => s.has(d.id))) { const n = new Set(s); visible.forEach((d) => n.delete(d.id)); return n; }
+    const n = new Set(s); visible.forEach((d) => n.add(d.id)); return n;
+  });
+  const clearSel = () => setSelected(new Set());
+  // Drop selections that fall out of the visible set (trip/filter change) so the
+  // count never lies about what will export.
+  useEffect(() => {
+    setSelected((s) => { if (!s.size) return s; const vis = new Set(visible.map((d) => d.id)); const n = new Set([...s].filter((id) => vis.has(id))); return n.size === s.size ? s : n; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  const printList = printOne ? [printOne] : (selCount ? visible.filter((d) => selected.has(d.id)) : visible);
+  // Both "Print" and "Save as PDF" go through the browser print sheet — the user
+  // just picks the destination (printer vs "Save as PDF") in the print dialog.
   const doPrint = (one) => {
     setPrintOne(one || null);
     setTimeout(() => { window.print(); setPrintOne(null); }, 80);
+  };
+  // Direct file download of a single delegate's branded QR (PNG) — a real
+  // download, distinct from the print path.
+  const downloadPng = (d) => {
+    const url = qr[d.id];
+    if (!url) return;
+    const a = document.createElement("a");
+    a.href = url; a.download = `boarding-pass-${d.qr_code || d.name}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
   };
 
   const copyCode = (code) => {
@@ -413,10 +442,24 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             ))}
           </select>
           <button className="btn btn-ghost" onClick={() => load()}><RefreshCw size={15} /> {t("Refresh")}</button>
+          <button className="btn btn-ghost" onClick={() => doPrint(null)} disabled={!visible.length} title={t("Opens the print dialog — choose \"Save as PDF\"")}>
+            <FileText size={15} /> {selCount ? `${t("Save PDF")} (${selCount})` : t("Save as PDF")}
+          </button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
-            <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
+            <Printer size={15} /> {selCount ? `${t("Print")} (${selCount})` : filtered ? `${t("Print filtered")} (${visible.length})` : `${t("Print all")} (${visible.length})`}
           </button>
         </div>
+      </div>
+
+      {/* Selection bar — pick all or specific delegates, then Print / Save as PDF */}
+      <div className="mg-screen-only row" style={{ gap: 12, alignItems: "center", margin: "0 2px 10px", fontSize: 12.5, flexWrap: "wrap" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontWeight: 600, color: "var(--ink-2)" }}>
+          <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} disabled={!visible.length} />
+          {t("Select all")}{filtered ? ` (${t("shown")})` : ""}
+        </label>
+        {selCount > 0
+          ? <><span className="muted">{selCount} {t("selected")}</span><button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 10px" }} onClick={clearSel}>{t("Clear")}</button></>
+          : <span className="muted">{t("Tick delegates to export just those, or use the buttons above for all.")}</span>}
       </div>
 
       {/* Search + filter tabs */}
@@ -456,7 +499,10 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             {g.items.map((d) => {
               const meta = STATUS_META[d.status] || STATUS_META.UNASSIGNED;
               return (
-                <button key={d.id} className="mg-passrow" onClick={() => setOpen(d)}>
+                <div key={d.id} className="mg-passrow-wrap" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                  <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSel(d.id)}
+                    aria-label={`${t("Select")} ${d.name}`} style={{ flexShrink: 0, width: 16, height: 16, cursor: "pointer" }} />
+                <button className="mg-passrow" style={{ marginBottom: 0, flex: 1 }} onClick={() => setOpen(d)}>
                   <span className="avatar" style={{ flexShrink: 0 }}>{initialsOf(d.name)}</span>
                   <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
                     <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
@@ -476,6 +522,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                   </span>
                   <QrCode size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
                 </button>
+                </div>
               );
             })}
           </div>
@@ -536,10 +583,15 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                 {emailMsg && <div style={{ fontSize: 12, marginTop: 5, textAlign: "center", color: emailMsg.ok ? "var(--st-present)" : "var(--st-missing)" }}>{emailMsg.text}</div>}
               </div>
             )}
-            <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
-              <button className="btn btn-ghost btn-block" onClick={() => copyCode(open.qr_code)}>
-                {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? t("Copied") : t("Copy code")}
-              </button>
+            <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "grid", gap: 8 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn btn-ghost btn-block" onClick={() => copyCode(open.qr_code)}>
+                  {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? t("Copied") : t("Copy code")}
+                </button>
+                <button className="btn btn-ghost btn-block" onClick={() => downloadPng(open)} disabled={!qr[open.id]}>
+                  <Download size={15} /> {t("Download")}
+                </button>
+              </div>
               <button className="btn btn-primary btn-block" onClick={() => doPrint(open)}>
                 <Printer size={15} /> {t("Print pass")}
               </button>
@@ -552,17 +604,26 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
         <PassLinker delegate={linking} onLink={(code) => doLink(linking.id, code)} onClose={() => setLinking(null)} />
       )}
 
-      {/* Print-only sheet (all passes, or just one when printing a single pass) */}
+      {/* Print/PDF-only sheet — a designed boarding-pass card per delegate.
+          Shows the current print scope (single pass, ticked selection, or the
+          whole filtered list). */}
       <div className="mg-print-sheet">
+        <div className="mg-print-title">
+          MusterGo — {printList.length} {printList.length === 1 ? "boarding pass" : "boarding passes"}
+          {currentTrip ? ` · ${currentTrip.name}` : ""}
+        </div>
         {printList.map((d) => (
           <div key={d.id} className="mg-pass">
-            {qr[d.id] && <img src={qr[d.id]} alt="" width={150} height={150} />}
-            <div className="mg-pass-name">{d.name}</div>
-            {d.role && <div className="mg-pass-sub">{d.role}</div>}
-            <div className="mg-pass-company"><CompanyLogo company={d.company} logoUrl={d.logo_url} website={d.website} size={16} /> <span>{d.company || ""}</span></div>
-            {d.industry && <div className="mg-pass-sub">{d.industry}</div>}
-            <div className="mg-pass-sub">{coachLabel(coachOf(d.coach_id))}</div>
-            <div className="mg-pass-code">{d.qr_code}</div>
+            <div className="mg-pass-band">MusterGo · Boarding Pass</div>
+            <div className="mg-pass-body">
+              {qr[d.id] && <img className="mg-pass-qr" src={qr[d.id]} alt="" width={172} height={172} />}
+              <div className="mg-pass-code">{d.qr_code}</div>
+              <div className="mg-pass-name">{d.name}{d.vip ? " ★" : ""}</div>
+              <div className="mg-pass-sub">{d.role || "Delegate"}{d.company ? ` · ${d.company}` : ""}</div>
+              {d.industry && <div className="mg-pass-sub2">{d.industry}</div>}
+              <div className="mg-pass-sub2">{coachLabel(coachOf(d.coach_id))}</div>
+            </div>
+            <div className="mg-pass-foot">Show this QR at muster to board</div>
           </div>
         ))}
       </div>
@@ -574,17 +635,24 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
         .mg-print-sheet{display:none}
-        .mg-pass-company{display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;font-weight:600;margin-top:5px}
         @media print {
           body * { visibility: hidden !important; }
           .mg-print-sheet, .mg-print-sheet * { visibility: visible !important; }
           .mg-print-sheet{display:grid !important;position:absolute;left:0;top:0;width:100%;
-            grid-template-columns:repeat(3,1fr);gap:10px;
+            grid-template-columns:repeat(2,1fr);gap:14px;padding:10px;
+            font-family:-apple-system,Segoe UI,Arial,sans-serif;
             -webkit-print-color-adjust:exact;print-color-adjust:exact}
-          .mg-pass{break-inside:avoid;border:1px solid #bbb;border-radius:8px;padding:10px;text-align:center}
-          .mg-pass-name{font-weight:700;font-size:13px;margin-top:6px}
-          .mg-pass-sub{font-size:11px;color:#555}
-          .mg-pass-code{font-family:monospace;font-size:11px;margin-top:4px}
+          .mg-print-title{grid-column:1 / -1;font-size:13px;font-weight:800;color:#111;
+            padding-bottom:4px;border-bottom:2px solid #e1232a;margin-bottom:2px}
+          .mg-pass{break-inside:avoid;border:1px solid #ddd;border-radius:12px;overflow:hidden;text-align:center}
+          .mg-pass-band{background:#e1232a;color:#fff;font-weight:800;font-size:11.5px;letter-spacing:.3px;padding:8px 10px}
+          .mg-pass-body{padding:14px 12px 8px}
+          .mg-pass-qr{border-radius:8px}
+          .mg-pass-code{font-family:monospace;font-size:13px;font-weight:700;letter-spacing:1px;margin-top:8px;color:#111}
+          .mg-pass-name{font-weight:800;font-size:15px;margin-top:8px;color:#111}
+          .mg-pass-sub{font-size:11.5px;color:#444;margin-top:3px}
+          .mg-pass-sub2{font-size:10.5px;color:#777;margin-top:2px}
+          .mg-pass-foot{font-size:10px;color:#999;padding:8px 10px;border-top:1px dashed #ddd}
         }
       `}</style>
     </div>
