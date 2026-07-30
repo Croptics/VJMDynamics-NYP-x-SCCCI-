@@ -9,7 +9,7 @@
  * (2026-07-21). Everything here requires the "manageAccounts" permission. */
 import { Router } from "express";
 import { wrap } from "../lib/wrap.js";
-import { makeToken, requirePermission } from "../lib/auth.js";
+import { makeToken, requirePermission, requireAccountsView } from "../lib/auth.js";
 import {
   listAccounts, createAccount, updateAccount, deleteAccount, listActiveAccounts,
   listRoleTemplates, createRoleTemplate, updateRoleTemplate, deleteRoleTemplate,
@@ -24,7 +24,7 @@ const router = Router();
  * every client already makes (see touchLastSeen() in data.js) — no new
  * client-side polling infra.
  */
-router.get("/api/staff/active-sessions", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+router.get("/api/staff/active-sessions", requireAccountsView(), wrap(async (_req, res) => {
   const [all, active] = await Promise.all([listAccounts(), listActiveAccounts()]);
   // Role breakdown for the Staff operations "Total staff accounts" tile —
   // role is "admin" or "staff" only (see cleanRole()/accountPublic() in data.js).
@@ -33,7 +33,7 @@ router.get("/api/staff/active-sessions", requirePermission("manageAccounts"), wr
   res.json({ totalStaff: all.length, adminCount, staffCount, activeCount: active.length, active });
 }));
 
-router.get("/api/accounts", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+router.get("/api/accounts", requireAccountsView(), wrap(async (_req, res) => {
   res.json({ accounts: await listAccounts() });
 }));
 
@@ -66,7 +66,7 @@ router.delete("/api/accounts/:id", requirePermission("manageAccounts"), wrap(asy
 
 // Self-registration approval queue (2026-07-24) — "Pending approval" section
 // on Account control. Same manageAccounts gate as the rest of this file.
-router.get("/api/accounts/pending", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+router.get("/api/accounts/pending", requireAccountsView(), wrap(async (_req, res) => {
   res.json({ accounts: await listPendingAccounts() });
 }));
 
@@ -97,7 +97,7 @@ router.post("/api/accounts/pending/reject-all", requirePermission("manageAccount
 // Role templates — "Manage roles" screen. Same manageAccounts gate as the
 // rest of Account control (creating/editing a role is itself an account-
 // administration action).
-router.get("/api/role-templates", requirePermission("manageAccounts"), wrap(async (_req, res) => {
+router.get("/api/role-templates", requireAccountsView(), wrap(async (_req, res) => {
   res.json({ templates: await listRoleTemplates() });
 }));
 

@@ -128,6 +128,29 @@ export function requirePermission(perm) {
 }
 
 /**
+ * Gate for the READ side of Account control (GET routes only). Passes for
+ * anyone with "manageAccounts", OR a read-only Admin — a read-only Admin's
+ * whole point is full visibility with zero write capability (see
+ * accountPermissions() in db/accounts.js, which zeroes "manageAccounts" for
+ * them same as every other action-group key), so a plain requirePermission()
+ * check would lock them out of even VIEWING this page. The mutating routes
+ * (POST/PATCH/DELETE below) stay on requirePermission("manageAccounts"),
+ * which a read-only Admin still correctly fails.
+ */
+export function requireAccountsView() {
+  return wrap(async (req, res, next) => {
+    const acc = await accountFromReq(req);
+    if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please sign in again." });
+    const isReadOnlyAdmin = acc.role === "admin" && !!acc.readOnly;
+    if (!accountPermissions(acc).manageAccounts && !isReadOnlyAdmin) {
+      return res.status(403).json({ error: "FORBIDDEN", message: "You don't have permission for that action." });
+    }
+    req.account = acc;
+    next();
+  });
+}
+
+/**
  * Like requireKioskOrAuth(), but the SIGNED-IN-SESSION path additionally
  * requires `perm` (the passwordless kiosk token path is unaffected either
  * way — it never carried per-permission checks and still doesn't; the kiosk

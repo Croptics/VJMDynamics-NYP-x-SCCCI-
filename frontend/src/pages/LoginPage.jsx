@@ -6,13 +6,13 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
-import PasskeySignIn from "../components/PasskeySignIn.jsx";
+import { usePasskeySignIn, biometricLabel } from "../components/PasskeySignIn.jsx";
 
 // One-time cleanup: earlier builds stored the plaintext password in
 // localStorage under these two keys, across two iterations of a since-removed
@@ -102,23 +102,59 @@ export default function LoginPage({ onSignIn }) {
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
 
+  // Biometric sign-in (Vimal — components/PasskeySignIn.jsx), merged into
+  // this single "Sign in" button (2026-07-30, "merge these 2 buttons
+  // together... only do the biometric sign-in [if set up], if not then
+  // follow the normal login"): submit() below tries passkey.attempt() FIRST
+  // whenever this device has one set up, and silently falls through to the
+  // normal Staff ID + password flow otherwise.
+  const passkey = usePasskeySignIn({ staffId, keep, onSignedIn: () => onSignIn?.() });
+
+  // Auto-attempt biometric sign-in ONCE per real page load (2026-07-30 —
+  // "set the login by face to be one time until i exit the page... then
+  // re-scan to login, like real application logic"): as soon as this device
+  // is known to have a passkey set up, fire the OS prompt automatically with
+  // no click needed — the `triedRef` guard means it only ever fires once for
+  // this mount, so cancelling it (or it failing) drops you straight into the
+  // normal form with no repeat prompting; leaving /login and coming back
+  // (a real remount) is what makes it eligible to auto-fire again. Silent on
+  // failure — same "just fall through to the manual form" rule as submit().
+  // Requires a known Staff ID (typed or remembered) — NOT just "some account
+  // somewhere has a passkey" (usePasskeySignIn falls back to that broader
+  // `anyRegistered` signal only for a deliberate, user-clicked blank-field
+  // attempt). Auto-firing on that broader signal would pop an OS biometric
+  // prompt for ANY visitor landing on a blank login form the moment a single
+  // account anywhere had ever registered a passkey — unrelated to whether
+  // this device or this visitor has anything enrolled at all.
+  const triedRef = useRef(false);
+  useEffect(() => {
+    if (triedRef.current || !staffId.trim() || !passkey.available || !passkey.registered) return;
+    triedRef.current = true;
+    passkey.attempt();
+  }, [staffId, passkey.available, passkey.registered, passkey.attempt]);
+
   async function submit() {
     setError("");
-
-    if (!staffId.trim() || !password) {
-      setError("Please enter your Staff ID and password.");
-      return;
-    }
-
     setSubmitting(true);
     try {
-      const { token, name, role, username, permissions } = await apiPost("/auth/login", {
+      if (passkey.available && passkey.registered) {
+        const signedInViaPasskey = await passkey.attempt();
+        if (signedInViaPasskey) return; // token/user already saved, onSignIn already fired
+        // else: fall through to the normal password flow below
+      }
+
+      if (!staffId.trim() || !password) {
+        setError("Please enter your Staff ID and password.");
+        return;
+      }
+
+      const { token, name, role, readOnly, username, permissions } = await apiPost("/auth/login", {
         staffId: staffId.trim(),
         password,
       });
       if (token) {
         setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
-        setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, permissions }, keep);
+        setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, readOnly, permissions }, keep);
         // See REMEMBER_KEY note at the top of this file for why this stores
         // the actual password (a deliberate, requested trade-off) rather
         // than relying on the browser's own save-password prompt.
@@ -201,6 +237,7 @@ export default function LoginPage({ onSignIn }) {
             className="input"
             placeholder="e.g. SCCCI132"
             value={staffId}
+            disabled={submitting || passkey.busy}
             onChange={(e) => setStaffId(e.target.value)}
           />
 
@@ -214,6 +251,7 @@ export default function LoginPage({ onSignIn }) {
               type={showPw ? "text" : "password"}
               placeholder="............"
               value={password}
+              disabled={submitting}
               onChange={(e) => setPassword(e.target.value)}
               style={{ paddingRight: 42 }}
             />
@@ -250,15 +288,24 @@ export default function LoginPage({ onSignIn }) {
             </button>
           </div>
 
-          <button type="submit" className="btn btn-primary btn-block" disabled={submitting}>
-            {submitting ? t("Signing in…") : t("Sign in")}
+          <button type="submit" className="btn btn-primary btn-block" disabled={submitting || passkey.busy}>
+            {passkey.busy ? t("Waiting for your device…") : submitting ? t("Signing in…") : t("Sign in")}
           </button>
 
-          {/* Passkey sign-in (Vimal) — Face ID / Touch ID / fingerprint /
-              Windows Hello. Self-contained in components/PasskeySignIn.jsx and
-              renders NOTHING unless the device supports it and a passkey is
-              registered, so this file stays otherwise untouched. */}
-          <PasskeySignIn staffId={staffId} keep={keep} t={t} onSignedIn={() => onSignIn?.()} />
+          {/* Merged biometric sign-in (2026-07-30) — no separate button
+              anymore. submit() above tries Face ID / Touch ID / fingerprint /
+              Windows Hello FIRST whenever this device has one set up
+              (usePasskeySignIn(), Vimal's components/PasskeySignIn.jsx), and
+              silently falls back to this same button's normal Staff ID +
+              password flow otherwise. It also now auto-fires once on page
+              load (see the useEffect above submit()), so `passkey.busy` can
+              go true before the button is ever clicked — the label reflects
+              that so the OS prompt doesn't look like the page just hung. */}
+          {passkey.available && passkey.registered && (
+            <p className="muted" style={{ fontSize: 12, textAlign: "center", marginTop: 10 }}>
+              {t("Uses")} {biometricLabel()} {t("on this device if you've set it up.")}
+            </p>
+          )}
 
           {/* Quick Scanner Access — DELIBERATELY passwordless, per the
               user's explicit request ("Allow any user to open and load the

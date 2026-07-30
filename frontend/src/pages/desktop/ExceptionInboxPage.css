@@ -118,13 +118,21 @@
 .exc-resolved-meta { display: block; margin-top: 3px; font-size: 11.5px; color: var(--st-present); }
 
 /* ---- Row actions -------------------------------------------------------- */
-.exc-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+/* nowrap (2026-07-30 — "the all, critical, resolved tab are consistent, pls
+   do the same for open tab"): an OPEN, non-critical ticket renders 4 buttons
+   here (Resolve + Escalate + Override/Present + Delete) — one more than
+   Critical tickets (no Escalate, already critical) or Resolved ones (Delete
+   only) ever show. flex-wrap:wrap let the table column stay too narrow for
+   4 and pushed Delete onto its own line instead of growing the column to
+   fit, which is what a table cell should do by default. */
+.exc-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: nowrap; }
 .exc-present-tag {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 12.5px; font-weight: 600; color: var(--st-present);
   background: var(--st-present-bg); padding: 5px 10px; border-radius: var(--r-sm);
 }
 .exc-btn-sm {
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
   font-size: 13px; padding: 6px 12px; border-radius: var(--r-sm);
   border: 1px solid var(--line); background: var(--surface); font-weight: 600; color: var(--ink-2);
 }

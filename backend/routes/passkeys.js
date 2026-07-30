@@ -273,6 +273,7 @@ router.post("/api/passkeys/login/verify", wrap(async (req, res) => {
   res.json({
     token: makeToken(acc.username, acc.token_version ?? 0),
     role: acc.role,
+    readOnly: !!acc.readOnly,
     name: acc.name,
     username: acc.username,
     permissions: accountPermissions(acc),

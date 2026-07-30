@@ -26,6 +26,7 @@ import { wrap } from "../lib/wrap.js";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { actorOf } from "../lib/actor.js";
 import { all, get } from "../db/connection.js";
+import { resolveTripUuid } from "../db/dashboard.js";
 import { logActivity } from "../db/history.js";
 import { createEscalation, listOpenEscalations, listActiveEscalations, acknowledgeEscalation, acknowledgeAllOpen, resolveEscalation } from "../db/escalations.js";
 import { sendEscalationEmails, sendEscalationSms, sendEscalationWhatsApp, buildEscalationHtml } from "../lib/notify.js";
@@ -92,13 +93,30 @@ async function resolveEmailRecipients(recipientEmails, tripId) {
   return [...allowed];
 }
 
+// HARDENING (2026-07-30, JQ): every tripId below is resolved through
+// resolveTripUuid() before it reaches a query. escalations.trip_id and
+// trips.uuid_id are both UUID-typed, and Postgres validates a parameter's
+// shape against the column type before comparing values — so the legacy short
+// id "t-1" (JQ's seeded primary trip, still used by the Dashboard/mobile)
+// didn't just fail to match, it threw `invalid input syntax for type uuid`
+// and 500'd. Today's callers happen to pass an already-resolved uuid, so this
+// wasn't live-reachable, but it's the same bug that WAS live in desmond.js
+// (fixed the same day) and every other route file already resolves here.
+// tripId is an optional refinement on this route (it only floats the trip's
+// own lead to the top of the list), so an id that resolves to nothing is
+// simply ignored rather than 404'd.
 router.get("/api/escalations/recipients", requireAuth(), wrap(async (req, res) => {
-  res.json({ recipients: await listRecipientCandidates(req.query.tripId) });
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  res.json({ recipients: await listRecipientCandidates(tripUuid) });
 }));
 
 router.post("/api/escalations", requirePermission("manageDelegates"), wrap(async (req, res) => {
   const { tripId, delegateId, message, recipientEmails } = req.body || {};
-  const escalation = await createEscalation({ tripId, delegateId, message }, actorOf(req));
+  // Resolved before it reaches escalations.trip_id (UUID) — see the comment on
+  // GET /api/escalations/recipients above. Nullable column, so an id that
+  // resolves to nothing stores as "not tied to a trip" rather than erroring.
+  const tripUuid = tripId ? await resolveTripUuid(tripId) : null;
+  const escalation = await createEscalation({ tripId: tripUuid, delegateId, message }, actorOf(req));
 
   // Dedupe hit (2026-07-25) — same delegate already has an open escalation,
   // so this is a re-click, not a new emergency. Skip re-notifying entirely
@@ -170,7 +188,18 @@ router.get("/api/escalations/open", requireAuth(), wrap(async (_req, res) => {
 // Scoped to ?tripId= (the Dashboard's currently viewed trip) — see
 // listActiveEscalations()'s own doc for the bug this fixes.
 router.get("/api/escalations/active", requireAuth(), wrap(async (req, res) => {
-  res.json({ escalations: await listActiveEscalations(req.query.tripId || null) });
+  // Resolved before it reaches the UUID-typed filter — see the comment on
+  // GET /api/escalations/recipients above. Unlike that route, tripId here is a
+  // real FILTER, so an explicitly-passed id that resolves to nothing returns
+  // an empty list rather than falling through to listActiveEscalations(null),
+  // which would show EVERY trip's escalations — the exact cross-trip bleed
+  // that function's own doc comment says the tripId scoping was added to fix.
+  if (req.query.tripId) {
+    const tripUuid = await resolveTripUuid(req.query.tripId);
+    if (!tripUuid) return res.json({ escalations: [] });
+    return res.json({ escalations: await listActiveEscalations(tripUuid) });
+  }
+  res.json({ escalations: await listActiveEscalations(null) });
 }));
 
 // Small shared lookup for the History Log entry logged on acknowledge/

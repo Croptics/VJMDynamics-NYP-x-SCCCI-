@@ -28,6 +28,7 @@ const EMPTY_FORM = {
   phone: "",
   password: "",
   role: "staff",
+  readOnly: false,
   perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
 };
 
@@ -391,6 +392,7 @@ export default function AccountControlPage() {
       password: "",
       perms,
       role: a.role === "admin" ? "admin" : "staff",
+      readOnly: !!a.readOnly,
     });
     setFormErr("");
     setCollapsedGroups(new Set(PERM_GROUPS.map((g) => g.key)));
@@ -402,7 +404,11 @@ export default function AccountControlPage() {
   }
 
   function selectRole(role) {
-    setForm((f) => ({ ...f, role, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
+    setForm((f) => ({ ...f, role, readOnly: role === "admin" ? f.readOnly : false, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
+  }
+
+  function toggleReadOnly() {
+    setForm((f) => ({ ...f, readOnly: !f.readOnly }));
   }
 
   function applyTemplate(templateId) {
@@ -463,6 +469,7 @@ export default function AccountControlPage() {
       username: form.username.trim(),
       name: form.name.trim(),
       role: form.role,
+      readOnly: form.role === "admin" && form.readOnly,
       permissions: form.perms,
     };
     if (form.password) payload.password = form.password; // blank on edit = keep current
@@ -852,7 +859,9 @@ export default function AccountControlPage() {
                     </td>
                     <td>
                       {isAdmin ? (
-                        <span className="badge badge-missing">{t("Full access")}</span>
+                        a.readOnly
+                          ? <span className="badge badge-normal">{t("Read-only")}</span>
+                          : <span className="badge badge-missing">{t("Full access")}</span>
                       ) : matchedTpl ? (
                         <span className="badge badge-normal" style={{ padding: "2px 8px" }}>{matchedTpl.label}</span>
                       ) : (
@@ -984,6 +993,18 @@ export default function AccountControlPage() {
                 ? t("Admins bypass every check below — full access to every tab and feature.")
                 : t("Staff are limited to exactly what's ticked below.")}
             </p>
+
+            {form.role === "admin" && (
+              <label className="row" style={{ gap: 8, marginTop: 10, alignItems: "flex-start", cursor: "pointer" }}>
+                <input type="checkbox" checked={form.readOnly} onChange={toggleReadOnly} style={{ marginTop: 3 }} />
+                <span>
+                  <span style={{ fontWeight: 600 }}>{t("Read-only access")}</span>
+                  <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                    {t("Sees every tab and feature like a normal Admin, but can't create, edit, delete, or check anyone in — including creating new accounts here.")}
+                  </p>
+                </span>
+              </label>
+            )}
 
             {form.role === "staff" && (
               <>

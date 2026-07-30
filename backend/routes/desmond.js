@@ -58,7 +58,7 @@ import { Router } from "express";
 import pg from "pg";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { actorOf } from "../lib/actor.js";
-import { syncTripDayOf } from "../db/dashboard.js";
+import { syncTripDayOf, resolveTripUuid } from "../db/dashboard.js";
 // Read-only import of JQ's own write helper (2026-07-25 fix, JQ) — see the
 // attendance POST route below for why: marking someone's attendance here
 // used to only touch checkpoint_checkins, leaving the Dashboard/All-
@@ -232,6 +232,45 @@ const router = Router();
 const readAccess = requireAuth();
 const writeAccess = requirePermission("manageTrips");
 
+/* ---- Trip-id resolution (FIX 2026-07-30, JQ) --------------------------------
+ * Every trip-scoped column in this file's queries is UUID-typed (trips.uuid_id,
+ * coaches.trip_id, delegates.trip_id, itinerary_items.trip_id,
+ * trip_event_log.trip_id, attendance_log.trip_id). The caller-supplied trip id,
+ * though, may legitimately be the base app's LEGACY short id "t-1" (JQ's
+ * seeded primary Beijing trip, which the Dashboard/mobile surfaces still use)
+ * rather than a real uuid.
+ *
+ * This file used to pass that id STRAIGHT into those queries. Postgres
+ * validates a parameter's shape against the column type before it ever
+ * compares values, so "t-1" didn't simply fail to match — it threw
+ * `invalid input syntax for type uuid: "t-1"` (SQLSTATE 22P02) and the route
+ * 500'd. Not display-only: it blocked real usage (an empty "Move to coach"
+ * dropdown because GET /coaches 500'd, and POST /api/delegates failing
+ * outright on the primary trip).
+ *
+ * Every other route file in the backend (announcements/checkpoints/dashboard/
+ * delegates/exceptions/export/history/insights/roomAssign) already funnels the
+ * caller's id through resolveTripUuid() for exactly this reason — this file was
+ * the only one that never did. resolveTripUuid() maps "t-1" to its real uuid,
+ * passes a real uuid through unchanged, and returns null for anything else
+ * (including garbage, which is why no separate "is it t-1" branch is needed).
+ *
+ * Used as route middleware on every `:tripId` path so the handler can just read
+ * req.tripUuid. A 404 here (rather than the previous 500) is also the correct
+ * answer for an id that resolves to no trip at all. Routes taking the id from
+ * the BODY or QUERY STRING instead resolve it inline — same call, same reason.
+ * -------------------------------------------------------------------------- */
+async function withTripUuid(req, res, next) {
+  try {
+    const tripUuid = await resolveTripUuid(req.params.tripId);
+    if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+    req.tripUuid = tripUuid;
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 /* ---- Helpers -------------------------------------------------------------- */
 
 /** Mirrors data.js's own nextId() exactly so new delegate ids stay in the
@@ -299,20 +338,23 @@ export async function recordEvent(tripId, req, { action, entity, entityId = null
   }
 }
 
-router.get("/api/trips/:tripId/activity", readAccess, wrap(async (req, res) => {
-  res.json({ activity: ACTIVITY.get(req.params.tripId) || [] });
+// ACTIVITY is keyed by the RESOLVED uuid (recordEvent/logActivity are called
+// with the resolved id everywhere below), so this read has to resolve too or
+// "t-1" would look up a key nothing ever writes to and always read empty.
+router.get("/api/trips/:tripId/activity", readAccess, withTripUuid, wrap(async (req, res) => {
+  res.json({ activity: ACTIVITY.get(req.tripUuid) || [] });
 }));
 
 // Persisted before/after audit for one trip, newest first. Powers the board's
 // History panel. Separate from the ephemeral /activity feed above (which is
 // in-memory and resets on restart); this reads the durable trip_event_log.
-router.get("/api/trips/:tripId/audit", readAccess, wrap(async (req, res) => {
+router.get("/api/trips/:tripId/audit", readAccess, withTripUuid, wrap(async (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
   const events = await all(
     `SELECT id, actor, action, entity, entity_id AS "entityId", summary,
             before_data AS "before", after_data AS "after", at
        FROM trip_event_log WHERE trip_id = $1 ORDER BY at DESC LIMIT $2`,
-    [req.params.tripId, limit]
+    [req.tripUuid, limit]
   );
   res.json({ events });
 }));
@@ -350,12 +392,12 @@ router.get("/api/my-captain-coaches", readAccess, wrap(async (req, res) => {
 // why this router can't observe those requests directly. Cosmetic (an
 // activity-feed entry, not a real mutation), so any signed-in user, same as
 // the original design.
-router.post("/api/trips/:tripId/activity", readAccess, wrap(async (req, res) => {
+router.post("/api/trips/:tripId/activity", readAccess, withTripUuid, wrap(async (req, res) => {
   const { text, kind, before, after } = req.body || {};
   if (!text || !String(text).trim()) {
     return res.status(400).json({ error: "TEXT_REQUIRED", message: "Activity text is required." });
   }
-  const entry = logActivity(req.params.tripId, String(text).trim(), kind);
+  const entry = logActivity(req.tripUuid, String(text).trim(), kind);
   // Also persist to the durable audit so client-reported actions (delegate
   // reassign / remove, which happen through JQ's routes and so can't be logged
   // server-side here — see file header) show up in the History panel too, with
@@ -364,7 +406,7 @@ router.post("/api/trips/:tripId/activity", readAccess, wrap(async (req, res) => 
     await run(
       `INSERT INTO trip_event_log (id, trip_id, actor, action, entity, entity_id, summary, before_data, after_data)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [`evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, req.params.tripId, actorOf(req) || "System",
+      [`evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, req.tripUuid, actorOf(req) || "System",
        `reported.${kind || "system"}`, "delegate", null, String(text).trim().slice(0, 300),
        before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]
     );
@@ -416,8 +458,8 @@ router.get("/api/all-trips", readAccess, wrap(async (_req, res) => {
   });
 }));
 
-router.get("/api/trips/:tripId/summary", readAccess, wrap(async (req, res) => {
-  const trip = await get(`SELECT * FROM trips WHERE uuid_id = $1`, [req.params.tripId]);
+router.get("/api/trips/:tripId/summary", readAccess, withTripUuid, wrap(async (req, res) => {
+  const trip = await get(`SELECT * FROM trips WHERE uuid_id = $1`, [req.tripUuid]);
   if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
 
   const coachRow = await get(`SELECT COUNT(*) AS c FROM coaches WHERE trip_id = $1`, [trip.uuid_id]);
@@ -543,7 +585,7 @@ router.post("/api/trips", writeAccess, wrap(async (req, res) => {
   res.status(201).json(trip);
 }));
 
-router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
+router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, res) => {
   const b = req.body || {};
   const sets = [];
   const params = [];
@@ -579,9 +621,9 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   if (sets.length === 0) return res.status(400).json({ error: "NO_FIELDS", message: "Nothing to update." });
   const tripBefore = await get(
     `SELECT name, status, "dateRange", "lead", "dayOf", "totalDays", "startDate" FROM trips WHERE uuid_id = $1`,
-    [req.params.tripId]
+    [req.tripUuid]
   );
-  params.push(req.params.tripId);
+  params.push(req.tripUuid);
   let trip = await get(
     `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
      RETURNING uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo"`,
@@ -591,14 +633,14 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   // A new startDate, or clearing the manual override, means "dayOf" may now
   // be stale — recompute immediately rather than waiting for the next tick.
   if (b.startDate !== undefined || b.resetDayOfAuto === true) {
-    await syncTripDayOf(req.params.tripId);
+    await syncTripDayOf(req.tripUuid);
     trip = await get(
       `SELECT uuid_id AS id, name, "dateRange", status, "lead", "dayOf", "totalDays", "startDate", "dayOfIsManual", "departureTime", "countryFrom", "countryTo" FROM trips WHERE uuid_id = $1`,
-      [req.params.tripId]
+      [req.tripUuid]
     );
   }
-  await recordEvent(req.params.tripId, req, {
-    action: "trip.update", entity: "trip", entityId: req.params.tripId, kind: "system",
+  await recordEvent(req.tripUuid, req, {
+    action: "trip.update", entity: "trip", entityId: req.tripUuid, kind: "system",
     summary: `Trip details for "${trip.name}" were updated.`,
     before: tripBefore && { name: tripBefore.name, status: tripBefore.status, dateRange: tripBefore.dateRange, lead: tripBefore.lead, dayOf: tripBefore.dayOf, totalDays: tripBefore.totalDays, startDate: tripBefore.startDate },
     after: { name: trip.name, status: trip.status, dateRange: trip.dateRange, lead: trip.lead, dayOf: trip.dayOf, totalDays: trip.totalDays, startDate: trip.startDate },
@@ -606,8 +648,8 @@ router.patch("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
   res.json(trip);
 }));
 
-router.delete("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
-  const trip = await get(`SELECT id, uuid_id, name FROM trips WHERE uuid_id = $1`, [req.params.tripId]);
+router.delete("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, res) => {
+  const trip = await get(`SELECT id, uuid_id, name FROM trips WHERE uuid_id = $1`, [req.tripUuid]);
   if (!trip) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
   // Guard the base app's primary trip (id "t-1"): JQ's Dashboard hard-depends
   // on it, so it must never be deletable from here.
@@ -633,10 +675,17 @@ router.delete("/api/trips/:tripId", writeAccess, wrap(async (req, res) => {
 /* =============================================================================
  *  Coaches
  * ========================================================================== */
-router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
+router.get("/api/trips/:tripId/coaches", readAccess, withTripUuid, wrap(async (req, res) => {
+  // FIX (2026-07-30, JQ): c.name/c.city weren't selected, so any consumer of
+  // this list (e.g. MobileTripsPage.jsx's DelegateSheet, which shows "Coach
+  // 4 · Suzhou" the same way MobileAttendancePage.jsx's own coachName()
+  // helper does — [c.name, c.city].filter(Boolean).join(" · ")) could only
+  // ever fall back to the bare c.label ("C3"). Coaches created through this
+  // board's own forms never set city at all (no field for it) — that's
+  // expected, not a bug; the join naturally degrades to name-only for those.
   const coaches = await all(`
     SELECT
-      c.id, c.label, c.capacity, c.sort_order AS "sortOrder",
+      c.id, c.label, c.name, c.city, c.capacity, c.sort_order AS "sortOrder",
       c.staff_user_id AS "staffUserId", u.name AS "staffName", c.driver_name AS "driverName",
       c.account_id AS "accountId", a.name AS "captainName", a.username AS "captainUsername",
       COALESCE(c.arrival_status, 'not_arrived') AS "arrivalStatus",
@@ -648,9 +697,9 @@ router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
     LEFT JOIN accounts a ON a.id = c.account_id
     LEFT JOIN delegates d ON d."coachId" = c.id
     WHERE c.trip_id = $1
-    GROUP BY c.id, c.label, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name, c.account_id, a.name, a.username, c.arrival_status
+    GROUP BY c.id, c.label, c.name, c.city, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name, c.account_id, a.name, a.username, c.arrival_status
     ORDER BY c.sort_order
-  `, [req.params.tripId]);
+  `, [req.tripUuid]);
 
   res.json({
     coaches: coaches.map((c) => ({ ...c, boarded: Number(c.boarded), missing: Number(c.missing), total: Number(c.total) })),
@@ -662,16 +711,16 @@ router.get("/api/trips/:tripId/coaches", readAccess, wrap(async (req, res) => {
 // Deliberately separate from the per-coach PATCH /api/coaches/:id below —
 // that one already exists for adjusting a single coach; this is for "make
 // them all X" instead of editing each one individually.
-router.patch("/api/trips/:tripId/coaches/capacity", writeAccess, wrap(async (req, res) => {
+router.patch("/api/trips/:tripId/coaches/capacity", writeAccess, withTripUuid, wrap(async (req, res) => {
   const capacity = Math.min(200, Math.max(1, Math.floor(Number(req.body?.capacity) || 0)));
   if (!capacity) return res.status(400).json({ error: "BAD_CAPACITY", message: "capacity must be a positive number." });
   const updated = await all(
     `UPDATE coaches SET capacity = $1 WHERE trip_id = $2 RETURNING id`,
-    [capacity, req.params.tripId]
+    [capacity, req.tripUuid]
   );
   if (updated.length) {
-    await recordEvent(req.params.tripId, req, {
-      action: "coach.capacity", entity: "trip", entityId: req.params.tripId, kind: "coach",
+    await recordEvent(req.tripUuid, req, {
+      action: "coach.capacity", entity: "trip", entityId: req.tripUuid, kind: "coach",
       summary: `All coaches set to ${capacity} seats.`, after: { capacityEach: capacity, coachesAffected: updated.length },
     });
   }
@@ -709,9 +758,13 @@ router.patch("/api/coaches/:id/arrival", writeAccess, wrap(async (req, res) => {
 router.post("/api/coaches/generate", writeAccess, wrap(async (req, res) => {
   const { tripId, count, capacity } = req.body || {};
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
+  // Body-supplied id — resolve it the same way withTripUuid does for :tripId
+  // routes (see its comment). 404 rather than 500 on an id that matches no trip.
+  const tripUuid = await resolveTripUuid(tripId);
+  if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
   const n = Math.min(50, Math.max(1, Math.floor(Number(count) || 0)));
   const cap = Math.min(200, Math.max(1, Math.floor(Number(capacity) || 40)));
-  const rows = await all(`SELECT label, sort_order AS "sortOrder" FROM coaches WHERE trip_id = $1`, [tripId]);
+  const rows = await all(`SELECT label, sort_order AS "sortOrder" FROM coaches WHERE trip_id = $1`, [tripUuid]);
   let maxNum = 0, maxSort = -1;
   for (const r of rows) {
     const m = /coach\s*(\d+)/i.exec(r.label || "");
@@ -725,12 +778,12 @@ router.post("/api/coaches/generate", writeAccess, wrap(async (req, res) => {
       `INSERT INTO coaches (id, trip_id, label, name, capacity, staff_user_id, sort_order, driver_name)
        VALUES (gen_random_uuid()::text, $1, $2, $2, $3, NULL, $4, NULL)
        RETURNING id, label, capacity, sort_order AS "sortOrder"`,
-      [tripId, label, cap, maxSort + i]
+      [tripUuid, label, cap, maxSort + i]
     );
     created.push(c);
   }
-  await recordEvent(tripId, req, {
-    action: "coach.generate", entity: "trip", entityId: tripId, kind: "coach",
+  await recordEvent(tripUuid, req, {
+    action: "coach.generate", entity: "trip", entityId: tripUuid, kind: "coach",
     summary: `${n} coach${n !== 1 ? "es" : ""} generated (${cap} seats each).`, after: { generated: n, capacityEach: cap },
   });
   res.status(201).json({ created });
@@ -749,6 +802,9 @@ router.get("/api/coaches/staff-assignments", readAccess, wrap(async (_req, res) 
 router.post("/api/coaches", writeAccess, wrap(async (req, res) => {
   const { tripId, label, capacity, staffUserId, driverName, accountId } = req.body || {};
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
+  // Body-supplied id — resolve like withTripUuid does for :tripId routes.
+  const tripUuid = await resolveTripUuid(tripId);
+  if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
   if (!label || !label.trim()) return res.status(400).json({ error: "LABEL_REQUIRED", message: "A coach label is required." });
   if (!staffUserId) return res.status(400).json({ error: "STAFF_REQUIRED", message: "Every coach needs a staff member assigned." });
 
@@ -764,16 +820,16 @@ router.post("/api/coaches", writeAccess, wrap(async (req, res) => {
     if (!captain) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "That login account doesn't exist." });
   }
 
-  const maxRow = await get(`SELECT COALESCE(MAX(sort_order), -1) AS m FROM coaches WHERE trip_id = $1`, [tripId]);
+  const maxRow = await get(`SELECT COALESCE(MAX(sort_order), -1) AS m FROM coaches WHERE trip_id = $1`, [tripUuid]);
   const sortOrder = Number(maxRow?.m ?? -1) + 1;
 
   const created = await get(
     `INSERT INTO coaches (id, trip_id, label, name, capacity, staff_user_id, sort_order, driver_name, account_id)
      VALUES (gen_random_uuid()::text, $1, $2, $2, $3, $4, $5, $6, $7)
      RETURNING id, label, capacity, sort_order AS "sortOrder", staff_user_id AS "staffUserId", driver_name AS "driverName", account_id AS "accountId"`,
-    [tripId, label.trim(), Number(capacity) || 40, staffUserId, sortOrder, (driverName || "").trim() || null, captain?.id || null]
+    [tripUuid, label.trim(), Number(capacity) || 40, staffUserId, sortOrder, (driverName || "").trim() || null, captain?.id || null]
   );
-  await recordEvent(tripId, req, {
+  await recordEvent(tripUuid, req, {
     action: "coach.create", entity: "coach", entityId: created.id, kind: "coach",
     summary: `${label.trim()} was added to the fleet, led by ${staffRow.name}${captain ? `, captained by ${captain.name || captain.username}` : ""}.`,
     after: { label: created.label, capacity: created.capacity, staffName: staffRow.name, captain: captain?.username || null },
@@ -860,7 +916,7 @@ router.delete("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
 /* =============================================================================
  *  Itinerary
  * ========================================================================== */
-router.get("/api/trips/:tripId/itinerary", readAccess, wrap(async (req, res) => {
+router.get("/api/trips/:tripId/itinerary", readAccess, withTripUuid, wrap(async (req, res) => {
   const items = await all(
     `SELECT id, day_number AS "dayNumber", TO_CHAR(start_time, 'HH24:MI') AS "startTime",
             title, location, sort_order AS "sortOrder", category,
@@ -868,12 +924,12 @@ router.get("/api/trips/:tripId/itinerary", readAccess, wrap(async (req, res) => 
             COALESCE(delay_minutes, 0) AS "delayMinutes",
             COALESCE(completed, false) AS completed
        FROM itinerary_items WHERE trip_id = $1 ORDER BY day_number, sort_order`,
-    [req.params.tripId]
+    [req.tripUuid]
   );
   res.json({ items, categories: ITINERARY_CATEGORIES });
 }));
 
-router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) => {
+router.post("/api/trips/:tripId/itinerary", writeAccess, withTripUuid, wrap(async (req, res) => {
   const { dayNumber, startTime, title, location, sortOrder, category, status, delayMinutes } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
@@ -884,10 +940,10 @@ router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) =
     `INSERT INTO itinerary_items (trip_id, day_number, start_time, title, location, sort_order, category, status, delay_minutes)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
-    [req.params.tripId, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category), st, delay]
+    [req.tripUuid, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category), st, delay]
   );
-  await syncTotalDaysToItinerary(req.params.tripId);
-  await recordEvent(req.params.tripId, req, {
+  await syncTotalDaysToItinerary(req.tripUuid);
+  await recordEvent(req.tripUuid, req, {
     action: "itinerary.create", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" added to Day ${item.dayNumber}.`,
     after: { day: item.dayNumber, time: item.startTime, title: item.title, status: item.status },
@@ -895,7 +951,7 @@ router.post("/api/trips/:tripId/itinerary", writeAccess, wrap(async (req, res) =
   res.status(201).json(item);
 }));
 
-router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (req, res) => {
+router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, withTripUuid, wrap(async (req, res) => {
   const { dayNumber, startTime, title, location, category, status, delayMinutes } = req.body || {};
   if (!dayNumber || !startTime || !title || !title.trim()) {
     return res.status(400).json({ error: "MISSING_FIELDS", message: "Day, time and title are required." });
@@ -905,17 +961,17 @@ router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (re
   const before = await get(
     `SELECT day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, category, status, delay_minutes AS "delayMinutes"
        FROM itinerary_items WHERE id = $1 AND trip_id = $2`,
-    [req.params.itemId, req.params.tripId]
+    [req.params.itemId, req.tripUuid]
   );
   const item = await get(
     `UPDATE itinerary_items SET day_number = $1, start_time = $2, title = $3, location = $4, category = $5, status = $6, delay_minutes = $7
       WHERE id = $8 AND trip_id = $9
       RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
-    [Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, normalizeCategory(category), st, delay, req.params.itemId, req.params.tripId]
+    [Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, normalizeCategory(category), st, delay, req.params.itemId, req.tripUuid]
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
-  await syncTotalDaysToItinerary(req.params.tripId);
-  await recordEvent(req.params.tripId, req, {
+  await syncTotalDaysToItinerary(req.tripUuid);
+  await recordEvent(req.tripUuid, req, {
     action: "itinerary.update", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" updated.`,
     before: before && { day: before.dayNumber, time: before.startTime, title: before.title, status: before.status, delayMinutes: before.delayMinutes },
@@ -927,7 +983,7 @@ router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (re
 // Lightweight live-status update for one stop — lets a coordinator flag a stop
 // as delayed / moved / cancelled (or back to on-time) from the board itself,
 // without re-entering its whole form. delayMinutes only applies to "delayed".
-router.patch("/api/trips/:tripId/itinerary/:itemId/status", writeAccess, wrap(async (req, res) => {
+router.patch("/api/trips/:tripId/itinerary/:itemId/status", writeAccess, withTripUuid, wrap(async (req, res) => {
   const { status, delayMinutes } = req.body || {};
   if (!ITINERARY_STATUSES.includes(status)) {
     return res.status(400).json({ error: "BAD_STATUS", message: "Unknown itinerary status." });
@@ -935,17 +991,17 @@ router.patch("/api/trips/:tripId/itinerary/:itemId/status", writeAccess, wrap(as
   const delay = status === "delayed" ? Math.max(0, Number(delayMinutes) || 0) : 0;
   const before = await get(
     `SELECT status, delay_minutes AS "delayMinutes" FROM itinerary_items WHERE id = $1 AND trip_id = $2`,
-    [req.params.itemId, req.params.tripId]
+    [req.params.itemId, req.tripUuid]
   );
   const item = await get(
     `UPDATE itinerary_items SET status = $1, delay_minutes = $2
       WHERE id = $3 AND trip_id = $4
       RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
-    [status, delay, req.params.itemId, req.params.tripId]
+    [status, delay, req.params.itemId, req.tripUuid]
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
   const label = status === "delayed" ? `delayed ${delay} min` : status;
-  await recordEvent(req.params.tripId, req, {
+  await recordEvent(req.tripUuid, req, {
     action: "itinerary.status", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" marked ${label}.`,
     before: before && { status: before.status, delayMinutes: before.delayMinutes },
@@ -956,16 +1012,16 @@ router.patch("/api/trips/:tripId/itinerary/:itemId/status", writeAccess, wrap(as
 
 // Tick / untick a stop as completed (crossed out on the board). Orthogonal to
 // status — a stop can be, say, "delayed" and then completed.
-router.patch("/api/trips/:tripId/itinerary/:itemId/complete", writeAccess, wrap(async (req, res) => {
+router.patch("/api/trips/:tripId/itinerary/:itemId/complete", writeAccess, withTripUuid, wrap(async (req, res) => {
   const completed = !!(req.body && req.body.completed);
   const item = await get(
     `UPDATE itinerary_items SET completed = $1
       WHERE id = $2 AND trip_id = $3
       RETURNING id, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", title, location, sort_order AS "sortOrder", category, status, delay_minutes AS "delayMinutes", completed`,
-    [completed, req.params.itemId, req.params.tripId]
+    [completed, req.params.itemId, req.tripUuid]
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
-  await recordEvent(req.params.tripId, req, {
+  await recordEvent(req.tripUuid, req, {
     action: "itinerary.complete", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" ${completed ? "completed" : "reopened"}.`,
     before: { completed: !completed }, after: { completed },
@@ -973,14 +1029,14 @@ router.patch("/api/trips/:tripId/itinerary/:itemId/complete", writeAccess, wrap(
   res.json(item);
 }));
 
-router.delete("/api/trips/:tripId/itinerary/:itemId", writeAccess, wrap(async (req, res) => {
+router.delete("/api/trips/:tripId/itinerary/:itemId", writeAccess, withTripUuid, wrap(async (req, res) => {
   const deleted = await get(
     `DELETE FROM itinerary_items WHERE id = $1 AND trip_id = $2 RETURNING id, title, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime"`,
-    [req.params.itemId, req.params.tripId]
+    [req.params.itemId, req.tripUuid]
   );
   if (!deleted) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
-  await syncTotalDaysToItinerary(req.params.tripId);
-  await recordEvent(req.params.tripId, req, {
+  await syncTotalDaysToItinerary(req.tripUuid);
+  await recordEvent(req.tripUuid, req, {
     action: "itinerary.delete", entity: "itinerary", entityId: deleted.id, kind: "itinerary",
     summary: `Itinerary: "${deleted.title}" removed.`,
     before: { day: deleted.dayNumber, time: deleted.startTime, title: deleted.title },
@@ -1003,8 +1059,9 @@ const ATTENDANCE_STATUSES = ["ARRIVED", "MISSING", "LATE"];
 
 // Read: every delegate's status at one stop (grouped client-side by coach) plus
 // the change history for that stop. View-for-all.
-router.get("/api/trips/:tripId/itinerary/:itemId/attendance", readAccess, wrap(async (req, res) => {
-  const { tripId, itemId } = req.params;
+router.get("/api/trips/:tripId/itinerary/:itemId/attendance", readAccess, withTripUuid, wrap(async (req, res) => {
+  const { itemId } = req.params;
+  const tripId = req.tripUuid; // resolved (see withTripUuid) — the queries below are UUID-typed
   const item = await get(
     `SELECT id, title, day_number AS "dayNumber", TO_CHAR(start_time,'HH24:MI') AS "startTime", COALESCE(completed,false) AS completed
        FROM itinerary_items WHERE id = $1 AND trip_id = $2`,
@@ -1040,8 +1097,9 @@ router.get("/api/trips/:tripId/itinerary/:itemId/attendance", readAccess, wrap(a
 
 // Write: set one delegate's status at one stop. Upserts JQ's checkpoint_checkins
 // AND logs the before/after to attendance_log. Gated on manageTrips.
-router.post("/api/trips/:tripId/itinerary/:itemId/attendance", writeAccess, wrap(async (req, res) => {
-  const { tripId, itemId } = req.params;
+router.post("/api/trips/:tripId/itinerary/:itemId/attendance", writeAccess, withTripUuid, wrap(async (req, res) => {
+  const { itemId } = req.params;
+  const tripId = req.tripUuid; // resolved (see withTripUuid) — the queries below are UUID-typed
   const { delegateId, status } = req.body || {};
   if (!delegateId) return res.status(400).json({ error: "DELEGATE_REQUIRED", message: "delegateId is required." });
   if (!ATTENDANCE_STATUSES.includes(status)) {
@@ -1093,10 +1151,21 @@ router.post("/api/trips/:tripId/itinerary/:itemId/attendance", writeAccess, wrap
 router.get("/api/delegates", readAccess, wrap(async (req, res) => {
   const { tripId } = req.query;
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId query param is required." });
+  // Query-string id — resolve like withTripUuid does for :tripId routes.
+  const tripUuid = await resolveTripUuid(tripId);
+  if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+  // FIX (2026-07-30, JQ): this SELECT was missing phone/room/last-known-
+  // location — MobileTripsPage.jsx's DelegateSheet (built to mirror
+  // MobileAttendancePage.jsx's own delegate sheet: status, coach, phone,
+  // room, last location, checkpoint timeline) only ever got that sparser
+  // subset because THIS route, not the sheet component, never selected the
+  // rest. Mirrors JQ's own listDelegates()'s column set (db/delegates.js,
+  // SELECT d.*) for the fields this feature's board actually shows.
   const delegates = await all(
-    `SELECT id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl"
+    `SELECT id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation", phone, notes, company,
+            accessibility_notes AS "accessibilityNotes", hotel_name, room_number, "photoUrl"
        FROM delegates WHERE trip_id = $1 ORDER BY name`,
-    [tripId]
+    [tripUuid]
   );
   res.json({ delegates });
 }));
@@ -1104,6 +1173,10 @@ router.get("/api/delegates", readAccess, wrap(async (req, res) => {
 router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
   const { tripId, name, vip, notes, company, accessibilityNotes } = req.body || {};
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
+  // Body-supplied id — resolve like withTripUuid does for :tripId routes.
+  // Creating a delegate on the primary trip ("t-1") used to 500 outright here.
+  const tripUuid = await resolveTripUuid(tripId);
+  if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
   if (!name || !name.trim()) return res.status(400).json({ error: "NAME_REQUIRED", message: "A name is required." });
 
   const id = await nextDelegateId();
@@ -1111,9 +1184,9 @@ router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
     `INSERT INTO delegates (id, trip_id, name, initials, "coachId", status, vip, notes, company, accessibility_notes)
      VALUES ($1,$2,$3,$4,NULL,'UNASSIGNED',$5,$6,$7,$8)
      RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl"`,
-    [id, tripId, name.trim(), initialsOf(name), !!vip, (notes || "").trim() || null, (company || "").trim() || null, (accessibilityNotes || "").trim() || null]
+    [id, tripUuid, name.trim(), initialsOf(name), !!vip, (notes || "").trim() || null, (company || "").trim() || null, (accessibilityNotes || "").trim() || null]
   );
-  await recordEvent(tripId, req, {
+  await recordEvent(tripUuid, req, {
     action: "delegate.create", entity: "delegate", entityId: delegate.id, kind: "delegate",
     summary: `${delegate.name} was added${vip ? " (VIP)" : ""}.`,
     after: { name: delegate.name, vip: !!delegate.vip, company: delegate.company },

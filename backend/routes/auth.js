@@ -75,6 +75,7 @@ router.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
   res.json({
     token: makeToken(acc.username, tokenVersion),
     role: acc.role,
+    readOnly: !!acc.readOnly,
     name: acc.name,
     username: acc.username,
     permissions: accountPermissions(acc),
@@ -147,6 +148,7 @@ router.get("/api/auth/session", wrap(async (req, res) => {
     email: acc.email || null,
     photoUrl: acc.photoUrl || null,
     role: acc.role,
+    readOnly: !!acc.readOnly,
     permissions: accountPermissions(acc),
   });
 }));

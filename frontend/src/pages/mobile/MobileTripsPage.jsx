@@ -1,7 +1,9 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { ChevronRight, ArrowLeft, Bus, Users, X, Trash2, Loader2, AlertCircle, CheckCircle2, Clock, ClipboardList } from "lucide-react";
+import { ChevronRight, ArrowLeft, Bus, Users, X, Trash2, Loader2, AlertCircle, CheckCircle2, Clock, ClipboardList, Phone, BedDouble, MapPin } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
+import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 
 function initials(name) {
   return (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
@@ -83,16 +85,37 @@ const STATUS_LABEL = { PRESENT: "Arrived", ARRIVED: "Arrived", ASSIGNED: "Assign
 /* ---- Delegate detail bottom-sheet — the touch-friendly alternative to
  * dragging. Move to another coach, edit details, or remove. Editing is gated
  * on manageTrips + a non-completed trip; otherwise it's read-only. ---------- */
+/* ---- Delegate detail sheet (2026-07-30 — "if i click on delegate, i don't
+ * want that ui, i want to see delegate detail page, additionally add a
+ * button to move the delegate to different coach") — this used to open
+ * straight into an edit FORM (move dropdown + Company/Accessibility/Notes
+ * inputs + Remove). Tapping a delegate chip on the coach board is someone
+ * checking WHO this is and WHERE they are first, not editing their record —
+ * so this now leads with the same read-only detail (status, coach, phone,
+ * room, last known location, checkpoint timeline) MobileAttendancePage.jsx's
+ * own delegate detail sheet already shows, with "Move to coach" — the one
+ * capability actually needed from this board — added as its own action.
+ * Editing company/accessibility/notes and removing the delegate move to a
+ * collapsed "Edit details" section below, so nothing is lost, it's just not
+ * the first thing you see. */
 function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
   const { t } = useLang();
   const [moveTo, setMoveTo] = useState(delegate.coachId || "");
-  const [form, setForm] = useState({ company: delegate.company || "", accessibilityNotes: delegate.accessibilityNotes || "", notes: delegate.notes || "" });
   const [moving, setMoving] = useState(false);
+  const [moveErr, setMoveErr] = useState(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [form, setForm] = useState({ company: delegate.company || "", accessibilityNotes: delegate.accessibilityNotes || "", notes: delegate.notes || "" });
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [err, setErr] = useState(null);
+  const [editErr, setEditErr] = useState(null);
   const tone = DELEGATE_TONE[delegate.status] || "";
+  // "Coach 4 · Suzhou" — same [name, city] join MobileAttendancePage.jsx's
+  // own coachName() helper uses, not just the bare label ("C3"). Falls back
+  // to label alone for a coach with no name/city set (e.g. one generated via
+  // "Generate coaches", which has no city field at all).
+  const matchedCoach = coaches.find((c) => c.id === delegate.coachId);
+  const coachLabel = matchedCoach && ([matchedCoach.name, matchedCoach.city].filter(Boolean).join(" · ") || matchedCoach.label);
   // Only dismiss if the WHOLE click gesture started on the backdrop itself,
   // not wherever the mouse was released after dragging to select text in
   // e.g. the Notes field.
@@ -104,20 +127,20 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
     // Mirror the desktop reassign rule: an unassigned delegate becomes ASSIGNED
     // when put on a coach; one that already has a real status keeps it.
     const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "ASSIGNED" : delegate.status);
-    setMoving(true); setErr(null);
+    setMoving(true); setMoveErr(null);
     try { await apiPatch(`/delegates/${delegate.id}`, { coachId: toCoachId, status: nextStatus }); await onChanged(); onClose(); }
-    catch (e) { setErr(e.message); setMoving(false); }
+    catch (e) { setMoveErr(e.message); setMoving(false); }
   }
   async function save() {
-    setSaving(true); setErr(null);
+    setSaving(true); setEditErr(null);
     try { await apiPatch(`/delegates/${delegate.id}/details`, form); await onChanged(); onClose(); }
-    catch (e) { setErr(e.message); setSaving(false); }
+    catch (e) { setEditErr(e.message); setSaving(false); }
   }
   async function remove() {
     if (!confirmRemove) { setConfirmRemove(true); return; }
-    setRemoving(true); setErr(null);
+    setRemoving(true); setEditErr(null);
     try { await apiDelete(`/delegates/${delegate.id}`); await onChanged(); onClose(); }
-    catch (e) { setErr(e.message); setRemoving(false); setConfirmRemove(false); }
+    catch (e) { setEditErr(e.message); setRemoving(false); setConfirmRemove(false); }
   }
 
   return (
@@ -136,10 +159,63 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
           <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8 }} aria-label={t("Close")}><X size={16} /></button>
         </div>
 
-        {canEdit ? (
-          <>
+        {coachLabel && <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>{coachLabel}</div>}
+
+        {delegate.phone && (
+          <a href={`tel:${delegate.phone}`} className="row" style={{ gap: 8, marginTop: 8, color: "var(--st-missing)", textDecoration: "none" }}>
+            <Phone size={16} /> {delegate.phone}
+          </a>
+        )}
+
+        {(delegate.company || delegate.hotel_name || delegate.room_number) && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: "10px 14px", marginTop: 14 }}>
+            {delegate.company && (
+              <div>
+                <div className="muted" style={{ fontSize: 11.5, marginBottom: 2 }}>{t("Company")}</div>
+                <div style={{ fontSize: 13.5, fontWeight: 500 }}>{delegate.company}</div>
+              </div>
+            )}
+            {(delegate.hotel_name || delegate.room_number) && (
+              <div>
+                <div className="muted" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, marginBottom: 2 }}>
+                  <BedDouble size={12} /> {t("Room")}
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                  {[delegate.hotel_name, delegate.room_number ? `${t("Room")} ${delegate.room_number}` : null].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {delegate.lastLocation ? (
+          <div style={{ marginTop: 14 }}>
+            <div className="field-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <MapPin size={13} /> {t("Last known location")}
+            </div>
+            <p style={{ fontSize: 13, marginTop: 3, marginBottom: 8 }}>
+              {[delegate.lastLocation, delegate.lastSeen].filter(Boolean).join(" · ")}
+            </p>
+            <DelegateLocationMap location={delegate.lastLocation} height={160} />
+          </div>
+        ) : (
+          <div className="muted" style={{ fontSize: 13, marginTop: 12 }}>
+            {t("No location has been recorded for this delegate yet.")}
+          </div>
+        )}
+
+        <div style={{ marginTop: 16 }}>
+          <div className="row" style={{ gap: 6, marginBottom: 8 }}>
+            <Clock size={14} color="var(--ink-3)" />
+            <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t("Checkpoint timeline")}</span>
+          </div>
+          <DelegateTimeline delegateId={delegate.id} defaultVisible={2} />
+        </div>
+
+        {canEdit && (
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
             <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Move to coach")}</label>
-            <div className="row" style={{ gap: 8, marginTop: 6, marginBottom: 16 }}>
+            <div className="row" style={{ gap: 8, marginTop: 6 }}>
               <select className="select" style={{ flex: 1 }} value={moveTo} onChange={(e) => setMoveTo(e.target.value)}>
                 <option value="">{t("Unassigned")}</option>
                 {coaches.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
@@ -148,26 +224,38 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
                 {moving ? <Loader2 size={14} className="spin" /> : t("Move")}
               </button>
             </div>
+            {moveErr && <div style={{ color: "var(--st-missing)", fontSize: 13, marginTop: 8 }}>{moveErr}</div>}
+          </div>
+        )}
 
-            <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Company")}</label>
-            <input className="input" style={{ marginTop: 6, marginBottom: 12 }} value={form.company} onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))} placeholder={t("Optional")} />
-            <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Accessibility notes")}</label>
-            <input className="input" style={{ marginTop: 6, marginBottom: 12 }} value={form.accessibilityNotes} onChange={(e) => setForm((f) => ({ ...f, accessibilityNotes: e.target.value }))} placeholder={t("e.g. wheelchair access, dietary needs")} />
-            <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Notes")}</label>
-            <textarea className="input" rows={3} style={{ marginTop: 6, marginBottom: 14, resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder={t("Dietary needs, medical notes, flight details…")} />
-
-            {err && <div style={{ color: "var(--st-missing)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
-            <button className="btn btn-dark btn-block" onClick={save} disabled={saving}>{saving ? <Loader2 size={14} className="spin" /> : null} {t("Save changes")}</button>
-            <button className="btn btn-ghost btn-block" onClick={remove} disabled={removing} style={{ marginTop: 10, color: "var(--st-missing)" }}>
-              {removing ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />} {confirmRemove ? t("Tap again to confirm") : t("Remove delegate")}
+        {canEdit && (
+          <div style={{ marginTop: 18 }}>
+            <button className="btn btn-ghost btn-block" onClick={() => setEditOpen((v) => !v)}>
+              {t("Edit details")}
             </button>
-          </>
-        ) : (
-          <div>
-            {delegate.company && <div style={{ fontSize: 14, marginBottom: 6 }}><span className="muted">{t("Company")}: </span>{delegate.company}</div>}
+            {editOpen && (
+              <div style={{ marginTop: 12 }}>
+                <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Company")}</label>
+                <input className="input" style={{ marginTop: 6, marginBottom: 12 }} value={form.company} onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))} placeholder={t("Optional")} />
+                <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Accessibility notes")}</label>
+                <input className="input" style={{ marginTop: 6, marginBottom: 12 }} value={form.accessibilityNotes} onChange={(e) => setForm((f) => ({ ...f, accessibilityNotes: e.target.value }))} placeholder={t("e.g. wheelchair access, dietary needs")} />
+                <label className="muted" style={{ fontSize: 12, fontWeight: 700 }}>{t("Notes")}</label>
+                <textarea className="input" rows={3} style={{ marginTop: 6, marginBottom: 14, resize: "vertical", fontFamily: "inherit" }} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} placeholder={t("Dietary needs, medical notes, flight details…")} />
+
+                {editErr && <div style={{ color: "var(--st-missing)", fontSize: 13, marginBottom: 10 }}>{editErr}</div>}
+                <button className="btn btn-dark btn-block" onClick={save} disabled={saving}>{saving ? <Loader2 size={14} className="spin" /> : null} {t("Save changes")}</button>
+                <button className="btn btn-ghost btn-block" onClick={remove} disabled={removing} style={{ marginTop: 10, color: "var(--st-missing)" }}>
+                  {removing ? <Loader2 size={14} className="spin" /> : <Trash2 size={14} />} {confirmRemove ? t("Tap again to confirm") : t("Remove delegate")}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!canEdit && (
+          <div style={{ marginTop: 16 }}>
             {delegate.accessibilityNotes && <div style={{ fontSize: 14, marginBottom: 6 }}><span className="muted">{t("Accessibility notes")}: </span>{delegate.accessibilityNotes}</div>}
             {delegate.notes && <div style={{ fontSize: 14 }}><span className="muted">{t("Notes")}: </span>{delegate.notes}</div>}
-            {!delegate.company && !delegate.accessibilityNotes && !delegate.notes && <div className="muted" style={{ fontSize: 13 }}>{t("No additional details.")}</div>}
           </div>
         )}
       </div>
@@ -568,6 +656,10 @@ export default function MobileTripsPage() {
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
   const [captainTripIds, setCaptainTripIds] = useState(null); // Set of trip ids this account captains
+  // "Load more" paging (2026-07-30 — "same for exception, trip tab") — see
+  // the identical pattern in MobileAttendancePage.jsx.
+  const TRIPS_PAGE_SIZE = 20;
+  const [shownTripCount, setShownTripCount] = useState(TRIPS_PAGE_SIZE);
   const me = getUser() || {};
 
   // Staff (without viewMobileAllTrips) only see the trip that's actually
@@ -621,7 +713,7 @@ export default function MobileTripsPage() {
       {trips && visibleTrips.length === 0 && <div className="muted">{t(canSeeAllTrips ? "No trips yet" : "No trip currently in progress")}</div>}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {(visibleTrips || []).map((trip) => (
+        {(visibleTrips || []).slice(0, shownTripCount).map((trip) => (
           <button
             key={trip.id}
             className="mobile-card"
@@ -644,6 +736,16 @@ export default function MobileTripsPage() {
           </button>
         ))}
       </div>
+
+      {(visibleTrips || []).length > shownTripCount && (
+        <button
+          className="btn btn-ghost btn-block"
+          style={{ marginTop: 10 }}
+          onClick={() => setShownTripCount((n) => n + TRIPS_PAGE_SIZE)}
+        >
+          {t("Load more")} ({visibleTrips.length - shownTripCount} {t("more")})
+        </button>
+      )}
     </div>
   );
 }

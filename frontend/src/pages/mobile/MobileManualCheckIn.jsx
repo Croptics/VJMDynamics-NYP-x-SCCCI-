@@ -78,12 +78,14 @@ const REASONS = [
   { key: "OTHER", type: "OTHER", label: "Other", hint: "Type a short note", Icon: PencilLine },
 ];
 
+// Late/Missing/Everyone removed (2026-07-30 — "can you remove late,
+// missing, everyone tab") — the underlying filter values still work if
+// something else ever links here with ?filter=LATE etc (see `visible`'s
+// filter predicate below, untouched), this only trims which ones render as
+// tappable chips on this screen.
 const FILTERS = [
   { key: "TODO", label: "To check in" },
-  { key: "LATE", label: "Late" },
-  { key: "MISSING", label: "Missing" },
   { key: "DONE", label: "Checked in" },
-  { key: "ALL", label: "Everyone" },
 ];
 
 const HINT_KEY = "musterGo.manualSwipeHintSeen";

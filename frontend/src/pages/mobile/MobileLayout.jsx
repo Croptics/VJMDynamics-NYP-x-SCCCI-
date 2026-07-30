@@ -122,7 +122,7 @@ export default function MobileLayout({ onLogout }) {
       ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
     ...(perms.viewMobileAttendance || perms.viewMobileTrips
-      ? [{ to: "/mobile/attendance", label: "Ops", icon: ClipboardList, badge: missing }] : []),
+      ? [{ to: "/mobile/operations", label: "Ops", icon: ClipboardList, badge: missing }] : []),
     // Face and QR are separate tabs rather than modes of one scanner screen.
     // QR leads (and sits dead-centre, flagged `primary` so it renders as the
     // raised action tab) because it's the fastest, most reliable check-in —

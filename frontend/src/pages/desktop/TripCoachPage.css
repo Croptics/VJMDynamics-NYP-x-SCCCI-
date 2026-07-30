@@ -154,8 +154,16 @@
 .tf-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .tf-btn-solid { background: var(--tf-surface); color: var(--tf-text); border-color: var(--tf-border); }
 .tf-btn-solid:not(:disabled):hover { background: var(--tf-surface-2); }
-.tf-btn-primary { background: var(--tf-text); color: var(--tf-surface); }
-.tf-btn-primary:not(:disabled):hover { background: #000; }
+/* 2026-07-30 ("fix the button color for dark theme mode") — this used
+   var(--tf-text)/var(--tf-surface) for background/color, which INVERTS
+   between themes (.tf-root.tf-dark swaps --tf-text to a light color and
+   --tf-surface to a dark one — see the top of this file) instead of staying
+   a fixed, always-visible accent button. In dark mode that produced a
+   washed-out pill with low-contrast text. Fixed to the same --scc-red brand
+   color tokens.css's own .btn-primary already uses everywhere else in the
+   app, unaffected by theme — one real "primary action" look, not two. */
+.tf-btn-primary { background: var(--scc-red); color: #fff; }
+.tf-btn-primary:not(:disabled):hover { background: var(--scc-red-600); }
 .tf-btn-ghost { background: transparent; color: var(--tf-text-2); border-color: var(--tf-border); }
 .tf-btn-ghost:not(:disabled):hover { background: var(--tf-surface-2); }
 .tf-btn-sm { padding: 6px 12px; font-size: 12px; }

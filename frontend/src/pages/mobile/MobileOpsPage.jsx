@@ -1,30 +1,40 @@
 // frontend/src/pages/mobile/MobileOpsPage.jsx
 // OWNED BY: FaceCheck-Pro (Vimal) — mobile UI shell work
 //
-// The combined "Trips + Attendance" tab. Instead of two separate bottom-nav
-// destinations, this is ONE operations screen:
+// The combined "Trips + Attendance + Exceptions" tab. Instead of separate
+// bottom-nav destinations, this is ONE operations screen:
 //
 //   [ live summary strip — trip context, KPIs, latest updates ]
-//   [ Delegates | Trips ]  <- segmented switch
+//   [ Delegates | Exceptions | Trips ]  <- segmented switch
 //   [ the full existing page for whichever is selected            ]
 //
 // IMPORTANT — this COMPOSES the teammates' pages, it does not replace or edit
 // them. MobileAttendancePage (roster, search, filters, status sheet, call
-// buttons) and MobileTripsPage (trip list, itinerary, coach assignments) are
-// rendered here verbatim, so every feature they own keeps working exactly as
-// before and stays their code to maintain. All this file adds is the summary
-// strip above them and the switch between them.
+// buttons), MobileExceptionsPage (Jayden's exception inbox — see below), and
+// MobileTripsPage (trip list, itinerary, coach assignments) are rendered
+// here verbatim, so every feature they own keeps working exactly as before
+// and stays their code to maintain. All this file adds is the summary strip
+// above them and the switch between them.
 //
-// Deep links still work: /mobile/attendance?status=MISSING opens with the
+// 2026-07-30 ("jayden mobile have this exception, pls add it to main
+// project") — MobileExceptionsPage.jsx already existed, fully built, with
+// its OWN doc comment describing exactly this 3-way switch — it just was
+// never actually wired in here; this segment was missing entirely (only
+// "delegates"/"trips" existed). Wiring it in is the whole fix; the component
+// itself needed no changes.
+//
+// Deep links still work: /mobile/operations?status=MISSING opens with the
 // Delegates view active, and MobileAttendancePage reads that query param
-// itself, exactly as it always did.
+// itself, exactly as it always did. (Renamed from /mobile/attendance
+// 2026-07-30 — the old path still redirects here, preserving the query.)
 
 import { useEffect, useState, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Users, Bus, RefreshCw } from "lucide-react";
+import { Users, Bus, AlertTriangle, RefreshCw } from "lucide-react";
 import { apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import MobileAttendancePage from "./MobileAttendancePage.jsx";
+import MobileExceptionsPage from "./MobileExceptionsPage.jsx";
 import MobileTripsPage from "./MobileTripsPage.jsx";
 
 // Trip id comes from the mobile trip switcher, not a hardcoded base trip
@@ -99,6 +109,7 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
       <div style={{ display: "flex", gap: 8, margin: "14px 0 16px" }}>
         {[
           { key: "delegates", label: "Delegates", Icon: Users },
+          { key: "exceptions", label: "Exceptions", Icon: AlertTriangle },
           { key: "trips", label: "Trips", Icon: Bus },
         ].map(({ key, label, Icon }) => {
           const active = view === key;
@@ -120,7 +131,9 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
       </div>
 
       {/* The teammates' own pages, rendered unmodified. */}
-      {view === "delegates" ? <MobileAttendancePage /> : <MobileTripsPage />}
+      {view === "delegates" ? <MobileAttendancePage />
+        : view === "exceptions" ? <MobileExceptionsPage />
+        : <MobileTripsPage />}
 
       <style>{`.ops-spin{animation:ops-spin .9s linear infinite}@keyframes ops-spin{to{transform:rotate(360deg)}}`}</style>
     </div>

@@ -134,6 +134,16 @@ export async function createSchema() {
   // account, that path has nowhere to send to no matter how it's wired up.
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
 
+  // Read-only Admin (2026-07-30) — an Admin account can be flagged so it
+  // keeps full VIEW access everywhere (every desktopView/mobileView
+  // permission stays true, same as a regular admin) but loses every
+  // write/action permission (manageDelegates, manageAccounts, etc. all
+  // false) — see accountPermissions() in db/accounts.js. Meaningless for a
+  // "staff" role account (staff never bypass their stored checkboxes in the
+  // first place), so it's only ever surfaced on Account control when the
+  // Role picker is set to Admin.
+  await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "readOnly" BOOLEAN NOT NULL DEFAULT false`);
+
   // Named, admin-managed access-role templates (2026-07-24) — Account
   // control's "Apply template" quick-fill + "Access role" filter used to be
   // 2 templates hardcoded in the frontend; now real, persisted rows any

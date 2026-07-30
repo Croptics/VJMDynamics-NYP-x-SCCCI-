@@ -928,7 +928,7 @@ function CapacityPlanner({ delegateCount, coachCount, onGenerate }) {
  *  applyCheckpointLateCutoff() in backend/routes/checkpoints.js), making the
  *  single global cutoff field redundant.
  * ========================================================================== */
-function Hero({ trip, coachCount, delegateCount, dateRange, mode, onEditItinerary, onAddDelegate, canEdit = true }) {
+function Hero({ trip, coachCount, delegateCount, dateRange, mode, onEditItinerary, canEdit = true }) {
   const { t } = useLang();
   const statusColor = TRIP_STATUS_COLOR[trip.status] || "grey";
   const showActions = canEdit && mode !== "completed";
@@ -943,7 +943,6 @@ function Hero({ trip, coachCount, delegateCount, dateRange, mode, onEditItinerar
         {showActions && (
           <div className="tf-hero-actions">
             <button className="tf-btn tf-btn-solid" onClick={onEditItinerary}><PencilLine size={14} /> {mode === "planning" ? t("Plan itinerary") : t("Edit itinerary")}</button>
-            <button className="tf-btn tf-btn-primary" onClick={onAddDelegate}><UserPlus size={14} /> {t("Add delegate")}</button>
           </div>
         )}
       </div>
@@ -2077,7 +2076,7 @@ function CoachBoardView({ tripId }) {
           trip={trip} coachCount={coaches.length} delegateCount={delegates.length}
           dateRange={liveDateRange(trip.startDate, displayTotalDays, trip.dateRange)}
           mode={mode} canEdit={canEdit}
-          onEditItinerary={() => setShowItinerary(true)} onAddDelegate={() => setShowAddDelegate(true)}
+          onEditItinerary={() => setShowItinerary(true)}
         />
 
         {mode === "planning" && <TripSummaryBar mode="planning" stats={summaryStats} />}

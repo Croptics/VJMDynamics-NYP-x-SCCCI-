@@ -53,8 +53,8 @@ export function useSessionGuard(onLogout) {
         // label fell back to showing the raw Staff ID, which read as a bug.
         // Syncing it here means that self-corrects on the next 15s poll or
         // tab focus, without needing a fresh login.
-        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role) {
-          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role } });
+        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role || fresh.readOnly !== before.readOnly) {
+          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role, readOnly: fresh.readOnly } });
         }
       } catch (e) {
         // 401 means the token no longer resolves to any account — it was

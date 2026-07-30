@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
-import { getToken, clearToken, getPermissions, apiPost } from "./lib/api.js";
+import { getToken, clearToken, getPermissions, getUser, apiPost } from "./lib/api.js";
 
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
@@ -68,7 +68,7 @@ const DESKTOP_FALLBACK_ORDER = [
 ];
 const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile", perm: "viewMobileHome" },
-  { path: "/mobile/attendance", perm: "viewMobileAttendance" },
+  { path: "/mobile/operations", perm: "viewMobileAttendance" },
   { path: "/mobile/trips", perm: "viewMobileTrips" },
   // Was "/mobile/scanner" until 2026-07-29; that route no longer exists, so the
   // fallback points at the QR scanner (the primary/centre tab) instead — an
@@ -138,6 +138,17 @@ function ViewGate({ perm, mode = "desktop", children }) {
   const perms = getPermissions();
   if (perms[perm]) return children;
   return <Navigate to={firstAllowedRoute(perms, mode)} replace />;
+}
+
+/**
+ * Legacy-URL redirect that keeps the query string (2026-07-30, the
+ * /mobile/attendance -> /mobile/operations rename) — a plain `<Navigate>`
+ * drops `?status=MISSING` entirely, which would silently break any old
+ * bookmark/link that relied on it.
+ */
+function RedirectPreservingQuery({ to }) {
+  const { search } = useLocation();
+  return <Navigate to={`${to}${search}`} replace />;
 }
 
 /**
@@ -217,7 +228,7 @@ export default function App() {
     const mode = pickModeFromPermissions(perms);
     setUiMode(mode);
     // If we got bounced to /login from a specific URL (e.g. someone opened a
-    // deep link like /mobile/attendance?status=MISSING while logged out, or a
+    // deep link like /mobile/operations?status=MISSING while logged out, or a
     // stale token silently expired while they were on some page), go back to
     // exactly that page — but ONLY if it's a real deep link: in the same
     // namespace as the mode just derived, AND not one of the two neutral
@@ -334,7 +345,7 @@ export default function App() {
         <Route
           path="/accounts"
           element={
-            getPermissions().manageAccounts
+            getPermissions().manageAccounts || (getUser()?.role === "admin" && getUser()?.readOnly)
               ? <AccountControlPage />
               : <Navigate to={pickHomeRoute()} replace />
           }
@@ -382,9 +393,16 @@ export default function App() {
         />
         {/* Trips and Attendance are one combined "Operations" destination.
             Both paths are kept so existing deep links (e.g. Home's KPI tiles
-            linking to /mobile/attendance?status=MISSING) still work — they
-            just open the combined page with the matching view selected. */}
-        <Route path="/mobile/attendance" element={<ViewGate perm="viewMobileAttendance" mode="mobile"><MobileOpsPage defaultView="delegates" /></ViewGate>} />
+            linking to /mobile/operations?status=MISSING) still work — they
+            just open the combined page with the matching view selected.
+            2026-07-30 ("change the url from /attendance to /operations") —
+            renamed from /mobile/attendance; /mobile/attendance itself is kept
+            as a redirect below so any old bookmark/link still lands somewhere
+            real instead of 404ing. The underlying permission key stays
+            "viewMobileAttendance" — renaming that would mean migrating every
+            account's stored permissions JSON for a URL-only cosmetic change. */}
+        <Route path="/mobile/operations" element={<ViewGate perm="viewMobileAttendance" mode="mobile"><MobileOpsPage defaultView="delegates" /></ViewGate>} />
+        <Route path="/mobile/attendance" element={<RedirectPreservingQuery to="/mobile/operations" />} />
         <Route path="/mobile/trips" element={<ViewGate perm="viewMobileTrips" mode="mobile"><MobileOpsPage defaultView="trips" /></ViewGate>} />
         {/* Dedicated Issues page (2026-07-20) — was an inline accordion on
             Mobile Home. Gated behind viewMobileIssues (2026-07-21) so an

@@ -123,6 +123,12 @@ export default function MobileExceptionsPage() {
   const [error, setError] = useState("");
   const [live, setLive] = useState(false);
   const [query, setQuery] = useState("");
+  // "Load more" paging (2026-07-30 — "imagine there are 100 delegates, it
+  // will be very long page... same for exception, trip tab") — see the
+  // identical PAGE_SIZE pattern in MobileAttendancePage.jsx.
+  const PAGE_SIZE = 20;
+  const [shownCount, setShownCount] = useState(PAGE_SIZE);
+  useEffect(() => { setShownCount(PAGE_SIZE); }, [tab, query]);
   const [busyId, setBusyId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -277,7 +283,7 @@ export default function MobileExceptionsPage() {
         </div>
       )}
 
-      {!error && tickets.map((tk) => {
+      {!error && tickets.slice(0, shownCount).map((tk) => {
         const lvl = ageLevel(tk, now);
         const present = isCheckedIn(tk.delegateStatus);
         const busy = busyId === tk.id;
@@ -343,6 +349,16 @@ export default function MobileExceptionsPage() {
           </div>
         );
       })}
+
+      {tickets.length > shownCount && (
+        <button
+          className="btn btn-ghost btn-block"
+          style={{ marginBottom: 10 }}
+          onClick={() => setShownCount((n) => n + PAGE_SIZE)}
+        >
+          {t("Load more")} ({tickets.length - shownCount} {t("more")})
+        </button>
+      )}
 
       {canEdit && (
         <button className="btn btn-primary mexc-log" onClick={() => setModalOpen(true)}>

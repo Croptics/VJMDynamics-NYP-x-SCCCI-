@@ -366,7 +366,16 @@ export default function AnnouncementsPage() {
       {error && <div style={{ marginTop: 20, color: "var(--st-missing)", fontSize: 13.5 }}>{t(error)}</div>}
       {loading && !announcements.length && <div className="muted" style={{ marginTop: 20 }}>{t("Loading…")}</div>}
 
-      {!loading && announcements.length === 0 && (
+      {/* 2026-07-30 ("why is the abc announcement have double announcement?")
+          — this used to render whenever announcements.length === 0, with no
+          regard for the day-tabs section below it. Once a trip had >1 day
+          tab (sections.length > 1), THAT section renders its OWN "No
+          announcements yet for this day" empty state for whichever day is
+          active — so a trip with zero announcements showed both empty-state
+          cards stacked, reading as a duplicate. This one is now only for
+          the untabbed case (a trip with no day-grouping at all); the day
+          tabs' own empty state (below) covers the tabbed case. */}
+      {!loading && announcements.length === 0 && sections.length <= 1 && (
         <div className="card" style={{ marginTop: 20, padding: 24, textAlign: "center" }}>
           <Megaphone size={28} color="var(--ink-3)" />
           <p className="muted" style={{ marginTop: 8, fontSize: 13.5 }}>{t("No announcements yet for this trip.")}</p>

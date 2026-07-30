@@ -1,9 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail, ClipboardList } from "lucide-react";
-import { apiGet, getUser, getPermissions } from "../../lib/api.js";
+import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail } from "lucide-react";
+import { apiGet, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
-import { getCriticalOpenCount } from "../../lib/exceptionsApi.js";
 
 // Trip id comes from the mobile trip switcher, not a hardcoded base trip
 // (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
@@ -96,16 +95,6 @@ export default function MobileHomePage() {
     return () => clearInterval(id);
   }, []);
 
-  // Issues card badge — open-critical count only; the form/list themselves
-  // live on the dedicated /mobile/issues page now.
-  const [openIssueCount, setOpenIssueCount] = useState(0);
-
-  useEffect(() => {
-    getCriticalOpenCount().then(setOpenIssueCount).catch(() => {});
-    const id = setInterval(() => { getCriticalOpenCount().then(setOpenIssueCount).catch(() => {}); }, 2000);
-    return () => clearInterval(id);
-  }, []);
-
   // Guards against overlapping polls (a slow response still in flight when
   // the next tick fires) — same pattern as the desktop Dashboard.
   const loadingRef = useRef(false);
@@ -137,7 +126,7 @@ export default function MobileHomePage() {
   const k = data?.kpis;
   const staffName = getUser()?.name || getUser()?.staffId || t("Staff");
   const goToAttendance = (status, coachId) =>
-    navigate(`/mobile/attendance?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
+    navigate(`/mobile/operations?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
 
   return (
     <div className="m-fade-in">
@@ -231,41 +220,12 @@ export default function MobileHomePage() {
             </div>
             <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
           </button>
-          {getPermissions().viewMobileIssues && (
-            <button className="m-tile" onClick={() => navigate("/mobile/issues")}>
-              <span className="m-tile-ic" style={{ background: "var(--st-missing-bg)", color: "var(--st-missing)" }}>
-                <AlertTriangle size={18} />
-              </span>
-              <div className="m-tile-body">
-                <div className="m-tile-title">{t("Report an issue")}</div>
-                <div className="m-tile-sub">{t("Log a new exception for your coach")}</div>
-              </div>
-              <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                {openIssueCount > 0 && <span className="badge badge-missing">{openIssueCount}</span>}
-                <ChevronRight size={16} style={{ color: "var(--ink-3)" }} />
-              </div>
-            </button>
-          )}
-          {/* Jayden's mobile exception inbox (2026-07-29 integration) — his new
-              page arrived with no route AND nothing linking to it, so it was
-              doubly unreachable. This tile is the way in. The tile above it was
-              relabelled at the same time: both used to be reachable only as
-              "Issues", and two tiles with near-identical names would be
-              indistinguishable — so that one now says what it's for (logging a
-              ticket) and this one says what it is (the inbox of everything
-              raised, with actions). */}
-          {getPermissions().viewMobileIssues && (
-            <button className="m-tile" onClick={() => navigate("/mobile/exceptions")}>
-              <span className="m-tile-ic" style={{ background: "var(--st-review-bg)", color: "var(--st-review)" }}>
-                <ClipboardList size={18} />
-              </span>
-              <div className="m-tile-body">
-                <div className="m-tile-title">{t("Exception inbox")}</div>
-                <div className="m-tile-sub">{t("Resolve, override or re-prioritise tickets")}</div>
-              </div>
-              <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
-            </button>
-          )}
+          {/* "Report an issue" and "Exception inbox" tiles REMOVED 2026-07-30
+              ("remove these 2 button ya") — Exceptions is now its own segment
+              inside the Ops tab (see MobileOpsPage.jsx's Delegates | Exceptions
+              | Trips switch), so these were duplicate entry points into the
+              same feature. /mobile/issues and /mobile/exceptions still exist
+              as routes for anyone with an old link. */}
         </div>
       </div>
 

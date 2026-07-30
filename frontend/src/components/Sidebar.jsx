@@ -41,7 +41,10 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
   }, []);
 
   const perms = getPermissions();
-  const isAdmin = !!perms.manageAccounts;
+  // A read-only Admin has manageAccounts=false (see accountPermissions() in
+  // backend/db/accounts.js) but should still see the Account control link —
+  // they can view everything there, just can't create/edit/delete/approve.
+  const isAdmin = !!perms.manageAccounts || (getUser()?.role === "admin" && getUser()?.readOnly);
   const { lang, toggleLang, t } = useLang();
   const { theme, toggleTheme } = useTheme();
   // Every item (except Account control, still its own manageAccounts check)

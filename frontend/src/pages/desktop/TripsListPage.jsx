@@ -168,10 +168,6 @@ function TripFormModal({ trip, onClose, onSaved }) {
     countryTo: trip?.countryTo || "",
     coachCapacity: "",
   });
-  // Whether "Current day" is a deliberate manual override vs. auto-computed
-  // from startDate (see syncTripDayOf(), backend/db/dashboard.js). Editing
-  // the number below sets this true; "Use automatic day" clears it.
-  const [dayOfManual, setDayOfManual] = useState(!!trip?.dayOfIsManual);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   // "Total days" now follows the itinerary rather than being a second,
@@ -225,8 +221,20 @@ function TripFormModal({ trip, onClose, onSaved }) {
         countryFrom: form.countryFrom.trim() || null,
         countryTo: form.countryTo.trim() || null,
       };
-      if (!editing || dayOfManual) payload.dayOf = Number(form.dayOf) || 1;
-      else payload.resetDayOfAuto = true; // editing + not manual: let the backend recompute from startDate
+      // ALWAYS reset to automatic on save now (2026-07-30 — "the logic for
+      // the actual start date is broken... set ytd start so today should be
+      // day 2, not day 5"): "Current day" was hidden from this form entirely
+      // (no more input, no more "Use automatic day" toggle), on the premise
+      // that it's fully automatic now — but a trip that already had
+      // `dayOfIsManual=true` from BEFORE that change (or from any other
+      // path) had no way back: dayOfManual could still read true from the
+      // trip's own data, and the branch below would keep resending the
+      // stale `form.dayOf` forever, permanently ignoring every future
+      // startDate edit. There is no UI left that can legitimately WANT a
+      // manual override anymore, so every save now clears it unconditionally
+      // — a brand new trip has no override to clear either, so this is safe
+      // for both create and edit.
+      payload.resetDayOfAuto = true;
       const saved = editing ? await apiPatch(`/trips/${trip.id}`, payload) : await apiPost(`/trips`, payload);
       // Bulk coach capacity — separate call, only sent if the admin actually
       // typed a value (left blank = leave each coach's own capacity alone).
@@ -295,13 +303,17 @@ function TripFormModal({ trip, onClose, onSaved }) {
               Current day from startDate (syncTripDayOf, backend), Total days
               from the itinerary's own day count (see totalDaysFromItinerary
               above) — so two disabled-looking number inputs just cluttered
-              the form with nothing left for staff to actually do here. Their
-              underlying state/payload fields are untouched, still resubmitted
-              as-is on save (dayOf/dayOfManual keep whatever an existing trip
-              already had; a brand-new trip starts at day 1 and totalDays
-              grows on its own once itinerary items exist), so no existing
-              manual "Current day" override is silently lost by removing the
-              UI for it. */}
+              the form with nothing left for staff to actually do here. Every
+              save now unconditionally sends `resetDayOfAuto: true` (see
+              handleSubmit) rather than conditionally, precisely BECAUSE this
+              UI is gone: a trip that already had a manual override set from
+              before this change (or from any other path) had no way back —
+              nothing left could ever flip it off again, so a startDate edit
+              would silently keep being ignored forever (2026-07-30 bug
+              report: "set ytd start so today should be day 2, not day 5" —
+              stuck on an old manual value with no reset control in sight).
+              Total days grows/shrinks on its own once itinerary items exist
+              (syncTotalDaysToItinerary, desmond.js) — nothing to reset there. */}
 
           {/* Real anchor for the "Departure in" countdown on Dashboard/mobile
               Home/mobile topbar (2026-07-30 — that chip was a frozen seed
@@ -405,8 +417,6 @@ export default function TripsListPage() {
   const [dark] = useTfTheme();
   const [trips, setTrips] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [seeding, setSeeding] = useState(false);
-  const [seedMessage, setSeedMessage] = useState(null);
   const [query, setQuery] = useState("");
   const [formTrip, setFormTrip] = useState(null);   // null = closed · {} = new · {…trip} = edit
   const [deleteTripState, setDeleteTripState] = useState(null);
@@ -440,25 +450,6 @@ export default function TripsListPage() {
       .catch(() => setCaptainTripIds(new Set()));
   }, []);
 
-  async function handleSeed() {
-    setSeeding(true);
-    setSeedMessage(null);
-    try {
-      const result = await apiPost("/trips/seed", {});
-      await fetchTrips();
-      setSeedMessage(
-        result.created > 0
-          ? `+${result.created} ${t("new trip")}${result.created === 1 ? "" : "s"} ${t("added")}`
-          : t("All demo trips are already on the board")
-      );
-    } catch (err) {
-      setLoadError(err.message);
-    } finally {
-      setSeeding(false);
-      setTimeout(() => setSeedMessage(null), 4000);
-    }
-  }
-
   const filteredTrips = useMemo(() => {
     if (!trips) return [];
     // Captains only ever see the trip(s) they're assigned to.
@@ -477,21 +468,13 @@ export default function TripsListPage() {
             <h1 style={{ fontSize: 28, fontWeight: 800, marginTop: 2 }}>{t("Trips & coaches")}</h1>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {/* Persistent seed control — previously only reachable from the
-               zero-trips empty state, so once any trip existed there was no
-               UI path left to add the newer demo trips. Gated on manageTrips. */}
+            {/* "Seed more trips" REMOVED 2026-07-30 ("remove the seed data") —
+                it was a dev-only demo-data convenience, not something a real
+                event coordinator ever needs once trips are real. */}
             {canEdit && !isCaptain && trips && !loadError && (
-              <>
-                {seedMessage && (
-                  <span className="tf-muted" style={{ fontSize: 12.5, fontWeight: 600 }}>{seedMessage}</span>
-                )}
-                <button className="tf-btn tf-btn-solid tf-btn-sm" onClick={handleSeed} disabled={seeding}>
-                  {seeding ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} {t("Seed more trips")}
-                </button>
-                <button className="tf-btn tf-btn-primary tf-btn-sm" onClick={() => setFormTrip({})}>
-                  <Plus size={14} /> {t("New trip")}
-                </button>
-              </>
+              <button className="tf-btn tf-btn-primary tf-btn-sm" onClick={() => setFormTrip({})}>
+                <Plus size={14} /> {t("New trip")}
+              </button>
             )}
           </div>
         </div>
@@ -518,7 +501,7 @@ export default function TripsListPage() {
             <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>{t("No trips yet")}</h2>
             <p className="tf-muted" style={{ fontSize: 13.5, maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
               {canManageTrips
-                ? t("Create your first trip, or use “Seed more trips” above to explore with demo data.")
+                ? t("Create your first trip to get started.")
                 : t("No trips have been added yet. Please check back later.")}
             </p>
             {canManageTrips && (

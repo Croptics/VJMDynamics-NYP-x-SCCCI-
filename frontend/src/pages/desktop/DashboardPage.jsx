@@ -198,12 +198,11 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
   // Countdown to the next auto-refresh tick (2026-07-27 — "update this will
-  // see how long it refresh") — the poll itself is a fixed 8s interval (see
+  // see how long it refresh") — the poll itself is a fixed 10s interval (see
   // the comment on that useEffect below); this is purely a visual "time
-  // until next sync" next to the Live badge, reset to REFRESH_SECONDS every
-  // time `load()` actually completes.
-  const REFRESH_SECONDS = 8;
-  const [refreshCountdown, setRefreshCountdown] = useState(REFRESH_SECONDS);
+  // until next sync" next to the Live badge. 8 -> 10 (2026-07-30 — "can you
+  // put sync to 10 sec").
+  const REFRESH_SECONDS = 10;
 
   // Trip switcher — the whole dashboard re-points to the selected trip.
   // "t-1" = the default Beijing trip (unfiltered); anything else is a trip uuid.
@@ -521,17 +520,8 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
       loadingRef.current = false;
-      setRefreshCountdown(REFRESH_SECONDS);
     }
   }, [selectedTripId, historyScope]);
-
-  // Ticks the visible countdown down every second between polls — a
-  // separate 1s interval rather than piggybacking on the 8s poll interval
-  // below, since that one only fires the actual refetch, not a UI tick.
-  useEffect(() => {
-    const id = setInterval(() => setRefreshCountdown((s) => Math.max(0, s - 1)), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   // Auto-refresh so a change made by another signed-in staff member (a
   // status edit, a new upload, a coach reassignment, etc.) shows up here
@@ -542,13 +532,14 @@ export default function DashboardPage() {
   // (2026-07-24) after this poll (5 parallel queries, including a 200-row
   // activity dump and the full delegate list) was found to be the single
   // biggest contributor to the Neon project's monthly egress quota with
-  // several tabs left open all day; 8s is still fast enough to feel live.
+  // several tabs left open all day; 10s (2026-07-30, was 8s — "put sync to
+  // 10 sec") is still fast enough to feel live.
   // 2026-07-29: now also PAUSES entirely while the tab is hidden (and catches
   // up on re-show) — see useVisiblePolling. The 8s slowdown above only reduced
   // the tick rate; this stops the ticks nobody is looking at, which is where
   // most of that egress was actually going. Five calls per tick makes this the
   // single biggest beneficiary in the app.
-  useVisiblePolling(load, 8000, [load]);
+  useVisiblePolling(load, 10000, [load]);
 
   // Reactively re-reads ?tripId=/?escalationDelegate= on every URL change
   // (2026-07-25 bugfix) — clicking EscalationBanner's "View" while ALREADY on
@@ -1165,22 +1156,16 @@ export default function DashboardPage() {
                    The overlaid select keeps the NATIVE dropdown (and its
                    keyboard handling) and covers the text + chevron, so the
                    whole title is the click target. */
-                <span className="mg-title-switch">
-                  <span className="mg-title-name">
-                    {trip ? `${trip.name}${trip.countryTo ? ` (${trip.countryTo})` : ""}` : t("Dashboard")}
-                  </span>
-                  <ChevronDown size={20} strokeWidth={2.5} aria-hidden="true" />
-                  <select
-                    value={selectedTripId}
-                    onChange={(e) => { setSelectedTripId(e.target.value); saveSelectedTripId(e.target.value); setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set()); }}
-                    title={t("Switch trip")}
-                    aria-label={t("Switch trip")}
-                  >
-                    {tripOptions.map((tr) => (
-                      <option key={tr.id} value={tr.id}>{tr.name}</option>
-                    ))}
-                  </select>
-                </span>
+                <TripSwitcher
+                  trip={trip}
+                  tripOptions={tripOptions}
+                  selectedTripId={selectedTripId}
+                  t={t}
+                  onPick={(id) => {
+                    setSelectedTripId(id); saveSelectedTripId(id);
+                    setShowAllDelegates(false); setShowAllCoaches(false); setSelectedDelegateIds(new Set());
+                  }}
+                />
               ) : (
                 trip ? trip.name : t("Dashboard")
               )}
@@ -1302,11 +1287,7 @@ export default function DashboardPage() {
             genuinely too-narrow viewport, wraps as a whole unit — never split
             mid-cluster. */}
         <div className="row" style={{ gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
-          {data && (
-            <span className="badge badge-present" title={t("Auto-refreshes every 8 seconds")}>
-              <span style={S.dot} /> {t("Live · synced")} · {refreshCountdown}s
-            </span>
-          )}
+          {data && <LiveSyncBadge seconds={REFRESH_SECONDS} t={t} dotStyle={S.dot} />}
           <button
             className="btn btn-ghost"
             onClick={() => { load(); if (tab === "staffops") loadStaffOps(); }}
@@ -1476,15 +1457,26 @@ export default function DashboardPage() {
               // flagged LATE, not past checkpoint-reset to be flagged
               // MISSING — showed 0 "missing" and a green "Arrived" badge,
               // directly contradicting the "5 to board" already visible one
-              // card over. `d.status` is normalised PRESENT→ARRIVED at fetch
-              // time (see the delegates-map above), so "not ARRIVED" alone
-              // is the correct "still needs to board" check — it already
-              // naturally includes ASSIGNED, LATE, and MISSING together.
+              // card over. `effectiveStatus(d)` (not raw `d.status`) is the
+              // correct "still needs to board" check — it already naturally
+              // includes ASSIGNED, LATE, and MISSING together.
+              // 2026-07-30 ("why is it arrived delegate are there?") — this
+              // used to check raw `d.status !== "ARRIVED"` on the (incorrect)
+              // assumption that PRESENT gets normalised to ARRIVED before it
+              // ever reaches this list; it doesn't (that normalisation only
+              // happens inside openEdit()'s form initializer, for a single
+              // delegate at a time) — so anyone whose real stored status was
+              // the legacy "PRESENT" value stayed stuck in "not boarded"
+              // forever despite having genuinely checked in. effectiveStatus()
+              // is the one helper in this file that actually does that
+              // PRESENT->ARRIVED aliasing, and mobile's own status checks
+              // already rely on it — this just brings Reverse headcount in
+              // line with the same rule instead of re-deriving its own.
               // Search/filter/sort applied on top (all client-side — the list
               // per coach is small enough not to need a server round-trip).
               const search = hcSearch.trim().toLowerCase();
               const coachMissing = delegates
-                .filter((d) => d.coachId === c.id && d.status !== "ARRIVED")
+                .filter((d) => d.coachId === c.id && effectiveStatus(d) !== "ARRIVED")
                 .filter((d) => {
                   if (hcFilter === "missing") return d.status === "MISSING";
                   if (hcFilter === "late") return d.status === "LATE";
@@ -3062,6 +3054,85 @@ export default function DashboardPage() {
         .kpi-clickable:hover{box-shadow:var(--shadow-md);border-color:var(--kpi-tone);transform:translateY(-1px)}
         .kpi-clickable:focus-visible{outline:2px solid var(--kpi-tone);outline-offset:2px}`}</style>
     </div>
+  );
+}
+
+/* ---- "Synced" badge (2026-07-30 — "why is it moving up and down?", then
+ * "the sec is affecting the itinerary placement, remove it"). This used to
+ * tick a live "Ns" countdown once a second, which was first isolated into
+ * its own component so only the badge (not the whole Dashboard) re-rendered
+ * each tick — but the countdown text's changing width ("10s" -> "9s" -> ...)
+ * still reflowed the itinerary chip sitting right below it in the header
+ * row. The countdown wasn't load-bearing information, so it's gone entirely
+ * now: a plain static badge, no interval, no per-second re-render, no
+ * reflow. */
+function LiveSyncBadge({ seconds, t, dotStyle }) {
+  return (
+    <span className="badge badge-present" title={t(`Auto-refreshes every ${seconds} seconds`)}>
+      <span style={dotStyle} /> {t("Synced")}
+    </span>
+  );
+}
+
+/* ---- Trip switcher (2026-07-30 — "fix the button color for dark theme
+ * mode" / "i don't like the hover effect, color"). This USED to be a native
+ * <select> laid invisibly over the styled title text (kept for its built-in
+ * keyboard handling and native dropdown) — but a native <option> list's
+ * hover/highlight colors are drawn by the OS, not by our CSS, and in dark
+ * theme that OS highlight came out dark-on-dark — genuinely unreadable, not
+ * something author CSS can reliably fix cross-browser. Rebuilt as a real,
+ * fully-styled dropdown (a button + our own absolutely-positioned menu) so
+ * every pixel — including the hover state — uses this app's own theme
+ * tokens (`--surface-2`, the same hover fill every other menu/nav item in
+ * the app already uses) instead of the browser's native option styling. */
+function TripSwitcher({ trip, tripOptions, selectedTripId, t, onPick }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e) { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); }
+    function onKeyDown(e) { if (e.key === "Escape") setOpen(false); }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <span className="mg-title-switch" ref={rootRef}>
+      <button
+        type="button"
+        className="mg-title-switch-btn"
+        onClick={() => setOpen((v) => !v)}
+        title={t("Switch trip")}
+        aria-label={t("Switch trip")}
+        aria-expanded={open}
+      >
+        <span className="mg-title-name">
+          {trip ? `${trip.name}${trip.countryTo ? ` (${trip.countryTo})` : ""}` : t("Dashboard")}
+        </span>
+        <ChevronDown size={20} strokeWidth={2.5} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="mg-title-menu" role="listbox">
+          {tripOptions.map((tr) => (
+            <button
+              key={tr.id}
+              type="button"
+              role="option"
+              aria-selected={tr.id === selectedTripId}
+              className={"mg-title-menu-item" + (tr.id === selectedTripId ? " active" : "")}
+              onClick={() => { onPick(tr.id); setOpen(false); }}
+            >
+              {tr.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 

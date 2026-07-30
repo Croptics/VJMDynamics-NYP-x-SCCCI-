@@ -380,53 +380,93 @@ a { color: inherit; }
   color: var(--ink-3);
 }
 .page-title { font-size: 28px; margin: 4px 0 2px; }
-/* The Dashboard's trip switcher, which IS the page title (2026-07-29). See the
-   comment at its call site in DashboardPage for the full reasoning; the short
-   version is that a <select> always sizes to its WIDEST option, so styling the
-   select directly left the chevron stranded far from a shorter selected name.
-   Instead the name is real text, the chevron sits immediately after it, and the
-   select is laid transparently over both — so the pair sizes to the actual
-   selected name at any length, while the click target stays the whole title and
-   the dropdown stays native. */
+/* The Dashboard's trip switcher, which IS the page title (2026-07-29). The
+   name is real text with the chevron right after it, sized to the actual
+   selected name at any length rather than the widest option.
+   2026-07-30 ("fix the button color for dark theme mode" / "i don't like the
+   hover effect") — this used to be a native <select> laid invisibly over the
+   text so the browser's own dropdown handled the list; but a native
+   <option>'s hover highlight is drawn by the OS, not by this CSS, and in
+   dark theme that came out dark-on-dark and unreadable. Rebuilt below as a
+   real button + our own menu (TripSwitcher in DashboardPage.jsx), styled
+   entirely with this app's own tokens — same --surface-2 hover fill every
+   other menu/nav item already uses, so it's guaranteed readable in both
+   themes and consistent with the rest of the app. */
 .mg-title-switch {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  min-width: 0;          /* lets the name below ellipsis instead of overflowing */
+  min-width: 0;
   max-width: 100%;
   color: inherit;
 }
-.mg-title-switch .mg-title-name {
+.mg-title-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
+  max-width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+/* 2026-07-30 ("can you show all the text" then "can you show in one line?")
+   — this used to hard-truncate with an ellipsis whenever the flex row didn't
+   have room for the full name (e.g. "Beijing study mission (china)" ->
+   "Beijing study mission (chi..."). Wrapping it onto a second line instead
+   wasn't right either — the ask was one line, full text. So: no ellipsis, no
+   wrap — the name always renders in full on one line; if the row genuinely
+   doesn't have room, it overflows past its own box rather than cutting or
+   wrapping (harmless here: the box already sizes to content, not the other
+   way around, so this only matters at the very narrowest viewports). */
+.mg-title-switch-btn .mg-title-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: visible;
+}
+.mg-title-switch-btn > svg { flex-shrink: 0; color: var(--ink-3); }
+.mg-title-switch-btn:hover { background: var(--surface-2); }
+.mg-title-switch-btn:hover .mg-title-name,
+.mg-title-switch-btn:hover > svg { color: var(--scc-red); }
+.mg-title-switch-btn:focus-visible { outline: 2px solid var(--scc-red); outline-offset: 2px; }
+.mg-title-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.18));
+  padding: 6px;
+  z-index: 30;
+}
+.mg-title-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.mg-title-switch > svg { flex-shrink: 0; color: var(--ink-3); }
-/* Covers the text AND the chevron, so clicking anywhere on the title opens the
-   list. opacity:0 rather than visibility/display so it stays focusable and the
-   browser still anchors its native dropdown here. */
-.mg-title-switch select {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-  font: inherit;
-  border: none;
-  appearance: none;
-  -webkit-appearance: none;
-}
-.mg-title-switch:hover .mg-title-name,
-.mg-title-switch:hover > svg { color: var(--scc-red); }
-/* The invisible select can't show its own focus ring, so the wrapper wears it —
-   otherwise keyboard users get no indication the title is focused. */
-.mg-title-switch:focus-within { outline: 2px solid var(--scc-red); outline-offset: 4px; border-radius: 4px; }
-/* The dropdown LIST renders with the OS's own styling, which would otherwise
-   inherit the transparent background and be unreadable in dark theme. */
-.mg-title-switch option { font-size: 14px; font-weight: 400; color: var(--ink); background: var(--surface); }
+.mg-title-menu-item:hover { background: var(--surface-2); }
+.mg-title-menu-item.active { color: var(--scc-red); font-weight: 700; }
 .page-sub { color: var(--ink-3); font-size: 14px; }
 
 /* ---- Status + confidence badges --------------------------------------- */

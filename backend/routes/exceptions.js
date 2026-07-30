@@ -43,8 +43,18 @@ import { syncCurrentCheckpointStatus } from "./checkpoints.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
 // desmond.js's own edits already use; exported from there rather than
-// duplicated here.
+// duplicated here. This powers the Trip board's OWN small "History" panel
+// (trip_event_log) — a SEPARATE system from the real Delegate history log
+// page below, which turned out to need a second, different fix entirely
+// (2026-07-30, "the qr code scanner didn't log in the history log, pls
+// check" — this route writes with raw SQL, bypassing updateDelegate() in
+// db/delegates.js entirely, and logActivity() is only ever called FROM
+// updateDelegate() — so this route, unlike Face/Voice scans which DO go
+// through updateDelegate(), never reached the real activity_log table at
+// all, regardless of the recordEvent() fix already in place here).
 import { recordEvent } from "./desmond.js";
+import { logActivity } from "../db/history.js";
+import { actorOf } from "../lib/actor.js";
 
 const router = Router();
 
@@ -450,6 +460,12 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
       before: { status: d.rows[0].status }, after: { status: "ARRIVED" },
     });
   }
+  // The REAL Delegate history log (activity_log — see the import comment
+  // above) is a separate table this route never wrote to at all, since it
+  // updates `delegates` with raw SQL instead of going through
+  // updateDelegate() (db/delegates.js), which is the ONLY place logActivity()
+  // used to be called from.
+  await logActivity(`${d.rows[0].name} checked in (manual)`, "checkin", actorOf(req), { delegateId, tripUuid });
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "MANUAL" });
   res.status(201).json({ id, delegateId, status: "ARRIVED", duplicate: false, method: "MANUAL" });
@@ -547,6 +563,10 @@ router.post("/api/checkins/qr", requireAuth(), wrap(async (req, res) => {
       before: { status: d.rows[0].status }, after: { status: "ARRIVED" },
     });
   }
+  // The REAL Delegate history log (activity_log — see the import comment
+  // near the top of this file) — this route also updates `delegates` with
+  // raw SQL, so it needs its own explicit logActivity() call too.
+  await logActivity(`${d.rows[0].name} checked in (QR)`, "checkin", actorOf(req), { delegateId, tripUuid: qrTripUuid });
 
   broadcast("attendance:override", { delegateId, name: d.rows[0].name, method: "QR" });
   res.status(201).json({ id, delegateId, name: d.rows[0].name, status: "ARRIVED", duplicate: false, method: "QR" });

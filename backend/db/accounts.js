@@ -28,8 +28,13 @@
  */
 
 import bcrypt from "bcryptjs";
-import { cleanPermissions, PERM_KEYS } from "../../permissions.js";
+import { cleanPermissions, PERM_KEYS, PERMISSIONS } from "../../permissions.js";
 import { all, get, run } from "./connection.js";
+
+// Every action-group key (manageDelegates, manageAccounts, ...) — the write
+// capabilities a read-only Admin loses. Everything else (desktopView/
+// mobileView) stays true so a read-only Admin still sees every tab.
+const ACTION_KEYS = PERMISSIONS.filter((p) => p.group === "action").map((p) => p.key);
 
 /* ---- Password rule (shared with the frontend hint) ---------------------- *
  * At least 8 characters, with a letter and a number. Returns an error
@@ -72,8 +77,15 @@ export async function upgradePasswordIfNeeded(account, plainPassword) {
   await run("UPDATE accounts SET password = $1 WHERE id = $2", [await hashPassword(plainPassword), account.id]);
 }
 
-export function defaultPermsForRole(role) {
-  if (role === "admin") return cleanPermissions(Object.fromEntries(PERM_KEYS.map((k) => [k, true])));
+/** readOnly=true gives a "read-only Admin": every key true EXCEPT the
+ *  action-group (write) ones, which are forced false — full visibility, zero
+ *  write capability. Meaningless (ignored) for role="staff". */
+export function defaultPermsForRole(role, readOnly = false) {
+  if (role === "admin") {
+    const all = Object.fromEntries(PERM_KEYS.map((k) => [k, true]));
+    if (readOnly) for (const k of ACTION_KEYS) all[k] = false;
+    return cleanPermissions(all);
+  }
   return cleanPermissions({ manageDelegates: true }); // staff
 }
 
@@ -88,21 +100,24 @@ export function cleanRole(role) {
 }
 
 /** Parsed permissions for an account row. Admins bypass entirely (always
- *  every permission true); staff get their stored checkboxes, falling back
- *  to the staff defaults if the stored JSON is missing/corrupt. */
+ *  every permission true, or every-but-action if flagged readOnly); staff
+ *  get their stored checkboxes, falling back to the staff defaults if the
+ *  stored JSON is missing/corrupt. */
 export function accountPermissions(row) {
   if (!row) return cleanPerms({});
-  if (row.role === "admin") return defaultPermsForRole("admin");
+  if (row.role === "admin") return defaultPermsForRole("admin", !!row.readOnly);
   try {
     if (row.permissions) return cleanPerms(JSON.parse(row.permissions));
   } catch { /* fall through */ }
   return defaultPermsForRole("staff");
 }
 
-/** Count of admin accounts — used to block removing/demoting the LAST admin
- *  (would otherwise lock everyone out of Account control). */
+/** Count of FULL (non-read-only) admin accounts — used to block
+ *  removing/demoting/read-only-flagging the last one, which would otherwise
+ *  lock everyone out of Account control (a read-only admin can see the page
+ *  but has no manageAccounts permission to act on it). */
 async function countAdmins() {
-  return (await all("SELECT role FROM accounts")).filter((a) => a.role === "admin").length;
+  return (await all("SELECT role, \"readOnly\" FROM accounts")).filter((a) => a.role === "admin" && !a.readOnly).length;
 }
 
 function accountPublic(row) {
@@ -200,7 +215,8 @@ export async function createAccount(input) {
   // so store the admin-default set for a clean "Access" display; a Staff
   // account keeps whatever was actually submitted.
   const role = cleanRole(input.role);
-  const perms = role === "admin" ? defaultPermsForRole("admin") : cleanPerms(input.permissions);
+  const readOnly = role === "admin" && !!input.readOnly;
+  const perms = role === "admin" ? defaultPermsForRole("admin", readOnly) : cleanPerms(input.permissions);
 
   if (!username) return { error: "USERNAME_REQUIRED" };
   if (!password) return { error: "PASSWORD_REQUIRED" };
@@ -218,8 +234,8 @@ export async function createAccount(input) {
   // status defaults to 'approved' (see schema.js) — an admin creating an
   // account directly on Account control IS the approval, unlike a public
   // self-registration (see registerAccount()), which starts 'pending'.
-  await run(`INSERT INTO accounts (id, username, name, email, phone, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [
-    id, username, name, email, phone || null, await hashPassword(password), role, JSON.stringify(perms), new Date().toISOString(),
+  await run(`INSERT INTO accounts (id, username, name, email, phone, password, role, permissions, "readOnly", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [
+    id, username, name, email, phone || null, await hashPassword(password), role, JSON.stringify(perms), readOnly, new Date().toISOString(),
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
@@ -305,8 +321,9 @@ export async function updateAccount(id, patch) {
   const username = patch.username !== undefined ? String(patch.username).trim() : existing.username;
   const name = patch.name !== undefined ? String(patch.name).trim() || username : existing.name;
   const role = patch.role !== undefined ? cleanRole(patch.role) : cleanRole(existing.role);
+  const readOnly = role === "admin" ? !!(patch.readOnly !== undefined ? patch.readOnly : existing.readOnly) : false;
   const perms = role === "admin"
-    ? defaultPermsForRole("admin")
+    ? defaultPermsForRole("admin", readOnly)
     : (patch.permissions ? cleanPerms(patch.permissions) : accountPermissions(existing));
 
   let password = existing.password;
@@ -338,13 +355,17 @@ export async function updateAccount(id, patch) {
     if (emailClash && emailClash.id !== id) return { error: "EMAIL_TAKEN" };
   }
 
-  // Block demoting the last admin — would lock everyone out of Account control.
-  if (cleanRole(existing.role) === "admin" && role !== "admin" && (await countAdmins()) <= 1) {
+  // Block demoting the last FULL admin (to staff, OR to read-only) — either
+  // way would lock everyone out of Account control (a read-only admin can
+  // view the page but has no manageAccounts permission to act on it).
+  const wasFullAdmin = cleanRole(existing.role) === "admin" && !existing.readOnly;
+  const staysFullAdmin = role === "admin" && !readOnly;
+  if (wasFullAdmin && !staysFullAdmin && (await countAdmins()) <= 1) {
     return { error: "LAST_MAIN" };
   }
 
-  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5, role=$6, permissions=$7 WHERE id=$8`, [
-    username, name, email, phone || null, password, role, JSON.stringify(perms), id,
+  await run(`UPDATE accounts SET username=$1, name=$2, email=$3, phone=$4, password=$5, role=$6, permissions=$7, "readOnly"=$8 WHERE id=$9`, [
+    username, name, email, phone || null, password, role, JSON.stringify(perms), readOnly, id,
   ]);
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }

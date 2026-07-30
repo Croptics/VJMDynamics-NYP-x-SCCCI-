@@ -46,6 +46,13 @@ import {
 // desmond.js's own edits already use; exported from there rather than
 // duplicated here.
 import { recordEvent } from "./desmond.js";
+// The REAL Delegate history log (activity_log, db/history.js — a SEPARATE
+// system from recordEvent's trip_event_log above) — this route also updates
+// `delegates` with raw SQL, bypassing updateDelegate() (db/delegates.js),
+// which is the only place logActivity() otherwise gets called from (2026-07-30
+// — "the qr code scanner didn't log in the history log, pls check").
+import { logActivity } from "../db/history.js";
+import { actorOf } from "../lib/actor.js";
 import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
 
 const router = Router();
@@ -1001,6 +1008,7 @@ router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner")
       before: { status: del.status }, after: { status: "PRESENT" },
     });
   }
+  await logActivity(`${del.name} checked in (QR)`, "checkin", actorOf(req), { delegateId: del.id, tripUuid: onboardTripUuid });
 
   const counts = await q(
     `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('PRESENT','ARRIVED'))::int AS present

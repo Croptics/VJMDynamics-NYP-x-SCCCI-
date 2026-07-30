@@ -117,6 +117,17 @@ export default function MobileAttendancePage() {
   // ?coach=<id> — set when the Home page's Coach status card links to one
   // specific coach's missing list instead of everyone's.
   const [coachFilter, setCoachFilter] = useState(() => searchParams.get("coach") || null);
+  // "Load more" paging (2026-07-30 — "imagine there are 100 delegates, it
+  // will be very long page, pls advise and adjust it"): a trip that size
+  // rendered every single row at once with no pagination at all. Mobile
+  // convention is tap-to-reveal-more rather than desktop's page-number
+  // pagination (AccountControlPage.jsx), so this renders only the first
+  // PAGE_SIZE of `visible` and grows by PAGE_SIZE per tap; it resets back to
+  // one page below whenever the filter/search/coach narrows the list, so a
+  // fresh filter never opens already scrolled deep into a stale page.
+  const PAGE_SIZE = 20;
+  const [shownCount, setShownCount] = useState(PAGE_SIZE);
+  useEffect(() => { setShownCount(PAGE_SIZE); }, [filter, query, coachFilter]);
   const [rowError, setRowError] = useState(null); // { id, message }
   const [savingId, setSavingId] = useState(null);
   const [mapDelegate, setMapDelegate] = useState(null);
@@ -579,7 +590,7 @@ export default function MobileAttendancePage() {
         </div>
       )}
 
-      {visible.map((d) => {
+      {visible.slice(0, shownCount).map((d) => {
         const missing = d.status === "MISSING";
         // Late delegates are the other case staff actually want to ring —
         // they haven't checked in by the trip's cutoff and might just be
@@ -679,6 +690,16 @@ export default function MobileAttendancePage() {
           </div>
         );
       })}
+
+      {visible.length > shownCount && (
+        <button
+          className="btn btn-ghost btn-block"
+          style={{ marginBottom: 10 }}
+          onClick={() => setShownCount((n) => n + PAGE_SIZE)}
+        >
+          {t("Load more")} ({visible.length - shownCount} {t("more")})
+        </button>
+      )}
 
       {mapDelegate && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(16,24,40,0.45)", display: "grid", placeItems: "center", padding: 20, zIndex: 50 }}

@@ -1,129 +1,124 @@
 // frontend/src/components/PasskeySignIn.jsx
 // OWNED BY: FaceCheck-Pro (Vimal)
 //
-// "Sign in with Face ID / Touch ID / fingerprint / Windows Hello" — a passkey
-// (WebAuthn) sign-in button for the login page.
+// Biometric ("Face ID / Touch ID / fingerprint / Windows Hello") sign-in for
+// the login page.
 //
-// Everything lives in this ONE component on purpose: LoginPage.jsx belongs to
-// JQ and asks teammates not to edit it, so it only needs a single <PasskeySignIn/>
-// line rather than a chunk of biometric logic.
+// 2026-07-30 ("can you merge these 2 buttons together — try biometric first,
+// if it didn't happen just follow the normal login"): this used to render
+// its OWN separate "Sign in with Windows Hello" button + "or" divider below
+// the password Sign in button. Now there's a single Sign in button (in
+// LoginPage.jsx, JQ's file) — usePasskeySignIn() below exposes attempt(),
+// which LoginPage calls FIRST on submit whenever a passkey is set up on this
+// device; if attempt() resolves false (unsupported device, nothing
+// registered yet, the OS prompt is cancelled, or it just fails) LoginPage
+// silently falls through to the normal Staff ID + password flow with
+// whatever's currently typed — no separate biometric error is shown for
+// that fallback path, since failing over is the expected, quiet case now,
+// not a real error.
 //
-// The biometric itself never reaches this app. iOS/Android/Windows verify the
-// face or finger in secure hardware and release only a signature from a private
-// key that never leaves the device — we just hand the signature to the server,
-// which checks it against a stored PUBLIC key. That's why this needs no camera
-// permission, no enrolment, and stores nothing sensitive.
+// The biometric itself still never reaches this app: iOS/Android/Windows
+// verify the face or finger in secure hardware and release only a signature
+// from a private key that never leaves the device — we just hand that
+// signature to the server, which checks it against a stored PUBLIC key.
+// That's why this needs no camera permission, no enrolment, and stores
+// nothing sensitive.
 //
-// It renders nothing at all when passkeys can't work (no platform biometric,
-// nothing registered yet, or the app opened over a bare IP — see rp() in
-// backend/routes/passkeys.js), so the login page is never cluttered with a
-// button that would only fail.
+// 2026-07-30 ("set the login by face to be one time until i exit the page or
+// the local storage/web browser forget, then re-scan to login — like real
+// application logic"): LoginPage.jsx now also calls attempt() ONCE
+// automatically on page load (guarded by a ref there, not here) whenever
+// `available && registered` — this hook itself has no memory of "already
+// tried this page load"; that's deliberately the caller's job, since a fresh
+// mount (a real page reload, or navigating back to /login after signing
+// out) is exactly what should make it eligible to auto-fire again.
 
-import { useEffect, useState } from "react";
-import { Fingerprint, ScanFace, Loader2 } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
 import { startAuthentication, platformAuthenticatorIsAvailable } from "@simplewebauthn/browser";
 import { apiGet, apiPost, setToken, setUser } from "../lib/api.js";
 
-/** Name the gesture the way the user's own OS does, so it reads as familiar. */
-function biometricLabel() {
+/** Name the gesture the way the user's own OS does, so it reads as familiar
+ *  wherever a caller wants to mention it (e.g. a small hint under the button). */
+export function biometricLabel() {
   const ua = navigator.userAgent || "";
   const apple = /iPhone|iPad|iPod|Macintosh/i.test(ua);
-  if (/iPhone|iPad|iPod/i.test(ua)) return { text: "Sign in with Face ID / Touch ID", Icon: ScanFace };
-  if (apple) return { text: "Sign in with Touch ID", Icon: Fingerprint };
-  if (/Android/i.test(ua)) return { text: "Sign in with fingerprint", Icon: Fingerprint };
-  if (/Windows/i.test(ua)) return { text: "Sign in with Windows Hello", Icon: ScanFace };
-  return { text: "Sign in with biometrics", Icon: Fingerprint };
+  if (/iPhone|iPad|iPod/i.test(ua)) return "Face ID / Touch ID";
+  if (apple) return "Touch ID";
+  if (/Android/i.test(ua)) return "fingerprint";
+  if (/Windows/i.test(ua)) return "Windows Hello";
+  return "biometrics";
 }
 
-export default function PasskeySignIn({ staffId = "", onSignedIn, keep = true, t = (s) => s }) {
-  const [show, setShow] = useState(false);
+/**
+ * available: this device + origin could do passkey sign-in at all (platform
+ * authenticator present, and the WebAuthn relying-party origin check on the
+ * backend allows it — see rp() in backend/routes/passkeys.js).
+ * registered: whether it's actually worth prompting for THIS typed Staff ID
+ * — scoped to `registeredForStaffId` (a specific account) once something's
+ * typed, falling back to `anyRegistered` (discoverable/usernameless credential
+ * — some account, any account, has one, and the device is asked to offer
+ * whatever it's holding) only while the field is still blank. Both `available`
+ * and `registered` must be true for attempt() to be worth calling.
+ *
+ * 2026-07-30 bug fix — this used to check `anyRegistered` unconditionally,
+ * even with a Staff ID already typed. Combined with LoginPage's auto-fire-on-
+ * mount, that meant ANY staff member's login page would auto-trigger an OS
+ * biometric prompt the instant SOME OTHER account anywhere on the server had
+ * ever registered a passkey — nothing to do with whether THIS account, or
+ * this device, actually had one. Scoping to the typed Staff ID once one
+ * exists is what `registeredForStaffId` (backend/routes/passkeys.js) is
+ * actually for.
+ */
+export function usePasskeySignIn({ staffId = "", keep = true, onSignedIn } = {}) {
+  const [available, setAvailable] = useState(false);
   const [registered, setRegistered] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const { text, Icon } = biometricLabel();
 
-  // Show whenever the DEVICE could do this (has a built-in biometric) and the
-  // origin allows passkeys. Deliberately NOT gated on a passkey already
-  // existing: that was a chicken-and-egg — the button stayed invisible, so
-  // nobody could discover the feature to set it up in the first place. If
-  // there's nothing registered yet we still render, and explain how to enable
-  // it rather than silently hiding.
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         const hasPlatform = await platformAuthenticatorIsAvailable();
-        const info = await apiGet("/passkeys/available").catch(() => ({ supported: false }));
+        const id = staffId.trim();
+        const info = await apiGet(`/passkeys/available${id ? `?staffId=${encodeURIComponent(id)}` : ""}`).catch(() => ({ supported: false }));
         if (!alive) return;
-        setShow(hasPlatform && info.supported);
-        setRegistered(!!info.anyRegistered);
-      } catch { /* endpoint unavailable — stay hidden */ }
+        setAvailable(hasPlatform && info.supported);
+        setRegistered(!!(id ? info.registeredForStaffId : info.anyRegistered));
+      } catch { /* endpoint unavailable — stay unavailable */ }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [staffId]);
 
-  async function signIn() {
-    // Nothing registered anywhere yet — say so plainly instead of firing an OS
-    // prompt that can only fail.
-    if (!registered) {
-      setError(t("No device is set up yet. Sign in with your password once, then turn this on under Me → Biometric sign-in."));
-      return;
-    }
-    setBusy(true); setError("");
+  const attempt = useCallback(async () => {
+    if (!available || !registered) return false;
+    setBusy(true);
     try {
       // 1) Server issues a one-time challenge. Passing a Staff ID narrows it to
       // that account's devices; leaving it blank lets the device offer whatever
-      // passkey it holds (username-less sign-in).
-      const options = await apiPost("/passkeys/login/options", staffId ? { staffId: staffId.trim() } : {});
-
+      // passkey it holds (username-less sign-in — see the "no credential at
+      // all" advisory note above the exports: this already works today,
+      // nothing else to build for it).
+      const options = await apiPost("/passkeys/login/options", staffId.trim() ? { staffId: staffId.trim() } : {});
       // 2) The OS prompts for Face ID / fingerprint and signs the challenge.
       const assertion = await startAuthentication({ optionsJSON: options });
-
       // 3) Server verifies the signature and returns the normal session token.
-      const res = await apiPost("/passkeys/login/verify", {
-        ...assertion,
-        expectedChallenge: options.challenge,
-      });
-      if (!res.token) throw new Error("Sign-in failed.");
+      const res = await apiPost("/passkeys/login/verify", { ...assertion, expectedChallenge: options.challenge });
+      if (!res.token) return false;
       setToken(res.token, keep);
       setUser(
-        { staffId: res.username, username: res.username, name: res.name, role: res.role, permissions: res.permissions },
+        { staffId: res.username, username: res.username, name: res.name, role: res.role, readOnly: res.readOnly, permissions: res.permissions },
         keep
       );
       onSignedIn?.();
-    } catch (e) {
-      // A user cancelling the OS prompt is not an error worth shouting about.
-      const name = e?.name || "";
-      if (name === "NotAllowedError" || name === "AbortError") setError("");
-      else if (e?.code === "NO_PASSKEY") setError(t("No passkey set up for that Staff ID yet."));
-      else setError(e?.message || t("Biometric sign-in failed. Use your password instead."));
+      return true;
+    } catch {
+      // Cancelled OS prompt, no matching passkey for this Staff ID, network
+      // hiccup, revoked credential, etc. — all fall back to password silently.
+      return false;
     } finally {
       setBusy(false);
     }
-  }
+  }, [available, registered, staffId, keep, onSignedIn]);
 
-  if (!show) return null;
-
-  return (
-    <>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0 10px" }}>
-        <span style={{ flex: 1, height: 1, background: "var(--line)" }} />
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-          {t("or")}
-        </span>
-        <span style={{ flex: 1, height: 1, background: "var(--line)" }} />
-      </div>
-
-      <button type="button" className="btn btn-ghost btn-block" onClick={signIn} disabled={busy}>
-        {busy ? <Loader2 size={18} className="pk-spin" /> : <Icon size={18} />}
-        {busy ? t("Waiting for your device…") : t(text)}
-      </button>
-
-      {error && (
-        <p style={{ color: "var(--st-missing)", fontSize: 12.5, textAlign: "center", marginTop: 8 }}>{error}</p>
-      )}
-
-      <style>{`.pk-spin{animation:pk-spin .9s linear infinite}@keyframes pk-spin{to{transform:rotate(360deg)}}`}</style>
-    </>
-  );
+  return { available, registered, busy, attempt };
 }
