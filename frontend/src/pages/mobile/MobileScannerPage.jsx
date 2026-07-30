@@ -31,6 +31,7 @@ const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
 import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 import ManualTrackingPanel from "../../components/ManualTrackingPanel.jsx";
+import BadgeFlipCard from "../../components/BadgeFlipCard.jsx";
 
 import { getMobileTripId } from "../../lib/mobileTrip.js";
 
@@ -91,7 +92,8 @@ export default function MobileScannerPage({ lockMode }) {
   // Keep the mode pinned if the route changes between the Face and QR tabs.
   useEffect(() => { if (lockMode) setScanMode(lockMode); }, [lockMode]);
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState(null); // { name, time }
+  const [scanResult, setScanResult] = useState(null); // { name, time, code }
+  const [badgeCode, setBadgeCode] = useState(null);    // delegate code shown in the flip-badge overlay
   const [scanError, setScanError] = useState("");
   const [camError, setCamError] = useState("");
   const [resetTick, setResetTick] = useState(0);
@@ -453,7 +455,10 @@ export default function MobileScannerPage({ lockMode }) {
         return;
       }
       haptic([18, 40, 18]); // confirmed-match double-tick
-      setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s` });
+      // For QR / manual check-ins the scanned token IS the boarding code, so we
+      // can offer to pull up that delegate's flip badge. (Face tokens aren't a code.)
+      const scannedCode = (scanMode === "qr" || scanMode === "manual") && typeof token === "string" ? token : null;
+      setScanResult({ name: res.name, time: `${(elapsed / 1000).toFixed(1)}s`, code: scannedCode });
       fetchCoaches();
       fetchCoach(coachId);
       // Second, separate write — only when a checkpoint is actively selected.
@@ -841,16 +846,24 @@ export default function MobileScannerPage({ lockMode }) {
             <div className="mobile-card mscan-pop" style={{ padding: "16px 18px", margin: 0, maxWidth: 280 }}>
               <div className="row" style={{ gap: 12 }}>
                 <CheckCircle2 size={34} style={{ color: "var(--st-present)", flexShrink: 0 }} />
-                <div style={{ textAlign: "left" }}>
+                <div style={{ textAlign: "left", flex: 1 }}>
                   <div style={{ fontWeight: 700, fontSize: 16 }}>{scanResult.name}</div>
                   <div className="muted" style={{ fontSize: 13 }}>
                     {t("Matched")} · {scanResult.time} · {coach?.coachLabel || t("Coach")} ✓
                   </div>
                 </div>
               </div>
+              {scanResult.code && (
+                <button className="btn btn-ghost btn-block" style={{ marginTop: 12, fontSize: 13 }}
+                  onClick={() => { setBadgeCode(scanResult.code); setScanResult(null); }}>
+                  <QrCode size={15} /> {t("View badge")}
+                </button>
+              )}
             </div>
           </div>
         )}
+
+        {badgeCode && <BadgeFlipCard code={badgeCode} onClose={() => setBadgeCode(null)} />}
       </div>
 
       {/* Mode toggle — hidden when the route pins this page to one scanner
