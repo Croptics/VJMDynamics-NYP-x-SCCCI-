@@ -914,7 +914,7 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   const tripId = req.query.tripId;
   const tripUuid = await resolveTripUuid(tripId);
   await backfillQrCodes(tripUuid);
-  const cols = `id, name, company, role, industry, website, "coachId" AS coach_id, status, vip, qr_code, external_badge_code`;
+  const cols = `id, name, email, company, role, industry, website, "coachId" AS coach_id, status, vip, qr_code, external_badge_code`;
   const r = tripUuid
     ? await q(`SELECT ${cols} FROM delegates WHERE trip_id = $1 ORDER BY name`, [tripUuid])
     : await q(`SELECT ${cols} FROM delegates ORDER BY name`);
