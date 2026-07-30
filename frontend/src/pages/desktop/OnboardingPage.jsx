@@ -281,6 +281,11 @@ export default function OnboardingPage() {
       localStorage.removeItem(LS_JOB);
       localStorage.removeItem(LS_ROWS);
       getOnboardingContext(tripId).then(setContext).catch(() => {});
+      // Land the user on Boarding passes so the passes they just created are
+      // visible immediately — the tab remounts BoardingPassesView, which
+      // refetches. Without this the review list just clears and it looks like
+      // nothing happened ("the reader works but doesn't update boarding passes").
+      if (added > 0) setView("passes");
     } catch (err) {
       notify("error", err.message || t("Couldn't save the delegates. Please try again."));
     } finally {
