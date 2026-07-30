@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail, Download, FileText } from "lucide-react";
+import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail, Download, FileText, RotateCw } from "lucide-react";
 import { getBadges, getTrips, linkPhysicalBadge, emailPass } from "../../lib/claudeParse.js";
 import { useLang } from "../../lib/i18n.jsx";
 
@@ -256,6 +256,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
   const [open, setOpen] = useState(null);      // delegate shown in the pass modal
+  const [flipped, setFlipped] = useState(false); // pass modal: QR (front) ↔ company badge (back)
   const [linking, setLinking] = useState(null); // delegate whose physical pass is being linked
   const [emailing, setEmailing] = useState(false);
   const [emailMsg, setEmailMsg] = useState(null); // { ok, text } after an email attempt
@@ -272,6 +273,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const [selectedTrip, setSelectedTrip] = useState(tripId || "t-1");
   useEffect(() => { getTrips().then(setTrips).catch(() => {}); }, []);
   useEffect(() => { setSelectedTrip(tripId || "t-1"); }, [tripId]);
+  useEffect(() => { setFlipped(false); }, [open?.id]); // always open a pass on the QR side
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -546,22 +548,44 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
               </div>
               <span role="button" onClick={() => setOpen(null)} style={{ cursor: "pointer", color: "var(--ink-3)", display: "flex" }}><X size={18} /></span>
             </div>
-            {/* Company identity band — the "who they represent" line of the badge */}
-            <div className="row" style={{ gap: 10, alignItems: "center", padding: "12px 18px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)" }}>
-              <CompanyLogo company={open.company} logoUrl={open.logo_url} website={open.website} size={40} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{open.company || t("No company")}</div>
-                {open.industry && <div className="muted" style={{ fontSize: 11.5, marginTop: 1 }}>{open.industry}</div>}
+            {/* Flippable pass — QR (front) ↔ digital company badge (back).
+                Same interaction as the public /badge page: QR first, ↻ top-right. */}
+            <div style={{ padding: "18px 18px 4px", display: "flex", justifyContent: "center" }}>
+              <div className="mgp-flip" onClick={() => setFlipped((f) => !f)} role="button" aria-label={t("Flip badge")}>
+                <div className={"mgp-inner" + (flipped ? " flipped" : "")}>
+                  {/* FRONT — QR */}
+                  <div className="mgp-face" style={{ background: "#fff", border: "1px solid var(--line)" }}>
+                    <button className="mgp-flipbtn" onClick={(e) => { e.stopPropagation(); setFlipped((f) => !f); }} aria-label={t("Flip badge")}><RotateCw size={15} /></button>
+                    <div style={{ height: 32, background: companyBrand(open.company).bg, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10, letterSpacing: 1 }}>{t("BOARDING PASS")}</div>
+                    <div style={{ padding: "14px 14px 12px", textAlign: "center" }}>
+                      {qr[open.id]
+                        ? <img src={qr[open.id]} alt={`QR ${open.name}`} width={168} height={168} style={{ borderRadius: 10 }} />
+                        : <div style={{ width: 168, height: 168, background: "var(--surface-2)", borderRadius: 10, margin: "0 auto" }} />}
+                      <div className="mono" style={{ marginTop: 8, fontSize: 12.5, fontWeight: 700, letterSpacing: 1 }}>{open.qr_code}</div>
+                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{coachLabel(coachOf(open.coach_id))} · {t((STATUS_META[open.status] || STATUS_META.UNASSIGNED).label)}</div>
+                    </div>
+                  </div>
+                  {/* BACK — digital company badge */}
+                  <div className="mgp-face mgp-back" style={{ background: companyBrand(open.company).bg, color: "#fff" }}>
+                    <button className="mgp-flipbtn" style={{ background: "rgba(255,255,255,.22)", color: "#fff" }} onClick={(e) => { e.stopPropagation(); setFlipped((f) => !f); }} aria-label={t("Flip badge")}><RotateCw size={15} /></button>
+                    <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "16px 16px", textAlign: "center", boxSizing: "border-box" }}>
+                      <div style={{ background: "#fff", borderRadius: 18, padding: 6, boxShadow: "0 4px 14px rgba(0,0,0,.2)" }}>
+                        <CompanyLogo company={open.company} logoUrl={open.logo_url} website={open.website} size={62} radius={13} />
+                      </div>
+                      <div style={{ marginTop: 12, fontWeight: 800, fontSize: 17, display: "flex", alignItems: "center", gap: 6 }}>{open.name}{open.vip && <Star size={13} fill="#ffd76a" color="#ffd76a" />}</div>
+                      <div style={{ opacity: 0.95, fontSize: 12, marginTop: 2 }}>{open.role || t("Delegate")}</div>
+                      <div style={{ width: 38, height: 3, background: "rgba(255,255,255,.5)", borderRadius: 2, margin: "11px 0" }} />
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{open.company || t("No company")}</div>
+                      {open.industry && <div style={{ opacity: 0.85, fontSize: 11, marginTop: 3 }}>{open.industry}</div>}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <div style={{ padding: 18, textAlign: "center" }}>
-              {qr[open.id]
-                ? <img src={qr[open.id]} alt={`QR ${open.name}`} width={200} height={200} style={{ borderRadius: 10 }} />
-                : <div style={{ width: 200, height: 200, background: "var(--surface-2)", borderRadius: 10, margin: "0 auto" }} />}
-              <div className="mono" style={{ marginTop: 10, fontSize: 13, fontWeight: 600 }}>{open.qr_code}</div>
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                {coachLabel(coachOf(open.coach_id))} · {t((STATUS_META[open.status] || STATUS_META.UNASSIGNED).label)}
-              </div>
+            <div className="row" style={{ justifyContent: "center", paddingBottom: 6 }}>
+              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setFlipped((f) => !f)}>
+                <RotateCw size={13} /> {flipped ? t("Show QR") : t("Show company badge")}
+              </button>
             </div>
             {/* Physical pass (Feature 4b) — link SCCCI's own pass; check-in accepts either code */}
             <div style={{ padding: "12px 18px", borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 10 }}>
@@ -634,6 +658,12 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           background:var(--surface);border:1px solid var(--line);border-radius:10px;cursor:pointer;
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
+        .mgp-flip{perspective:1200px;width:272px;height:298px;cursor:pointer}
+        .mgp-inner{position:relative;width:100%;height:100%;transition:transform .6s cubic-bezier(.2,.7,.2,1);transform-style:preserve-3d}
+        .mgp-inner.flipped{transform:rotateY(180deg)}
+        .mgp-face{position:absolute;inset:0;-webkit-backface-visibility:hidden;backface-visibility:hidden;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.14)}
+        .mgp-back{transform:rotateY(180deg)}
+        .mgp-flipbtn{position:absolute;top:8px;right:8px;z-index:2;width:32px;height:32px;border-radius:50%;border:none;cursor:pointer;background:rgba(0,0,0,.06);color:#333;display:flex;align-items:center;justify-content:center}
         .mg-print-sheet{display:none}
         @media print {
           body * { visibility: hidden !important; }
