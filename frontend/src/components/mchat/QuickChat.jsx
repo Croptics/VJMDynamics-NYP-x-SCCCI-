@@ -23,9 +23,9 @@ import { TRIP_ID } from "../../lib/exceptionsApi.js";
 import { formatClock as hhmm, formatListStamp, dayLabel, isSameDay } from "../../lib/chatTime.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
+import ContactAvatar from "./ContactAvatar.jsx";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024;
-const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 const fileToDataUrl = (file) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
 const parseDoc = (m) => { try { return JSON.parse(m.media || "{}"); } catch { return {}; } };
 
@@ -192,11 +192,11 @@ export default function QuickChat({ onOpenFull }) {
           <div className="page-eyebrow" style={{ padding: "10px 8px 2px", display: "flex", alignItems: "center", gap: 5 }}><Users size={12} /> {t("People")}</div>
           {cVisible.length === 0 && <div className="muted" style={{ fontSize: 12.5, textAlign: "center", padding: 12 }}>{t("No contacts found.")}</div>}
           {cVisible.map((c) => (
-            <button key={`${c.kind}:${c.id}`} onClick={() => setActive({ kind: c.kind, id: c.id, name: c.name })}
+            <button key={`${c.kind}:${c.id}`} onClick={() => setActive({ kind: c.kind, id: c.id, name: c.name, photoUrl: c.photoUrl })}
               style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
               onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-2)")} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
               <div style={{ position: "relative", flexShrink: 0 }}>
-                <span className="avatar" style={{ background: c.kind === "delegate" ? "var(--ink-2)" : "var(--scc-red)", color: "#fff" }}>{initialsOf(c.name)}</span>
+                <ContactAvatar name={c.name} kind={c.kind} photoUrl={c.photoUrl} />
                 {c.online && <span style={{ position: "absolute", bottom: 0, right: 0, width: 10, height: 10, borderRadius: "50%", background: "var(--st-present)", border: "2px solid var(--surface,#fff)" }} />}
               </div>
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -229,7 +229,11 @@ export default function QuickChat({ onOpenFull }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, position: "relative" }}>
       <div className="row" style={{ gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--line)", flexShrink: 0, alignItems: "center" }}>
         <button className="btn btn-ghost" style={{ padding: 5 }} onClick={() => setActive(null)}><ArrowLeft size={16} /></button>
-        <span className="avatar" style={{ background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", flexShrink: 0, width: 30, height: 30, fontSize: 12 }}>{isGroup ? <Users size={15} /> : initialsOf(active.name)}</span>
+        {isGroup ? (
+          <span className="avatar" style={{ background: "var(--scc-red)", color: "#fff", flexShrink: 0, width: 30, height: 30, fontSize: 12 }}><Users size={15} /></span>
+        ) : (
+          <ContactAvatar name={active.name} kind={active.kind} photoUrl={active.photoUrl} style={{ flexShrink: 0, width: 30, height: 30, fontSize: 12 }} />
+        )}
         <div style={{ fontWeight: 600, fontSize: 13.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{active.name}</div>
         {onOpenFull && <button className="btn btn-ghost" title={t("Open full inbox")} style={{ padding: 5 }} onClick={openFull}><ExternalLink size={15} /></button>}
       </div>

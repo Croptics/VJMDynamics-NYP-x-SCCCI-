@@ -380,7 +380,7 @@ export default function AssistantConversation({ compact = false }) {
           floating bubble's own "Assistant" tab and the full inbox's sidebar
           row both already label this as the assistant. */}
       <div className="row" style={{ gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--line)", alignItems: "center" }}>
-        <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={16} /></span>
+        <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={16} /></span>
         <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: healthy ? "var(--st-present)" : "var(--st-missing)" }}>
           ● {t("MusterChat")}
         </div>
@@ -474,7 +474,7 @@ export default function AssistantConversation({ compact = false }) {
       <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
         {messages.length === 0 && (
           <div style={{ margin: "auto 0", textAlign: "center", padding: "0 20px" }}>
-            <span className="avatar" style={{ background: "var(--ink)", color: "#fff", width: 46, height: 46, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}><Bot size={22} /></span>
+            <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", width: 46, height: 46, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}><Bot size={22} /></span>
             <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 5 }}>{t("Ask about the trip")}</div>
             <p className="muted" style={{ fontSize: 13.5, marginBottom: 18, maxWidth: 430, marginLeft: "auto", marginRight: "auto", lineHeight: 1.5 }}>
               {t("Live attendance, missing delegates, coach status, open exceptions or today's itinerary — in English or 中文.")}
@@ -492,7 +492,7 @@ export default function AssistantConversation({ compact = false }) {
             </div>
           ) : (
             <div key={i} className="row" style={{ alignItems: "flex-start", gap: 10, maxWidth: "85%" }}>
-              <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={15} /></span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ background: m.notice ? "var(--st-unassigned-bg)" : "var(--surface-2)", border: m.notice ? "1px solid var(--st-unassigned)" : "1px solid var(--line)", color: m.notice ? "var(--st-unassigned)" : undefined, padding: "10px 14px", borderRadius: "14px 14px 14px 4px", fontSize: 14, lineHeight: 1.5 }}>
                   {m.notice ? m.content : m.content ? renderRich(m.content, nameCtx) : <span className="mg-typing"><i /><i /><i /></span>}
@@ -534,7 +534,7 @@ export default function AssistantConversation({ compact = false }) {
         <div onClick={() => setCard(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }}>
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ padding: 0, width: 340, maxWidth: "92%", overflow: "hidden" }}>
             <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 12 }}>
-              <span className="avatar" style={{ background: "var(--ink)", color: "#fff" }}>{initialsOf(card.name)}</span>
+              <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff" }}>{initialsOf(card.name)}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>{card.name} {card.vip && <Star size={14} fill="#e0a800" color="#e0a800" />}</div>
                 <div className="muted" style={{ fontSize: 12 }}>{card.role || t("Delegate")}</div>

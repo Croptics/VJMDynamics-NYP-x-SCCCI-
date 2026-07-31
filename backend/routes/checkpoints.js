@@ -41,6 +41,7 @@ import { requireAuth, requireKioskOrAuth, requireKioskOrPermission } from "../li
 import { all, get, run } from "../db/connection.js";
 import { getTrip, resolveTripUuid, getVisibleCoachIds } from "../db/dashboard.js";
 import { updateDelegate } from "../db/delegates.js";
+import { logActivity } from "../db/history.js";
 
 const router = Router();
 
@@ -178,7 +179,7 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const items = await all(`
     SELECT i.id, i.trip_id AS "tripId", i.day_number AS "dayNumber", i.sort_order AS "sortOrder",
-           TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime",
+           i.title, TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime",
            COALESCE(t."checkpointResetMinutes", 5) AS "resetWindowMinutes"
     FROM itinerary_items i
     JOIN trips t ON t.uuid_id = i.trip_id
@@ -198,9 +199,23 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
          AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
       [item.tripId, item.id]
     );
+    // One consolidated History Log entry per checkpoint (2026-07-31, "instead
+    // of 2 code there, change into one say that system update the all
+    // delegate status for next checkin") — this used to log once PER
+    // delegate via updateDelegate()'s own default logging, which read as a
+    // wall of identical "X: Y → Assigned" rows for what's really one system
+    // event. silent:true skips that per-row entry.
+    let resetCount = 0;
     for (const d of candidates) {
-      const result = await updateDelegate(d.id, { status: "ASSIGNED" }, "System");
-      if (result) updated++;
+      const result = await updateDelegate(d.id, { status: "ASSIGNED" }, "System", { silent: true });
+      if (result) { updated++; resetCount++; }
+    }
+    if (resetCount > 0) {
+      const label = item.title || "the next check-in";
+      await logActivity(
+        `System reset ${resetCount} delegate${resetCount === 1 ? "" : "s"} to Assigned ahead of ${label}.`,
+        "reassign", "System", { tripUuid: item.tripId }
+      );
     }
   }
   return { updated };
@@ -226,7 +241,7 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
 export async function applyCheckpointLateCutoff(now = new Date()) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const items = await all(`
-    SELECT i.id, i.trip_id AS "tripId", TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime"
+    SELECT i.id, i.trip_id AS "tripId", i.title, TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime"
     FROM itinerary_items i
     JOIN trips t ON t.uuid_id = i.trip_id
     WHERE COALESCE(i.status, 'scheduled') <> 'cancelled' AND i.day_number = t."dayOf"
@@ -238,6 +253,10 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
     if (nowMinutes - itemMinutes <= CHECKPOINT_GRACE_MINUTES) continue; // still current or upcoming
 
     const delegates = await all(`SELECT id, status FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
+    // One consolidated History Log entry per checkpoint, same reasoning as
+    // resetArrivedBeforeNextCheckpoint() above (2026-07-31) — was one entry
+    // PER delegate via updateDelegate()'s default logging.
+    let lateCount = 0;
     for (const d of delegates) {
       const inserted = await get(
         `INSERT INTO checkpoint_checkins (itinerary_item_id, delegate_id, status, method, scanned_by)

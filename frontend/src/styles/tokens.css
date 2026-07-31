@@ -93,8 +93,6 @@
 }
 
 /* Dark theme — toggled by adding data-theme="dark" to <html> (see lib/theme.jsx).
-   Overrides only the neutrals/surfaces/status-tints; brand red and the status
-   accent colors themselves stay legible on dark backgrounds unchanged.
    Softened to a lighter charcoal (was near-black, #121417 bg / #1a1d22
    cards) — same relative structure (bg < surface < surface-2), just lifted
    several steps so it reads as a gentler dark mode instead of pure black. */
@@ -113,8 +111,25 @@
   --surface: #24272c;
   --surface-2: #2a2e33;
 
+  /* Brand red, brightened for dark mode (2026-07-31 — "the chatbot, staff/
+     admin profile in dark mode can't see much"). The comment this replaced
+     claimed brand red "stays legible on dark backgrounds unchanged" — it
+     doesn't: the light-mode #e1232a measures ~2.9:1 against these dark
+     surfaces (WCAG AA needs 4.5:1 for body text), which is exactly why
+     things like the assistant's clickable delegate names, red nav-item
+     text, and MISSING badges read as a barely-visible dark smear in dark
+     mode despite looking fine on white. This lighter red measures ~4.5:1+
+     against --surface/--surface-2 while staying plenty readable as a button
+     background (white-on-red contrast barely changes) — text usages get
+     fixed, background usages stay fine. --st-missing shares the same value
+     since both are literally the same "red" concept. */
+  --scc-red: #ff5a60;
+  --scc-red-600: #ff7378;
+  --scc-red-700: #ff8c90;
   --scc-red-tint: #43262a;
   --scc-red-tint-2: #52292e;
+
+  --st-missing: #ff5a60;
 
   --st-present-bg: #17392a;
   --st-arrived-bg: #17392a;

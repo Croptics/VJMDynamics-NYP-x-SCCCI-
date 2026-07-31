@@ -175,6 +175,27 @@ const COACH_ARRIVALS = ["not_arrived", "en_route", "arrived"];
     // between a signed-in person and the one coach they manage. Soft reference
     // (no FK) to avoid coupling this feature's migrations to accounts'.
     await run(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS account_id VARCHAR(64)`);
+    // Multiple captains per coach (2026-07-31, "allow me to select 1-3
+    // staff"). coaches.account_id above only ever held ONE login — this is
+    // the many-to-many replacement: every route now reads/writes captains
+    // through this table instead. The old column is left in place (still
+    // populated by the backfill below, and by dev seed scripts) but is no
+    // longer the source of truth for any live route.
+    await run(`CREATE TABLE IF NOT EXISTS coach_captains (
+      coach_id   VARCHAR(64) NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
+      account_id VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      PRIMARY KEY (coach_id, account_id)
+    )`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_coach_captains_account ON coach_captains(account_id)`);
+    // One-time backfill: carry over whatever single captain each coach
+    // already had into the new table, so this migration doesn't silently
+    // un-scope every existing captain-restricted Staff account the moment it
+    // ships. ON CONFLICT DO NOTHING makes it safe to run on every boot.
+    await run(`
+      INSERT INTO coach_captains (coach_id, account_id)
+      SELECT id, account_id FROM coaches WHERE account_id IS NOT NULL
+      ON CONFLICT DO NOTHING
+    `);
     // Persisted before/after audit for trip-management events (coach /
     // itinerary / trip edits). Delegate changes are already audited in JQ's
     // activity_log (History Log, with rollback); this is the equivalent trail
@@ -380,8 +401,10 @@ router.get("/api/my-captain-coaches", readAccess, wrap(async (req, res) => {
   if (!accountId) return res.json({ coaches: [] });
   const coaches = await all(
     `SELECT c.id AS "coachId", c.label AS "coachLabel", c.trip_id AS "tripId", t.name AS "tripName"
-       FROM coaches c JOIN trips t ON t.uuid_id = c.trip_id
-      WHERE c.account_id = $1 ORDER BY t.name, c.sort_order`,
+       FROM coaches c
+       JOIN trips t ON t.uuid_id = c.trip_id
+       JOIN coach_captains cc ON cc.coach_id = c.id AND cc.account_id = $1
+      ORDER BY t.name, c.sort_order`,
     [accountId]
   );
   res.json({ coaches });
@@ -687,17 +710,21 @@ router.get("/api/trips/:tripId/coaches", readAccess, withTripUuid, wrap(async (r
     SELECT
       c.id, c.label, c.name, c.city, c.capacity, c.sort_order AS "sortOrder",
       c.staff_user_id AS "staffUserId", u.name AS "staffName", c.driver_name AS "driverName",
-      c.account_id AS "accountId", a.name AS "captainName", a.username AS "captainUsername",
       COALESCE(c.arrival_status, 'not_arrived') AS "arrivalStatus",
+      -- Captains (2026-07-31, multi-captain support) — a correlated subquery,
+      -- not a plain JOIN, so it can't multiply rows against the delegates
+      -- JOIN below and corrupt the boarded/missing/total counts.
+      (SELECT COALESCE(json_agg(json_build_object('id', a2.id, 'name', a2.name, 'username', a2.username) ORDER BY a2.name NULLS LAST, a2.username), '[]'::json)
+         FROM coach_captains cc JOIN accounts a2 ON a2.id = cc.account_id
+        WHERE cc.coach_id = c.id) AS captains,
       COUNT(d.id) FILTER (WHERE d.status IN ('PRESENT', 'ARRIVED')) AS boarded,
       COUNT(d.id) FILTER (WHERE d.status = 'MISSING') AS missing,
       COUNT(d.id) AS total
     FROM coaches c
     LEFT JOIN users u    ON u.id = c.staff_user_id
-    LEFT JOIN accounts a ON a.id = c.account_id
     LEFT JOIN delegates d ON d."coachId" = c.id
     WHERE c.trip_id = $1
-    GROUP BY c.id, c.label, c.name, c.city, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name, c.account_id, a.name, a.username, c.arrival_status
+    GROUP BY c.id, c.label, c.name, c.city, c.capacity, c.sort_order, c.staff_user_id, u.name, c.driver_name, c.arrival_status
     ORDER BY c.sort_order
   `, [req.tripUuid]);
 
@@ -799,99 +826,116 @@ router.get("/api/coaches/staff-assignments", readAccess, wrap(async (_req, res) 
   res.json({ assignments: rows });
 }));
 
+const MAX_CAPTAINS = 3;
+
 router.post("/api/coaches", writeAccess, wrap(async (req, res) => {
-  const { tripId, label, capacity, staffUserId, driverName, accountId } = req.body || {};
+  const { tripId, label, capacity, driverName } = req.body || {};
+  // accountIds (2026-07-31, "allow me to select 1-3 staff") replaces the old
+  // singular accountId — still accepted as a 1-element fallback so nothing
+  // calling this with the old shape breaks.
+  const rawIds = Array.isArray(req.body?.accountIds) ? req.body.accountIds : (req.body?.accountId ? [req.body.accountId] : []);
+  const accountIds = Array.from(new Set(rawIds.filter(Boolean)));
   if (!tripId) return res.status(400).json({ error: "MISSING_TRIP_ID", message: "tripId is required." });
   // Body-supplied id — resolve like withTripUuid does for :tripId routes.
   const tripUuid = await resolveTripUuid(tripId);
   if (!tripUuid) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
   if (!label || !label.trim()) return res.status(400).json({ error: "LABEL_REQUIRED", message: "A coach label is required." });
-  if (!staffUserId) return res.status(400).json({ error: "STAFF_REQUIRED", message: "Every coach needs a staff member assigned." });
+  if (accountIds.length > MAX_CAPTAINS) return res.status(400).json({ error: "TOO_MANY_CAPTAINS", message: `A coach can have at most ${MAX_CAPTAINS} captains.` });
 
-  const staffRow = await get(`SELECT id, name FROM users WHERE id = $1`, [staffUserId]);
-  if (!staffRow) return res.status(404).json({ error: "STAFF_NOT_FOUND", message: "That staff member doesn't exist." });
-
-  // Optional captain: the login account that manages (and is scoped to) this
-  // coach — see account_id in ensureOpsSchema. Validated so a coach can't be
-  // pinned to a non-existent login.
-  let captain = null;
-  if (accountId) {
-    captain = await get(`SELECT id, name, username FROM accounts WHERE id = $1`, [accountId]);
-    if (!captain) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "That login account doesn't exist." });
+  // Captains: the login accounts that manage (and are scoped to) this coach —
+  // see coach_captains in ensureOpsSchema. Validated so a coach can't be
+  // pinned to a non-existent login. This is now the ONLY "who's assigned"
+  // concept a coach has (2026-07-31, "remove the staff member option ...
+  // rename coach captains to staff member") — the old staffUserId (a
+  // display-only guide-directory name with no login, from the separate
+  // `users` table) is no longer collected from the UI at all.
+  let captains = [];
+  if (accountIds.length) {
+    captains = await all(`SELECT id, name, username FROM accounts WHERE id = ANY($1)`, [accountIds]);
+    if (captains.length !== accountIds.length) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "One of those login accounts doesn't exist." });
   }
 
   const maxRow = await get(`SELECT COALESCE(MAX(sort_order), -1) AS m FROM coaches WHERE trip_id = $1`, [tripUuid]);
   const sortOrder = Number(maxRow?.m ?? -1) + 1;
 
   const created = await get(
-    `INSERT INTO coaches (id, trip_id, label, name, capacity, staff_user_id, sort_order, driver_name, account_id)
-     VALUES (gen_random_uuid()::text, $1, $2, $2, $3, $4, $5, $6, $7)
-     RETURNING id, label, capacity, sort_order AS "sortOrder", staff_user_id AS "staffUserId", driver_name AS "driverName", account_id AS "accountId"`,
-    [tripUuid, label.trim(), Number(capacity) || 40, staffUserId, sortOrder, (driverName || "").trim() || null, captain?.id || null]
+    `INSERT INTO coaches (id, trip_id, label, name, capacity, sort_order, driver_name, account_id)
+     VALUES (gen_random_uuid()::text, $1, $2, $2, $3, $4, $5, $6)
+     RETURNING id, label, capacity, sort_order AS "sortOrder", driver_name AS "driverName"`,
+    [tripUuid, label.trim(), Number(capacity) || 40, sortOrder, (driverName || "").trim() || null, captains[0]?.id || null]
   );
+  for (const cap of captains) {
+    await run(`INSERT INTO coach_captains (coach_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [created.id, cap.id]);
+  }
+  const captainNames = captains.map((c) => c.name || c.username).join(", ");
   await recordEvent(tripUuid, req, {
     action: "coach.create", entity: "coach", entityId: created.id, kind: "coach",
-    summary: `${label.trim()} was added to the fleet, led by ${staffRow.name}${captain ? `, captained by ${captain.name || captain.username}` : ""}.`,
-    after: { label: created.label, capacity: created.capacity, staffName: staffRow.name, captain: captain?.username || null },
+    summary: `${label.trim()} was added to the fleet${captains.length ? `, staffed by ${captainNames}` : ""}.`,
+    after: { label: created.label, capacity: created.capacity, captains: captains.map((c) => c.username) },
   });
-  res.status(201).json({ ...created, staffName: staffRow.name, captainName: captain?.name || null, captainUsername: captain?.username || null });
+  res.status(201).json({ ...created, captains: captains.map((c) => ({ id: c.id, name: c.name, username: c.username })) });
 }));
 
 // Switch which staff member is assigned to this coach, and/or update the
-// driver's name / capacity. All fields optional except staffUserId, which
-// (per the original design) every coach must always have one of.
+// driver's name / capacity. Captains (2026-07-31) are now the only "who's
+// assigned" concept a coach has — the old staffUserId requirement (a
+// display-only guide-directory name from the separate `users` table, with no
+// login behind it) is gone; every field here is optional.
 router.patch("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
-  const { staffUserId, driverName, capacity, label, accountId } = req.body || {};
-  if (!staffUserId) return res.status(400).json({ error: "STAFF_REQUIRED", message: "Every coach needs a staff member assigned." });
+  const { driverName, capacity, label } = req.body || {};
 
-  const staffRow = await get(`SELECT id, name FROM users WHERE id = $1`, [staffUserId]);
-  if (!staffRow) return res.status(404).json({ error: "STAFF_NOT_FOUND", message: "That staff member doesn't exist." });
-
-  // Full BEFORE snapshot so the audit can show exactly what changed. Joins in
-  // the old staff/captain display names, not just their ids.
+  // Full BEFORE snapshot so the audit can show exactly what changed.
   const existing = await get(
-    `SELECT c.trip_id, c.label, c.capacity, c.staff_user_id AS "staffUserId", u.name AS "staffName",
-            c.account_id AS "accountId", a.username AS "captainUsername", a.name AS "captainName"
-       FROM coaches c LEFT JOIN users u ON u.id = c.staff_user_id LEFT JOIN accounts a ON a.id = c.account_id
-      WHERE c.id = $1`,
+    `SELECT trip_id, label, capacity FROM coaches WHERE id = $1`,
     [req.params.id]
   );
   if (!existing) return res.status(404).json({ error: "NOT_FOUND", message: "Coach not found." });
+  const existingCaptains = await all(
+    `SELECT a.id, a.name, a.username FROM coach_captains cc JOIN accounts a ON a.id = cc.account_id WHERE cc.coach_id = $1 ORDER BY a.name NULLS LAST, a.username`,
+    [req.params.id]
+  );
 
-  // accountId semantics: omitted (undefined) = leave the captain unchanged;
-  // explicit null/"" = clear the captain; a value = set/validate it.
-  const changeCaptain = accountId !== undefined;
-  let captain = null;
-  if (changeCaptain && accountId) {
-    captain = await get(`SELECT id, name, username FROM accounts WHERE id = $1`, [accountId]);
-    if (!captain) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "That login account doesn't exist." });
+  // accountIds semantics: omitted (undefined) = leave captains unchanged;
+  // [] = clear all captains; an array = replace the set (2026-07-31, "allow
+  // me to select 1-3 staff" — up to MAX_CAPTAINS).
+  const changeCaptains = req.body?.accountIds !== undefined;
+  let captains = existingCaptains;
+  if (changeCaptains) {
+    const accountIds = Array.from(new Set((Array.isArray(req.body.accountIds) ? req.body.accountIds : []).filter(Boolean)));
+    if (accountIds.length > MAX_CAPTAINS) return res.status(400).json({ error: "TOO_MANY_CAPTAINS", message: `A coach can have at most ${MAX_CAPTAINS} captains.` });
+    captains = accountIds.length ? await all(`SELECT id, name, username FROM accounts WHERE id = ANY($1)`, [accountIds]) : [];
+    if (captains.length !== accountIds.length) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "One of those login accounts doesn't exist." });
   }
 
   const updated = await get(
     `UPDATE coaches
-        SET staff_user_id = $1,
-            driver_name = COALESCE($2, driver_name),
-            capacity = COALESCE($3, capacity),
-            label = COALESCE($4, label),
-            name = COALESCE($4, name),
-            account_id = CASE WHEN $6 THEN $7 ELSE account_id END
-      WHERE id = $5
-      RETURNING id, label, capacity, sort_order AS "sortOrder", staff_user_id AS "staffUserId", driver_name AS "driverName", account_id AS "accountId"`,
-    [staffUserId, driverName !== undefined ? (String(driverName).trim() || null) : null, Number(capacity) || null, label?.trim() || null, req.params.id, changeCaptain, changeCaptain ? (captain?.id || null) : null]
+        SET driver_name = COALESCE($1, driver_name),
+            capacity = COALESCE($2, capacity),
+            label = COALESCE($3, label),
+            name = COALESCE($3, name),
+            account_id = CASE WHEN $5 THEN $6 ELSE account_id END
+      WHERE id = $4
+      RETURNING id, label, capacity, sort_order AS "sortOrder", driver_name AS "driverName"`,
+    [driverName !== undefined ? (String(driverName).trim() || null) : null, Number(capacity) || null, label?.trim() || null, req.params.id, changeCaptains, changeCaptains ? (captains[0]?.id || null) : null]
   );
+  if (changeCaptains) {
+    await run(`DELETE FROM coach_captains WHERE coach_id = $1`, [req.params.id]);
+    for (const cap of captains) await run(`INSERT INTO coach_captains (coach_id, account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [req.params.id, cap.id]);
+  }
 
+  const existingNames = existingCaptains.map((c) => c.name || c.username).sort().join(",");
+  const newNames = captains.map((c) => c.name || c.username).sort().join(",");
   const parts = [];
-  if (existing.staffUserId !== staffUserId) parts.push(`led by ${staffRow.name}`);
-  if (changeCaptain && (existing.captainUsername || null) !== (captain?.username || null)) {
-    parts.push(captain ? `captained by ${captain.name || captain.username}` : "captain cleared");
+  if (changeCaptains && existingNames !== newNames) {
+    parts.push(captains.length ? `staffed by ${captains.map((c) => c.name || c.username).join(", ")}` : "staff cleared");
   }
   await recordEvent(existing.trip_id, req, {
     action: "coach.update", entity: "coach", entityId: req.params.id, kind: "coach",
     summary: `${updated.label} updated${parts.length ? ` — ${parts.join(", ")}` : ""}.`,
-    before: { label: existing.label, capacity: existing.capacity, staffName: existing.staffName, captain: existing.captainUsername },
-    after: { label: updated.label, capacity: updated.capacity, staffName: staffRow.name, captain: changeCaptain ? (captain?.username || null) : existing.captainUsername },
+    before: { label: existing.label, capacity: existing.capacity, captains: existingCaptains.map((c) => c.username) },
+    after: { label: updated.label, capacity: updated.capacity, captains: captains.map((c) => c.username) },
   });
-  res.json({ ...updated, staffName: staffRow.name, captainName: captain?.name || (changeCaptain ? null : existing.captainName), captainUsername: captain?.username || (changeCaptain ? null : existing.captainUsername) });
+  res.json({ ...updated, captains: captains.map((c) => ({ id: c.id, name: c.name, username: c.username })) });
 }));
 
 router.delete("/api/coaches/:id", writeAccess, wrap(async (req, res) => {

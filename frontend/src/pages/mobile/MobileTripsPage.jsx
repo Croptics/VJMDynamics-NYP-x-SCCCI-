@@ -264,7 +264,7 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
 }
 
 /* ---- Per-event attendance bottom-sheet (mirrors desktop AttendanceModal) --- */
-function MobileAttendanceSheet({ tripId, item, scopedCoachId, canEdit, onClose }) {
+function MobileAttendanceSheet({ tripId, item, scopedCoachIds, canEdit, onClose }) {
   const { t } = useLang();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -285,7 +285,7 @@ function MobileAttendanceSheet({ tripId, item, scopedCoachId, canEdit, onClose }
 
   const groups = useMemo(() => {
     if (!data) return [];
-    const rows = scopedCoachId ? data.delegates.filter((d) => d.coachId === scopedCoachId) : data.delegates;
+    const rows = scopedCoachIds?.length ? data.delegates.filter((d) => scopedCoachIds.includes(d.coachId)) : data.delegates;
     const byCoach = new Map();
     for (const d of rows) {
       const key = d.coachId || "__un__";
@@ -293,9 +293,9 @@ function MobileAttendanceSheet({ tripId, item, scopedCoachId, canEdit, onClose }
       byCoach.get(key).delegates.push(d);
     }
     return [...byCoach.values()].sort((a, b) => a.sort - b.sort);
-  }, [data, scopedCoachId, t]);
+  }, [data, scopedCoachIds, t]);
 
-  const history = useMemo(() => (!data ? [] : (scopedCoachId ? data.history.filter((h) => h.coachId === scopedCoachId) : data.history)), [data, scopedCoachId]);
+  const history = useMemo(() => (!data ? [] : (scopedCoachIds?.length ? data.history.filter((h) => scopedCoachIds.includes(h.coachId)) : data.history)), [data, scopedCoachIds]);
   const summary = useMemo(() => {
     const all = groups.flatMap((g) => g.delegates);
     return { present: all.filter((d) => d.status === "ARRIVED").length, late: all.filter((d) => d.status === "LATE").length, missing: all.filter((d) => d.status === "MISSING").length, total: all.length };
@@ -432,16 +432,19 @@ function TripDetail({ tripId, onBack }) {
     (data?.delegates || []).filter((d) => d.coachId && !coachIds.has(d.coachId)).map((d) => d.id)
   );
   // Per-coach scoping (mirrors desktop): a non-admin captain of a coach on this
-  // trip sees only their own coach. Match on username — the login stores no id.
+  // trip sees only their own coach(es). Match on username — the login stores
+  // no id. Plural (2026-07-31, multi-captain support) — a captain can now be
+  // assigned to more than one coach.
   const me = getUser() || {};
-  const myCoach = (data?.coaches || []).find((c) => c.captainUsername && me.username && c.captainUsername === me.username) || null;
-  const scopedToCoach = !!myCoach && me.role !== "admin";
-  const shownCoaches = scopedToCoach ? (data?.coaches || []).filter((c) => c.id === myCoach.id) : (data?.coaches || []);
+  const myCoaches = (data?.coaches || []).filter((c) => me.username && (c.captains || []).some((cap) => cap.username === me.username));
+  const scopedToCoach = myCoaches.length > 0 && me.role !== "admin";
+  const myCoachIds = new Set(myCoaches.map((c) => c.id));
+  const shownCoaches = scopedToCoach ? (data?.coaches || []).filter((c) => myCoachIds.has(c.id)) : (data?.coaches || []);
   const currentDay = trip?.dayOf ?? 1;
   const stops = (data?.itinerary || []).slice().sort((a, b) => (a.dayNumber - b.dayNumber) || a.startTime.localeCompare(b.startTime));
   const shownStops = mode === "live" ? stops.filter((s) => s.dayNumber === currentDay) : stops;
   // Scoped counts for the command-centre KPI row.
-  const statDelegates = scopedToCoach ? (data?.delegates || []).filter((d) => d.coachId === myCoach.id) : (data?.delegates || []);
+  const statDelegates = scopedToCoach ? (data?.delegates || []).filter((d) => myCoachIds.has(d.coachId)) : (data?.delegates || []);
   const stats = {
     present: statDelegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
     late: statDelegates.filter((d) => d.status === "LATE").length,
@@ -540,7 +543,7 @@ function TripDetail({ tripId, onBack }) {
           </div>
           {scopedToCoach && (
             <div className="mobile-card" role="status" style={{ margin: "0 0 10px", border: "1px solid var(--st-present)", background: "var(--st-present-bg)", color: "var(--st-present)", fontSize: 12.5 }}>
-              {t("You're the captain of")} <strong>{myCoach.label}</strong>. {t("Other coaches are hidden.")} ({shownCoaches.length}/{(data?.coaches || []).length})
+              {t("You're the captain of")} <strong>{myCoaches.map((c) => c.label).join(", ")}</strong>. {t("Other coaches are hidden.")} ({shownCoaches.length}/{(data?.coaches || []).length})
             </div>
           )}
           {!scopedToCoach && wrongCoachIds.size > 0 && (
@@ -570,8 +573,10 @@ function TripDetail({ tripId, onBack }) {
                           ? `${total} ${t("delegates")}${cap ? ` · ${cap} ${t("seats")}` : ""}`
                           : `${boarded}/${total} ${t("boarded")}`}
                       </div>
-                      {(c.captainName || c.captainUsername) && (
-                        <div className="row muted" style={{ gap: 5, fontSize: 12, marginTop: 4, fontWeight: 600 }}><Users size={11} /> {t("Captain")}: {c.captainName || c.captainUsername}</div>
+                      {c.captains?.length > 0 && (
+                        <div className="row muted" style={{ gap: 5, fontSize: 12, marginTop: 4, fontWeight: 600 }}>
+                          <Users size={11} /> {t(c.captains.length > 1 ? "Captains" : "Captain")}: {c.captains.map((cap) => cap.name || cap.username).join(", ")}
+                        </div>
                       )}
                     </div>
                     <div className="row" style={{ gap: 6, flexShrink: 0 }}>
@@ -639,7 +644,7 @@ function TripDetail({ tripId, onBack }) {
         <MobileAttendanceSheet
           tripId={tripId}
           item={attItem}
-          scopedCoachId={scopedToCoach ? myCoach.id : null}
+          scopedCoachIds={scopedToCoach ? [...myCoachIds] : null}
           canEdit={editable}
           onClose={() => setAttItem(null)}
         />

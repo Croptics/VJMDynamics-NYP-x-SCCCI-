@@ -10,11 +10,11 @@ import { listContacts, listGroups, createGroup } from "../../lib/messagesApi.js"
 import AssistantConversation from "./AssistantConversation.jsx";
 import HumanThread from "./HumanThread.jsx";
 import GroupThread from "./GroupThread.jsx";
+import ContactAvatar from "./ContactAvatar.jsx";
 import VideoCallOverlay from "./VideoCallOverlay.jsx";
 import callManager from "../../lib/callManager.js";
 import { formatListStamp as hhmm } from "../../lib/chatTime.js";
 
-const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
 const AI = { kind: "ai", id: "assistant", name: "Trip Assistant" };
 
@@ -58,11 +58,14 @@ export default function MusterChatInbox({ railWidth = 300, initialActive = null 
   // Coaches represented among the staff list (2026-07-31, "add filter by
   // coach assigned" — the New Group modal's member picker), so a group can be
   // quickly built out of one coach's team instead of scrolling every staff
-  // account. Only staff who currently captain a coach show up here.
+  // account. Only staff who currently captain a coach show up here. A staff
+  // member can captain more than one coach (multi-captain support), hence
+  // coachIds/coachLabels are arrays — matching against `.includes()` rather
+  // than equality.
   const staffCoaches = Array.from(
-    new Map(staff.filter((c) => c.coachId).map((c) => [c.coachId, c.coachLabel || c.coachId])).entries()
+    new Map(staff.flatMap((c) => (c.coachIds || []).map((id, i) => [id, c.coachLabels[i] || id]))).entries()
   ).sort((a, b) => a[1].localeCompare(b[1]));
-  const staffVisible = gCoachFilter === "all" ? staff : staff.filter((c) => c.coachId === gCoachFilter);
+  const staffVisible = gCoachFilter === "all" ? staff : staff.filter((c) => (c.coachIds || []).includes(gCoachFilter));
 
   const rowStyle = (on) => ({
     cursor: "pointer",
@@ -112,7 +115,7 @@ export default function MusterChatInbox({ railWidth = 300, initialActive = null 
         {/* AI assistant — pinned */}
         <div className="page-eyebrow" style={{ padding: "4px 8px 6px" }}>{t("Assistant")}</div>
         <div onClick={() => setActive(AI)} style={rowStyle(active.kind === "ai")}>
-          <span className="avatar" style={{ background: "var(--ink)", color: "#fff", flexShrink: 0 }}><Bot size={16} /></span>
+          <span className="avatar" style={{ background: "var(--ink-solid)", color: "#fff", flexShrink: 0 }}><Bot size={16} /></span>
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontWeight: 600, fontSize: 14 }}>{t("Trip Assistant")}</div>
             <div className="muted" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("Ask about the live trip")}</div>
@@ -154,7 +157,7 @@ export default function MusterChatInbox({ railWidth = 300, initialActive = null 
           return (
             <div key={`${c.kind}:${c.id}`} onClick={() => setActive(c)} style={rowStyle(on)}>
               <div style={{ position: "relative", flexShrink: 0 }}>
-                <span className="avatar" style={{ background: c.kind === "delegate" ? "var(--ink-2)" : "var(--scc-red)", color: "#fff" }}>{initialsOf(c.name)}</span>
+                <ContactAvatar name={c.name} kind={c.kind} photoUrl={c.photoUrl} />
                 {c.online && <span style={{ position: "absolute", bottom: 0, right: 0, width: 11, height: 11, borderRadius: "50%", background: "var(--st-present)", border: "2px solid var(--surface, #fff)" }} />}
               </div>
               <div style={{ minWidth: 0, flex: 1 }}>
@@ -233,10 +236,10 @@ export default function MusterChatInbox({ railWidth = 300, initialActive = null 
                   const checked = gMembers.has(c.id);
                   return (
                     <div key={c.id} onClick={() => toggleMember(c.id)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, background: checked ? "var(--scc-red-tint)" : "transparent" }}>
-                      <span className="avatar" style={{ background: "var(--scc-red)", color: "#fff" }}>{initialsOf(c.name)}</span>
+                      <ContactAvatar name={c.name} kind="account" photoUrl={c.photoUrl} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 14, fontWeight: 500 }}>{c.name}</div>
-                        {c.coachLabel && <div className="muted" style={{ fontSize: 11 }}>{c.coachLabel}</div>}
+                        {c.coachLabels?.length > 0 && <div className="muted" style={{ fontSize: 11 }}>{c.coachLabels.join(", ")}</div>}
                       </div>
                       <span style={{ width: 20, height: 20, borderRadius: 6, border: `1.5px solid ${checked ? "var(--scc-red)" : "var(--line)"}`, background: checked ? "var(--scc-red)" : "transparent", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
                         {checked && <Check size={13} />}

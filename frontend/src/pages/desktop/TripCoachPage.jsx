@@ -72,6 +72,7 @@ import {
   PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
   Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare, MapPin,
   Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Clock, Circle,
+  ChevronDown, Check,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
@@ -383,8 +384,10 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
           ) : (
             <div className="tf-fleet-sub">{coach.total ?? 0} {t(coach.total === 1 ? "delegate" : "delegates")}{coach.capacity ? ` · ${coach.capacity} ${t("seats")}` : ""}</div>
           )}
-          {!isUnassigned && (coach.captainName || coach.captainUsername) && (
-            <div className="tf-fleet-captain"><Users size={11} /> {t("Captain")}: {coach.captainName || coach.captainUsername}</div>
+          {!isUnassigned && coach.captains?.length > 0 && (
+            <div className="tf-fleet-captain">
+              <Users size={11} /> {t(coach.captains.length > 1 ? "Captains" : "Captain")}: {coach.captains.map((c) => c.name || c.username).join(", ")}
+            </div>
           )}
           {!isUnassigned && mode === "live" && (() => {
             const av = COACH_ARRIVAL_META[coach.arrivalStatus] || COACH_ARRIVAL_META.not_arrived;
@@ -1253,24 +1256,33 @@ function AddDelegateModal({ tripId, onClose, onAdded }) {
   );
 }
 
-/* ---- Staff select + Add/Edit coach modals (driver name) ----------------- */
-function StaffSelect({ value, onChange, staff, assignments, excludeCoachId }) {
-  const { t } = useLang();
-  const assignedElsewhere = (userId) => assignments.find((a) => a.staffUserId === userId && a.coachId !== excludeCoachId);
-  return (
-    <select className="tf-input" value={value || ""} onChange={(e) => onChange(e.target.value)}>
-      <option value="" disabled>{t("Select a staff member…")}</option>
-      {staff.map((s) => {
-        const other = assignedElsewhere(s.id);
-        return <option key={s.id} value={s.id}>{s.name} ({s.role}){other ? ` — ${t("already on")} ${other.coachLabel}` : ""}</option>;
-      })}
-    </select>
-  );
+/* ---- Shared dropdown-open/outside-click plumbing (2026-07-31, "this is
+ * static right? remove that" — replaces the native <select>s below, whose
+ * hover/focus highlight is OS-drawn, not themeable, and reads as an
+ * out-of-place native-blue chip in dark mode especially). Same pattern as
+ * DashboardPage's own TripSwitcher. */
+function useDropdown() {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); };
+    const onKeyDown = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("mousedown", onDocClick); document.removeEventListener("keydown", onKeyDown); };
+  }, [open]);
+  return { open, setOpen, rootRef };
 }
 
-/* Captain = the LOGIN account scoped to this coach. When set, that person sees
- * only this coach on the board (unless they're an admin). Separate from the
- * staff/guide directory above, which is display-only. */
+/* ---- Add/Edit coach modals (driver name) -------------------------------- */
+/* Captains = the LOGIN accounts scoped to this coach — up to MAX_CAPTAINS
+ * (2026-07-31, "allow me to select 1-3 staff"; was a single captain). When
+ * set, each of them sees only this coach on the board (unless admin). Now
+ * ALSO the "Staff member" field itself (2026-07-31 — collapsed with the old
+ * display-only guide-directory StaffSelect, which had no login behind it and
+ * just duplicated this same "who's in charge" concept). */
+const MAX_CAPTAINS = 3;
 // Many accounts have `name` equal to (or just a different case of) their own
 // `username` — showing both then read as a literal duplicate, e.g.
 // "Vance · vance (admin)" (2026-07-25 fix). Only shows the username
@@ -1283,13 +1295,44 @@ function captainLabel(a) {
 
 function CaptainSelect({ value, onChange, accounts }) {
   const { t } = useLang();
+  const { open, setOpen, rootRef } = useDropdown();
+  const ids = value || [];
+  const selectedAccounts = ids.map((id) => accounts.find((a) => a.id === id)).filter(Boolean);
+  const atMax = ids.length >= MAX_CAPTAINS;
+  const toggle = (id) => {
+    if (ids.includes(id)) onChange(ids.filter((x) => x !== id));
+    else if (!atMax) onChange([...ids, id]);
+  };
   return (
-    <select className="tf-input" value={value || ""} onChange={(e) => onChange(e.target.value)}>
-      <option value="">{t("No captain — anyone can see all coaches")}</option>
-      {accounts.map((a) => (
-        <option key={a.id} value={a.id}>{captainLabel(a)}</option>
-      ))}
-    </select>
+    <div ref={rootRef} style={{ position: "relative" }}>
+      <button type="button" className="tf-input tf-select-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        {selectedAccounts.length ? (
+          <span>{selectedAccounts.map((a) => a.name || a.username).join(", ")}</span>
+        ) : (
+          <span className="tf-select-placeholder">{t("No staff assigned — anyone can see all coaches")}</span>
+        )}
+        <ChevronDown size={16} style={{ flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+      </button>
+      {open && (
+        <div className="tf-select-menu" role="listbox" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, maxHeight: 260, zIndex: 30 }}>
+          <div className="tf-select-empty">{t("Select up to")} {MAX_CAPTAINS} {t("staff")}{ids.length ? ` (${ids.length}/${MAX_CAPTAINS})` : ""}</div>
+          {accounts.map((a) => {
+            const checked = ids.includes(a.id);
+            const disabled = !checked && atMax;
+            return (
+              <button key={a.id} type="button" role="option" aria-selected={checked}
+                className={"tf-select-item" + (checked ? " active" : "")}
+                disabled={disabled}
+                style={disabled ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+                onClick={() => toggle(a.id)}>
+                <span className="tf-select-check">{checked && <Check size={11} />}</span>
+                {captainLabel(a)}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1298,10 +1341,7 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   const [label, setLabel] = useState(`Coach ${existingCount + 1}`);
   const [capacity, setCapacity] = useState(40);
   const [driverName, setDriverName] = useState("");
-  const [staffUserId, setStaffUserId] = useState("");
-  const [accountId, setAccountId] = useState("");
-  const [staff, setStaff] = useState([]);
-  const [assignments, setAssignments] = useState([]);
+  const [accountIds, setAccountIds] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1309,8 +1349,12 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   useEffect(() => {
     (async () => {
       try {
-        const [s, a, acc] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments"), apiGet("/assignable-accounts")]);
-        setStaff(s.staff); setAssignments(a.assignments); setAccounts(acc.accounts || []);
+        const acc = await apiGet("/assignable-accounts");
+        // Staff only (2026-07-31, "no need admin") — this field assigns who
+        // actually runs the coach day-to-day, not account administration, so
+        // admin logins are excluded from the picker (an admin can still see
+        // every coach regardless of whether they're staffed on one).
+        setAccounts((acc.accounts || []).filter((a) => a.role === "staff"));
       } catch (e) { setError(e.message); }
     })();
   }, []);
@@ -1318,10 +1362,9 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   async function handleSubmit() {
     if (!label.trim()) { setError(t("Label is required")); return; }
     if (capacity < 1) { setError(t("Capacity must be ≥ 1")); return; }
-    if (!staffUserId) { setError(t("Every coach needs a staff member")); return; }
     setSaving(true); setError(null);
     try {
-      const coach = await apiPost(`/coaches`, { tripId, label: label.trim(), capacity: Number(capacity), staffUserId, driverName: driverName.trim(), accountId: accountId || null });
+      const coach = await apiPost(`/coaches`, { tripId, label: label.trim(), capacity: Number(capacity), driverName: driverName.trim(), accountIds });
       onAdded(coach); onClose();
     } catch (e) { setError(e.message); setSaving(false); }
   }
@@ -1346,17 +1389,20 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
         {capNum < 1 ? t("Capacity must be at least 1.") : t("Maximum number of delegates this coach can seat.")}
       </p>
 
-      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Navigation size={13} /> {t("Driver name")}</label>
-      <input className="tf-input" placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
-
       <div className="tf-form-section">{t("Staff & access")}</div>
-      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")} <span className="tf-req">*</span></label>
-      <StaffSelect value={staffUserId} onChange={setStaffUserId} staff={staff} assignments={assignments} excludeCoachId={null} />
-      <p className="tf-help">{t("Every coach needs at least one staff member assigned.")}</p>
+      {/* "Staff member" (2026-07-31) — was two separate concepts stacked here:
+          a display-only guide-directory name (StaffSelect, backed by the
+          `users` table, no login) plus this login-account picker labelled
+          "Coach captains". Collapsed into just this one, renamed "Staff
+          member" and moved to the top — the guide-directory field added a
+          second "who's in charge" concept with no login behind it, which
+          just duplicated what the account picker already covers. */}
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")}</label>
+      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} />
+      <p className="tf-help">{t("Optional, up to 3. Each login sees only this coach on the board (admins always see all).")}</p>
 
-      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center", marginTop: 14 }}><Users size={13} /> {t("Coach captain (login)")}</label>
-      <CaptainSelect value={accountId} onChange={setAccountId} accounts={accounts} />
-      <p className="tf-help">{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center", marginTop: 14 }}><Navigation size={13} /> {t("Driver name")}</label>
+      <input className="tf-input" placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
       {error && <p className="tf-form-error">{error}</p>}
     </Modal>
   );
@@ -1364,9 +1410,8 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
 
 function EditCoachStaffModal({ coach, onClose, onSaved }) {
   const { t } = useLang();
-  const [staffUserId, setStaffUserId] = useState(coach.staffUserId || "");
   const [driverName, setDriverName] = useState(coach.driverName || "");
-  const [accountId, setAccountId] = useState(coach.accountId || "");
+  const [accountIds, setAccountIds] = useState((coach.captains || []).map((c) => c.id));
   // Real-world coaches don't all seat the same number of people (2026-07-30 —
   // "each coach may not have the same amount of seat"). Capacity could
   // already be set per-coach at creation time (AddCoachModal), and
@@ -1375,8 +1420,6 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
   // exposed the field, leaving the bulk "set every coach on this trip to N"
   // tool on the Edit Trip form as the only way to change it after creation.
   const [capacity, setCapacity] = useState(coach.capacity || 40);
-  const [staff, setStaff] = useState([]);
-  const [assignments, setAssignments] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -1384,18 +1427,21 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
   useEffect(() => {
     (async () => {
       try {
-        const [s, a, acc] = await Promise.all([apiGet("/users/staff"), apiGet("/coaches/staff-assignments"), apiGet("/assignable-accounts")]);
-        setStaff(s.staff); setAssignments(a.assignments); setAccounts(acc.accounts || []);
+        const acc = await apiGet("/assignable-accounts");
+        // Staff only (2026-07-31, "no need admin") — this field assigns who
+        // actually runs the coach day-to-day, not account administration, so
+        // admin logins are excluded from the picker (an admin can still see
+        // every coach regardless of whether they're staffed on one).
+        setAccounts((acc.accounts || []).filter((a) => a.role === "staff"));
       } catch (e) { setError(e.message); }
     })();
   }, []);
 
   async function handleSubmit() {
-    if (!staffUserId) { setError(t("Every coach needs a staff member")); return; }
     setSaving(true); setError(null);
     try {
       const updated = await apiPatch(`/coaches/${coach.id}`, {
-        staffUserId, driverName: driverName.trim(), accountId: accountId || null,
+        driverName: driverName.trim(), accountIds,
         capacity: Math.max(1, Number(capacity) || 40),
       });
       onSaved(updated); onClose();
@@ -1411,17 +1457,16 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
         </button>
       </>}
     >
-      <label className="tf-field-label">{t("Staff member")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
-      <StaffSelect value={staffUserId} onChange={setStaffUserId} staff={staff} assignments={assignments} excludeCoachId={coach.id} />
-      <p className="tf-muted" style={{ fontSize: 12, margin: "6px 0 14px" }}>
-        {t("Picking someone already on another coach moves them here — it doesn't remove them there automatically, so you'll see them flagged on both boards until you fix the other one up too.")}
-      </p>
+      {/* "Staff member" (2026-07-31) — collapsed from two separate concepts
+          (a display-only guide-directory name with no login, plus this
+          login-account picker labelled "Coach captains") into just this one,
+          renamed and moved to the top. See AddCoachModal's matching note. */}
+      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")}</label>
+      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} />
+      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>{t("Optional, up to 3. Each login sees only this coach on the board (admins always see all).")}</p>
+
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Navigation size={13} /> {t("Driver name")}</label>
       <input className="tf-input" style={{ marginBottom: 14 }} placeholder={t("Optional")} value={driverName} onChange={(e) => setDriverName(e.target.value)} />
-
-      <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Coach captain (login)")}</label>
-      <CaptainSelect value={accountId} onChange={setAccountId} accounts={accounts} />
-      <p className="tf-muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>{t("Optional. This login sees only this coach on the board (admins always see all).")}</p>
 
       <label className="tf-field-label">{t("Capacity (seats)")}</label>
       <input type="number" min={1} max={200} className="tf-input" value={capacity}
@@ -1531,7 +1576,7 @@ const ATT_META = {
   LATE:    { label: "Late",    color: "orange" },
   MISSING: { label: "Missing", color: "red" },
 };
-function AttendanceModal({ tripId, item, scopedCoachId, canEdit, onClose }) {
+function AttendanceModal({ tripId, item, scopedCoachIds, canEdit, onClose }) {
   const { t } = useLang();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -1557,7 +1602,7 @@ function AttendanceModal({ tripId, item, scopedCoachId, canEdit, onClose }) {
   // Group delegates by coach (respecting the captain scope).
   const groups = useMemo(() => {
     if (!data) return [];
-    const rows = scopedCoachId ? data.delegates.filter((d) => d.coachId === scopedCoachId) : data.delegates;
+    const rows = scopedCoachIds?.length ? data.delegates.filter((d) => scopedCoachIds.includes(d.coachId)) : data.delegates;
     const byCoach = new Map();
     for (const d of rows) {
       const key = d.coachId || "__un__";
@@ -1565,12 +1610,12 @@ function AttendanceModal({ tripId, item, scopedCoachId, canEdit, onClose }) {
       byCoach.get(key).delegates.push(d);
     }
     return [...byCoach.values()].sort((a, b) => a.sort - b.sort);
-  }, [data, scopedCoachId, t]);
+  }, [data, scopedCoachIds, t]);
 
   const history = useMemo(() => {
     if (!data) return [];
-    return scopedCoachId ? data.history.filter((h) => h.coachId === scopedCoachId) : data.history;
-  }, [data, scopedCoachId]);
+    return scopedCoachIds?.length ? data.history.filter((h) => scopedCoachIds.includes(h.coachId)) : data.history;
+  }, [data, scopedCoachIds]);
 
   // Headline counts across everything shown — so a manager reads the numbers,
   // not counts rows by hand.
@@ -1985,13 +2030,17 @@ function CoachBoardView({ tripId }) {
   // sees only Coach 1" rule. Admins, and coordinators who don't captain any
   // coach here, see the whole board.
   // NB: the login only stores { username, name, role, permissions } — NO id —
-  // so we match on username (coach.captainUsername) rather than account id.
+  // so we match on username (coach.captains[].username) rather than account
+  // id. Plural (2026-07-31, multi-captain support) — a captain can now be
+  // assigned to more than one coach, so this scopes to ALL of them, not just
+  // the first match.
   const me = getUser() || {};
-  const myCoach = coaches.find((c) => c.captainUsername && me.username && c.captainUsername === me.username) || null;
-  const scopedToCoach = !!myCoach && me.role !== "admin";
-  const boardCoaches = scopedToCoach ? coaches.filter((c) => c.id === myCoach.id) : coaches;
-  // When scoped, every count reflects just the captain's own coach.
-  const statDelegates = scopedToCoach ? delegates.filter((d) => d.coachId === myCoach.id) : delegates;
+  const myCoaches = coaches.filter((c) => me.username && (c.captains || []).some((cap) => cap.username === me.username));
+  const scopedToCoach = myCoaches.length > 0 && me.role !== "admin";
+  const myCoachIds = new Set(myCoaches.map((c) => c.id));
+  const boardCoaches = scopedToCoach ? coaches.filter((c) => myCoachIds.has(c.id)) : coaches;
+  // When scoped, every count reflects just the captain's own coach(es).
+  const statDelegates = scopedToCoach ? delegates.filter((d) => myCoachIds.has(d.coachId)) : delegates;
 
   const summaryStats = useMemo(() => ({
     delegates: statDelegates.length,
@@ -2054,7 +2103,7 @@ function CoachBoardView({ tripId }) {
         {attendanceItem && (
           <AttendanceModal
             tripId={tripId} item={attendanceItem}
-            scopedCoachId={scopedToCoach ? myCoach.id : null}
+            scopedCoachIds={scopedToCoach ? [...myCoachIds] : null}
             canEdit={editable}
             onClose={() => setAttendanceItem(null)}
           />
@@ -2150,7 +2199,7 @@ function CoachBoardView({ tripId }) {
           {scopedToCoach && (
             <div className="tf-scope-banner" role="status">
               <Users size={15} />
-              <span>{t("You're the captain of")} <strong>{myCoach.label}</strong>. {t("Other coaches are hidden.")} ({boardCoaches.length}/{coaches.length})</span>
+              <span>{t("You're the captain of")} <strong>{myCoaches.map((c) => c.label).join(", ")}</strong>. {t("Other coaches are hidden.")} ({boardCoaches.length}/{coaches.length})</span>
             </div>
           )}
 

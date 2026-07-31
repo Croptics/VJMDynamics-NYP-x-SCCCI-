@@ -14,6 +14,7 @@ import { getThread, sendMessage, editMessage, deleteMessage } from "../../lib/me
 import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
+import ContactAvatar from "./ContactAvatar.jsx";
 import callManager from "../../lib/callManager.js";
 // Shared trip id constant (integration patch 2026-07-27) — was a duplicated
 // local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
@@ -23,7 +24,6 @@ import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/chatTime.js"
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024; // ~8MB clip → ~11MB base64 (under backend cap)
 
-const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 const fileToDataUrl = (file) => new Promise((resolve, reject) => {
   const r = new FileReader();
   r.onload = () => resolve(r.result);
@@ -200,9 +200,7 @@ export default function HumanThread({ peer, onActivity }) {
     <div className="card" style={{ display: "flex", flexDirection: "column", height: 560, position: "relative", overflow: "hidden" }}>
       {/* Header */}
       <div className="row" style={{ gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--line)", alignItems: "center" }}>
-        <span className="avatar" style={{ background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", flexShrink: 0 }}>
-          {initialsOf(peer.name)}
-        </span>
+        <ContactAvatar name={peer.name} kind={peer.kind} photoUrl={peer.photoUrl} style={{ flexShrink: 0 }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{peer.name}</div>
           <div className="muted" style={{ fontSize: 12 }}>
@@ -228,9 +226,7 @@ export default function HumanThread({ peer, onActivity }) {
         {loading && <div className="muted" style={{ margin: "auto", fontSize: 13 }}>Loading…</div>}
         {!loading && messages.length === 0 && (
           <div style={{ margin: "auto", textAlign: "center", padding: "0 24px" }}>
-            <span className="avatar" style={{ width: 56, height: 56, fontSize: 20, margin: "0 auto 12px", background: isDelegate ? "var(--ink-2)" : "var(--scc-red)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              {initialsOf(peer.name)}
-            </span>
+            <ContactAvatar name={peer.name} kind={peer.kind} photoUrl={peer.photoUrl} style={{ width: 56, height: 56, fontSize: 20, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }} />
             <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{peer.name}</div>
             <div className="muted" style={{ fontSize: 13, maxWidth: 280, marginLeft: "auto", marginRight: "auto", lineHeight: 1.5 }}>
               No messages yet. Say hello{isDelegate ? "" : ", share a document, or start a call"}.

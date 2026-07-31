@@ -160,7 +160,7 @@ const PROFILE_FIELDS = [
   ["hotelName", "hotel_name"], ["roomNumber", "room_number"],
 ];
 
-export async function updateDelegate(id, patch, actor = null) {
+export async function updateDelegate(id, patch, actor = null, { silent = false } = {}) {
   const existing = await get("SELECT * FROM delegates WHERE id = $1", [id]);
   if (!existing) return null;
   const merged = normalize({ ...rowToDelegate(existing), ...patch }, id);
@@ -242,7 +242,15 @@ export async function updateDelegate(id, patch, actor = null) {
       text = `${merged.name} unassigned from ${labelFor(changes.coachId.from)}`;
     }
   }
-  await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
+  // silent (2026-07-31, "instead of 2 code there, change into one say that
+  // system update the all delegate status for next checkin") — a bulk system
+  // auto-transition (checkpoints.js's resetArrivedBeforeNextCheckpoint() /
+  // applyCheckpointLateCutoff(), both looping this over every affected
+  // delegate) used to log one full History Log entry PER delegate, which
+  // read as a wall of identical noisy rows for what's really one event. Those
+  // callers now log a single consolidated summary entry themselves instead —
+  // this flag just skips the per-delegate one so it isn't logged twice.
+  if (!silent) await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
   return {
     ...merged, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,

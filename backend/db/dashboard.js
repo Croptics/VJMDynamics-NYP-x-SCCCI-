@@ -133,10 +133,14 @@ const isBoarded = (x) => x.status === "PRESENT" || x.status === "ARRIVED";
  *  account captains. */
 export async function getVisibleCoachIds(tripUuid, account) {
   if (!account || account.role === "admin") return null;
-  const coaches = tripUuid
-    ? await all(`SELECT id, account_id AS "accountId" FROM coaches WHERE trip_id = $1`, [tripUuid])
-    : await all(`SELECT id, account_id AS "accountId" FROM coaches`);
-  const mine = coaches.filter((c) => c.accountId === account.id).map((c) => c.id);
+  // Multi-captain support (2026-07-31) — a coach can now have up to 3
+  // captains (coach_captains), not just the one coaches.account_id used to
+  // hold, so visibility is now membership in that join table rather than a
+  // single equality check.
+  const mineRows = tripUuid
+    ? await all(`SELECT cc.coach_id AS id FROM coach_captains cc JOIN coaches c ON c.id = cc.coach_id WHERE c.trip_id = $1 AND cc.account_id = $2`, [tripUuid, account.id])
+    : await all(`SELECT coach_id AS id FROM coach_captains WHERE account_id = $1`, [account.id]);
+  const mine = mineRows.map((c) => c.id);
   if (mine.length === 0) return null;
   return new Set(mine);
 }

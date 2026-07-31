@@ -569,6 +569,43 @@
 .tf-input:focus { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg); }
 .tf-input[readonly] { background: var(--tf-surface-2); color: var(--tf-text-2); cursor: default; }
 
+/* Custom dropdown (2026-07-31, "this is static right? remove that") — a
+   native <select>'s hover/focus highlight on its options is drawn by the
+   OS, not by this app's CSS, and read as an out-of-place native-blue chip
+   next to this page's own themed inputs (worse in dark mode, where that
+   native highlight can come out unreadable). Replaces the Staff-member and
+   Coach-captain(s) pickers with a real, fully-styled dropdown instead —
+   every pixel, including the hover state, now uses --tf-* tokens like every
+   other control on this page. */
+.tf-select-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  cursor: pointer; text-align: left;
+}
+.tf-select-btn:focus-visible { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg); }
+.tf-select-placeholder { color: var(--tf-text-3); }
+.tf-select-menu {
+  background: var(--tf-surface); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-sm);
+  box-shadow: var(--tf-shadow-lg); padding: 4px; overflow-y: auto;
+}
+.tf-select-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 8px 10px; border-radius: 8px; border: none; background: transparent; color: var(--tf-text);
+  font-size: 13.5px; cursor: pointer;
+}
+.tf-select-item:hover { background: var(--tf-surface-2); }
+/* Red, not blue (2026-07-31, "this one still static right? remove that") —
+   blue read as a leftover default/native highlight even though it was
+   already fully custom; switched to this app's own brand red so a selected
+   row reads as unmistakably "this app's" styling, matching every other
+   selected-row treatment elsewhere (contact list, New Group picker, etc). */
+.tf-select-item.active { background: var(--tf-red-bg); color: var(--tf-red); font-weight: 700; }
+.tf-select-item .tf-select-check {
+  width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid var(--tf-border); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; color: #fff;
+}
+.tf-select-item.active .tf-select-check { background: var(--tf-red); border-color: var(--tf-red); }
+.tf-select-empty { padding: 10px; font-size: 13px; color: var(--tf-text-3); }
+
 /* ---- Slide-out delegate panel -------------------------------------------------------- */
 .tf-panel-overlay { position: fixed; inset: 0; background: rgba(17,24,39,0.3); z-index: 3000; }
 .tf-panel {

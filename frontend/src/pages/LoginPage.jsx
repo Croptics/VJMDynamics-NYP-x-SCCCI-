@@ -6,7 +6,7 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  OWNERSHIP.md at the project root for what's yours vs. what's off-limits.
  * ============================================================================= */
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
@@ -110,28 +110,14 @@ export default function LoginPage({ onSignIn }) {
   // normal Staff ID + password flow otherwise.
   const passkey = usePasskeySignIn({ staffId, keep, onSignedIn: () => onSignIn?.() });
 
-  // Auto-attempt biometric sign-in ONCE per real page load (2026-07-30 —
-  // "set the login by face to be one time until i exit the page... then
-  // re-scan to login, like real application logic"): as soon as this device
-  // is known to have a passkey set up, fire the OS prompt automatically with
-  // no click needed — the `triedRef` guard means it only ever fires once for
-  // this mount, so cancelling it (or it failing) drops you straight into the
-  // normal form with no repeat prompting; leaving /login and coming back
-  // (a real remount) is what makes it eligible to auto-fire again. Silent on
-  // failure — same "just fall through to the manual form" rule as submit().
-  // Requires a known Staff ID (typed or remembered) — NOT just "some account
-  // somewhere has a passkey" (usePasskeySignIn falls back to that broader
-  // `anyRegistered` signal only for a deliberate, user-clicked blank-field
-  // attempt). Auto-firing on that broader signal would pop an OS biometric
-  // prompt for ANY visitor landing on a blank login form the moment a single
-  // account anywhere had ever registered a passkey — unrelated to whether
-  // this device or this visitor has anything enrolled at all.
-  const triedRef = useRef(false);
-  useEffect(() => {
-    if (triedRef.current || !staffId.trim() || !passkey.available || !passkey.registered) return;
-    triedRef.current = true;
-    passkey.attempt();
-  }, [staffId, passkey.available, passkey.registered, passkey.attempt]);
+  // REMOVED auto-attempt-on-page-load (2026-07-31 — "when i logout it will
+  // auto try to sign me in... should be when i click then it activate"). This
+  // used to fire the OS biometric prompt automatically the instant a passkey
+  // was known to exist for the typed/remembered Staff ID, with no click at
+  // all — including right after logging out, since that redirect back to
+  // /login is a fresh mount just like a real page load. Now passkey.attempt()
+  // only ever runs from inside submit() below, i.e. only when the user
+  // actually presses "Sign in".
 
   async function submit() {
     setError("");
@@ -297,10 +283,10 @@ export default function LoginPage({ onSignIn }) {
               Windows Hello FIRST whenever this device has one set up
               (usePasskeySignIn(), Vimal's components/PasskeySignIn.jsx), and
               silently falls back to this same button's normal Staff ID +
-              password flow otherwise. It also now auto-fires once on page
-              load (see the useEffect above submit()), so `passkey.busy` can
-              go true before the button is ever clicked — the label reflects
-              that so the OS prompt doesn't look like the page just hung. */}
+              password flow otherwise. Only ever runs from a click on this
+              button (2026-07-31 — the old auto-fire-on-page-load was removed;
+              it was popping the OS prompt right after logging out too, with
+              no click at all). */}
           {passkey.available && passkey.registered && (
             <p className="muted" style={{ fontSize: 12, textAlign: "center", marginTop: 10 }}>
               {t("Uses")} {biometricLabel()} {t("on this device if you've set it up.")}

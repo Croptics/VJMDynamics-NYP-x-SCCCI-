@@ -2219,18 +2219,20 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const me = req.account.id;
 
-  // Coach each staff contact currently captains, on the assistant's default
-  // trip (2026-07-31, "add filter by coach assigned" — the New Group modal's
-  // member picker) — a coach's `account_id` is the captain assigned to it,
-  // same linkage getVisibleCoachIds() already reads elsewhere. Not trip-scoped
-  // any further than that default since contacts themselves aren't per-trip;
-  // an account with no coach on this trip just shows no coach filter chip.
+  // Coach(es) each staff contact currently captains (2026-07-31, "add filter
+  // by coach assigned" — the New Group modal's member picker), via a
+  // correlated subquery rather than a plain JOIN: multi-captain support
+  // (coach_captains) means one account can now captain more than one coach,
+  // and a plain JOIN would return that account as multiple duplicate contact
+  // rows. Not trip-scoped since contacts themselves aren't per-trip; an
+  // account with no coach anywhere just gets an empty array (no filter chip).
   const accounts = (await q(
-    `SELECT a.id, a.name, a.username, a.role,
+    `SELECT a.id, a.name, a.username, a.role, a."photoUrl" AS photo_url,
             (a.last_seen_at IS NOT NULL AND a.last_seen_at > now() - interval '45 seconds') AS online,
-            c.id AS coach_id, COALESCE(c.label, c.name) AS coach_label
+            (SELECT COALESCE(json_agg(json_build_object('id', c.id, 'label', COALESCE(c.label, c.name)) ORDER BY c.label), '[]'::json)
+               FROM coach_captains cc JOIN coaches c ON c.id = cc.coach_id
+              WHERE cc.account_id = a.id) AS coaches
        FROM accounts a
-       LEFT JOIN coaches c ON c.account_id = a.id
       WHERE a.id <> $1 ORDER BY a.name NULLS LAST, a.username`, [me]
   )).rows;
 
@@ -2282,7 +2284,12 @@ router.get("/api/messages/contacts", requireAuth(), wrap(async (req, res) => {
   const contacts = [
     ...accounts.map((a) => ({
       ...build("account", a, a.role === "admin" ? "Staff · admin" : "Staff", a.online),
-      coachId: a.coach_id || null, coachLabel: a.coach_label || null,
+      // coachIds/coachLabels (2026-07-31, multi-captain support) replace the
+      // old singular coachId/coachLabel — a staff member can now captain more
+      // than one coach.
+      coachIds: (a.coaches || []).map((c) => c.id),
+      coachLabels: (a.coaches || []).map((c) => c.label),
+      photoUrl: a.photo_url || null,
     })),
     ...delegates.map((d) => build("delegate", d, d.company || "Delegate", false)),
   ];

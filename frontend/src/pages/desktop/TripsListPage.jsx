@@ -24,7 +24,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin, Plus, Pencil, Trash2, X } from "lucide-react";
+import { Loader2, AlertCircle, Bus, Users, Sparkles, Search, MapPin, Plus, Pencil, Trash2, X, ChevronDown } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
@@ -144,6 +144,60 @@ function computeDateRange(startDateStr, totalDays) {
   end.setUTCDate(end.getUTCDate() + (n - 1));
   const endFmt = formatDayMonthYear(end.getUTCFullYear(), end.getUTCMonth() + 1, end.getUTCDate());
   return `${startFmt} – ${endFmt}`;
+}
+
+/* Trip lead (2026-07-31, "the trip lead show existing admin/staff account
+ * instead") — was a free-text input, so it could hold any typo'd string with
+ * no link to a real login. Now picks from the same account list Coach
+ * captains/staff use (both admin AND staff — unlike the coach-staffing
+ * picker, a trip lead is often the coordinating admin, not a driver). Still
+ * just writes the account's display name into the trip's own plain-text
+ * `lead` column — no schema change, no login/visibility link like coach
+ * captains have; purely "pick a real name instead of typing one". */
+function useDropdown() {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); };
+    const onKeyDown = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("mousedown", onDocClick); document.removeEventListener("keydown", onKeyDown); };
+  }, [open]);
+  return { open, setOpen, rootRef };
+}
+
+function TripLeadSelect({ value, onChange }) {
+  const { t } = useLang();
+  const { open, setOpen, rootRef } = useDropdown();
+  const [accounts, setAccounts] = useState([]);
+  useEffect(() => {
+    apiGet("/assignable-accounts").then((r) => setAccounts(r.accounts || [])).catch(() => {});
+  }, []);
+  return (
+    <div ref={rootRef} style={{ position: "relative" }}>
+      <button type="button" className="tf-input tf-select-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        {value ? <span>{value}</span> : <span className="tf-select-placeholder">{t("Optional")}</span>}
+        <ChevronDown size={16} style={{ flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+      </button>
+      {open && (
+        <div className="tf-select-menu" role="listbox" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, maxHeight: 220, zIndex: 30 }}>
+          {accounts.length === 0 && <div className="tf-select-empty">{t("No accounts found.")}</div>}
+          {accounts.map((a) => {
+            const label = a.name || a.username;
+            return (
+              <button key={a.id} type="button" role="option" aria-selected={value === label}
+                className={"tf-select-item" + (value === label ? " active" : "")}
+                onClick={() => { onChange(label); setOpen(false); }}>
+                {label} ({a.role})
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Create / edit a trip. `trip` with an id = edit; anything else = create.
@@ -271,7 +325,7 @@ function TripFormModal({ trip, onClose, onSaved }) {
             </div>
             <div>
               <label className="tf-field-label">{t("Trip lead")}</label>
-              <input className="tf-input" value={form.lead} placeholder={t("Optional")} onChange={(e) => set("lead", e.target.value)} />
+              <TripLeadSelect value={form.lead} onChange={(v) => set("lead", v)} />
             </div>
           </div>
 
