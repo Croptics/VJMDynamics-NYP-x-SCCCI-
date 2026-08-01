@@ -61,8 +61,11 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
     // Desktop entrance-kiosk scanner (Face + QR + Manual).
     // Temporarily hidden from the sidebar (2026-07-27, "hide this page for
     // now, don't show it on frontend") — the route/page itself is untouched,
-    // just not linked from nav. Restore by un-commenting the line below.
-    // ...(perms.viewScanner ? [{ to: "/scanner", label: "Face + QR scan", icon: ScanFace }] : []),
+    // just not linked from nav. The viewScanner permission that used to gate
+    // this nav item was removed entirely 2026-08-02 ("remove face + qr
+    // scanner on desktop, include the permission") since it had no visible
+    // effect with nothing linking here — if this page is ever restored, add
+    // a fresh permission for it rather than reaching for the old key.
     // Biometric enrolment — feeds the scanner above (a delegate can only be
     // face/voice matched once they're enrolled), so it sits next to it.
     // Biometric enrolment is deliberately NOT here (2026-07-29, "this page can

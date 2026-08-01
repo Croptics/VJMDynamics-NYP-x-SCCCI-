@@ -1,6 +1,10 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { ChevronRight, ArrowLeft, Bus, Users, X, Trash2, Loader2, AlertCircle, CheckCircle2, Clock, ClipboardList, Phone, BedDouble, MapPin } from "lucide-react";
+import { ChevronRight, ArrowLeft, Bus, Users, X, Trash2, Loader2, AlertCircle, CheckCircle2, Clock, ClipboardList, Phone, BedDouble, MapPin, CloudOff } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
+// Offline-capable reassignment shared with the desktop board (Desmond, Phase 4).
+// Importing it also registers the "delegates/reassign" outbox sender, so replay
+// works whenever the mobile bundle is the one loaded.
+import { reassignRequest, applyQueuedReassigns } from "../../lib/reassignQueue.js";
 import { useLang } from "../../lib/i18n.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 import DelegateTimeline from "../../components/DelegateTimeline.jsx";
@@ -65,6 +69,7 @@ function StatusBadge({ tone, children }) {
 }
 
 function DelegateChip({ d, onSelect, wrongCoach = false }) {
+  const { t } = useLang();
   const tone = DELEGATE_TONE[d.status] || "";
   const dot = tone ? `var(--st-${tone})` : "var(--ink-3)";
   return (
@@ -72,12 +77,13 @@ function DelegateChip({ d, onSelect, wrongCoach = false }) {
       type="button"
       onClick={() => onSelect(d)}
       className="row"
-      style={{ gap: 5, fontSize: 12.5, padding: "5px 10px", borderRadius: 999, background: "var(--surface)", cursor: "pointer", color: "inherit", font: "inherit",
-        border: wrongCoach ? "1px solid var(--st-missing)" : "1px solid var(--line)" }}
+      style={{ gap: 6, fontSize: 12.5, padding: "6px 12px", minHeight: 44, borderRadius: 999, background: "var(--surface)", cursor: "pointer", color: "inherit", font: "inherit",
+        border: wrongCoach ? "1px solid var(--st-missing)" : d.pendingSync ? "1px solid var(--st-late)" : "1px solid var(--line)" }}
     >
       <span style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flexShrink: 0 }} />
       {d.name}{d.vip ? " ★" : ""}
       {wrongCoach && <AlertCircle size={11} color="var(--st-missing)" />}
+      {d.pendingSync && <CloudOff size={11} color="var(--st-late)" title={t("Waiting to sync — offline")} />}
     </button>
   );
 }
@@ -100,7 +106,7 @@ const STATUS_LABEL = { PRESENT: "Arrived", ARRIVED: "Arrived", ASSIGNED: "Assign
  * Editing company/accessibility/notes and removing the delegate move to a
  * collapsed "Edit details" section below, so nothing is lost, it's just not
  * the first thing you see. */
-function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
+function DelegateSheet({ delegate, coaches, canEdit, tripId, onClose, onChanged }) {
   const { t } = useLang();
   const [moveTo, setMoveTo] = useState(delegate.coachId || "");
   const [moving, setMoving] = useState(false);
@@ -126,12 +132,16 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
   async function move() {
     const toCoachId = moveTo || null;
     if (toCoachId === (delegate.coachId || null)) return;
-    // Mirror the desktop reassign rule: an unassigned delegate becomes ASSIGNED
-    // when put on a coach; one that already has a real status keeps it.
-    const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "ASSIGNED" : delegate.status);
+    // Through desmond.js's validated /reassign endpoint (capacity + optimistic
+    // lock, Phase 5), with offline queueing (Phase 4). The server computes the
+    // resulting status; expectedCoachId guards against a concurrent move. A
+    // queued (offline) move resolves without throwing, so the sheet just closes.
     setMoving(true); setMoveErr(null);
-    try { await apiPatch(`/delegates/${delegate.id}`, { coachId: toCoachId, status: nextStatus }); await onChanged(); onClose(); }
-    catch (e) { setMoveErr(e.message); setMoving(false); }
+    try {
+      await reassignRequest(tripId, { delegateId: delegate.id, toCoachId, expectedCoachId: delegate.coachId || null }, { label: delegate.name });
+      await onChanged();
+      onClose();
+    } catch (e) { setMoveErr(e.message); setMoving(false); }
   }
   async function save() {
     setSaving(true); setEditErr(null);
@@ -158,7 +168,7 @@ function DelegateSheet({ delegate, coaches, canEdit, onClose, onChanged }) {
               <StatusBadge tone={tone}>{t(STATUS_LABEL[delegate.status] || delegate.status)}</StatusBadge>
             </div>
           </div>
-          <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8 }} aria-label={t("Close")}><X size={16} /></button>
+          <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8, minWidth: 44, minHeight: 44 }} aria-label={t("Close")}><X size={16} /></button>
         </div>
 
         {coachLabel && <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>{coachLabel}</div>}
@@ -317,7 +327,7 @@ function MobileAttendanceSheet({ tripId, item, scopedCoachIds, canEdit, onClose 
       <div className="mobile-card" onClick={(e) => e.stopPropagation()} style={{ width: "100%", margin: 0, borderRadius: "16px 16px 0 0", padding: 18, paddingBottom: 28, maxHeight: "90vh", overflowY: "auto" }}>
         <div className="row between" style={{ marginBottom: 14 }}>
           <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0 }}>{t("Attendance")} · {fmt12h(item.startTime)} {item.title}</div>
-          <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8, flexShrink: 0 }} aria-label={t("Close")}><X size={16} /></button>
+          <button onClick={onClose} className="btn btn-ghost" style={{ padding: 8, minWidth: 44, minHeight: 44, flexShrink: 0 }} aria-label={t("Close")}><X size={16} /></button>
         </div>
         {error && <div style={{ color: "var(--st-missing)", fontSize: 13, marginBottom: 10 }}>{error}</div>}
         {!data && !error && <div className="row" style={{ justifyContent: "center", padding: 18 }}><Loader2 size={18} className="spin" /></div>}
@@ -349,7 +359,7 @@ function MobileAttendanceSheet({ tripId, item, scopedCoachIds, canEdit, onClose 
                             const tone = ATT_META[s].tone;
                             return (
                               <button key={s} type="button" disabled={savingId === d.delegateId + s} onClick={() => setStatus(d.delegateId, s)}
-                                style={{ fontSize: 11.5, fontWeight: 700, padding: "7px 9px", border: "none", borderLeft: s === "ARRIVED" ? "none" : "1px solid var(--line)", background: active ? `var(--st-${tone})` : "var(--surface)", color: active ? "#fff" : "var(--ink-2)", cursor: "pointer" }}>
+                                style={{ fontSize: 11.5, fontWeight: 700, padding: "0 11px", minHeight: 44, border: "none", borderLeft: s === "ARRIVED" ? "none" : "1px solid var(--line)", background: active ? `var(--st-${tone})` : "var(--surface)", color: active ? "#fff" : "var(--ink-2)", cursor: "pointer" }}>
                                 {t(ATT_META[s].label)}
                               </button>
                             );
@@ -396,6 +406,7 @@ function TripDetail({ tripId, onBack }) {
   const [attItem, setAttItem] = useState(null);
   const [cacheStale, setCacheStale] = useState(false);
   const [cacheAt, setCacheAt] = useState(null);
+  const [openCoaches, setOpenCoaches] = useState({}); // coachId -> explicit open/closed (Phase 3 expandable sections)
   const busy = useRef(false);
 
   const load = useCallback(async () => {
@@ -415,7 +426,7 @@ function TripDetail({ tripId, onBack }) {
       const stale = summaryRes.stale || coachRes.stale || itinRes.stale || delRes.stale;
       setCacheStale(stale);
       setCacheAt([summaryRes, coachRes, itinRes, delRes].find((r) => r.stale)?.at || null);
-      setData({ summary: summaryRes.data, coaches: coachRes.data.coaches || [], itinerary: itinRes.data.items || [], delegates: delRes.data.delegates || [] });
+      setData({ summary: summaryRes.data, coaches: coachRes.data.coaches || [], itinerary: itinRes.data.items || [], delegates: applyQueuedReassigns(delRes.data.delegates || []) });
       setError(null); // got usable data either way (fresh or cached)
     } catch (e) { setError(e.message); }
     finally { busy.current = false; }
@@ -451,9 +462,22 @@ function TripDetail({ tripId, onBack }) {
   const scopedToCoach = myCoaches.length > 0 && me.role !== "admin";
   const myCoachIds = new Set(myCoaches.map((c) => c.id));
   const shownCoaches = scopedToCoach ? (data?.coaches || []).filter((c) => myCoachIds.has(c.id)) : (data?.coaches || []);
+  // Expandable coach sections (Phase 3). Default open when there's little to
+  // scroll (own coach when scoped, or ≤ 2 coaches); otherwise collapsed so the
+  // header/capacity overview reads first and the delegate list is opt-in.
+  const coachSectionsDefaultOpen = scopedToCoach || shownCoaches.length <= 2;
+  const isCoachOpen = (id) => (id in openCoaches ? openCoaches[id] : coachSectionsDefaultOpen);
+  const toggleCoach = (id) => setOpenCoaches((m) => ({ ...m, [id]: !isCoachOpen(id) }));
   const currentDay = trip?.dayOf ?? 1;
   const stops = (data?.itinerary || []).slice().sort((a, b) => (a.dayNumber - b.dayNumber) || a.startTime.localeCompare(b.startTime));
   const shownStops = mode === "live" ? stops.filter((s) => s.dayNumber === currentDay) : stops;
+  // Current live stop = the last of today's stops whose scheduled time has
+  // passed — gets a "NOW" marker so the eye lands on it first.
+  let liveNowId = null;
+  if (mode === "live") {
+    const d = new Date(); const nowMin = d.getHours() * 60 + d.getMinutes();
+    for (const s of shownStops) { const [h, m] = String(s.startTime || "0:0").split(":").map(Number); if (((h || 0) * 60 + (m || 0)) <= nowMin) liveNowId = s.id; }
+  }
   // m-fade-in to match the rest of the mobile UI (2026-07-29).
   return (
     <div className="m-fade-in">
@@ -502,12 +526,15 @@ function TripDetail({ tripId, onBack }) {
                   {shownStops.map((s) => {
                     const st = s.status && s.status !== "scheduled" ? s.status : null;
                     const struck = s.completed || s.status === "cancelled";
+                    const isNow = s.id === liveNowId;
                     return (
                       <button key={s.id} type="button" onClick={() => setAttItem(s)}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 13, opacity: s.completed ? 0.6 : 1,
-                          width: "100%", textAlign: "left", background: "transparent", border: "none", borderRadius: 8, padding: "7px 6px", cursor: "pointer", color: "inherit", font: "inherit" }}>
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 13, minHeight: 44, opacity: s.completed ? 0.6 : 1,
+                          width: "100%", textAlign: "left", background: isNow ? "var(--st-missing-bg)" : "transparent", borderRadius: 8, padding: "8px 8px",
+                          border: "none", borderLeft: `3px solid ${isNow ? "var(--st-missing)" : "transparent"}`, cursor: "pointer", color: "inherit", font: "inherit" }}>
                         <span className="row" style={{ gap: 8, minWidth: 0 }}>
                           <span className="mono" style={{ fontWeight: 700, flexShrink: 0 }}>{fmt12h(s.startTime)}</span>
+                          {isNow && <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", color: "var(--st-missing)", background: "var(--surface)", border: "1px solid var(--st-missing)", padding: "1px 6px", borderRadius: 999, flexShrink: 0 }}>{t("NOW")}</span>}
                           <span style={{ textDecoration: struck ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {mode !== "live" ? `D${s.dayNumber} · ` : ""}{s.title}
                           </span>
@@ -553,9 +580,14 @@ function TripDetail({ tripId, onBack }) {
               const ratio = cap ? Math.min(1, total / cap) : 0;
               const capColor = cap && (total > cap || ratio >= 1) ? "missing" : cap && ratio >= 0.85 ? "late" : "present";
               const accent = mode === "planning" ? "var(--line)" : missing > 0 ? "var(--st-missing)" : (total > 0 && boarded >= total) ? "var(--st-present)" : "var(--st-late)";
+              const open = isCoachOpen(c.id);
               return (
                 <div key={c.id} className="mobile-card" style={{ border: "1px solid var(--line)", borderLeft: `3px solid ${accent}`, background: "var(--surface)" }}>
-                  <div className="row between" style={{ alignItems: "flex-start", gap: 8 }}>
+                  {/* Header doubles as the expand/collapse control — 44px tap
+                      target, aria-expanded for screen readers, chevron rotates. */}
+                  <button type="button" onClick={() => toggleCoach(c.id)} aria-expanded={open}
+                    style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, width: "100%", minHeight: 44,
+                      background: "transparent", border: "none", padding: 0, textAlign: "left", color: "inherit", font: "inherit", cursor: "pointer" }}>
                     <div style={{ minWidth: 0 }}>
                       <div className="row" style={{ gap: 6, fontWeight: 800, fontSize: 15 }}><Bus size={14} color="var(--ink-3)" /> {c.label}</div>
                       <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
@@ -569,7 +601,7 @@ function TripDetail({ tripId, onBack }) {
                         </div>
                       )}
                     </div>
-                    <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+                    <div className="row" style={{ gap: 6, flexShrink: 0, alignItems: "center" }}>
                       {mode === "live" && c.arrivalStatus && (
                         <span className="badge" style={{ ...ARRIVAL_STYLE[c.arrivalStatus], display: "inline-flex", alignItems: "center", gap: 4 }}>
                           <Bus size={11} /> {t(ARRIVAL_SHORT[c.arrivalStatus])}
@@ -579,8 +611,9 @@ function TripDetail({ tripId, onBack }) {
                         ? <StatusBadge tone="missing">{missing} {t("missing")}</StatusBadge>
                         : notIn > 0 ? <StatusBadge tone="late">{notIn} {t("not in")}</StatusBadge>
                         : <StatusBadge tone="present">{t("All in")}</StatusBadge>)}
+                      <ChevronRight size={18} color="var(--ink-3)" style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
                     </div>
-                  </div>
+                  </button>
                   {cap > 0 && (
                     <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
                       <div style={{ flex: 1, height: 8, borderRadius: 999, background: "var(--line)", overflow: "hidden" }}>
@@ -589,12 +622,21 @@ function TripDetail({ tripId, onBack }) {
                       <span style={{ fontSize: 12, fontWeight: 800, color: `var(--st-${capColor})`, flexShrink: 0 }}>{total}/{cap} {t("seats")}</span>
                     </div>
                   )}
-                  {list.length > 0 && (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
-                      {list.map((d) => <DelegateChip key={d.id} d={d} onSelect={setSelectedDelegate} />)}
-                    </div>
+                  {open ? (
+                    list.length > 0 ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                        {list.map((d) => <DelegateChip key={d.id} d={d} onSelect={setSelectedDelegate} />)}
+                      </div>
+                    ) : (
+                      <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("Empty")}</div>
+                    )
+                  ) : (
+                    list.length > 0 && (
+                      <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                        {list.length} {t(list.length === 1 ? "delegate" : "delegates")} · {t("tap to view")}
+                      </div>
+                    )
                   )}
-                  {list.length === 0 && <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("Empty")}</div>}
                 </div>
               );
             })}
@@ -626,6 +668,7 @@ function TripDetail({ tripId, onBack }) {
           delegate={selectedDelegate}
           coaches={data?.coaches || []}
           canEdit={editable}
+          tripId={tripId}
           onClose={() => setSelectedDelegate(null)}
           onChanged={load}
         />
@@ -657,12 +700,20 @@ export default function MobileTripsPage() {
   const [shownTripCount, setShownTripCount] = useState(TRIPS_PAGE_SIZE);
   const me = getUser() || {};
 
-  // Staff (without viewMobileAllTrips) only see the trip that's actually
-  // happening right now — Planning/Completed trips are filtered out client-
-  // side rather than requested differently, since /all-trips is a shared
-  // read-only endpoint with no reason for a second, narrower backend route.
-  // Admin bypasses every permission check, so this is a no-op filter for them.
-  const canSeeAllTrips = getPermissions().viewMobileAllTrips;
+  // 2026-08-02 ("on mobile, should hide the trip that is not in progress
+  // status, for simplicity") — this used to bypass the status filter
+  // entirely for admins/anyone with the old viewMobileAllTrips permission
+  // (Planning/Completed trips cluttered the list, as seen live: abc/Planning,
+  // Bangkok/Completed, Chengdu/Planning etc. all listed above the one real
+  // live trip). Mobile is for on-the-ground ops, not trip planning — that's
+  // the desktop Trips board's job — so the "In progress" filter now applies
+  // unconditionally, same as staff already got. Planning/Completed trips are
+  // filtered out client-side rather than requested differently, since
+  // /all-trips is a shared read-only endpoint with no reason for a second,
+  // narrower backend route. viewMobileAllTrips itself was removed from
+  // permissions.js the same day ("this can remove") since this hardcoded
+  // `false` made the toggle a no-op.
+  const canSeeAllTrips = false;
 
   function load() {
     apiGet("/all-trips").then((d) => { setTrips(d.trips); setError(null); }).catch((e) => setError(e.message));

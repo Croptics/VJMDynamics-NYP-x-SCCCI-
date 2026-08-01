@@ -58,7 +58,7 @@ import { Router } from "express";
 import pg from "pg";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { actorOf } from "../lib/actor.js";
-import { syncTripDayOf, resolveTripUuid } from "../db/dashboard.js";
+import { syncTripDayOf, resolveTripUuid, getVisibleCoachIds } from "../db/dashboard.js";
 // Read-only import of JQ's own write helper (2026-07-25 fix, JQ) — see the
 // attendance POST route below for why: marking someone's attendance here
 // used to only touch checkpoint_checkins, leaving the Dashboard/All-
@@ -66,6 +66,18 @@ import { syncTripDayOf, resolveTripUuid } from "../db/dashboard.js";
 // (not a raw UPDATE) also means this shows up in the History Log like every
 // other status change, not just a silent side effect.
 import { updateDelegate } from "../db/delegates.js";
+// Phase 5 (reassignment robustness, Desmond 2026-08-02) — read-only use of
+// teammates' helpers, exactly as JQ's own PATCH /api/delegates/:id does:
+// getVisibleCoachIds (added to the db/dashboard.js import above) for
+// captain-scope enforcement, logActivity for the global History Log (aliased —
+// this file has its OWN in-memory logActivity below), and
+// syncCurrentCheckpointStatus to keep the checkpoint view honest on a status
+// change. None of these files are edited; only their exports are called.
+import { logActivity as logHistory } from "../db/history.js";
+import { syncCurrentCheckpointStatus } from "./checkpoints.js";
+// Pure reassignment decision core (no DB) — kept in its own file so tests can
+// import it without this module's Postgres pool. See reassign-core.js.
+import { evaluateReassign } from "./reassign-core.js";
 
 const { Pool } = pg;
 
@@ -1332,6 +1344,129 @@ router.patch("/api/delegates/:id/notes", writeAccess, wrap(async (req, res) => {
   );
   if (!delegate) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
   res.json(delegate);
+}));
+
+/* =============================================================================
+ *  Reassign a delegate to a coach — TransitFlow's robust write path (Phase 5).
+ *
+ *  JQ's generic PATCH /api/delegates/:id can also change coachId/status, but the
+ *  Trips board's own reassignment goes through HERE so it can enforce, server-
+ *  side and atomically, the three things that endpoint doesn't:
+ *    (1) one-coach-per-delegate / no cross-trip — the target coach must exist
+ *        AND belong to THIS trip (the root cause of the "wrong coach" bug where
+ *        a delegate ends up pointing at a coach from another trip);
+ *    (2) seat capacity — a move onto a full coach is rejected (409 CAPACITY_FULL)
+ *        unless the caller explicitly overrides, so the board's "coach is full"
+ *        confirm is backed by real server enforcement, not just client courtesy;
+ *    (3) optimistic locking — the UPDATE is guarded on the coachId the client
+ *        last saw (expectedCoachId), so two coordinators moving the same delegate
+ *        at once can't silently clobber each other (409 CONFLICT).
+ *
+ *  Idempotent (it ASSIGNS state, doesn't append), so the offline outbox can
+ *  replay it safely. Offline replays omit expectedCoachId → deferred intent
+ *  applies last-write-wins, matching JQ's own offline delegate-patch semantics.
+ *  Captain scoping mirrors JQ's PATCH exactly. See TripCoachPage.jsx's
+ *  reassignDelegate() / MobileTripsPage.jsx's move() for the client side.
+ * ========================================================================== */
+// evaluateReassign() — the PURE decision core for the reassignment below — lives
+// in ./reassign-core.js (imported at the top) so tests/desmond can import it
+// without booting this file's Postgres pool. The route here does the I/O (load
+// rows, atomic write); reassign-core decides what should happen.
+
+router.patch("/api/trips/:tripId/reassign", writeAccess, withTripUuid, wrap(async (req, res) => {
+  const tripUuid = req.tripUuid;
+  const body = req.body || {};
+  const delegateId = String(body.delegateId || "").trim();
+  const toCoachId = body.toCoachId ? String(body.toCoachId) : null;
+  const override = !!body.override;
+  // expectedCoachId enables the optimistic lock — but ONLY when the client sent
+  // the field at all. An offline replay omits it entirely (deferred intent), so
+  // presence, not truthiness, is the switch (a valid expected value is null =
+  // "was Unassigned", which is falsy).
+  const hasExpected = Object.prototype.hasOwnProperty.call(body, "expectedCoachId");
+  const expectedCoachId = body.expectedCoachId ? String(body.expectedCoachId) : null;
+  if (!delegateId) return res.status(400).json({ error: "DELEGATE_REQUIRED", message: "A delegate is required." });
+
+  // ---- Load the rows the decision needs (this is the route's job: I/O) ----
+  const del = await get(`SELECT id, name, trip_id AS "tripId", "coachId", status FROM delegates WHERE id = $1`, [delegateId]);
+  const fromCoachId = del ? (del.coachId || null) : null;
+  // Target coach + its current occupancy (excluding this delegate). Only fetched
+  // when actually assigning to a coach, and only if the delegate resolved at all.
+  let coach = null, occupied = 0;
+  if (del && toCoachId) {
+    coach = await get(`SELECT id, label, name, capacity, trip_id AS "tripId" FROM coaches WHERE id = $1`, [toCoachId]);
+    if (coach && coach.tripId === tripUuid) {
+      occupied = Number((await get(`SELECT COUNT(*)::int AS c FROM delegates WHERE "coachId" = $1 AND id <> $2`, [toCoachId, delegateId]))?.c || 0);
+    }
+  }
+  const visibleCoachIds = del ? await getVisibleCoachIds(tripUuid, req.account) : null;
+
+  // ---- All the guard logic in one pure, unit-tested place ----
+  const decision = evaluateReassign({
+    delegate: del && { tripId: del.tripId, coachId: del.coachId, status: del.status },
+    toCoachId,
+    coach: coach && { tripId: coach.tripId, capacity: coach.capacity, label: coach.name || coach.label },
+    occupied, visibleCoachIds, expectedCoachId, hasExpected, override, tripUuid,
+  });
+  if (!decision.ok) {
+    const extra = decision.code === "CAPACITY_FULL"
+      ? { used: decision.used, capacity: decision.capacity, coachLabel: coach?.name || coach?.label }
+      : decision.code === "CONFLICT" ? { currentCoachId: decision.currentCoachId }
+      : {};
+    return res.status(decision.status).json({ error: decision.code, message: decision.message, ...extra });
+  }
+  if (decision.noop) return res.json({ id: del.id, coachId: fromCoachId, status: del.status, unchanged: true });
+  const nextStatus = decision.status;
+
+  // (3) Optimistic lock + write in ONE atomic statement. IS NOT DISTINCT FROM so
+  // NULL (Unassigned) compares correctly. If someone else moved this delegate
+  // since the client last read it, zero rows update and we return 409 CONFLICT
+  // rather than silently overwriting their change. Offline replays skip the
+  // guard (last-write-wins).
+  const lockClause = hasExpected ? ` AND "coachId" IS NOT DISTINCT FROM $4` : "";
+  const params = hasExpected ? [toCoachId, nextStatus, delegateId, expectedCoachId] : [toCoachId, nextStatus, delegateId];
+  const updated = await get(
+    `UPDATE delegates SET "coachId" = $1, status = $2 WHERE id = $3${lockClause}
+       RETURNING id, name, initials, "coachId", status, vip, "lastSeen", "lastLocation",
+                 company, accessibility_notes AS "accessibilityNotes", notes, trip_id AS "tripId"`,
+    params
+  );
+  if (!updated) {
+    // Zero rows with a lock present = a concurrent move. Re-read so the client
+    // can resync to where the delegate actually is now.
+    const now = await get(`SELECT "coachId" FROM delegates WHERE id = $1`, [delegateId]);
+    if (!now) return res.status(404).json({ error: "NOT_FOUND", message: "Delegate not found." });
+    return res.status(409).json({ error: "CONFLICT", message: "Someone else moved this delegate. Refresh and try again.", currentCoachId: now.coachId || null });
+  }
+
+  // Keep the checkpoint-scoped view honest when the status actually changed —
+  // the same fire-and-forget call JQ's PATCH /api/delegates/:id makes.
+  if (nextStatus !== del.status) {
+    try { syncCurrentCheckpointStatus(delegateId, tripUuid, nextStatus, actorOf(req)); } catch { /* best-effort */ }
+  }
+
+  // Human-readable "moved from X to Y", built from fresh coach labels.
+  const labelFor = async (cid) => (cid ? ((await get(`SELECT COALESCE(name, label) AS label FROM coaches WHERE id = $1`, [cid]))?.label || cid) : null);
+  const fromLabel = await labelFor(fromCoachId);
+  const toLabel = await labelFor(toCoachId);
+  const summary = fromCoachId && toCoachId ? `${updated.name} moved from ${fromLabel} to ${toLabel}`
+    : toCoachId ? `${updated.name} assigned to ${toLabel}`
+    : `${updated.name} unassigned from ${fromLabel}`;
+
+  // Board's own before/after audit (trip_event_log → the History panel).
+  await recordEvent(tripUuid, req, {
+    action: "delegate.reassign", entity: "delegate", entityId: delegateId, kind: "delegate",
+    summary, before: { coach: fromLabel, status: del.status }, after: { coach: toLabel, status: nextStatus },
+  });
+  // JQ's global History Log (activity_log) too, so a reassignment still shows
+  // there like it did when this went through updateDelegate(); changes.coachId
+  // keeps that entry's field-level rollback working.
+  const changes = { coachId: { from: fromCoachId, to: toCoachId } };
+  if (nextStatus !== del.status) changes.status = { from: del.status, to: nextStatus };
+  try { await logHistory(summary, "reassign", actorOf(req), { delegateId, changes, tripUuid }); }
+  catch (e) { console.error("desmond.js reassign history (non-fatal):", e.message); }
+
+  res.json(updated);
 }));
 
 export default router;

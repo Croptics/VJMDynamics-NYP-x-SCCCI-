@@ -193,7 +193,9 @@
 .tf-stop-box-time { font-size: 13.5px; font-weight: 800; color: var(--tf-text); display: flex; align-items: center; gap: 6px; }
 .tf-stop-box.is-now .tf-stop-box-time { color: var(--tf-red); }
 .tf-stop-now-text { font-size: 11px; font-weight: 800; letter-spacing: 0.04em; color: var(--tf-red); }
-.tf-stop-box-title { font-size: 12.5px; color: var(--tf-text-2); margin-top: 2px; }
+.tf-stop-box-title { font-size: 12.5px; color: var(--tf-text-2); margin-top: 2px; font-weight: 600; }
+.tf-stop-box-venue { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--tf-text-3); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-stop-box-venue svg { flex-shrink: 0; }
 .tf-stop-arrow { display: flex; align-items: center; color: var(--tf-text-3); flex-shrink: 0; }
 
 /* Stop-box as a clickable div (edit mode: click body to open the live-status
@@ -219,6 +221,57 @@
 .tf-stop-box.is-moved     { border-color: var(--tf-blue-line); }
 .tf-stop-box.is-cancelled { border-color: var(--tf-red-line); background: var(--tf-red-bg); }
 .tf-stop-box.is-cancelled .tf-stop-box-title { text-decoration: line-through; color: var(--tf-text-3); }
+
+/* ---- Now / Next focus band + rail hierarchy (Phase 3) ----------------------
+ * The live in-progress itinerary leads with a dominant "NOW" card and a "NEXT"
+ * card carrying a live countdown, above the full-day rail. In the rail the
+ * current stop is enlarged, the next stop is blue-accented, later stops are
+ * de-emphasised, and earlier/done stops collapse behind a "N done" pill.
+ * Palette unchanged: red = now/critical · blue = next/info · grey = past. --- */
+.tf-focus-band { display: grid; grid-template-columns: 1.35fr 1fr; gap: 14px; margin: 12px 0 16px; }
+@media (max-width: 640px) { .tf-focus-band { grid-template-columns: 1fr; } }
+.tf-focus-card {
+  position: relative; min-width: 0; padding: 14px 16px;
+  background: var(--tf-surface-2); border: 1px solid var(--tf-border); border-radius: var(--tf-radius-md);
+}
+.tf-focus-card.is-clickable { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.tf-focus-card.is-clickable:hover { border-color: var(--tf-text-3); box-shadow: var(--tf-shadow-sm); }
+/* NOW dominates: white surface, red rail + border, soft lift. */
+.tf-focus-now { background: var(--tf-surface); border-color: var(--tf-red-line); border-left: 4px solid var(--tf-red); box-shadow: var(--tf-shadow-sm); }
+.tf-focus-now.is-cancelled { background: var(--tf-red-bg); }
+.tf-focus-next { border-left: 4px solid var(--tf-blue-line); }
+.tf-focus-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--tf-red); }
+.tf-focus-eyebrow--next { color: var(--tf-blue); }
+.tf-focus-late, .tf-focus-count { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 800; letter-spacing: 0; text-transform: none; }
+.tf-focus-late { color: var(--tf-orange); background: var(--tf-orange-bg); }
+.tf-focus-count { color: var(--tf-blue); background: var(--tf-blue-bg); }
+.tf-focus-time { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; color: var(--tf-text); margin-top: 8px; }
+.tf-focus-time.is-next { font-size: 18px; }
+.tf-focus-title { font-size: 15px; font-weight: 700; color: var(--tf-text); margin-top: 3px; }
+.tf-focus-next .tf-focus-title { font-size: 14px; color: var(--tf-text-2); }
+.tf-focus-venue { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--tf-text-3); margin-top: 7px; }
+.tf-focus-venue svg { flex-shrink: 0; }
+/* Pulsing "now" dot — stilled under prefers-reduced-motion by the global rule. */
+.tf-now-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tf-red); flex-shrink: 0; animation: tf-pulse 1.8s ease-out infinite; }
+@keyframes tf-pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.5); } 70% { box-shadow: 0 0 0 7px rgba(220, 38, 38, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); } }
+
+/* Rail tiers: current enlarged/dominant, next blue-accented, later muted. */
+.tf-stop-box.is-now { flex: 1.4 1 188px; min-width: 166px; box-shadow: var(--tf-shadow-sm); }
+.tf-stop-box.is-now .tf-stop-box-title { font-size: 13.5px; font-weight: 700; color: var(--tf-text); }
+.tf-stop-box.is-next { border-color: var(--tf-blue-line); }
+.tf-stop-box.is-next .tf-stop-box-time { color: var(--tf-blue); }
+.tf-stop-next-text { font-size: 11px; font-weight: 800; letter-spacing: 0.04em; color: var(--tf-blue); }
+.tf-stop-box.is-upcoming { opacity: 0.9; }
+.tf-stop-box.is-upcoming .tf-stop-box-title { color: var(--tf-text-3); }
+
+/* Collapsed "N done" pill at the head of the rail. */
+.tf-stop-collapsed {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; align-self: center; white-space: nowrap;
+  padding: 8px 12px; border-radius: 999px; border: 1px dashed var(--tf-border); background: var(--tf-surface-2);
+  color: var(--tf-text-3); font-size: 12px; font-weight: 800; cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.tf-stop-collapsed:hover { color: var(--tf-green); border-color: var(--tf-green-line); }
 
 /* Inline live-status editor (appears below the chain when a stop is picked).
  * Two grouped ideas: "Schedule status" (on time/delayed/moved/cancelled) and
@@ -314,6 +367,7 @@
 }
 .tf-fleet-card:hover { box-shadow: var(--tf-shadow-md); }
 .tf-fleet-card.is-drop-target { border-color: var(--tf-blue); box-shadow: 0 0 0 3px var(--tf-blue-bg), var(--tf-shadow-md); transform: translateY(-2px); }
+.tf-fleet-card.is-drop-target.is-nearfull { border-color: var(--tf-orange); box-shadow: 0 0 0 3px var(--tf-orange-bg), var(--tf-shadow-md); }
 .tf-fleet-card.is-drop-target.is-full { border-color: var(--tf-red); box-shadow: 0 0 0 3px var(--tf-red-bg), var(--tf-shadow-md); }
 .tf-fleet-card.is-unassigned { background: var(--tf-yellow-bg); border-style: dashed; box-shadow: none; }
 .tf-fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
@@ -330,6 +384,34 @@
 .tf-fleet-cap-track { flex: 1; height: 10px; border-radius: 999px; background: var(--tf-grey-bg); overflow: hidden; box-shadow: inset 0 0 0 1px rgba(15,23,42,0.04); }
 .tf-fleet-cap-fill { display: block; height: 100%; border-radius: 999px; transition: width 0.3s ease; }
 .tf-fleet-cap-label { font-size: 12.5px; font-weight: 800; white-space: nowrap; flex-shrink: 0; letter-spacing: -0.01em; }
+/* Operational capacity status badge (Available / Almost full / Full / Over) */
+.tf-cap-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; padding: 3px 9px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+/* Headcount / capacity-fill "bump" when the number changes after a drop */
+@keyframes tf-bump-kf { 0% { transform: scale(1); } 35% { transform: scale(1.14); } 100% { transform: scale(1); } }
+.tf-fleet-cap-label.tf-bump { display: inline-block; animation: tf-bump-kf 0.42s ease; }
+.tf-fleet-cap-fill.tf-bump { animation: tf-bump-kf 0.42s ease; transform-origin: left center; }
+@media (prefers-reduced-motion: reduce) { .tf-bump, .tf-drag-ghost { animation: none !important; } }
+/* Dragged "ghost" card — lifts off the board: scale + slight rotation + shadow */
+.tf-drag-ghost { animation: tf-ghost-in 0.12s ease; }
+.tf-drag-ghost .tf-delegate-card { transform: scale(1.05) rotate(2.5deg); box-shadow: 0 14px 30px rgba(15,23,42,0.28); opacity: 0.96; border-color: var(--tf-blue-line); cursor: grabbing; }
+@keyframes tf-ghost-in { from { transform: scale(0.9); opacity: 0.5; } to { transform: scale(1); opacity: 1; } }
+/* Over-capacity: the target coach shakes + its bar flashes red before the dialog */
+@keyframes tf-shake-kf { 0%,100% { transform: translateX(0); } 15% { transform: translateX(-6px); } 30% { transform: translateX(5px); } 45% { transform: translateX(-4px); } 60% { transform: translateX(3px); } 75% { transform: translateX(-2px); } }
+.tf-fleet-card.is-shake { animation: tf-shake-kf 0.5s ease; border-color: var(--tf-red) !important; box-shadow: 0 0 0 3px var(--tf-red-bg), var(--tf-shadow-md) !important; }
+@keyframes tf-flash-kf { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.tf-fleet-card.is-shake .tf-fleet-cap-fill { background: var(--tf-red) !important; animation: tf-flash-kf 0.5s ease 2; }
+.tf-fleet-card.is-shake .tf-cap-badge { animation: tf-flash-kf 0.5s ease 2; }
+@media (prefers-reduced-motion: reduce) { .tf-fleet-card.is-shake { animation: none; } }
+/* Capacity override dialog */
+.tf-cap-dialog-stats { display: flex; flex-direction: column; gap: 9px; background: var(--tf-surface-2); border: 1px solid var(--tf-border); border-radius: 10px; padding: 12px 14px; }
+.tf-cap-dialog-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.tf-cap-dialog-k { color: var(--tf-text-3); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.tf-cap-dialog-v { font-weight: 800; color: var(--tf-text); font-size: 13px; text-align: right; }
+/* Bottom sheet on mobile, centred dialog on desktop */
+@media (max-width: 640px) {
+  .tf-cap-sheet { align-items: flex-end; }
+  .tf-cap-sheet .tf-cap-dialog { max-width: 100% !important; width: 100%; border-radius: 18px 18px 0 0; }
+}
 /* Per-delegate status pill on the card */
 .tf-del-status { font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.02em; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
 
@@ -423,9 +505,9 @@
 .tf-audit-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .tf-audit-summary { font-size: 13.5px; font-weight: 800; color: var(--tf-text); }
 .tf-audit-meta { font-size: 11.5px; color: var(--tf-text-2); white-space: nowrap; }
-.tf-audit-diff { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-.tf-audit-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-.tf-audit-key { min-width: 92px; color: var(--tf-text-3); font-weight: 700; }
+.tf-audit-diff { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; background: var(--tf-surface-2); border-radius: 8px; padding: 8px 10px; }
+.tf-audit-row { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; flex-wrap: wrap; }
+.tf-audit-key { min-width: 96px; color: var(--tf-text-3); font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; }
 .tf-audit-from { color: var(--tf-red); text-decoration: line-through; }
 .tf-audit-arrow { color: var(--tf-text-3); }
 .tf-audit-to { color: var(--tf-green); font-weight: 700; }
@@ -512,6 +594,22 @@
  * .tf-badge-pill, kept as its own class since that file isn't part of this
  * port). --------------------------------------------------------------------- */
 .tf-status-chip { font-size: 10.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; white-space: nowrap; letter-spacing: 0.02em; }
+
+/* ---- Trip status tabs (Planning / In progress / Completed / Cancelled) ----- */
+.tf-trip-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.tf-trip-tab {
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px;
+  border: 1px solid var(--tf-border); background: var(--tf-surface); color: var(--tf-text-2);
+  font-size: 13px; font-weight: 700; cursor: pointer; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.tf-trip-tab:hover { border-color: var(--tf-text-3); }
+.tf-trip-tab.is-active { background: var(--tf-text); color: var(--tf-surface); border-color: var(--tf-text); }
+.tf-trip-tab-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tf-trip-tab-count {
+  font-size: 11px; font-weight: 800; padding: 1px 8px; border-radius: 999px;
+  background: var(--tf-surface-2); color: var(--tf-text-3);
+}
+.tf-trip-tab.is-active .tf-trip-tab-count { background: rgba(255,255,255,0.2); color: var(--tf-surface); }
 
 /* ---- Toasts (flattened) ------------------------------------------------------------ */
 .tf-toast-stack { position: fixed; top: 18px; right: 18px; z-index: 4000; display: flex; flex-direction: column; gap: 8px; width: 300px; max-width: calc(100vw - 32px); }

@@ -63,7 +63,10 @@ const DESKTOP_FALLBACK_ORDER = [
   { path: "/announcements", perm: "viewAnnouncements" },
   { path: "/trips", perm: "viewTrips" },
   { path: "/onboarding", perm: "viewDocuments" },
-  { path: "/scanner", perm: "viewScanner" },
+  // "/scanner" was removed from this list 2026-08-02 along with the
+  // viewScanner permission itself — the route already just redirects to
+  // /dashboard unconditionally (see below), so it was never a real fallback
+  // destination anyway.
   { path: "/exceptions", perm: "viewExceptions" },
   { path: "/history", perm: "viewHistory" },
 ];
@@ -73,8 +76,11 @@ const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile/trips", perm: "viewMobileTrips" },
   // Was "/mobile/scanner" until 2026-07-29; that route no longer exists, so the
   // fallback points at the QR scanner (the primary/centre tab) instead — an
-  // account whose only permission is viewMobileScanner still lands somewhere real.
-  { path: "/mobile/scan/qr", perm: "viewMobileScanner" },
+  // account whose only permission is viewMobileScannerQr still lands somewhere
+  // real. viewMobileScanner was split into viewMobileScannerQr/Face/Manual
+  // 2026-08-02; this fallback follows the QR one since it's the primary tab.
+  { path: "/mobile/scan/qr", perm: "viewMobileScannerQr" },
+  { path: "/mobile/scan/face", perm: "viewMobileScannerFace" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
 
@@ -321,8 +327,10 @@ export default function App() {
 
         {/* Biometric enrolment (Vimal) — the in-app counterpart to the public
             /enroll link. Staff can enrol a delegate's face/voice at the desk;
-            delegates can still self-enrol from the public page. Gated on the
-            same viewScanner permission as the scanner it feeds. */}
+            delegates can still self-enrol from the public page. Its mobile
+            counterpart (/mobile/enrolment, below) is gated on
+            viewMobileScannerFace since enrolment specifically feeds face/voice
+            matching, not QR. */}
         {/* The desktop /enrolment page was REMOVED 2026-07-29 ("this page can be
             removed from desktop"), matching Vimal's "enrolment is its own app"
             decision. Nothing biometric is lost: the standalone delegate-facing
@@ -336,8 +344,11 @@ export default function App() {
             Temporarily hidden (2026-07-27, "hide this page for now, don't
             show it on frontend") — redirects to the dashboard instead of
             rendering, so even a direct /scanner visit doesn't show it while
-            the sidebar link is also commented out (Sidebar.jsx). Restore by
-            swapping this back to <ViewGate perm="viewScanner"><UnifiedScannerPage /></ViewGate>. */}
+            the sidebar link is also commented out (Sidebar.jsx). The
+            viewScanner permission that used to gate this was removed entirely
+            2026-08-02 (it had no nav entry point and was pure clutter in the
+            Account control editor) — if this page is ever restored, add a
+            fresh permission for it rather than reaching for the old key. */}
         <Route path="/scanner" element={<Navigate to="/dashboard" replace />} />
 
         {/* Account control — needs the manage-accounts permission. Kept on
@@ -437,17 +448,24 @@ export default function App() {
             the unlocked entry point is gone, so an old bookmark now falls
             through to the mobile catch-all instead of showing a second,
             redundant scanner UI. */}
-        <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
-        <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
+        {/* Each scanner mode gated on its OWN permission now (split 2026-08-02
+            from one combined viewMobileScanner toggle — "mobile view: ...
+            qr code scanner / face scanner / manual"), so an account can be
+            handed QR without Face, or Manual without either camera mode. */}
+        <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScannerFace" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
+        <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScannerQr" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
         {/* Manual check-in as its own locked mode (Vimal, taken 2026-07-29) —
             reached from inside the scanner screens rather than the tab bar. */}
-        <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
+        <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScannerManual" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
         {/* Mobile Announcements + biometric-enrolment coverage/invites (Vimal,
-            taken 2026-07-29). Gated on the SAME permissions as their desktop
-            counterparts — his branch left both ungated, which would have let any
-            signed-in account read announcements and send enrolment invites. */}
+            taken 2026-07-29). Announcements gated on the SAME permission as
+            its desktop counterpart — his branch left both ungated, which
+            would have let any signed-in account read announcements and send
+            enrolment invites. Enrolment moved to viewMobileScannerFace
+            2026-08-02 (split from the old combined viewMobileScanner) since
+            enrolment specifically feeds face/voice matching, not QR. */}
         <Route path="/mobile/announcements" element={<ViewGate perm="viewAnnouncements" mode="mobile"><MobileAnnouncementsPage /></ViewGate>} />
-        <Route path="/mobile/enrolment" element={<ViewGate perm="viewMobileScanner" mode="mobile"><MobileEnrolmentPage /></ViewGate>} />
+        <Route path="/mobile/enrolment" element={<ViewGate perm="viewMobileScannerFace" mode="mobile"><MobileEnrolmentPage /></ViewGate>} />
         <Route path="/mobile/profile" element={<MobileProfilePage />} />
         {/* Mobile-dedicated User Guide (2026-07-21) — fixes a routing defect
             where MobileProfilePage's "User guide" button used to send you to

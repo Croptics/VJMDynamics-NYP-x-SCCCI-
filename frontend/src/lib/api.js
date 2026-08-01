@@ -10,7 +10,7 @@
  * Minimal API client. Reads the JWT from storage and attaches it.
  * Swap BASE_URL for your deployed Express origin.
  */
-import { DEFAULT_PERMISSIONS, PERM_KEYS } from "../../../permissions.js";
+import { DEFAULT_PERMISSIONS, PERM_KEYS } from "./permissions.js";
 
 // `?.` so this module can also be imported outside Vite (Node unit tests —
 // tests/jq/*), where `import.meta.env` doesn't exist at all and a plain

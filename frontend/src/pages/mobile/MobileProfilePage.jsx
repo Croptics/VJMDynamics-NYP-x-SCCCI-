@@ -20,7 +20,7 @@ import PhotoCropModal from "../../components/PhotoCropModal.jsx";
 // means the label/grouping here can never drift from what an admin sees when
 // actually editing this account's role — one source of truth, not a second
 // copy that quietly goes stale.
-import { PERMISSIONS } from "../../../../permissions.js";
+import { PERMISSIONS } from "../../lib/permissions.js";
 
 /**
  * Mobile Profile — signed-in user info + logout, mirroring the account

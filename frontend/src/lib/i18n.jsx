@@ -1268,6 +1268,598 @@ const DICT = {
   "Reset headcount for the next leg": "为下一段行程重置点名",
   "Every manual check-in is logged with who did it, when, and the reason given — the head-count and the audit trail stay in step with a scanned one.":
     "每次手动签到都会记录操作人、时间与所填原因 — 人数统计与审计记录与扫描签到保持一致。",
+
+  // --- AnalyticsPanel ---
+  "Or describe what you want, e.g. \"missing delegates by company\"":
+    "或直接描述你的需求，例如「按公司显示缺席代表」",
+
+  // --- CachedDataBadge ---
+  "Offline — showing cached data from": "离线 — 显示以下时间的缓存数据：",
+  "h ago": "小时前",
+
+  // --- ChatBubble / MobileChatBubble ---
+  "Messages": "消息",
+  "Open full inbox": "打开完整收件箱",
+  "new message": "条新消息",
+  "new messages": "条新消息",
+  "open Messages": "打开消息",
+
+  // --- DelegateLocationMap ---
+  "AMap works best for locations within mainland China — where Google Maps is blocked.":
+    "高德地图在中国大陆境内定位效果最佳 — 该区域无法使用谷歌地图。",
+  "Enlarge": "放大",
+  "Enlarge map": "放大地图",
+  "No AMap preview for this address — AMap has little data outside mainland China. Use the link below, or add an AMap key (see THIRD_PARTY_SERVICES.md).":
+    "该地址暂无高德地图预览 — 高德地图在中国大陆以外的数据较少。请使用下方链接，或添加高德地图密钥（见 THIRD_PARTY_SERVICES.md）。",
+  "No account needed": "无需账号",
+  "Open in AMap": "在高德地图中打开",
+  "Searching by place name — if AMap lands on the wrong spot, search inside the map or open it in AMap.":
+    "正在按地点名称搜索 — 如果高德地图定位有误，请在地图内搜索或在高德地图中打开。",
+  "Using your AMap key.": "正在使用你的高德地图密钥。",
+
+  // --- EscalationBanner ---
+  "Click to view all escalations for this trip": "点击查看本次行程的所有紧急上报",
+  "View": "查看",
+
+  // --- ExportModal ---
+  "A separate sheet: every stop each delegate was arrived/late/missing at, not just their current status.":
+    "单独一个工作表：记录每位代表在每个站点的抵达/迟到/缺席情况，而不仅是当前状态。",
+  "Include per-checkpoint history": "包含各检查点历史记录",
+
+  // --- MediaManager ---
+  "Could not load media.": "无法加载媒体文件。",
+  "Guide video cleared": "指南视频已清除",
+  "Nothing stored yet.": "暂无存储内容。",
+  "Video": "视频",
+  "announcement(s) updated": "条公告已更新",
+  "item(s)": "项",
+  "item(s) from Cloudinary in this folder, and clears anything in the app pointing at them. This cannot be undone.":
+    "项 Cloudinary 中此文件夹内的内容，并清除应用内所有指向它们的引用。此操作无法撤销。",
+  "item(s)? This can't be undone.": "项？此操作无法撤销。",
+  "items": "项",
+
+  // --- PasskeyManager ---
+  "Add another device": "添加其他设备",
+  "Added": "已添加",
+  "Biometric sign-in": "生物识别登录",
+  "Could not remove that device.": "无法移除该设备。",
+  "Could not set up biometric sign-in.": "无法设置生物识别登录。",
+  "Device": "设备",
+  "Set up": "设置",
+  "Set up on": "设置于",
+  "This device is already set up.": "此设备已完成设置。",
+  "Use your device's": "使用你设备的",
+  "device": "设备",
+  "last used": "上次使用",
+  "this device": "此设备",
+  "to sign in instead of typing your password. Your face or fingerprint never leaves this device — it stays in secure hardware.":
+    "以生物识别登录代替输入密码。你的面容或指纹信息不会离开本设备 — 始终保存在安全硬件中。",
+
+  // --- Sidebar ---
+  "Announcements": "公告",
+
+  // --- SyncStatus ---
+  "Changes the server rejected": "服务器拒绝的更改",
+  "Details": "详情",
+  "Dismiss all": "全部关闭",
+  "Offline — scanning unavailable, use manual check-in": "离线 — 无法扫描，请使用手动签到",
+  "Sync now": "立即同步",
+  "Syncing…": "同步中…",
+  "These were taken offline but the server refused them — retrying won't help, so please redo them manually if they still apply.":
+    "这些操作是在离线状态下进行的，但服务器已拒绝 — 重试无效，如仍需处理请手动重新操作。",
+  "change waiting to sync": "条更改待同步",
+  "change was rejected": "条更改被拒绝",
+  "changes waiting to sync": "条更改待同步",
+  "changes were rejected": "条更改被拒绝",
+  "open a scanner to sync": "打开扫描器以同步",
+  "scan": "次扫描",
+  "scan waiting": "次扫描待同步",
+  "scans": "次扫描",
+  "scans waiting": "次扫描待同步",
+
+  // --- mchat/AssistantConversation ---
+  "History": "历史记录",
+  "MusterChat": "聊天",
+  "New": "新建",
+  "Thinking — the first answer can take a moment while the local model warms up.":
+    "思考中 — 首次回答可能需要一些时间以启动本地模型。",
+  "Watch": "观看",
+
+  // --- mchat/MusterChatInbox ---
+  "Add members": "添加成员",
+  "All staff": "全体员工",
+  "Ask about the live trip": "咨询当前行程情况",
+  "Couldn't load contacts.": "无法加载联系人。",
+  "Create": "创建",
+  "Creating…": "创建中…",
+  "Group name": "群组名称",
+  "Groups": "群组",
+  "New group": "新建群组",
+  "No contacts found.": "未找到联系人。",
+  "No groups yet.": "暂无群组。",
+  "No teammates on that coach.": "该车辆暂无同事。",
+  "No teammates to add.": "暂无可添加的同事。",
+  "People": "人员",
+  "Search people…": "搜索人员…",
+  "Trip Assistant": "行程助手",
+
+  // --- mchat/QuickChat ---
+  "Attach": "附件",
+  "Couldn't delete that message.": "无法删除该消息。",
+  "Couldn't edit that message.": "无法编辑该消息。",
+  "Document (parse & share)": "文档（解析并分享）",
+  "Enter to save · Esc to cancel": "按 Enter 保存 · 按 Esc 取消",
+  "No messages yet. Say hello.": "暂无消息，打个招呼吧。",
+  "Reading": "已读",
+  "Sticker": "表情贴图",
+  "This message was deleted": "此消息已删除",
+  "Uploading clip…": "上传中…",
+  "Video clip": "视频片段",
+  "edited": "已编辑",
+  "members": "名成员",
+
+  // --- AccountControlPage ---
+  "Access role": "访问角色",
+  "Contact number": "联系电话",
+  "Delete the \"": "删除「",
+  "Desktop web view": "桌面网页视图",
+  "Full access (create, edit, delete)": "完全权限（创建、编辑、删除）",
+  "Mobile view": "移动端视图",
+  "Named, fine-grained permission presets for the Accounts list's Access-role filter and badges — the New/Edit account form itself now uses the two simple Desktop/Mobile access dropdowns instead of applying a template directly.":
+    "具名的细粒度权限预设，用于账号列表的访问角色筛选与标签 — 新建/编辑账号表单现改用「桌面/移动端权限」两个简单下拉菜单，而非直接套用模板。",
+  "Quick-fills the two dropdowns below from a named template (edit templates under \"Manage roles\") — still fully overridable per surface afterward.":
+    "从具名模板快速填充下方两个下拉菜单（可在「管理角色」中编辑模板）— 填充后仍可按端分别覆盖调整。",
+  "Read-only can see every page and tab, but can't create, edit, delete, or check anyone in. For finer per-feature control, build a named template under \"Manage roles\" instead.":
+    "只读权限可查看所有页面与标签页，但无法创建、编辑、删除或为任何人签到。如需更精细的分功能控制，请改在「管理角色」中建立具名模板。",
+  "\" role template? Accounts already using these permissions keep them — this only removes the quick-fill option and the filter entry.":
+    "」角色模板？已使用该权限的账号不受影响 — 此操作仅移除快速填充选项与筛选条目。",
+  "optional": "可选",
+
+  // --- AnnouncementsPage / MobileAnnouncementsPage ---
+  "Add": "添加",
+  "Could not save the announcement.": "无法保存该公告。",
+  "Edit announcement": "编辑公告",
+  "General — not tied to a specific stop": "一般公告 — 不关联特定站点",
+  "Images (optional)": "图片（可选）",
+  "Keep image": "保留图片",
+  "Keep video": "保留视频",
+  "Leave blank for an image-only post": "留空即为仅图片公告",
+  "Message (optional)": "内容（可选）",
+  "New announcement": "新建公告",
+  "No announcements yet for this day.": "当天暂无公告。",
+  "No announcements yet for this trip.": "本次行程暂无公告。",
+  "Post announcement": "发布公告",
+  "Posting…": "发布中…",
+  "Remove image": "移除图片",
+  "Remove video": "移除视频",
+  "Tag to an itinerary stop (optional)": "关联行程站点（可选）",
+  "Title": "标题",
+  "Videos (optional)": "视频（可选）",
+  "up to": "最多",
+  "—": "—",
+  "Hide": "隐藏",
+  "Latest": "最新",
+  "No announcements": "暂无公告",
+  "Trip notices will show up here.": "行程通知将显示在此处。",
+  "Trip updates": "行程更新",
+  "Updates from the trip office. View only — posting is done by admins.": "来自行程办公室的更新。仅供查看 — 发布由管理员负责。",
+  "earlier update": "条更早更新",
+  "earlier updates": "条更早更新",
+
+  // --- BoardingPassesView ---
+  "Camera unavailable — type the code instead.": "摄像头不可用 — 请改为手动输入代码。",
+  "Couldn't link that pass.": "无法关联该登车证。",
+  "Couldn't send the email.": "邮件发送失败。",
+  "Email pass": "邮件发送登车证",
+  "Link": "关联",
+  "Link physical pass": "关联实体登车证",
+  "Linking…": "关联中…",
+  "No company": "无公司信息",
+  "Not linked — using our QR": "未关联 — 使用系统二维码",
+  "Physical pass": "实体登车证",
+  "Physical pass code": "实体登车证代码",
+  "Point the camera at the QR/barcode on the physical pass.": "将摄像头对准实体登车证上的二维码/条形码。",
+  "Scan": "扫描",
+  "Sent to": "已发送至",
+  "Type code": "输入代码",
+  "Unlink": "取消关联",
+
+  // --- ChatAssistantPage ---
+  "AI assistant + team messaging, video calls and document sharing — in one inbox.":
+    "AI 助手 + 团队消息、视频通话与文件分享 — 集成于同一收件箱。",
+
+  // --- DashboardPage ---
+  "AI suggested changes for": "AI 建议的更改，适用于：",
+  "All days": "所有天数",
+  "Apply to": "应用于",
+  "Apply to all": "应用于全部",
+  "Applying…": "应用中…",
+  "Ask AI to assign rooms": "让 AI 分配房间",
+  "Assign or reassign hotel/room per delegate — handy for an end-of-day pass.": "为每位代表分配或调整酒店/房间 — 适合每日结束时统一处理。",
+  "Checkpoint history": "检查点历史记录",
+  "Could not reach the AI right now.": "目前无法连接 AI。",
+  "Decrease room number": "减少房间号",
+  "Delegate management": "代表管理",
+  "Discard": "放弃",
+  "Escalate all": "全部上报",
+  "Escalated": "已上报",
+  "Escalated by": "上报人：",
+  "Escalating…": "上报中…",
+  "Every delegate's status at every itinerary stop — click a card for the full timeline.": "每位代表在每个行程站点的状态 — 点击卡片查看完整时间线。",
+  "Follows the coach filter — only the": "跟随车辆筛选 — 仅",
+  "Full attendance": "完整出勤记录",
+  "Hide delegates": "隐藏代表",
+  "Hotel": "酒店",
+  "Increase room number": "增加房间号",
+  "Itinerary stops": "行程站点",
+  "Late or missing": "迟到或缺席",
+  "No delegates match these filters.": "没有符合筛选条件的代表。",
+  "No delegates match your search.": "没有符合搜索条件的代表。",
+  "No itinerary stops on this trip yet — nothing to show a history for.": "本次行程尚无行程站点 — 暂无历史记录可显示。",
+  "No matches.": "没有匹配结果。",
+  "No message given.": "未填写说明。",
+  "Not assigned yet": "尚未分配",
+  "Nothing to suggest — try naming a delegate, hotel, or room number.": "暂无建议 — 请尝试指定代表姓名、酒店或房间号。",
+  "Nothing today yet.": "今天暂无记录。",
+  "Only": "仅",
+  "Room": "房间",
+  "Room Management": "房间管理",
+  "Room number": "房间号",
+  "Room numbers are untouched — edit individual rows below for a delegate in a different hotel. Filter to one coach to apply to just that coach. Delegates without a coach aren't shown here — they aren't confirmed for a hotel yet.":
+    "房间号不受影响 — 如需为入住不同酒店的代表调整，请在下方逐行编辑。筛选至单一车辆即可仅对该车辆生效。尚未分配车辆的代表不会显示在此处 — 因其酒店安排尚未确认。",
+  "Save all": "保存全部",
+  "Save all suggested": "保存全部建议",
+  "Search…": "搜索…",
+  "Set hotel for everyone": "为所有人设置酒店",
+  "Set hotel for this coach": "为该车辆设置酒店",
+  "Show today only": "仅显示今天",
+  "Sort by coach": "按车辆排序",
+  "Sort by name": "按姓名排序",
+  "Sort by room": "按房间排序",
+  "Stops on day": "站点所在天数：",
+  "Suggest": "生成建议",
+  "This only fills in the fields below — nothing saves until you review and click Save.": "此操作仅填充下方字段 — 需经确认并点击保存后才会生效。",
+  "View Exceptions": "查看异常",
+  "View delegates": "查看代表",
+  "Workbook downloaded": "工作簿已下载",
+  "Your device's current time — the trip has no timezone set": "你设备的当前时间 — 该行程未设置时区",
+  "delegate": "位代表",
+  "delegate(s) on": "位代表，日期为：",
+  "delegates you named were matched — review below, then ask again for the rest (one person per request works best).":
+    "位你指定的代表已匹配 — 请在下方确认，其余的可再次询问（建议每次仅指定一人效果最佳）。",
+  "e.g. Grand Hyatt": "例如 君悦酒店",
+  "e.g. Put all VIPs in Grand Hyatt room 501 — Shift+Enter for a new line": "例如 将所有 VIP 安排入住君悦酒店 501 房 — 按 Shift+Enter 换行",
+  "earlier": "更早",
+  "review the highlighted rows below": "请查看下方高亮的行",
+  "unsaved change": "项未保存的更改",
+  "unsaved changes": "项未保存的更改",
+  "will change. Switch the filter to \"All coaches\" to apply trip-wide. Room numbers are untouched, and the search box doesn't affect this.":
+    "将发生更改。切换筛选为「所有车辆」即可应用于整个行程。房间号不受影响，搜索框也不影响此操作。",
+
+  // --- ExceptionInboxPage / MobileExceptionsPage ---
+  "Avg resolve": "平均处理时长",
+  "Critical open": "待处理紧急工单",
+  "Delete this ticket?": "删除此工单？",
+  "Download this view as CSV": "将当前视图下载为 CSV",
+  "Escalate": "上报",
+  "Escalate to office — emails/SMS/WhatsApps the admin team, same as Escalate to office elsewhere":
+    "上报办公室 — 通过邮件/短信/WhatsApp 通知管理团队，与其他位置的「上报办公室」相同",
+  "Escalated to office — alert sent": "已上报办公室 — 提醒已发送",
+  "Escalated — alert pushed to all staff": "已上报 — 提醒已推送至全体员工",
+  "Exported": "已导出",
+  "No tickets match": "没有符合条件的工单",
+  "Nothing open": "暂无待处理工单",
+  "Nothing to export in this view": "当前视图暂无可导出内容",
+  "Oldest open": "最早的待处理工单",
+  "Open by issue": "按问题类型划分的待处理工单",
+  "Resolve this ticket?": "处理此工单？",
+  "Resolving…": "处理中…",
+  "Search delegate, coach, issue…": "搜索代表、车辆、问题…",
+  "Search tickets": "搜索工单",
+  "Select all open tickets": "全选待处理工单",
+  "Select ticket": "选择工单",
+  "This marks the exception as handled. It'll move to the Resolved tab and stay in the record.":
+    "此操作会将该异常标记为已处理，并移至「已处理」标签页，同时保留记录。",
+  "This permanently removes the ticket — there's no undo.": "此操作将永久删除该工单 — 无法撤销。",
+  "already done": "已处理",
+  "already escalated": "已上报",
+  "critical open": "紧急待处理",
+  "escalated": "已上报",
+  "ever raised": "累计发起",
+  "open": "待处理",
+  "resolved": "已处理",
+  "resolved today": "今日已处理",
+  "ticket": "项工单",
+  "tickets": "项工单",
+  "took": "用时",
+  "Oldest": "最早",
+  "pushed to all staff": "已推送至全体员工",
+  "All clear — nothing in this view.": "全部清空 — 此视图暂无内容。",
+
+  // --- OnboardingPage ---
+  "Cancel parse": "取消解析",
+  "done in": "用时",
+
+  // --- SettingsPage ---
+  "Alert sound": "提醒音效",
+  "Optional — e.g. +65 9123 4567": "可选 — 例如 +65 9123 4567",
+
+  // --- TripCoachPage / MobileTripsPage ---
+  "Almost full — drop here": "即将满员 — 拖放至此",
+  "Assigned to a coach that isn't on this trip — reassign or remove.": "已分配至不属于本次行程的车辆 — 请重新分配或移除。",
+  "Attendance & history": "出勤与历史记录",
+  "Capacity": "容量",
+  "Capacity must be at least 1.": "容量必须至少为 1。",
+  "Change history": "更改历史记录",
+  "Coach details": "车辆详情",
+  "Continues tomorrow": "明日继续",
+  "Every trip-management change, newest first, with what each value was before and after. Delegate attendance changes also appear in the app's History Log.":
+    "所有行程管理相关的更改，按时间倒序排列，并显示每项数值的更改前后对比。代表出勤更改同时也会显示在应用的历史记录中。",
+  "Hide completed stops": "隐藏已完成站点",
+  "Hide done": "隐藏已完成",
+  "Maximum number of delegates this coach can seat.": "该车辆可容纳的最多代表人数。",
+  "Moving": "移动中",
+  "NEXT": "下一站",
+  "No attendance changes recorded for this event yet.": "该事件暂无出勤更改记录。",
+  "No changes recorded yet.": "暂无更改记录。",
+  "No delegates to show.": "暂无代表可显示。",
+  "No more scheduled stops today": "今天没有更多预定站点",
+  "No staff assigned — anyone can see all coaches": "未分配员工 — 任何人都可查看所有车辆",
+  "Not recorded": "未记录",
+  "Optional, up to 3. Each login sees only this coach on the board (admins always see all).":
+    "可选，最多 3 人。每个登录账号在看板中只能看到该车辆（管理员始终可查看全部）。",
+  "Other coaches are hidden.": "其他车辆已隐藏。",
+  "Override assignment": "覆盖分配",
+  "Pending": "待处理",
+  "Select up to": "最多可选择",
+  "Show completed stops": "显示已完成站点",
+  "Staff & access": "员工与权限",
+  "The day hasn't reached its first stop yet.": "当天尚未到达第一个站点。",
+  "They're shown under Unassigned — reassign them to a coach here, or remove them.": "显示于「未分配」下 — 可在此重新分配至车辆，或将其移除。",
+  "This coach already has": "该车辆目前已有",
+  "This move is waiting to sync — you're offline": "此次移动待同步 — 你目前处于离线状态",
+  "View change history": "查看更改历史记录",
+  "Wrong coach": "车辆错误",
+  "You're the captain of": "你是以下车辆的负责人：",
+  "a coach": "一辆车",
+  "assigned — lowering capacity below that won't remove anyone, but the board will show it as over capacity.":
+    "人已分配 — 将容量调低至此数值以下不会移除任何人，但看板会显示超员。",
+  "before → after": "更改前 → 更改后",
+  "not in": "不在",
+  "now": "当前",
+  "onto": "至",
+  "present": "已到",
+  "queued (offline)": "排队中（离线）",
+  "staff": "员工",
+  "was moved by someone else — refreshing": "已被其他人移动 — 正在刷新",
+  "would put it over its seat capacity.": "将导致超出座位容量。",
+  "Tap a stop to take attendance": "点击站点以进行出勤记录",
+  "Waiting to sync — offline": "待同步 — 离线中",
+  "tap to view": "点击查看",
+  "under Unassigned are on a coach not on this trip — tap to reassign.": "位于「未分配」下，所属车辆不属于本次行程 — 点击以重新分配。",
+
+  // --- TripsListPage ---
+  "Create your first trip to get started.": "创建你的第一个行程以开始使用。",
+  "No": "否",
+  "No accounts found.": "未找到账号。",
+  "No trips to show.": "暂无行程可显示。",
+  "Set 2–3 days before the trip actually begins. \"Current day\" below auto-advances every midnight from this date.":
+    "设置为行程实际开始前 2-3 天。下方的「当前天数」将从此日期起，每天午夜自动推进。",
+  "e.g. China": "例如 中国",
+
+  // --- UserGuidePage / MobileUserGuidePage ---
+  "A dedicated Dashboard tab for assigning hotel + room number across the roster — handy for an end-of-day pass.":
+    "专门的仪表盘标签页，用于为全体名单分配酒店与房间号 — 适合每日结束时统一处理。",
+  "A delegate isn't shown here until they're assigned to a coach — someone not confirmed on the trip roster yet shouldn't be routed to a hotel room.":
+    "代表在分配至车辆之前不会显示在此处 — 尚未确认参与行程名单的人员不应被安排入住酒店房间。",
+  "A delegate's profile shows their full cross-checkpoint history — every stop, every day, newest first — separate from their single current status shown everywhere else.":
+    "代表的档案会显示其跨检查点的完整历史记录 — 每个站点、每一天，按时间倒序排列 — 与其他页面显示的单一当前状态相互独立。",
+  "Add a photo — a gate number, a meeting-point map, whatever helps delegates find the next location — stored alongside the announcement.":
+    "添加一张图片 — 登机口号码、集合点地图，任何有助于代表找到下一地点的内容 — 将与公告一并保存。",
+  "An account's own phone number (Settings, or Account Control) is what would let escalation SMS/WhatsApp alerts reach an admin directly — without one on file, that path has nowhere to send to.":
+    "账号自身的电话号码（设置或账号管理中填写）用于让紧急上报的短信/WhatsApp 提醒直接送达管理员 — 若未登记号码，该通知渠道将无法送达。",
+  "Anyone signed in can view the Announcements page; only Admin can post or delete.": "任何已登录用户均可查看公告页面；仅管理员可发布或删除公告。",
+  "Attach an image": "附加图片",
+  "Contact number — why it matters": "联系电话 — 为何重要",
+  "Could not upload the video.": "视频上传失败。",
+  "Drag a delegate card onto a coach to assign them (this sets Assigned, not Arrived — that only happens on an actual check-in). The journey timeline shows today's itinerary with a moving marker for where the group currently is.":
+    "将代表卡片拖至车辆上即可完成分配（此操作会设为「已分配」，而非「已抵达」— 后者只有在实际签到时才会发生）。行程时间线会显示当天的行程安排，并用移动标记指示团队当前所在位置。",
+  "Duplicate-proof": "防重复",
+  "Edit any row's hotel or room number inline and Save just that one — the same info also shows on the delegate's own profile.":
+    "可直接在行内编辑任意一行的酒店或房间号并单独保存 — 相同信息也会显示在该代表自己的档案中。",
+  "Editing your own profile (name, username, email, phone, photo, password) from Settings takes effect immediately without needing to log in again.":
+    "在「设置」中编辑自己的档案（姓名、用户名、邮箱、电话、头像、密码）会立即生效，无需重新登录。",
+  "Emergency escalation": "紧急上报",
+  "Every itinerary stop is its own cutoff": "每个行程站点都有各自独立的截止时间",
+  "Every scan/edit is per-stop": "每次扫描/编辑都是针对具体站点的",
+  "Filter and sort for a big roster": "适用于大型名单的筛选与排序",
+  "Flowchart — escalation lifecycle": "流程图 — 紧急上报生命周期",
+  "Flowchart — one itinerary stop's lifecycle": "流程图 — 单个行程站点的生命周期",
+  "For when a Missing delegate needs more than a phone call — pull in offsite admin/office help immediately, with one click.":
+    "适用于「缺席」代表需要电话联系以外协助的情况 — 一键立即联系场外管理/办公室支援。",
+  "If the SAME delegate already has an open escalation, clicking Escalate again doesn't create a second one or re-spam notifications — you'll just see it's already open.":
+    "若同一位代表已有一项待处理的紧急上报，再次点击「上报」不会重复创建或重复发送通知 — 系统只会提示该上报已存在。",
+  "Instead of ONE status for the whole day, a delegate gets tracked independently at EVERY scheduled itinerary stop — \"Arrived at Lunch\" and \"Missing at the 4pm Assembly\" can both be true for the same person.":
+    "代表不再仅有当天单一状态，而是在每个预定的行程站点独立追踪状态 — 「午餐时已抵达」与「下午4点集合时缺席」可同时成立于同一人身上。",
+  "Its own page (sidebar → Announcements) for admin-posted critical updates — \"Departure moved to 7am,\" a gate change, etc.":
+    "独立页面（侧边栏 → 公告）用于管理员发布重要更新 — 例如「出发时间提前至早上7点」、登机口变更等。",
+  "Missing, Late, and the Roster breakdown aren't just counters — tap any one to jump straight to the delegate table pre-filtered to that exact status.":
+    "「缺席」「迟到」及名单分布不仅是数字统计 — 点击任意一项即可直接跳转至已按该状态筛选好的代表列表。",
+  "Most trips put the whole group in one hotel — type it once and apply it to every coach-assigned delegate in one click, then only touch the individual rows that are actually different.":
+    "大多数行程会将整个团队安排在同一酒店 — 只需输入一次并一键应用于所有已分配车辆的代表，再单独调整确实不同的个别行。",
+  "Multi-checkpoint attendance": "多检查点出勤",
+  "One click, not a multi-step modal": "一键操作，无需多步骤弹窗",
+  "Only shows coach-assigned delegates": "仅显示已分配车辆的代表",
+  "Open the bell icon → Alerts → Emergency section. They stay there (reviewable, resolvable) until someone explicitly clicks Resolve — never silently disappear.":
+    "点击铃铛图标 → 提醒 → 紧急区域。这些项目会一直保留在此（可查看、可处理），直至有人明确点击「处理」— 绝不会自行消失。",
+  "Optionally tag an announcement to a specific itinerary stop and it groups under that stop instead of a flat list; untagged ones show under \"General.\"":
+    "可选择将公告关联到特定行程站点，公告会归类于该站点下而非平铺列表；未关联的公告显示在「一般」分类下。",
+  "Per-delegate exceptions": "逐位代表的异常记录",
+  "Remove the walkthrough video? The tab goes back to \"coming soon\" until another one is uploaded.":
+    "移除引导视频？该标签页将恢复为「即将推出」，直至上传新视频。",
+  "Replace video": "替换视频",
+  "Reset window is per-trip, adjustable": "重置窗口按行程设置，可调整",
+  "Safety rail: a delegate who's already scanned in early for the upcoming stop is never bounced back — only ones with no check-in yet for it get reset.":
+    "安全机制：若代表已提前为即将到来的站点完成签到，则不会被重置回退 — 只有尚未签到的代表才会被重置。",
+  "Search by name, filter by coach, and sort by name/coach/room — built for scanning a large group quickly rather than one delegate at a time.":
+    "按姓名搜索、按车辆筛选，并按姓名/车辆/房间排序 — 专为快速处理大型团队而设计，而非逐一查看单个代表。",
+  "Search by name, filter by status or coach, sort any column, and select rows for a batch delete. Clicking a delegate opens their full profile — phone, email, room, last known location, and checkpoint history.":
+    "按姓名搜索、按状态或车辆筛选、任意列排序，并可勾选多行进行批量删除。点击代表可打开其完整档案 — 电话、邮箱、房间、最后已知位置及检查点历史记录。",
+  "Set the hotel for everyone at once": "一次性为所有人设置酒店",
+  "Settings → \"Checkpoint reset window\" lets an admin dial this from 1–120 minutes per trip — shorter for testing, longer (e.g. 30 min) for a real trip.":
+    "「设置 → 签到点重置窗口」允许管理员按行程调整该数值，范围为 1–120 分钟 — 测试时可设短一些，正式行程建议设长一些（例如 30 分钟）。",
+  "Shows on every page (not just Dashboard), with the trip name and a \"View →\" button that jumps straight to that trip + delegate. If many are open at once, \"Acknowledge all\" clears the noisy banner in one click — nothing is lost, they all still show in the Emergency list.":
+    "显示于所有页面（不仅限于仪表盘），包含行程名称及可直接跳转至对应行程与代表的「查看 →」按钮。若同时有多项待处理，「全部确认」可一键清除干扰性横幅 — 内容不会丢失，所有项目仍会显示在紧急列表中。",
+  "Tag to an itinerary stop, or keep it general": "关联至行程站点，或保持为一般公告",
+  "The Coach status card shows every coach's boarded/missing count at a glance. Click \"More details\" in its header for a full per-coach breakdown of exactly who's still missing, with their last known location.":
+    "车辆状态卡片可一目了然地显示每辆车的已登车/缺席人数。点击标题栏的「更多详情」即可查看每辆车具体缺席人员的完整明细及其最后已知位置。",
+  "The Export button opens a configurable Excel export — pick which statuses, coaches, and columns to include, optionally include the full per-checkpoint history sheet (on by default) and/or an AI-written summary, and choose English or Chinese for the whole workbook.":
+    "「导出」按钮可打开可自定义的 Excel 导出设置 — 选择需包含的状态、车辆与列，可选择包含完整的各检查点历史工作表（默认开启）及/或 AI 撰写的摘要，并可为整份工作簿选择中文或英文。",
+  "The KPI tiles are shortcuts": "KPI 指标卡片即为快捷入口",
+  "The top banner — Acknowledge all": "顶部横幅 — 全部确认",
+  "There's no single trip-wide check-in time anymore — each scheduled stop (Trips board itinerary) has its own cutoff. A delegate flips to Late automatically once THAT stop's time passes, no one has to do it by hand.":
+    "不再有适用于整个行程的单一签到时间 — 每个预定站点（行程看板中的行程安排）都有各自的截止时间。一旦该站点的时间已过，代表会自动转为「迟到」状态，无需手动操作。",
+  "Trip Announcements": "行程公告",
+  "Trips board & itinerary": "行程看板与行程安排",
+  "Upload video": "上传视频",
+  "Uploading…": "上传中…",
+  "When a scan just won't work, mark someone present by hand from the Manual tab or the Trip board's Attendance modal. Every manual change is also logged to the per-stop history — nothing about it skips the audit trail.":
+    "当扫描无法使用时，可在「手动」标签页或行程看板的出勤弹窗中手动将某人标记为已到。每一次手动更改都会记录在该站点的历史记录中 — 绝不会跳过审计记录。",
+  "Where acknowledged ones go": "已确认项目的去向",
+  "Whichever stop is currently \"live\" (based on wall-clock time vs. the itinerary) is what a scan or manual check-in gets recorded against. The Dashboard's \"Now: ...\" chip always shows which one that is.":
+    "根据实际时间与行程安排比对，当前「进行中」的站点即为扫描或手动签到所记录的对象。仪表盘上的「当前：...」标签始终显示该站点信息。",
+  "Who can post": "可发布者",
+  "\"Escalate to office\" is available directly from a Missing delegate's profile. Pick who to alert (defaults to the trip's own lead + every admin with an email on file), add a short message, and send — that's it.":
+    "「上报办公室」可直接从「缺席」代表的档案中操作。选择需通知的人员（默认为该行程负责人及所有已登记邮箱的管理员），填写简短说明后发送即可。",
+  "\"Feature actions\" control what an account can CHANGE (add a delegate, edit a trip, resolve a ticket). \"Desktop/Mobile views\" control what pages an account can even SEE — a view can be granted without the matching edit permission, for a read-only look at a page. Every major page (Dashboard, Trips, Announcements, Documents, Scanner, Exceptions) has its own view toggle.":
+    "「功能操作」控制账号可执行的更改（添加代表、编辑行程、处理工单）。「桌面/移动端视图」控制账号可查看的页面 — 可单独授予查看权限而不授予对应编辑权限，实现只读浏览。每个主要页面（仪表盘、行程、公告、文档、扫描器、异常）都有各自独立的查看开关。",
+  "banner + chime + email/SMS": "横幅 + 提示音 + 邮件/短信",
+  "banner clears, stays in Emergency list": "横幅消失，但仍保留在紧急列表中",
+  "checked in for THIS stop": "已为该站点签到",
+  "delegate auto-set to Arrived": "代表自动设为「已抵达」",
+  "delegate found — click Resolve": "已找到代表 — 点击「处理」",
+  "for THIS stop only": "仅针对该站点",
+  "instant": "即时",
+  "or": "或",
+  "resets to": "重置为",
+  "scan / manual check-in": "扫描 / 手动签到",
+  "see the Trips & Checkpoints tab for exactly how.": "具体方式请参阅「行程与检查点」标签页。",
+  "someone clicks Acknowledge": "有人点击「确认」",
+  "staff clicks, picks who to alert": "员工点击后选择需通知的人员",
+  "stop's cutoff passes, no scan": "站点截止时间已过，且未扫描",
+  "waiting for this stop": "等待该站点",
+  "within the trip's reset window (default 5 min) before the NEXT stop starts — so they can be freshly scanned in again":
+    "在下一站开始前的行程重置窗口内（默认5分钟）— 以便重新扫描签到",
+  "↳ if THIS checkpoint's cutoff passes with no scan:": "↳ 若该检查点截止时间已过且未扫描：",
+  "↳ shortly before the NEXT stop starts, Arrived/Late auto-resets to": "↳ 在下一站开始前不久，「已抵达/迟到」将自动重置为",
+  "Tapping a specific coach on Home (not the \"Coach status\" header itself) takes you to Attendance pre-filtered to just that coach's roster — useful when you're physically standing next to one bus and only care about its list.":
+    "在首页点击具体的某辆车（而非「车辆状态」标题本身）会跳转至已按该车辆预先筛选好的出勤页面 — 适合你正站在某辆车旁、只需查看该车名单时使用。",
+  "The full delegate roster. Search by name, filter by status or by coach (the coach dropdown next to the search box), and tap \"Update status\" on any card to change it — a bottom sheet lists all 5 statuses as big buttons, no tiny dropdown to aim for.":
+    "完整的代表名单。可按姓名搜索、按状态或车辆筛选（搜索框旁的车辆下拉菜单），并点击任意卡片上的「更新状态」即可修改 — 底部弹出菜单会以大按钮列出全部5种状态，无需在小型下拉菜单中费力选择。",
+
+  // --- MobileAssistantPage ---
+  "Ask me anything about this trip — headcounts, who's missing, or a quick report.": "询问我关于本次行程的任何问题 — 人数统计、缺席人员或快速报告。",
+  "Generate an attendance report.": "生成出勤报告。",
+  "How many delegates are late?": "有多少代表迟到？",
+  "Try asking": "试着问问",
+  "Who is missing from Coach 2?": "Coach 2 有谁缺席？",
+
+  // --- MobileAttendancePage ---
+  "no reason given": "未填写原因",
+
+  // --- MobileEnrolmentPage ---
+  "Add an email and invite": "添加邮箱并发送邀请",
+  "Copy enrolment link": "复制录入链接",
+  "Could not render that preview.": "无法渲染该预览。",
+  "Could not send invites.": "邀请发送失败。",
+  "Could not send that invite.": "该邀请发送失败。",
+  "Dry run — nothing will send": "试运行 — 不会实际发送",
+  "Email address for": "邮箱地址，适用于：",
+  "Email an enrolment link to": "向以下人员发送录入链接：",
+  "Email enrolment invite to": "向以下人员发送录入邀请邮件：",
+  "Email invite to": "邀请邮件发送至：",
+  "Email invites to everyone outstanding": "向所有尚未录入者发送邀请邮件",
+  "Email preview": "邮件预览",
+  "Enrol this delegate": "为该代表录入",
+  "Enrolment invites": "录入邀请",
+  "Every delegate has a face or voice on file.": "每位代表均已录入人脸或声纹。",
+  "Everyone's already enrolled.": "所有人均已完成录入。",
+  "Everyone's enrolled": "全员已录入",
+  "Face enrolled": "人脸已录入",
+  "FaceCheck": "FaceCheck",
+  "Invite sent to": "邀请已发送至：",
+  "Link copied": "链接已复制",
+  "Live — sending is enabled": "正式模式 — 已启用发送",
+  "No delegates here": "此处暂无代表",
+  "Plain text": "纯文本",
+  "Preview invite email for": "预览邀请邮件，适用于：",
+  "Preview only (dry run)": "仅预览（试运行）",
+  "Preview only (dry run) — no email sent to": "仅预览（试运行）— 不会实际发送邮件至：",
+  "Preview the invite email": "预览邀请邮件",
+  "Rendered": "已渲染",
+  "Roster coverage": "名单录入进度",
+  "Run send (dry run)": "执行发送（试运行）",
+  "SMTP not configured": "未配置 SMTP",
+  "Send this invite": "发送此邀请",
+  "Subject": "主题",
+  "To": "收件人",
+  "To do": "待处理",
+  "Try a different filter.": "请尝试其他筛选条件。",
+  "Voice enrolled": "声纹已录入",
+  "delegate(s) who haven't enrolled?": "位尚未录入的代表？",
+  "enrolled": "已录入",
+  "face": "人脸",
+  "invite(s) sent": "条邀请已发送",
+  "skipped (no email)": "已跳过（无邮箱）",
+  "to go": "待完成",
+  "voice": "声纹",
+  "would be emailed": "位将收到邮件",
+
+  // --- MobileHomePage ---
+  "Email delegates their enrol link": "向代表发送录入链接",
+  "Quick actions": "快捷操作",
+  "See all": "查看全部",
+  "Trip updates for staff": "面向员工的行程更新",
+
+  // --- MobileIssuesPage ---
+  "Support": "支持",
+
+  // --- MobileMissingPage ---
+  "Everyone's accounted for": "全员已核实",
+  "No missing delegates right now.": "目前没有缺席代表。",
+
+  // --- MobileOpsPage ---
+  "Live headcount": "实时人数统计",
+
+  // --- MobileProfilePage ---
+  "Appearance": "外观",
+  "Dark": "深色",
+  "Light": "浅色",
+  "Toggle appearance": "切换外观",
+  "Toggle language": "切换语言",
+
+  // --- MobileScannerPage ---
+  "Avg match": "平均匹配度",
+  "Boarding progress": "登车进度",
+  "Checking in to": "正在签到至：",
+  "Enter code manually": "手动输入代码",
+  "Fires the moment a face aligns": "人脸对齐后立即触发",
+  "Hands-free auto-scan": "免提自动扫描",
+  "Low light": "光线不足",
+  "Normal light": "正常光线",
+  "Recent check-ins": "最近签到记录",
+  "Scan without pressing the button": "无需按按钮即可扫描",
+  "Slow demo": "慢速演示",
+  "Slow: on": "慢速：开启",
+  "Sound off": "声音关闭",
+  "Sound on": "声音开启",
+  "Undo last": "撤销上一次",
+  "Zero-Image mode: raw face pixels are zeroed in memory the instant the anonymous token is derived. No images stored or transmitted — PDPA compliant.":
+    "零图像模式：在生成匿名令牌的瞬间，原始人脸像素数据即会在内存中清零。不存储或传输任何图像 — 符合 PDPA 规定。",
+  "this session": "本次操作",
+
+  // --- i18n.jsx (placeholder key found by the extractor itself) ---
+  "...": "...",
 };
 
 /**

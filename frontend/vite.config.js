@@ -6,10 +6,6 @@ import basicSsl from "@vitejs/plugin-basic-ssl";
 // This means the React code just calls fetch("/api/...") — no CORS, no origin
 // juggling. Change the target if you run the backend on a different port.
 //
-// `server.fs.allow: ['..']` lets the dev server read one folder above the
-// frontend (the project root), so the shared ../../../permissions.js file that
-// both the frontend and backend import can be served in development.
-//
 // basicSsl() serves the dev site over HTTPS with an auto-generated self-signed
 // cert. WHY THIS IS REQUIRED (not cosmetic): the camera (getUserMedia) and the
 // browser's password-save/autofill (Credential Management API) ONLY work in a
@@ -38,9 +34,6 @@ export default defineConfig({
     // around.
     strictPort: true,
     host: true,
-    fs: {
-      allow: [".."],
-    },
     proxy: {
       "/api": {
         target: "http://localhost:4000",

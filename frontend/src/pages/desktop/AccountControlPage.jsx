@@ -9,7 +9,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, ChevronDown, ChevronRight, Eye, EyeOff } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../../lib/api.js";
-import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../../permissions.js";
+import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../lib/permissions.js";
 import { useLang } from "../../lib/i18n.jsx";
 
 /**

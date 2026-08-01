@@ -25,7 +25,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { initDb, hashPassword } from "../data.js";
-import { PERM_KEYS } from "../../permissions.js";
+import { PERM_KEYS } from "../../frontend/src/lib/permissions.js";
 
 const { Pool } = pg;
 

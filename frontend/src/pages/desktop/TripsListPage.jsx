@@ -472,6 +472,7 @@ export default function TripsListPage() {
   const [trips, setTrips] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [query, setQuery] = useState("");
+  const [activeTab, setActiveTab] = useState("In progress"); // status tab (admins/coordinators)
   const [formTrip, setFormTrip] = useState(null);   // null = closed · {} = new · {…trip} = edit
   const [deleteTripState, setDeleteTripState] = useState(null);
   const [captainTripIds, setCaptainTripIds] = useState(null); // Set of trip ids this account captains
@@ -504,14 +505,27 @@ export default function TripsListPage() {
       .catch(() => setCaptainTripIds(new Set()));
   }, []);
 
+  // Status tabs group the (often long) trip list into Planning / In progress /
+  // Completed / Cancelled so an admin/coordinator isn't scrolling one giant
+  // grid. Captains only ever have their own trip(s), so tabs are hidden for them.
+  const showTabs = !isCaptain;
+  const tabBase = useMemo(
+    () => (!trips ? [] : (isCaptain ? trips.filter((tr) => captainTripIds.has(tr.id)) : trips)),
+    [trips, isCaptain, captainTripIds]
+  );
+  const tabCounts = useMemo(() => {
+    const c = {};
+    for (const s of TRIP_STATUSES) c[s] = tabBase.filter((tr) => tr.status === s).length;
+    return c;
+  }, [tabBase]);
+
   const filteredTrips = useMemo(() => {
-    if (!trips) return [];
-    // Captains only ever see the trip(s) they're assigned to.
-    const base = isCaptain ? trips.filter((tr) => captainTripIds.has(tr.id)) : trips;
+    let base = tabBase;
+    if (showTabs) base = base.filter((tr) => tr.status === activeTab);
     const q = query.trim().toLowerCase();
     if (!q) return base;
     return base.filter((tr) => tr.name.toLowerCase().includes(q) || (tr.lead || "").toLowerCase().includes(q));
-  }, [trips, query, isCaptain, captainTripIds]);
+  }, [tabBase, query, showTabs, activeTab]);
 
   return (
     <div className={`tf-root${dark ? " tf-dark" : ""}`}>
@@ -568,6 +582,19 @@ export default function TripsListPage() {
 
         {trips && !loadError && trips.length > 0 && (
           <>
+            {showTabs && (
+              <div className="tf-trip-tabs" role="tablist">
+                {TRIP_STATUSES.map((s) => (
+                  <button key={s} type="button" role="tab" aria-selected={activeTab === s}
+                    className={`tf-trip-tab${activeTab === s ? " is-active" : ""}`}
+                    onClick={() => setActiveTab(s)}>
+                    <span className="tf-trip-tab-dot" style={{ background: `var(--tf-${STATUS_COLOR[s] || "grey"})` }} />
+                    {t(s)}
+                    <span className="tf-trip-tab-count">{tabCounts[s] || 0}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="tf-between" style={{ marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
               <div className="tf-search" style={{ maxWidth: 340, flex: "1 1 240px" }}>
                 <Search size={15} color="var(--tf-text-3)" />
@@ -636,7 +663,9 @@ export default function TripsListPage() {
                 </div>
               ))}
               {filteredTrips.length === 0 && (
-                <p className="tf-muted" style={{ fontSize: 13.5, gridColumn: "1 / -1" }}>{t("No trips match your search.")}</p>
+                <p className="tf-muted" style={{ fontSize: 13.5, gridColumn: "1 / -1" }}>
+                  {query.trim() ? t("No trips match your search.") : showTabs ? `${t("No")} ${t(activeTab)} ${t("trips")}.` : t("No trips to show.")}
+                </p>
               )}
             </div>
           </>

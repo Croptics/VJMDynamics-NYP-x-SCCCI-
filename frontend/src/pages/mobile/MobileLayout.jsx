@@ -126,17 +126,20 @@ export default function MobileLayout({ onLogout }) {
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
     ...(perms.viewMobileAttendance || perms.viewMobileTrips
       ? [{ to: "/mobile/operations", label: "Ops", icon: ClipboardList, badge: missing }] : []),
-    // Face and QR are separate tabs rather than modes of one scanner screen.
-    // QR leads (and sits dead-centre, flagged `primary` so it renders as the
-    // raised action tab) because it's the fastest, most reliable check-in —
-    // face is the premium path but needs good light and an enrolled delegate.
-    // Manual is intentionally NOT a tab: it's the fallback you reach for when
-    // a scan won't cooperate, so it lives one tap inside the scanner screens.
-    ...(perms.viewMobileScanner
-      ? [
-          { to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true },
-          { to: "/mobile/scan/face", label: "Face", icon: ScanFace },
-        ]
+    // Face and QR are separate tabs rather than modes of one scanner screen,
+    // each on its OWN permission now (split 2026-08-02 from one combined
+    // "viewMobileScanner" toggle). QR leads (and sits dead-centre, flagged
+    // `primary` so it renders as the raised action tab) because it's the
+    // fastest, most reliable check-in — face is the premium path but needs
+    // good light and an enrolled delegate. Manual is intentionally NOT a tab:
+    // it's the fallback you reach for when a scan won't cooperate, so it
+    // lives one tap inside the scanner screens (gated by its own
+    // viewMobileScannerManual permission there, not a tab-bar entry).
+    ...(perms.viewMobileScannerQr
+      ? [{ to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true }]
+      : []),
+    ...(perms.viewMobileScannerFace
+      ? [{ to: "/mobile/scan/face", label: "Face", icon: ScanFace }]
       : []),
     { to: "/mobile/profile", label: "Me", icon: User },
   ];

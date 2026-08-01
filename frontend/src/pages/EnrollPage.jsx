@@ -18,12 +18,12 @@
 // frequency profile only, and the delegate can erase everything at any time.
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   ScanFace, Mic, CheckCircle2, AlertTriangle, Search, Camera, ShieldCheck,
   RefreshCw, ArrowLeft, Trash2, BadgeCheck, Lock, Loader2, X, Bus, Sparkles, ChevronRight,
 } from "lucide-react";
-import { apiGet, apiPost } from "../lib/api.js";
+import { apiGet, apiPost, getToken } from "../lib/api.js";
 import { captureVoiceEmbedding, vectorizeVoiceprint } from "../lib/faceScan.js";
 import {
   loadHuman, detectFace, gate, averageEmbeddings, sampleConsistency, buildEmbeddingToken, MATCH_THRESHOLD,
@@ -62,6 +62,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default function EnrollPage({ embedded = false }) {
   const [params] = useSearchParams();
+  const navigate = useNavigate();
+  // 2026-08-02 ("if i access enrollment page on mobile, i should be able to go
+  // back to mobile page") — this route is registered OUTSIDE Layout/
+  // MobileLayout on purpose (see App.jsx's comment: no nav chrome, matching
+  // /kiosk-scan), since a real delegate opening their emailed invite link has
+  // no app to go back to. But this same route is ALSO reachable by an
+  // already-signed-in staff member previewing/testing it (e.g. "Copy
+  // enrolment link" on MobileEnrolmentPage.jsx) — for them there IS an app to
+  // return to, and no way back left them stuck. Only shown when a real
+  // session exists, so a delegate's own experience is unaffected.
+  const isStaffSession = !!getToken();
   const [step, setStep] = useState("identify");
 
   // identify
@@ -356,9 +367,17 @@ export default function EnrollPage({ embedded = false }) {
       <style>{CSS}</style>
       <div className="enr-wrap">
         {!embedded && (
-          <div className="enr-brand">
-            <ShieldCheck size={18} style={{ color: "var(--scc-red)" }} />
-            <span>MusterGo · <strong>Delegate enrolment</strong></span>
+          <div className="enr-brand" style={{ justifyContent: isStaffSession ? "space-between" : "flex-start" }}>
+            <span className="row" style={{ gap: 8, alignItems: "center" }}>
+              <ShieldCheck size={18} style={{ color: "var(--scc-red)" }} />
+              <span>MusterGo · <strong>Delegate enrolment</strong></span>
+            </span>
+            {isStaffSession && (
+              <button type="button" className="btn btn-ghost" style={{ padding: "6px 10px", fontSize: 12.5 }}
+                onClick={() => navigate(-1)}>
+                <ArrowLeft size={14} /> Back to app
+              </button>
+            )}
           </div>
         )}
 

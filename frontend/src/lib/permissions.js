@@ -157,6 +157,12 @@ export const PERMISSIONS = [
   },
 
   // ---- Desktop web views: which /routes this account can even see -------
+  // Ordered and grouped to match the actual left sidebar (Sidebar.jsx),
+  // top to bottom: Dashboard, Trips, Documents, Exceptions, MusterChat —
+  // then Account control (its own manageAccounts permission, admin-only,
+  // not listed in this group at all). Announcements and Face + QR scan are
+  // NOT in that main list — see their own comments below for where (or
+  // whether) they actually show up right now.
   {
     key: "viewDashboard",
     label: "Main dashboard",
@@ -173,6 +179,18 @@ export const PERMISSIONS = [
     default: true,
     group: "desktopView",
     parent: "viewDashboard",
+  },
+  {
+    key: "viewHistory",
+    label: "History logs",
+    desc: "See the full date-stamped activity audit trail",
+    chip: "History",
+    default: true,
+    group: "desktopView",
+    // Nested two levels deep (Dashboard -> Delegate -> History logs) per
+    // request — Account control's rendering supports this recursively, see
+    // AccountControlPage.jsx's PermRow.
+    parent: "viewDelegates",
   },
   // NOTE: "viewAnalytics" was removed 2026-07-27 ("staff can view delegate +
   // checkpoint, admin views all, regardless of account control — so remove
@@ -198,26 +216,6 @@ export const PERMISSIONS = [
     group: "desktopView",
   },
   {
-    key: "viewAnnouncements",
-    label: "Announcements",
-    desc: "See the trip Announcements page",
-    chip: "Announcements",
-    // Brand-new page/capability (2026-07-26) — default TRUE per the original
-    // requirement ("all logged-in Staff and Admin accounts can view"); an
-    // admin can still narrow it per-account afterwards, same as every other
-    // view toggle here.
-    default: true,
-    group: "desktopView",
-  },
-  {
-    key: "viewScanner",
-    label: "Face + QR scan",
-    desc: "See the desktop entrance-kiosk Face + QR scanner",
-    chip: "Scanner",
-    default: true,
-    group: "desktopView",
-  },
-  {
     key: "viewExceptions",
     label: "Exceptions",
     desc: "See the exception ticket inbox",
@@ -226,9 +224,12 @@ export const PERMISSIONS = [
     group: "desktopView",
   },
   {
+    // Gates TWO things together, same as mobile's scanner permission: the
+    // floating chat bubble (every route) AND the "MusterChat" sidebar nav
+    // item (/assistant, Vance's full inbox) — not just the bubble alone.
     key: "viewChatbot",
     label: "Chatbot",
-    desc: "See the floating Trip Assistant chat bubble",
+    desc: "See the floating Trip Assistant chat bubble and the MusterChat sidebar item",
     chip: "Chatbot",
     // Was open to every signed-in user with no gate at all — default TRUE so
     // nobody silently loses the assistant when this permission starts being
@@ -237,19 +238,36 @@ export const PERMISSIONS = [
     group: "desktopView",
   },
   {
-    key: "viewHistory",
-    label: "History logs",
-    desc: "See the full date-stamped activity audit trail",
-    chip: "History",
+    // NOT in the main sidebar list — it's its own icon in the footer utility
+    // row, beside the language/theme toggles (2026-07-27, "add another box
+    // beside the translation button for announcement"). Listed here after
+    // the main nav items since that's where it visually sits, off to the side.
+    key: "viewAnnouncements",
+    label: "Announcements",
+    desc: "See the trip Announcements page (its own footer icon, not the main nav list)",
+    chip: "Announcements",
+    // Brand-new page/capability (2026-07-26) — default TRUE per the original
+    // requirement ("all logged-in Staff and Admin accounts can view"); an
+    // admin can still narrow it per-account afterwards, same as every other
+    // view toggle here.
     default: true,
     group: "desktopView",
-    // Nested two levels deep (dashboard -> Delegate -> History logs) per
-    // request — Account control's rendering supports this recursively, see
-    // AccountControlPage.jsx's PermRow.
-    parent: "viewDelegates",
   },
+  // NOTE: the desktop "Face + QR scan" permission (viewScanner) was removed
+  // 2026-08-02 ("remove face + qr scanner on desktop, include the
+  // permission") — it had no nav entry point at all (Sidebar.jsx's link was
+  // commented out 2026-07-27, and /scanner redirected straight to
+  // /dashboard), so keeping a toggle for it was pure clutter. If a desktop
+  // scanner is ever restored, re-add it here fresh rather than un-deleting
+  // this comment.
 
   // ---- Mobile views: which /mobile/* routes this account can see -------
+  // Ordered and grouped to match the actual bottom tab bar in
+  // MobileLayout.jsx, left to right: Home, Ops (Attendance + Exception +
+  // Trips, all folded into ONE tab/screen), QR scanner, Face scanner, Manual
+  // check-in, then Chatbot last since its floating bubble isn't a tab at all.
+  // The always-visible Me tab is never listed here — it's account settings,
+  // not a gateable feature view.
   {
     key: "viewMobileHome",
     label: "Home",
@@ -259,54 +277,79 @@ export const PERMISSIONS = [
     group: "mobileView",
   },
   {
-    key: "viewMobileScanner",
-    label: "QR + Face Scanner",
-    desc: "See the mobile Face/QR/Manual entrance scanner",
-    chip: "Mobile scanner",
-    default: true,
-    group: "mobileView",
-    parent: "viewMobileHome",
-  },
-  {
-    key: "viewMobileIssues",
-    label: "Exception",
-    desc: "See the mobile Issues/Exceptions tracking page",
-    chip: "Mobile issues",
-    default: true,
-    group: "mobileView",
-    parent: "viewMobileHome",
-  },
-  {
+    // Attendance + Exception + Trips are three permissions but ONE nav tab:
+    // MobileLayout.jsx shows a single "Ops" tab whenever any of the three is
+    // on (MobileOpsPage.jsx composes Attendance/Trips together; Exception is
+    // a card reached from within Ops) — there's no separate "Attendance tab"
+    // or "Trips tab" to see on the phone.
     key: "viewMobileAttendance",
     label: "Attendance",
-    desc: "See the mobile Attendance tab (full roster on the go)",
+    desc: "See the Attendance side of the mobile Ops tab (full roster on the go)",
     chip: "Attendance",
     default: true,
     group: "mobileView",
   },
   {
+    key: "viewMobileIssues",
+    label: "Exception",
+    desc: "See the mobile Issues/Exceptions tracking card inside the Ops tab",
+    chip: "Mobile issues",
+    default: true,
+    group: "mobileView",
+    parent: "viewMobileAttendance",
+  },
+  {
     key: "viewMobileTrips",
     label: "Trips",
-    desc: "See the mobile Trips tab",
+    desc: "See the Trips side of the mobile Ops tab",
     chip: "Mobile trips",
+    default: true,
+    group: "mobileView",
+    parent: "viewMobileAttendance",
+  },
+  // NOTE: "viewMobileAllTrips" was removed 2026-08-02 ("on mobile, should
+  // hide the trip that is not in progress status, for simplicity" +
+  // "this can remove") — MobileTripsPage.jsx no longer reads this permission
+  // at all; `canSeeAllTrips` is hardcoded `false` there now, so every account
+  // (including admins) only ever sees the In-progress trip on mobile.
+  // Keeping a toggle for a permission the code no longer checks would just
+  // be a lie in the Account control editor.
+  {
+    // Split from the old combined "viewMobileScanner" 2026-08-02 ("mobile
+    // view: ... qr code scanner / face scanner / manual") into three
+    // independent permissions — QR, Face, and Manual can now be granted or
+    // revoked separately instead of all-or-nothing. Each still gates its own
+    // route directly (App.jsx), so even if the in-page mode-switcher shows a
+    // link to a mode this account lacks, following it lands on that route's
+    // own ViewGate, not the actual scanner.
+    key: "viewMobileScannerQr",
+    label: "QR code scanner",
+    desc: "See the mobile QR entrance-scanner tab",
+    chip: "QR scanner",
     default: true,
     group: "mobileView",
   },
   {
-    key: "viewMobileAllTrips",
-    label: "All trip statuses",
-    desc: "See Planning and Completed trips too, not just the current In progress one",
-    chip: "All trips",
-    // Staff only need the trip that's actually happening right now — seeing
-    // every Planning/Completed trip on a phone is clutter, not useful in the
-    // field. Default OFF for Staff (they still always see In progress).
-    // Admin bypasses every permission check regardless, so this is
-    // effectively always-on for Admin without needing its own special case.
-    default: false,
+    key: "viewMobileScannerFace",
+    label: "Face scanner",
+    desc: "See the mobile Face entrance-scanner tab",
+    chip: "Face scanner",
+    default: true,
     group: "mobileView",
-    parent: "viewMobileTrips",
   },
   {
+    // Not its own nav tab — reached from inside the QR/Face scanner screens
+    // as a fallback for when a scan won't cooperate (see MobileScannerPage.jsx).
+    key: "viewMobileScannerManual",
+    label: "Manual",
+    desc: "See manual check-in, reached from inside the QR/Face scanner screens",
+    chip: "Manual check-in",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    // Not a tab — a floating chat bubble rendered on every /mobile/* route,
+    // independent of which tab is active.
     key: "viewMobileChatbot",
     label: "Chatbot",
     desc: "See the floating Trip Assistant chat bubble on mobile",

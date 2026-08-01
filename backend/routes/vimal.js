@@ -451,10 +451,18 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
   }
 
   // Recognised and on the right coach, but already boarded — nothing to do.
-  if (matched.status !== "MISSING") {
+  // 2026-08-02 ("i not able to checkin by mobile face scan because the
+  // delegate i registered is late... it should checkin for late, missing")
+  // — this used to block on anything OTHER than MISSING, so ASSIGNED/LATE/
+  // UNASSIGNED delegates (i.e. everyone who hasn't boarded yet) were refused
+  // with a false "already X" instead of being checked in. Only PRESENT/
+  // ARRIVED (the aliased "already boarded" values — see the QR check-in
+  // routes' own identical check in vance.js/exceptions.js) are genuinely
+  // already checked in; every other status is a valid scan target.
+  if (matched.status === "PRESENT" || matched.status === "ARRIVED") {
     return res.status(409).json({
       error: "ALREADY_BOARDED",
-      message: `${matched.name} is already ${matched.status === "PRESENT" ? "boarded" : matched.status.toLowerCase()}.`,
+      message: `${matched.name} is already boarded.`,
       delegateId: matched.id,
       delegateName: matched.name,
     });

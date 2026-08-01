@@ -23,7 +23,7 @@ import {
   Mic, Moon, Sun, Zap, Turtle, Wifi, WifiOff, Undo2, Users, RotateCcw,
   Flashlight, FlashlightOff, Volume2, VolumeX, ScanEye, Clock, ShieldCheck, History,
 } from "lucide-react";
-import { apiGet, apiPost } from "../../lib/api.js";
+import { apiGet, apiPost, getPermissions } from "../../lib/api.js";
 import {
   vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken, playErrorTone,
   faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, captureFrame, FACE_CROP,
@@ -1154,15 +1154,18 @@ export default function MobileScannerPage({ lockMode }) {
 
       {/* Locked to one mode (the Face / QR / Manual routes) — offer the other
           two as a compact switcher, so Manual check-in is always one tap away
-          when a scan won't cooperate. */}
+          when a scan won't cooperate. Each mode is its own permission now
+          (split 2026-08-02 from one combined viewMobileScanner) — filtered
+          here too so this switcher never offers a chip that would just
+          bounce off that route's own ViewGate. */}
       {lockMode && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           {[
-            { key: "face", label: "Face", Icon: ScanFace, to: "/mobile/scan/face" },
-            { key: "qr", label: "QR", Icon: QrCode, to: "/mobile/scan/qr" },
-            { key: "manual", label: "Manual", Icon: PencilLine, to: "/mobile/scan/manual" },
+            { key: "face", label: "Face", Icon: ScanFace, to: "/mobile/scan/face", perm: "viewMobileScannerFace" },
+            { key: "qr", label: "QR", Icon: QrCode, to: "/mobile/scan/qr", perm: "viewMobileScannerQr" },
+            { key: "manual", label: "Manual", Icon: PencilLine, to: "/mobile/scan/manual", perm: "viewMobileScannerManual" },
           ]
-            .filter((m) => m.key !== lockMode)
+            .filter((m) => m.key !== lockMode && getPermissions()[m.perm])
             .map(({ key, label, Icon, to }) => (
               <button key={key} className="mscan-chip" onClick={() => navigate(to)}>
                 <Icon size={14} /> {t(label)}

@@ -28,7 +28,7 @@
  */
 
 import bcrypt from "bcryptjs";
-import { cleanPermissions, PERM_KEYS, PERMISSIONS } from "../../permissions.js";
+import { cleanPermissions, PERM_KEYS, PERMISSIONS } from "../../frontend/src/lib/permissions.js";
 import { all, get, run } from "./connection.js";
 
 // Every action-group key (manageDelegates, manageAccounts, ...) — the write

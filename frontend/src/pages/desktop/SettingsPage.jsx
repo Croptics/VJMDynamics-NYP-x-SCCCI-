@@ -16,7 +16,7 @@ import CameraCaptureModal from "../../components/CameraCaptureModal.jsx";
 // mobile Profile" (2026-07-30 — "can you add this into desktop setting page
 // also"). Same component, no props beyond `t`.
 import PasskeyManager from "../../components/PasskeyManager.jsx";
-import { PERMISSIONS } from "../../../../permissions.js";
+import { PERMISSIONS } from "../../lib/permissions.js";
 
 // Read-only summary of an account's own access, grouped the same way
 // Account Control's editor groups them — so "what I can do" here always

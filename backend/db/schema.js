@@ -23,7 +23,7 @@
 import { all, get, run } from "./connection.js";
 import { TRIP, COACHES } from "./constants.js";
 import { hashPassword, defaultPermsForRole } from "./accounts.js";
-import { PERM_KEYS } from "../../permissions.js";
+import { PERM_KEYS } from "../../frontend/src/lib/permissions.js";
 
 export async function createSchema() {
   /* ---- JQ base tables (Dashboard / Auth / Accounts) --------------------- */
@@ -482,11 +482,10 @@ export async function seed() {
       permissions: {
         manageDelegates: true, manageScanner: true,
         manageDocuments: false, exportData: false, manageTrips: false, manageExceptions: false,
-        viewDashboard: true, viewDelegates: true, viewTrips: true, viewScanner: true, viewChatbot: true, viewHistory: true,
+        viewDashboard: true, viewDelegates: true, viewTrips: true, viewChatbot: true, viewHistory: true,
         viewDocuments: false, viewExceptions: false,
-        viewMobileHome: true, viewMobileScanner: true, viewMobileIssues: true,
-        viewMobileAttendance: true, viewMobileTrips: true, viewMobileChatbot: true,
-        viewMobileAllTrips: false,
+        viewMobileHome: true, viewMobileScannerQr: true, viewMobileScannerFace: true, viewMobileScannerManual: true,
+        viewMobileIssues: true, viewMobileAttendance: true, viewMobileTrips: true, viewMobileChatbot: true,
       },
     },
     {

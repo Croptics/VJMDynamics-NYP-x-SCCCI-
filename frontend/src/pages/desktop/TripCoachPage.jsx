@@ -72,9 +72,13 @@ import {
   PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
   Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare, MapPin,
   Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Clock, Circle,
-  ChevronDown, Check,
+  ChevronDown, ChevronRight, ChevronLeft, Check, CloudOff,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
+// Offline-capable reassignment (Desmond, Phase 4) — wraps the validated
+// PATCH /api/trips/:tripId/reassign in JQ's shared outbox so a move made with
+// no signal is queued and replayed on reconnect. Shared with MobileTripsPage.
+import { reassignRequest, applyQueuedReassigns } from "../../lib/reassignQueue.js";
 // Offline-capable READ (2026-07-31) — the Trip/coach board is one of the
 // pages flagged as most important ("the manual, attendance, exception,
 // trip"): fetchAll() below used to just error out on any failure, including
@@ -243,6 +247,47 @@ function ConfirmDialog({ title, message, tone, onCancel, onConfirm }) {
   );
 }
 
+
+/* ---- CapacityDialog — over-capacity confirm/override -------------------------
+ * Shown when a delegate is dropped onto (or moved to) a coach that's already at
+ * capacity. Non-blocking: Cancel leaves everyone put; Override does the move
+ * anyway. Renders as a centred dialog on desktop and a bottom sheet on mobile
+ * (via .tf-cap-sheet responsive CSS). --------------------------------------- */
+function CapacityDialog({ delegate, coach, onCancel, onOverride }) {
+  const { t } = useLang();
+  const downOnBackdrop = useRef(false);
+  const used = coach.total ?? 0;
+  return (
+    <div
+      className="tf-modal-overlay tf-cap-sheet"
+      onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className="tf-modal-card tf-cap-dialog" style={{ maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+        <div className="tf-modal-header">
+          <h3 style={{ fontSize: 16.5, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}>
+            <AlertCircle size={18} color="var(--tf-red)" /> {t("Coach is full")}
+          </h3>
+        </div>
+        <div className="tf-modal-body">
+          <p style={{ fontSize: 13.5, color: "var(--tf-text-2)", marginBottom: 14, lineHeight: 1.5 }}>
+            {t("Moving")} <strong style={{ color: "var(--tf-text)" }}>{delegate.name}</strong> {t("onto")} <strong style={{ color: "var(--tf-text)" }}>{coach.label}</strong> {t("would put it over its seat capacity.")}
+          </p>
+          <div className="tf-cap-dialog-stats">
+            <div className="tf-cap-dialog-row"><span className="tf-cap-dialog-k">{t("Coach")}</span><span className="tf-cap-dialog-v">{coach.label}</span></div>
+            <div className="tf-cap-dialog-row"><span className="tf-cap-dialog-k">{t("Capacity")}</span><span className="tf-cap-dialog-v" style={{ color: "var(--tf-red)" }}>{used} / {coach.capacity} · {t("Full")}</span></div>
+            <div className="tf-cap-dialog-row"><span className="tf-cap-dialog-k">{t("Delegate")}</span><span className="tf-cap-dialog-v">{delegate.name}</span></div>
+          </div>
+        </div>
+        <div className="tf-modal-footer">
+          <button className="tf-btn tf-btn-ghost" onClick={onCancel}>{t("Cancel")}</button>
+          <button className="tf-btn tf-btn-primary" style={{ background: "var(--tf-red)", color: "#fff" }} onClick={onOverride}>{t("Override assignment")}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---- Modal shell ------------------------------------------------------------ */
 function Modal({ title, onClose, maxWidth = 480, children, footer }) {
   const { t } = useLang();
@@ -318,6 +363,11 @@ function DelegateCard({ delegate, ghost = false, dragging = false, wrongCoach = 
           </span>
         )}
       </div>
+      {!ghost && delegate.pendingSync && (
+        <span className="tf-del-status" title={t("This move is waiting to sync — you're offline")} style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--tf-orange)", background: "var(--tf-orange-bg)" }}>
+          <CloudOff size={9} /> {t("Pending")}
+        </span>
+      )}
       {!ghost && delegate.status && delegate.status !== "UNASSIGNED" && (
         <span className="tf-del-status" style={{ color: `var(--tf-${colorKey})`, background: `var(--tf-${colorKey}-bg)` }}>
           {t(STATUS_TEXT[delegate.status] || delegate.status)}
@@ -353,7 +403,7 @@ function DelegateCard({ delegate, ghost = false, dragging = false, wrongCoach = 
  * badge, delegate cards, and a "+N more" expand when there are more than
  * VISIBLE_LIMIT.
  * ---------------------------------------------------------------------------- */
-function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onPointerDownCard, onKeyOpen, draggingId, onRemoveCoach, onRemoveDelegate, onEditStaff, onCycleArrival, mode = "live", wrongCoachIds }) {
+function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onPointerDownCard, onKeyOpen, draggingId, onRemoveCoach, onRemoveDelegate, onEditStaff, onCycleArrival, mode = "live", wrongCoachIds, shake = false }) {
   const { t } = useLang();
   const [expanded, setExpanded] = useState(false);
   const missing = delegates.filter((d) => d.status === "MISSING").length;
@@ -361,12 +411,16 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
   const visible = expanded ? delegates : delegates.slice(0, VISIBLE_LIMIT);
   const remaining = delegates.length - visible.length;
   const isFull = !isUnassigned && coach.capacity > 0 && (coach.total ?? 0) >= coach.capacity;
+  // "Nearly full" (≥85%, not yet full) → amber drop tier, between blue (room)
+  // and red (full), so a drag shows how much headroom a coach really has.
+  const nearlyFull = !isUnassigned && !isFull && coach.capacity > 0 && (coach.total ?? 0) / coach.capacity >= 0.85;
+  const dropTier = isFull ? "red" : nearlyFull ? "orange" : "blue";
   // Status accent so a coordinator can distinguish problem coaches at a glance:
   // red rail = someone missing, green rail = everyone boarded.
   const statusAccent = isUnassigned || !showBoarding ? "" : missing > 0 ? " has-missing" : (coach.total ?? 0) > 0 ? " all-in" : "";
 
   return (
-    <div ref={colRef} className={`tf-fleet-card${isOver ? " is-drop-target" : ""}${isOver && isFull ? " is-full" : ""}${isUnassigned ? " is-unassigned" : ""}${statusAccent}`}>
+    <div ref={colRef} className={`tf-fleet-card${isOver ? " is-drop-target" : ""}${isOver && isFull ? " is-full" : ""}${isOver && nearlyFull ? " is-nearfull" : ""}${isUnassigned ? " is-unassigned" : ""}${statusAccent}${shake ? " is-shake" : ""}`}>
       <div className="tf-fleet-head">
         <div style={{ minWidth: 0 }}>
           {!isUnassigned && onEditStaff ? (
@@ -429,14 +483,23 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
         const used = coach.total ?? 0;
         const ratio = used / coach.capacity;
         const over = used > coach.capacity;
-        const capColor = over || ratio >= 1 ? "red" : ratio >= 0.85 ? "orange" : "green";
+        // Operational capacity tiers (label + colour + icon) so staff read the
+        // state, not the maths. Available < 85% · Almost full 85–99% · Full 100%
+        // · Over capacity > 100%.
+        const cap = over ? { color: "red", label: "Over capacity", Icon: AlertCircle }
+          : ratio >= 1 ? { color: "red", label: "Full", Icon: AlertCircle }
+          : ratio >= 0.85 ? { color: "orange", label: "Almost full", Icon: Clock }
+          : { color: "green", label: "Available", Icon: CheckCircle2 };
         return (
           <div className="tf-fleet-capacity">
             <div className="tf-fleet-cap-track">
-              <span className="tf-fleet-cap-fill" style={{ width: `${Math.min(100, Math.round(ratio * 100))}%`, background: `var(--tf-${capColor})` }} />
+              <span key={used} className="tf-fleet-cap-fill tf-bump" style={{ width: `${Math.min(100, Math.round(ratio * 100))}%`, background: `var(--tf-${cap.color})` }} />
             </div>
-            <span className="tf-fleet-cap-label" style={{ color: `var(--tf-${capColor})` }}>
-              {used}<span style={{ color: "var(--tf-text-3)" }}>/{coach.capacity}</span> {t("seats")}{over ? ` · ${t("Over capacity")}` : ratio >= 1 ? ` · ${t("Full")}` : ""}
+            <span key={`n-${used}`} className="tf-fleet-cap-label tf-bump" style={{ color: `var(--tf-${cap.color})` }}>
+              {used}<span style={{ color: "var(--tf-text-3)" }}>/{coach.capacity}</span>
+            </span>
+            <span className="tf-cap-badge" style={{ color: `var(--tf-${cap.color})`, background: `var(--tf-${cap.color}-bg)` }}>
+              <cap.Icon size={11} /> {t(cap.label)}
             </span>
           </div>
         );
@@ -447,8 +510,8 @@ function FleetCard({ coach, delegates, isUnassigned = false, isOver, colRef, onP
           <DelegateCard key={d.id} delegate={d} dragging={draggingId === d.id} wrongCoach={!!wrongCoachIds && wrongCoachIds.has(d.id)} onPointerDownCard={onPointerDownCard} onKeyOpen={onKeyOpen} onRemove={onRemoveDelegate} />
         ))}
         {isOver && (
-          <div style={{ border: `2px dashed var(--tf-${isFull ? "red" : "blue"})`, borderRadius: 10, padding: "12px 8px", textAlign: "center", color: `var(--tf-${isFull ? "red" : "blue"})`, fontSize: 12, fontWeight: 700 }}>
-            {isFull ? t("Coach is full") : t("Drop here")}
+          <div style={{ border: `2px dashed var(--tf-${dropTier})`, borderRadius: 10, padding: "12px 8px", textAlign: "center", color: `var(--tf-${dropTier})`, fontSize: 12, fontWeight: 700 }}>
+            {isFull ? t("Coach is full") : nearlyFull ? t("Almost full — drop here") : t("Drop here")}
           </div>
         )}
         {delegates.length === 0 && !isOver && <div className="tf-fleet-empty">{t("Empty")}</div>}
@@ -479,15 +542,20 @@ function DelegateDetailPanel({ delegate, coaches, onClose, onSave, onReassign, o
     return () => cancelAnimationFrame(id);
   }, []);
 
+  // Close on success (Desmond, 2026-08-02) — both used to leave the panel open
+  // after a successful save/move, so the board change you just made was hidden
+  // behind the very panel that made it. onClose() is INSIDE the try, so a
+  // failure still leaves the panel up with its error rather than silently
+  // dismissing the thing the user was working in.
   async function handleSave() {
     setSaving(true);
-    try { await onSave(delegate.id, form); }
+    try { await onSave(delegate.id, form); onClose(); }
     finally { setSaving(false); }
   }
 
   async function handleMove() {
     setMoving(true);
-    try { await onReassign(delegate, moveTo || null); }
+    try { await onReassign(delegate, moveTo || null); onClose(); }
     finally { setMoving(false); }
   }
 
@@ -583,6 +651,7 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
   const [durH, setDurH] = useState(0);              // hours part of a delay / move amount
   const [durM, setDurM] = useState(15);             // minutes part of a delay / move amount
   const [moveDay, setMoveDay] = useState(dayNumber + 1);
+  const [showPast, setShowPast] = useState(false);  // expand the collapsed "N done" earlier stops in the rail
 
   useEffect(() => {
     const iv = setInterval(() => { const d = new Date(); setNowMinutes(d.getHours() * 60 + d.getMinutes()); }, 30000);
@@ -639,6 +708,10 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
   const nextLabel = nextStop
     ? `${nextStop.title} · ${fmt12h(nextStop.startTime)}`
     : (dayNumber < totalDays ? `${t("Day")} ${dayNumber + 1}` : t("Free & easy"));
+  // Phase 3 hierarchy helpers: live minutes-until-next (drives the countdown)
+  // and the count of "earlier" stops (before now) that collapse behind a pill.
+  const nextCountdownMin = nextStop ? toMinutes(nextStop.startTime) - nowMinutes : null;
+  const pastCount = isToday && segIndex > 0 ? segIndex : 0;
 
   function applyStatus(item, status, delayMinutes) {
     setOpenId(null);
@@ -654,17 +727,14 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
 
   return (
     <div>
-      {/* Schedule summary: which day, where we are now / next, and whether the
-          day is on schedule, running late (by how long), or has a cancelled stop. */}
+      {/* Schedule summary — slimmed to context only (day · progress · on-time
+          status). "Now"/"Next" used to be crammed in here too; they now live in
+          the dominant focus band below, so this strip stays a quiet one-liner. */}
       <div className="tf-schedule">
         <span className="tf-schedule-day">{dayLabel}</span>
         {doneCount > 0 && <><span className="tf-schedule-sep">·</span><span className="tf-schedule-part">{doneCount}/{items.length} {t("done")}</span></>}
         {isToday && (
           <>
-            <span className="tf-schedule-sep">·</span>
-            <span className="tf-schedule-part"><strong>{t("Now")}:</strong> {currentStop ? `${currentStop.title} · ${fmt12h(currentStop.startTime)}` : t("Not started")}</span>
-            <span className="tf-schedule-sep">·</span>
-            <span className="tf-schedule-part"><strong>{t("Next")}:</strong> {nextLabel}</span>
             <span className="tf-schedule-spacer" />
             {currentCancelled ? (
               <span className="tf-schedule-pill" style={{ color: "var(--tf-red)", background: "var(--tf-red-bg)" }}><AlertCircle size={12} /> {t("Current stop cancelled")}</span>
@@ -677,52 +747,158 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
         )}
       </div>
 
-      <div className="tf-stop-chain">
-        {items.flatMap((item, idx) => {
-          const completed = !!item.completed;
-          const isNow = idx === segIndex && !completed;   // a ticked-off stop no longer shows "NOW"
-          const isDone = idx < segIndex && item.status !== "cancelled" && !completed;
-          const st = item.status && item.status !== "scheduled" ? item.status : null;
-          const meta = st ? ITIN_STATUS_META[st] : null;
-          const cls = `tf-stop-box${isNow ? " is-now" : ""}${isDone ? " is-done" : ""}${st ? ` is-${st}` : ""}${completed ? " is-completed" : ""}${openId === item.id ? " is-open" : ""}`;
-          const inner = (
-            <>
-              <div className="tf-stop-box-time">
-                {canEdit ? (
-                  <button type="button" className="tf-stop-check" aria-pressed={completed}
-                    title={completed ? t("Mark not done") : t("Mark completed")}
-                    onClick={(e) => { e.stopPropagation(); if (onToggleComplete) onToggleComplete(item); }}>
-                    {completed ? <CheckCircle2 size={15} color="var(--tf-green)" /> : <Circle size={15} />}
-                  </button>
-                ) : (completed && <CheckCircle2 size={14} color="var(--tf-green)" style={{ flexShrink: 0 }} />)}
-                <span>{fmt12h(item.startTime)}</span>
-                {isNow && !st && <span className="tf-stop-now-text">{t("NOW")}</span>}
-                {meta && (
-                  <span className="tf-stop-tag" style={{ color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>
-                    {t(meta.label)}{st === "delayed" && item.delayMinutes ? ` +${fmtDuration(item.delayMinutes)}` : ""}
-                  </span>
+
+      {/* Now / Next focus band — the day's current moment made visually
+          dominant, with a live countdown to the next stop. Live current-day
+          only (isToday); a previewed other day has no meaningful "now" so it
+          keeps just the plain rail. Each card opens the same inline status
+          editor on click / Enter / Space when the user can edit. */}
+      {isToday && (
+        <div className="tf-focus-band">
+          {(() => {
+            const clickable = canEdit && !!currentStop;
+            const st = currentStop && currentStop.status && currentStop.status !== "scheduled" ? currentStop.status : null;
+            const meta = st ? ITIN_STATUS_META[st] : null;
+            const openEditor = () => currentStop && setOpenId(openId === currentStop.id ? null : currentStop.id);
+            return (
+              <div
+                className={`tf-focus-card tf-focus-now${currentCancelled ? " is-cancelled" : ""}${clickable ? " is-clickable" : ""}`}
+                role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : undefined}
+                aria-expanded={clickable ? openId === currentStop.id : undefined}
+                onClick={clickable ? openEditor : undefined}
+                onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEditor(); } } : undefined}
+              >
+                <div className="tf-focus-eyebrow">
+                  <span className="tf-now-dot" aria-hidden="true" />
+                  {currentStop ? t("NOW") : t("Not started")}
+                  {activeDelay > 0 && !currentCancelled && (
+                    <span className="tf-focus-late"><Clock size={11} /> {fmtDuration(activeDelay)} {t("late")}</span>
+                  )}
+                </div>
+                {currentStop ? (
+                  <>
+                    <div className="tf-focus-time">{fmt12h(currentStop.startTime)}</div>
+                    <div className="tf-focus-title">{currentStop.title}</div>
+                    {currentStop.location && <div className="tf-focus-venue"><MapPin size={12} /> {currentStop.location}</div>}
+                    {meta && (
+                      <span className="tf-stop-tag" style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 10, padding: "3px 9px", fontSize: 11, color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>
+                        {t(meta.label)}{st === "delayed" && currentStop.delayMinutes ? ` +${fmtDuration(currentStop.delayMinutes)}` : ""}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <div className="tf-focus-title" style={{ marginTop: 6, color: "var(--tf-text-3)", fontWeight: 600 }}>{t("The day hasn't reached its first stop yet.")}</div>
                 )}
               </div>
-              <div className="tf-stop-box-title">{item.title}</div>
-            </>
-          );
-          // The box body opens the live-status editor (edit users). The check
-          // button above stops propagation so ticking "done" doesn't also open
-          // the editor. A plain <div> (not a nested <button>) keeps the check
-          // button valid inside it.
-          const box = canEdit ? (
-            <div key={item.id} className={cls} role="button" tabIndex={0}
-              onClick={() => setOpenId(openId === item.id ? null : item.id)}
-              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpenId(openId === item.id ? null : item.id); } }}
-              aria-expanded={openId === item.id}>
-              {inner}
-            </div>
-          ) : (
-            <div key={item.id} className={cls}>{inner}</div>
-          );
-          if (idx === items.length - 1) return [box];
-          return [box, <div key={`${item.id}-arrow`} className="tf-stop-arrow">→</div>];
-        })}
+            );
+          })()}
+
+          {(() => {
+            const clickable = canEdit && !!nextStop;
+            const openEditor = () => nextStop && setOpenId(openId === nextStop.id ? null : nextStop.id);
+            return (
+              <div
+                className={`tf-focus-card tf-focus-next${clickable ? " is-clickable" : ""}`}
+                role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : undefined}
+                aria-expanded={clickable ? openId === nextStop.id : undefined}
+                onClick={clickable ? openEditor : undefined}
+                onKeyDown={clickable ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEditor(); } } : undefined}
+              >
+                <div className="tf-focus-eyebrow tf-focus-eyebrow--next">
+                  {t("NEXT")}
+                  {nextStop && nextCountdownMin !== null && (
+                    <span className="tf-focus-count"><Clock size={11} /> {nextCountdownMin > 0 ? `${t("in")} ${fmtDuration(nextCountdownMin)}` : t("now")}</span>
+                  )}
+                </div>
+                {nextStop ? (
+                  <>
+                    <div className="tf-focus-time is-next">{fmt12h(nextStop.startTime)}</div>
+                    <div className="tf-focus-title">{nextStop.title}</div>
+                    {nextStop.location && <div className="tf-focus-venue"><MapPin size={12} /> {nextStop.location}</div>}
+                  </>
+                ) : (
+                  <>
+                    <div className="tf-focus-title" style={{ marginTop: 6 }}>{nextLabel}</div>
+                    <div className="tf-focus-venue" style={{ color: "var(--tf-text-3)" }}>{dayNumber < totalDays ? t("Continues tomorrow") : t("No more scheduled stops today")}</div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Full-day rail. Hierarchy (live current-day only): earlier/done stops
+          collapse behind a "N done" pill, the current stop is enlarged, the
+          next stop is blue-accented, later stops are de-emphasised. A previewed
+          other day (isToday === false) renders every stop flat, as before. */}
+      <div className="tf-stop-chain">
+        {(() => {
+          const rail = [];
+          if (pastCount > 0) {
+            rail.push(
+              <button key="tf-collapsed" type="button" className="tf-stop-collapsed" aria-expanded={showPast}
+                title={showPast ? t("Hide completed stops") : t("Show completed stops")}
+                onClick={() => setShowPast((v) => !v)}>
+                {showPast ? <ChevronLeft size={13} /> : <CheckCircle2 size={13} />}
+                {showPast ? t("Hide done") : `${pastCount} ${t("done")}`}
+                {!showPast && <ChevronRight size={13} />}
+              </button>
+            );
+          }
+          items.forEach((item, idx) => {
+            const past = isToday && segIndex > 0 && idx < segIndex;
+            if (past && !showPast) return;                    // collapsed away by default
+            const completed = !!item.completed;
+            const isNow = isToday && idx === segIndex && !completed;   // a ticked-off stop no longer shows "NOW"
+            const isNext = isToday && !!nextStop && item.id === nextStop.id;
+            const isDone = isToday && idx < segIndex && item.status !== "cancelled" && !completed;
+            const isUpcoming = isToday && idx > segIndex && !isNext;
+            const st = item.status && item.status !== "scheduled" ? item.status : null;
+            const meta = st ? ITIN_STATUS_META[st] : null;
+            const cls = `tf-stop-box${isNow ? " is-now" : ""}${isNext ? " is-next" : ""}${isUpcoming ? " is-upcoming" : ""}${isDone ? " is-done" : ""}${st ? ` is-${st}` : ""}${completed ? " is-completed" : ""}${openId === item.id ? " is-open" : ""}`;
+            const inner = (
+              <>
+                <div className="tf-stop-box-time">
+                  {canEdit ? (
+                    <button type="button" className="tf-stop-check" aria-pressed={completed}
+                      title={completed ? t("Mark not done") : t("Mark completed")}
+                      onClick={(e) => { e.stopPropagation(); if (onToggleComplete) onToggleComplete(item); }}>
+                      {completed ? <CheckCircle2 size={15} color="var(--tf-green)" /> : <Circle size={15} />}
+                    </button>
+                  ) : (completed && <CheckCircle2 size={14} color="var(--tf-green)" style={{ flexShrink: 0 }} />)}
+                  <span>{fmt12h(item.startTime)}</span>
+                  {isNow && !st && <span className="tf-stop-now-text">{t("NOW")}</span>}
+                  {isNext && !st && <span className="tf-stop-next-text">{t("NEXT")}</span>}
+                  {meta && (
+                    <span className="tf-stop-tag" style={{ color: `var(--tf-${meta.color})`, background: `var(--tf-${meta.color}-bg)` }}>
+                      {t(meta.label)}{st === "delayed" && item.delayMinutes ? ` +${fmtDuration(item.delayMinutes)}` : ""}
+                    </span>
+                  )}
+                </div>
+                <div className="tf-stop-box-title">{item.title}</div>
+                {item.location && <div className="tf-stop-box-venue"><MapPin size={11} /> {item.location}</div>}
+              </>
+            );
+            // The box body opens the live-status editor (edit users). The check
+            // button above stops propagation so ticking "done" doesn't also open
+            // the editor. A plain <div> (not a nested <button>) keeps the check
+            // button valid inside it.
+            const box = canEdit ? (
+              <div key={item.id} className={cls} role="button" tabIndex={0}
+                onClick={() => setOpenId(openId === item.id ? null : item.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpenId(openId === item.id ? null : item.id); } }}
+                aria-expanded={openId === item.id}>
+                {inner}
+              </div>
+            ) : (
+              <div key={item.id} className={cls}>{inner}</div>
+            );
+            if (rail.length) rail.push(<div key={`${item.id}-arrow`} className="tf-stop-arrow" aria-hidden="true">→</div>);
+            rail.push(box);
+          });
+          return rail;
+        })()}
       </div>
 
       {/* Inline editor (edit permission only). Two separate ideas, grouped so
@@ -741,11 +917,9 @@ function JourneyTimeline({ items, dayNumber, totalDays, onAddClick, canEdit = fa
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ color: "var(--tf-blue)" }} onClick={() => setEditMode(editMode === "moved" ? null : "moved")}>{t("Moved")}…</button>
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ color: "var(--tf-red)" }} onClick={() => applyStatus(editItem, "cancelled", 0)}><X size={12} /> {t("Cancelled")}</button>
             <span className="tf-editor-divider" />
-            <span className="tf-editor-label">{t("Completed")}</span>
-            <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ color: "var(--tf-green)" }} onClick={() => { if (onToggleComplete) onToggleComplete(editItem); }}>
-              {editItem.completed ? <><Circle size={12} /> {t("Mark not done")}</> : <><CheckCircle2 size={12} /> {t("Mark done")}</>}
-            </button>
-            <span className="tf-editor-divider" />
+            {/* "Mark done / not done" removed here 2026-07-31 — it duplicated the
+                round check button on each stop box (top-left of the time). Tick
+                a stop there instead. */}
             <button className="tf-btn tf-btn-ghost tf-btn-sm" onClick={() => { if (onOpenAttendance) onOpenAttendance(editItem); }}><Users size={12} /> {t("Attendance & history")}</button>
             <button className="tf-btn tf-btn-ghost tf-btn-sm" style={{ marginLeft: "auto" }} onClick={() => setOpenId(null)}>{t("Close")}</button>
           </div>
@@ -1497,6 +1671,16 @@ function fmtAuditVal(v) {
   if (typeof v === "boolean") return v ? "Yes" : "No";
   return String(v);
 }
+// Prettify raw audit field keys into human labels ("day" → "Day", "startTime"
+// → "Time") so the change log reads clearly instead of like a DB dump.
+const AUDIT_FIELD_LABEL = {
+  day: "Day", time: "Time", startTime: "Time", title: "Title", status: "Status",
+  delayMinutes: "Delay (min)", label: "Coach", capacity: "Capacity", staffName: "Staff",
+  captain: "Captain", name: "Name", dateRange: "Dates", lead: "Lead", dayOf: "Current day",
+  totalDays: "Total days", startDate: "Start date", vip: "VIP", company: "Company",
+  accessibilityNotes: "Accessibility", notes: "Notes", arrival: "Bus arrival", completed: "Completed",
+};
+const auditFieldLabel = (k) => AUDIT_FIELD_LABEL[k] || (k.charAt(0).toUpperCase() + k.slice(1));
 function diffFields(before, after) {
   const b = before || {}; const a = after || {};
   const keys = [...new Set([...Object.keys(b), ...Object.keys(a)])];
@@ -1547,7 +1731,7 @@ function HistoryModal({ tripId, onClose }) {
                     <div className="tf-audit-diff">
                       {rows.map((r) => (
                         <div key={r.key} className="tf-audit-row">
-                          <span className="tf-audit-key">{r.key}</span>
+                          <span className="tf-audit-key">{auditFieldLabel(r.key)}</span>
                           {isCreate || isDelete ? (
                             <span className="tf-audit-to">{fmtAuditVal(isCreate ? r.to : r.from)}</span>
                           ) : (
@@ -1758,6 +1942,8 @@ function CoachBoardView({ tripId }) {
   const [panelDelegate, setPanelDelegate] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
   const [toasts, setToasts] = useState([]);
+  const [shakeCoachId, setShakeCoachId] = useState(null);   // coach flashing "full" after an over-capacity drop
+  const [capacityPrompt, setCapacityPrompt] = useState(null); // { delegate, coach } awaiting override/cancel
 
   const dragInfo = useRef({ delegate: null, startX: 0, startY: 0, dragging: false });
   const [ghost, setGhost] = useState(null);
@@ -1800,7 +1986,7 @@ function CoachBoardView({ tripId }) {
       setCoaches(coachRes.data.coaches);
       setItinerary(itinRes.data.items);
       setCategories(itinRes.data.categories || []);
-      setDelegates(delRes.data.delegates);
+      setDelegates(applyQueuedReassigns(delRes.data.delegates)); // keep unsynced offline moves visible
       setLoadError(null); // got usable data either way (fresh or cached) — clear any prior real error
     } catch (e) { setLoadError(e.message); }
   }, [tripId]);
@@ -1853,29 +2039,67 @@ function CoachBoardView({ tripId }) {
   }
 
   /* ---- mutations ---- */
-  async function handleReassign(delegate, toCoachId) {
-    if (!editable) return; // needs manageTrips, and not on a completed/cancelled trip
-    if (toCoachId === delegate.coachId) return;
+  // The actual reassign (optimistic + rollback). Split out of handleReassign so
+  // the over-capacity confirm/override path can call it directly after the user
+  // chooses "Override".
+  async function doReassign(delegate, toCoachId, { override = false } = {}) {
     // Dropping onto a coach means "expected on this coach, not yet checked
-    // in" — that's ASSIGNED in the 5-status model, not MISSING. MISSING is
-    // reserved for a genuine check-in miss or explicit staff override. Only
-    // an UNASSIGNED delegate gets this default; a delegate who already has a
-    // real status (ARRIVED/LATE/MISSING/ASSIGNED) keeps it when moved between
-    // coaches — being dragged elsewhere doesn't reset their arrival state.
+    // in" — that's ASSIGNED in the 5-status model, not MISSING. Only an
+    // UNASSIGNED delegate gets this default; a delegate who already has a real
+    // status (ARRIVED/LATE/MISSING/ASSIGNED) keeps it when moved. (The server
+    // computes the same, and is authoritative — this is just the optimistic UI.)
     const nextStatus = toCoachId === null ? "UNASSIGNED" : (delegate.status === "UNASSIGNED" ? "ASSIGNED" : delegate.status);
     const prevSnapshot = delegate;
-    setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? { ...d, coachId: toCoachId, status: nextStatus } : d)));
+    const toLabel = toCoachId ? (coaches.find((c) => c.id === toCoachId)?.label || t("a coach")) : t("Unassigned");
+    setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? { ...d, coachId: toCoachId, status: nextStatus, pendingSync: false } : d)));
     try {
-      await apiPatch(`/delegates/${delegate.id}`, { coachId: toCoachId, status: nextStatus });
+      // expectedCoachId = the coach we last saw them on → server rejects (409
+      // CONFLICT) if someone else moved them meanwhile, instead of clobbering.
+      const res = await reassignRequest(tripId, { delegateId: delegate.id, toCoachId, expectedCoachId: delegate.coachId || null, override }, { label: delegate.name });
+      if (res && res.queued) {                        // offline — kept locally, replays on reconnect
+        setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? { ...d, coachId: toCoachId, status: nextStatus, pendingSync: true } : d)));
+        setPanelDelegate((p) => (p && p.id === delegate.id ? { ...p, coachId: toCoachId, status: nextStatus } : p));
+        pushToast(`${delegate.name} → ${toLabel} · ${t("queued (offline)")}`, "warn");
+        return;
+      }
       await refreshCoaches();
-      const toLabel = toCoachId ? (coaches.find((c) => c.id === toCoachId)?.label || "a coach") : t("Unassigned");
-      reportActivity(`${delegate.name} moved to ${toLabel}.`, "delegate");
-      pushToast(`${delegate.name} → ${toLabel}`);
+      pushToast(`${delegate.name} → ${toLabel}`);      // server-side endpoint logs the audit/history itself
       setPanelDelegate((p) => (p && p.id === delegate.id ? { ...p, coachId: toCoachId, status: nextStatus } : p));
     } catch (e) {
-      setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? prevSnapshot : d)));
+      setDelegates((ds) => ds.map((d) => (d.id === delegate.id ? prevSnapshot : d))); // roll back the optimistic move
+      if (e.code === "CAPACITY_FULL" && toCoachId) {   // filled up since our last poll — offer the override dialog
+        const target = coaches.find((c) => c.id === toCoachId);
+        if (target) {
+          setShakeCoachId(toCoachId);
+          setTimeout(() => setShakeCoachId((s) => (s === toCoachId ? null : s)), 550);
+          setCapacityPrompt({ delegate, coach: target });
+          return;
+        }
+      }
+      if (e.code === "CONFLICT") {                      // someone else moved them — resync to the server's truth
+        pushToast(`${delegate.name}: ${t("was moved by someone else — refreshing")}`, "error");
+        fetchAll();
+        return;
+      }
       pushToast(e.message, "error");
     }
+  }
+
+  async function handleReassign(delegate, toCoachId) {
+    if (!editable) return;                        // needs manageTrips, not completed/cancelled
+    if (toCoachId === (delegate.coachId || null)) return; // dropped on the same coach — no-op (edge case)
+    // Capacity guard: dropping onto a coach that's ALREADY at/over capacity
+    // shakes it + opens a confirm-override dialog instead of silently overfilling.
+    if (toCoachId) {
+      const target = coaches.find((c) => c.id === toCoachId);
+      if (target && target.capacity > 0 && (target.total ?? 0) >= target.capacity) {
+        setShakeCoachId(toCoachId);
+        setTimeout(() => setShakeCoachId((s) => (s === toCoachId ? null : s)), 550);
+        setCapacityPrompt({ delegate, coach: target });
+        return;
+      }
+    }
+    await doReassign(delegate, toCoachId);
   }
 
   function handleDelegateAdded(newDelegate) {
@@ -2110,6 +2334,13 @@ function CoachBoardView({ tripId }) {
         <ToastStack toasts={toasts} onDismiss={dismissToast} />
         <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 14 }} />
         {confirmState && <ConfirmDialog title={confirmState.title} message={confirmState.message} tone={confirmState.tone} onCancel={() => closeConfirm(false)} onConfirm={() => closeConfirm(true)} />}
+        {capacityPrompt && (
+          <CapacityDialog
+            delegate={capacityPrompt.delegate} coach={capacityPrompt.coach}
+            onCancel={() => setCapacityPrompt(null)}
+            onOverride={() => { const { delegate, coach } = capacityPrompt; setCapacityPrompt(null); doReassign(delegate, coach.id, { override: true }); }}
+          />
+        )}
         {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}
         {showAddDelegate && <AddDelegateModal tripId={tripId} onClose={() => setShowAddDelegate(false)} onAdded={handleDelegateAdded} />}
@@ -2132,7 +2363,7 @@ function CoachBoardView({ tripId }) {
             canEdit={editable}
           />
         )}
-        {ghost && <div style={{ position: "fixed", left: ghost.x + 12, top: ghost.y + 12, zIndex: 2000, pointerEvents: "none", width: 200 }}><DelegateCard delegate={ghost.delegate} ghost /></div>}
+        {ghost && <div className="tf-drag-ghost" style={{ position: "fixed", left: ghost.x + 14, top: ghost.y + 20, zIndex: 2000, pointerEvents: "none", width: 210 }}><DelegateCard delegate={ghost.delegate} ghost /></div>}
 
         <button className="tf-back-btn" style={{ marginBottom: 16 }} onClick={() => navigate("/trips")}>← {t("Back to trips")}</button>
 
@@ -2236,7 +2467,7 @@ function CoachBoardView({ tripId }) {
             {boardCoaches.map((coach) => (
               <FleetCard
                 key={coach.id} coach={coach} delegates={delegatesByCoach[coach.id] || []} mode={mode}
-                isOver={overCol === coach.id} colRef={(node) => { colRefs.current[coach.id] = node; }}
+                isOver={overCol === coach.id} colRef={(node) => { colRefs.current[coach.id] = node; }} shake={shakeCoachId === coach.id}
                 onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id}
                 onRemoveCoach={editable && !scopedToCoach ? handleRemoveCoach : undefined} onRemoveDelegate={editable ? handleRemoveDelegate : undefined} onEditStaff={editable && !scopedToCoach ? setEditStaffCoach : undefined}
                 onCycleArrival={editable && mode === "live" ? handleCycleArrival : undefined}

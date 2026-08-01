@@ -1397,9 +1397,89 @@ above wholesale:
 
 ---
 
+## Desmond post-v3 merge — TransitFlow "premium ops dashboard" (2026-08-02)
+
+Source: `integration/VJMDynamics-NYP-x-SCCCI--INTv2` (a plain folder drop, no
+git history — so there was no merge-base to diff. Scope came from his own
+`TRANSITFLOW_CHANGES.md` plus a file-by-file comparison against main.)
+
+His base predates 2026-07-31, so several of his files were OLDER than main's in
+ways a wholesale copy would have silently reverted. Ported hunk-by-hunk instead.
+
+### Taken
+
+| Area | What |
+|---|---|
+| `backend/routes/reassign-core.js` **(new)** | Pure, zero-import decision core for a reassignment (capacity / cross-trip / optimistic lock / captain scoping / status rules). No DB, so tests import it without booting a pg pool. |
+| `backend/routes/desmond.js` | New validated `PATCH /api/trips/:tripId/reassign` — atomic UPDATE guarded with `IS NOT DISTINCT FROM` on `expectedCoachId`, 409 CAPACITY_FULL (overridable), 400 on cross-trip, captain scoping, and DUAL audit (`recordEvent` → board History panel, `logActivity` → JQ's global History Log). |
+| `frontend/src/lib/reassignQueue.js` **(new)** | Offline reassignment. Built on JQ's existing `lib/outbox.js` (byte-identical in his drop) — one offline write path, not a competing queue. |
+| `TripCoachPage.jsx` + `.css` | Capacity tiers (Available/Almost full/Full/Over, icon + label), animated headcount, drag lift/ghost, blue/amber/red drop tiers, `CapacityDialog` shake → Cancel/Override, Now/Next focus band with live countdown, collapsible "N done" past stops, audit field-label prettifier, close-panel-on-success, dedup of the duplicate "Mark done" button. |
+| `TripsListPage.jsx` | 4-status tabs (Planning / In progress / Completed / Cancelled) with counts. |
+| `MobileTripsPage.jsx` | Expandable coach sections (44px `aria-expanded` headers + chevron, "N delegates · tap to view"), "NOW" itinerary marker, 44px touch targets, `pendingSync` chip, move via the new endpoint. |
+| `tests/desmond/` **(new)** | 36 unit tests (decision core + offline queue). |
+
+### NOT taken — and why
+
+1. **`backend/scripts/seed-demo.js`** — his is older: it still inserts the
+   legacy `"t-1"` string into `exception_tickets.trip_id`, which is now
+   `trips.uuid_id` and would violate the FK (main's 2026-07-31 migration).
+2. **Delegate-details modal** — he converts main's slide-in side panel
+   (`tf-panel`) into a centred `Modal`. Listed in his changelog as *earlier
+   groundwork*, not part of the 5-phase push, so it's a style preference;
+   main keeps the panel. His close-on-success behaviour WAS ported into it.
+3. **Hero "Add delegate" button** (`onAddDelegate`) — deliberately removed on
+   main at the user's request; his copy still has it.
+4. **Mobile command-centre KPI row** — likewise removed on main ("remove the
+   button kpi under trip", it duplicated the Ops screen's Live headcount card).
+
+### What his base would have reverted (kept on main)
+
+- `cachedFetch` / `CachedDataBadge` — JQ's offline READ cache (2026-07-31),
+  7 call sites in `TripCoachPage.jsx`, 6 in `MobileTripsPage.jsx`, part of a
+  9-file feature. His versions were plain `apiGet` again.
+- `clearManualDayOfAndResync()` + its 3 itinerary call sites + the `startDate`
+  → `dayOfIsManual=false` guard in `desmond.js` — the fix keeping the
+  checkpoint auto-transition schedulers from reading the wrong day.
+
+### Bug found in his test suite (pre-existing — fails in his repo too)
+
+`tests/desmond/reassign-queue.test.js` stubbed `globalThis.localStorage` but not
+`sessionStorage`. `api.js`'s `getToken()` reads
+`localStorage.getItem(...) || sessionStorage.getItem(...)`, so the fallback threw
+a `ReferenceError` — which carries no `.status` and therefore looks exactly like
+an offline failure to `isOfflineError()`. Both "online" tests saw their request
+queued instead of sent. Added the missing stub (+ a `clear()` in `beforeEach`):
+**36/36**, and 149/149 across the whole suite.
+
+### Verification
+
+`npx vite build` green · `node --check` on both backend files · 149/149 tests ·
+live against the running app: every guard exercised through the real endpoint
+(happy path preserving a real status, stale-lock 409 CONFLICT, same-coach no-op,
+foreign coach 400, foreign trip 400, unknown delegate 404, capacity 409 then
+success with `override:true`), both audit trails confirmed written, the shared
+`reassignRequest()` round-tripped a real move, desktop focus-band countdown and
+capacity badges rendering, mobile sections toggling with `aria-expanded` and
+44/44/52px tap targets, Trips-list tabs filtering 13/3/1/0. Zero console errors,
+zero server errors, all test writes reverted.
+
+---
+
 ## Open items for the team
 
 1. **Own database per developer.** Everyone currently shares one Neon database, which causes the "can't log in after clone" issue (see PROJECT_STRUCTURE.md → "CAN'T LOG IN AFTER CLONING?"). Giving each developer their own Neon DB (free tier allows several) would remove that whole class of problem.
 2. **`CANCELLED` ticket status** (Jayden): the exception status enum is `OPEN | RESOLVED` only, so a ticket raised in error is hard-deleted rather than soft-cancelled — losing the audit trail. Adding `CANCELLED` back is a small change but needs a team decision.
 3. **SSE vs WebSockets** (Jayden): the live alert channel uses SSE. If Vimal/Vance are assuming WebSockets elsewhere, align before deployment.
-4. **Deployment bug in the base** (flagged by Jayden, still open): `frontend/src/lib/api.js` imports `../../../permissions.js` from *outside* `frontend/`. It works locally (Vite `fs.allow`) but a Vercel build rooted at `frontend/` won't have that parent file and will fail. Worth fixing before deployment day.
+4. ~~**Deployment bug in the base** (flagged by Jayden): `frontend/src/lib/api.js` imports `../../../permissions.js` from *outside* `frontend/`. It works locally (Vite `fs.allow`) but a Vercel build rooted at `frontend/` won't have that parent file and will fail.~~ **Fixed 2026-08-02** — see the section below.
+
+---
+
+## 2026-08-02 — touched a teammate's file, and a shared file everyone uses
+
+**`backend/routes/vimal.js` (Vimal's own file, FaceCheck-Pro)** — one-line ownership note: the `POST /api/attendance/scan` "already checked in" guard was refusing anyone whose status wasn't exactly `MISSING` (so ASSIGNED/LATE/UNASSIGNED delegates got a false "already boarded/late" 409 instead of being checked in), fixed to only refuse `PRESENT`/`ARRIVED`. Same shape of guard already existed correctly in `vance.js`'s and `exceptions.js`'s QR check-in routes, so this was a bug isolated to the face-scan path, not a pattern repeated elsewhere. Flag to Vimal in case his own upstream copy still has the old condition.
+
+**`frontend/src/lib/i18n.jsx` (shared by all five features)** — every page's `t("English string")` calls were being diffed against `DICT` project-wide; 469 keys across ~25 files (spanning all four teammates' pages, not just JQ's) had no Chinese entry and were silently falling back to raw English in the zh UI. All 469 are now translated and added; re-running the same check shows 0 missing project-wide. **For everyone**: if you add a new user-facing string wrapped in `t("...")` , add its Chinese translation to `DICT` in the same PR — there's no build-time check that catches a missing key, it just silently shows English to zh users instead of erroring.
+
+**Fixed the deployment bug from open item 4** — `permissions.js` (the single source of truth both frontend and backend import) has been moved from the repo root to `frontend/src/lib/permissions.js`. Every frontend importer (`lib/api.js`, `AccountControlPage.jsx`, `SettingsPage.jsx`, `MobileProfilePage.jsx`) now reaches it with a normal in-tree relative path, so a Vercel build rooted at `frontend/` will have the file present — no more crossing outside the build root. Every backend importer (`db/accounts.js`, `db/schema.js`, `scripts/reset-login.js`, `scripts/seed-scope-test.js`, `scripts/seed-team.js`) was updated to `../../frontend/src/lib/permissions.js` — this still assumes the backend's host checks out the full monorepo (true for a plain Node process on Render/Railway/etc., unlike Vercel's narrower per-project build root), so it's unaffected. Also removed the now-unnecessary `server.fs.allow: ['..']` workaround from `frontend/vite.config.js`, since the frontend dev server no longer needs to reach outside its own root. Verified: `npx vite build` succeeds clean, both backend `db` modules resolve the new path via a live `import()` check, and the full test suite still passes 149/149.
+
+**`frontend/src/lib/permissions.js` cleanup (same day, follow-up)** — three dead/miswired permission entries affecting everyone's account editor, not just JQ's: `viewScanner` (desktop "Face + QR scan" — had no nav entry point at all) and `viewMobileAllTrips` (mobile "All trip statuses" — its own consuming code had been hardcoded off) were removed entirely; the combined `viewMobileScanner` was split into `viewMobileScannerQr`/`viewMobileScannerFace`/`viewMobileScannerManual` so each mobile scanner route is independently grantable. **For everyone**: if your own feature reads any of `viewScanner`, `viewMobileScanner`, or `viewMobileAllTrips` directly (unlikely, but check if you cloned an older permissions check), it'll now silently read as `undefined`/`false` — switch to the new keys above. Verified an existing account's stale stored permissions JSON (with the old keys) through `cleanPermissions()`: dead keys drop silently, new keys default `true`, nobody loses scanner access.
