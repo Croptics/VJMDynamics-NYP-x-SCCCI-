@@ -31,6 +31,8 @@ import {
 } from "lucide-react";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import LogExceptionModal from "../../components/LogExceptionModal.jsx";
+import EscalateModal from "../../components/EscalateModal.jsx";
+import ConfirmDialog from "../../components/ConfirmDialog.jsx";
 import { getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import {
@@ -38,13 +40,28 @@ import {
   subscribeStream, fmtTime, issueLabel, ageMinutes, fmtAge, ageLevel, resolveMinutes,
   isCheckedIn,
 } from "../../lib/exceptionsApi.js";
+// Follows the mobile trip switcher (2026-07-31 — "add the trip change to
+// exception"), instead of the fixed base TRIP_ID this inbox used to always
+// read regardless of which trip Home had selected.
+import { getMobileTripId } from "../../lib/mobileTrip.js";
+// Offline-capable READ (2026-07-31) — the Exceptions inbox is one of the
+// pages flagged as most important ("the manual, attendance, exception,
+// trip"): load() below used to just error out on any failure, including a
+// dead signal. See lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 import "../desktop/ExceptionInboxPage.css"; // LogExceptionModal's .exc-modal styles (mobile sheet)
 
+// Every tab is mutually exclusive by design (2026-07-31 — "for the all tab,
+// hide the resolved one" / "pls fix the for critical tab also" / "the open
+// tab shouldn't show critical") — same as the desktop inbox: a ticket
+// belongs on exactly ONE of Critical/Open/Resolved, and All is just
+// Critical+Open together.
 const TABS = [
-  { key: "All",      countKey: "all",      filter: {} },
-  { key: "Critical", countKey: "critical", filter: { priority: "CRITICAL" } },
-  { key: "Open",     countKey: "open",     filter: { status: "OPEN" } },
-  { key: "Resolved", countKey: "resolved", filter: { status: "RESOLVED" } },
+  { key: "All",      count: (c) => c.open ?? 0,                          filter: { excludeStatus: "RESOLVED" } },
+  { key: "Critical", count: (c) => c.criticalOpen ?? 0,                  filter: { priority: "CRITICAL", excludeStatus: "RESOLVED" } },
+  { key: "Open",     count: (c) => Math.max(0, (c.open ?? 0) - (c.criticalOpen ?? 0)), filter: { status: "OPEN", excludePriority: "CRITICAL" } },
+  { key: "Resolved", count: (c) => c.resolved ?? 0,                      filter: { status: "RESOLVED" } },
 ];
 
 const AGE_TICK_MS = 30000;
@@ -133,6 +150,12 @@ export default function MobileExceptionsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
+  // Escalate pop-up + Resolve/Delete confirmations (2026-07-31 — "add the
+  // pop-up to select who to escalate to" / "add warning to delete, resolve").
+  const [escalatingTicket, setEscalatingTicket] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null); // { type: "resolve" | "delete", ticket }
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), AGE_TICK_MS);
@@ -141,8 +164,12 @@ export default function MobileExceptionsPage() {
 
   const load = useCallback(async () => {
     setError("");
+    const tripId = getMobileTripId();
     try {
-      const { tickets, counts } = await listExceptions(); // sliced client-side, as on desktop
+      const r = await cachedFetch(`exceptions:${tripId}`, () => listExceptions({}, tripId)); // sliced client-side, as on desktop
+      const { tickets, counts } = r.data;
+      setCacheStale(r.stale);
+      setCacheAt(r.at);
       setAllTickets(tickets);
       setCounts(counts);
     } catch (e) {
@@ -183,10 +210,38 @@ export default function MobileExceptionsPage() {
     }
   }
 
+  /** Same real "Escalate to office" pop-up the desktop inbox now opens
+   *  (2026-07-31 — "add the pop-up to select who to escalate to") — see
+   *  ExceptionInboxPage.jsx's openEscalate()/onTicketEscalated() for the full
+   *  reasoning. */
+  function openEscalate(tk) {
+    if (!tk.delegateId) return;
+    setEscalatingTicket(tk);
+  }
+  async function onTicketEscalated() {
+    const tk = escalatingTicket;
+    setEscalatingTicket(null);
+    flash(t("Escalated to office — alert sent"));
+    if (tk) await updatePriority(tk.id, "CRITICAL").catch(() => {});
+    load();
+  }
+
+  /** Fires the actual Resolve/Delete after the confirm dialog's "Confirm"
+   *  (2026-07-31 — "pls add warning to delete, resolve button"). */
+  function runConfirmedAction() {
+    const { type, ticket } = confirmAction;
+    setConfirmAction(null);
+    if (type === "resolve") act(ticket.id, () => resolveException(ticket.id), t("Ticket resolved"));
+    else act(ticket.id, () => deleteException(ticket.id), t("Ticket deleted"));
+  }
+
   const byTab = useMemo(() => {
     const f = TABS.find((x) => x.key === tab).filter;
     return allTickets.filter(
-      (tk) => (!f.status || tk.status === f.status) && (!f.priority || tk.priority === f.priority)
+      (tk) => (!f.status || tk.status === f.status)
+        && (!f.excludeStatus || tk.status !== f.excludeStatus)
+        && (!f.priority || tk.priority === f.priority)
+        && (!f.excludePriority || tk.priority !== f.excludePriority)
     );
   }, [allTickets, tab]);
 
@@ -220,6 +275,8 @@ export default function MobileExceptionsPage() {
         <div style={{ fontSize: 13, fontWeight: 700 }}>{t("Exception inbox")}</div>
       </div>
 
+      <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 10 }} />
+
       <div className="mexc-stats">
         <div className="mexc-stat">
           <div className="mexc-stat__label">{t("Open")}</div>
@@ -250,10 +307,10 @@ export default function MobileExceptionsPage() {
       )}
 
       <div className="mexc-tabs" role="tablist">
-        {TABS.map(({ key, countKey }) => (
+        {TABS.map(({ key, count }) => (
           <button key={key} role="tab" aria-selected={tab === key}
             className={"mexc-tab" + (tab === key ? " active" : "")} onClick={() => setTab(key)}>
-            {t(key)} <span className="count">· {counts[countKey] ?? 0}</span>
+            {t(key)} <span className="count">· {count(counts)}</span>
           </button>
         ))}
       </div>
@@ -320,28 +377,30 @@ export default function MobileExceptionsPage() {
                 {tk.status === "OPEN" && (
                   <>
                     <button className="mexc-btn resolve" disabled={busy}
-                      onClick={() => act(tk.id, () => resolveException(tk.id), t("Ticket resolved"))}>
+                      onClick={() => setConfirmAction({ type: "resolve", ticket: tk })}>
                       <CheckCircle2 size={14} /> {t("Resolve")}
                     </button>
-                    {tk.priority !== "CRITICAL" && (
+                    {/* Only MISSING_PERSON opens the real "Escalate to office"
+                        pop-up (2026-07-31 — "for other issue, the escalate
+                        button should be how originally my teammate have").
+                        Every other issue type keeps the original one-click
+                        local priority bump. */}
+                    {tk.priority !== "CRITICAL" && tk.type === "MISSING_PERSON" && (
+                      <button className="mexc-btn escalate" disabled={busy}
+                        onClick={() => openEscalate(tk)}>
+                        <ChevronsUp size={14} /> {t("Escalate")}
+                      </button>
+                    )}
+                    {tk.priority !== "CRITICAL" && tk.type !== "MISSING_PERSON" && (
                       <button className="mexc-btn escalate" disabled={busy}
                         onClick={() => act(tk.id, () => updatePriority(tk.id, "CRITICAL"), t("Escalated — alert pushed to all staff"))}>
                         <ChevronsUp size={14} /> {t("Escalate")}
                       </button>
                     )}
-                    {tk.delegateId && !present && (
-                      <button className="mexc-btn" disabled={busy}
-                        onClick={() => act(tk.id, () => manualOverride(tk.delegateId), `${tk.delegateName} ${t("marked present")}`)}>
-                        <UserCheck size={14} /> {t("Override")}
-                      </button>
-                    )}
-                    {tk.delegateId && present && (
-                      <span className="mexc-present"><CheckCircle2 size={14} /> {t("Present")}</span>
-                    )}
                   </>
                 )}
                 <button className="mexc-btn danger" disabled={busy} aria-label={t("Delete")}
-                  onClick={() => act(tk.id, () => deleteException(tk.id), t("Ticket deleted"))}>
+                  onClick={() => setConfirmAction({ type: "delete", ticket: tk })}>
                   <Trash2 size={14} />
                 </button>
               </div>
@@ -368,12 +427,36 @@ export default function MobileExceptionsPage() {
 
       {modalOpen && (
         <LogExceptionModal
+          tripId={getMobileTripId()}
           onClose={() => setModalOpen(false)}
           onCreated={(_tk, wasCritical) => {
             setModalOpen(false);
             flash(wasCritical ? t("Critical alert pushed to all staff devices") : t("Exception logged"));
             load();
           }}
+        />
+      )}
+
+      {escalatingTicket && (
+        <EscalateModal
+          delegateId={escalatingTicket.delegateId}
+          delegateName={escalatingTicket.delegateName || t("Unidentified")}
+          tripId={getMobileTripId()}
+          defaultMessage={escalatingTicket.note || undefined}
+          onClose={() => setEscalatingTicket(null)}
+          onEscalated={onTicketEscalated}
+        />
+      )}
+      {confirmAction && (
+        <ConfirmDialog
+          title={confirmAction.type === "resolve" ? t("Resolve this ticket?") : t("Delete this ticket?")}
+          message={confirmAction.type === "resolve"
+            ? t("This marks the exception as handled. It'll move to the Resolved tab and stay in the record.")
+            : t("This permanently removes the ticket — there's no undo.")}
+          confirmLabel={confirmAction.type === "resolve" ? t("Resolve") : t("Delete")}
+          tone={confirmAction.type === "delete" ? "danger" : "default"}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={runConfirmedAction}
         />
       )}
 

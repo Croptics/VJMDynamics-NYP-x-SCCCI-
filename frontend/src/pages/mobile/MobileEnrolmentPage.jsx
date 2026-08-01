@@ -13,6 +13,11 @@ import { useEffect, useState, useCallback } from "react";
 import { RefreshCw, AlertTriangle, ScanFace, Mic, Bus, ChevronRight, CheckCircle2, Mail, Send, Loader2, Eye, X, Copy, Check } from "lucide-react";
 import { apiGet, apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
+// Scope the roster/coverage to the mobile trip switcher's current trip
+// (2026-07-31 — "add the trip change to exception") — this page used to pool
+// every delegate from every trip into one combined list regardless of which
+// trip Home had selected.
+import { getMobileTripId } from "../../lib/mobileTrip.js";
 
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
 const initials = (name) => (name || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
@@ -41,7 +46,11 @@ export default function MobileEnrolmentPage() {
   const load = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const [s, r] = await Promise.all([apiGet("/enroll/stats"), apiGet("/enroll/lookup")]);
+      const tripId = getMobileTripId();
+      const [s, r] = await Promise.all([
+        apiGet(`/enroll/stats?tripId=${encodeURIComponent(tripId)}`),
+        apiGet(`/enroll/lookup?tripId=${encodeURIComponent(tripId)}`),
+      ]);
       setStats(s); setRoster(r.matches || []);
     } catch (e) {
       setError(e.message || "Could not load enrolment data. Is the backend running?");
@@ -102,7 +111,7 @@ export default function MobileEnrolmentPage() {
     if (!window.confirm(`${t("Email an enrolment link to")} ${outstanding.length} ${t("delegate(s) who haven't enrolled?")}`)) return;
     setInviting("all"); setInviteMsg(null);
     try {
-      const r = await apiPost("/enroll/invite-all", { onlyMissing: true });
+      const r = await apiPost("/enroll/invite-all", { onlyMissing: true, tripId: getMobileTripId() });
       const skipped = (r.skippedNoEmail || []).length;
       const base = r.dryRun
         ? `${t("Preview only (dry run)")} — ${r.previewed} ${t("would be emailed")}`

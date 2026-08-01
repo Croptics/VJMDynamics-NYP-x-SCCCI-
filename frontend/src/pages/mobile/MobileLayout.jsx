@@ -5,15 +5,18 @@ import { getPermissions, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "./MobileChatBubble.jsx";
-// Re-added after taking Vimal's mobile UI wholesale (2026-07-29). These three
+// Re-added after taking Vimal's mobile UI wholesale (2026-07-29). These two
 // are FUNCTION, not styling, and his branch predates them:
-//   EscalationBanner — the "delegate escalated to office" alert, every route.
 //   SyncStatus       — the offline "N changes waiting to sync" pill. Without it
 //                      the offline attendance queue still works but becomes
 //                      invisible, which is worse than not having it.
 //   getMobileTripId  — the mobile trip switcher; his `const TRIP_ID = "t-1"`
 //                      silently pins the whole mobile app to the Beijing trip.
-import EscalationBanner from "../../components/EscalationBanner.jsx";
+// EscalationBanner was ALSO re-added here at the same time, but removed again
+// (2026-07-31, "hide the top bar escalation for mobile, that for admin or
+// desktop to see it") — the full-width red banner on every mobile route was
+// too intrusive for on-ground staff; Escalate-to-office alerts stay a
+// desktop/admin-only surface (Layout.jsx still renders it there).
 import SyncStatus from "../../components/SyncStatus.jsx";
 import { getMobileTripId } from "../../lib/mobileTrip.js";
 import "../../styles/mobile.css";
@@ -179,7 +182,6 @@ export default function MobileLayout({ onLogout }) {
         )}
       </div>
       <div className="mobile-page">
-        <EscalationBanner />
         <Outlet context={{ onLogout }} />
       </div>
       <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>

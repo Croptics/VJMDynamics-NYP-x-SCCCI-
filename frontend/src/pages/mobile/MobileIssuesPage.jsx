@@ -35,7 +35,7 @@ export default function MobileIssuesPage() {
 
   const loadDelegates = useCallback(async () => {
     try {
-      const rows = await getDelegates();
+      const rows = await getDelegates(getMobileTripId() || TRIP_ID_FALLBACK);
       setDelegates(rows.map((d) => ({ ...d, delegateId: d.id })));
     } catch { /* picker just shows "Unidentified" only */ }
   }, []);

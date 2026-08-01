@@ -21,6 +21,54 @@ import { useLang } from "../../lib/i18n.jsx";
  * automatically. The backend enforces every permission.
  */
 
+// Simplified New/Edit account form (2026-07-31 — "when I add new account,
+// just need 2 dropdown: Desktop web view [CRUD/Read-only], Mobile view
+// [CRUD/Read-only]. Keep it simple.") — replaces the "Apply an access role"
+// template picker + full per-permission checkbox tree that used to be the
+// ONLY way to set a Staff account's access, with two dropdowns. The detailed
+// checkbox tree still exists and is unchanged — it's what "Manage roles"
+// (the named access-TEMPLATE editor) uses to build a template in the first
+// place; this is just no longer how an individual ACCOUNT's access is set.
+//
+// Every desktopView/mobileView permission is always granted (an account can
+// always SEE every page/tab) — the two dropdowns only ever control WRITE
+// capability, which is what "CRUD" vs "Read-only" actually means. Action
+// permissions split into which surface can exercise them: some pages
+// (Trips board, Onboarding, Announcements, delegate CRUD) only exist on
+// desktop; Scanner and Exceptions have a real UI on BOTH desktop and mobile,
+// so either dropdown alone can grant them, and both must say Read-only to
+// revoke them.
+const DESKTOP_ONLY_ACTION_KEYS = ["manageDelegates", "exportData", "viewDelegateDetails", "manageTrips", "manageDocuments", "manageAnnouncements"];
+const SHARED_ACTION_KEYS = ["manageScanner", "manageExceptions"];
+
+/** "crud" if this surface's own action keys are currently granted, else
+ *  "readonly" — used both to render the dropdown's current value (when
+ *  editing an existing account, however its permissions actually got set)
+ *  and to know what the OTHER dropdown currently implies before recomputing
+ *  a shared key. Not a stored value — just a read of `perms`. */
+function accessLevelFor(perms, surface) {
+  const keys = surface === "desktop" ? DESKTOP_ONLY_ACTION_KEYS : SHARED_ACTION_KEYS;
+  return keys.some((k) => perms?.[k]) ? "crud" : "readonly";
+}
+
+/** Recomputes a full perms object from the two dropdown states. Desktop/
+ *  mobile VIEW permissions are always true; DESKTOP_ONLY_ACTION_KEYS follow
+ *  the desktop dropdown alone; SHARED_ACTION_KEYS follow whichever dropdown
+ *  says "crud" (an account with mobile Scanner access shouldn't lose it just
+ *  because Desktop is set to Read-only, and vice versa). manageAccounts is
+ *  never granted here — adminOnly, a Staff account can never have it
+ *  regardless of dropdown state. */
+function applyAccessLevels(perms, desktopLevel, mobileLevel) {
+  const next = { ...perms };
+  for (const p of PERMISSIONS) {
+    if (p.key === "manageAccounts") { next[p.key] = false; continue; }
+    if (p.group === "desktopView" || p.group === "mobileView") next[p.key] = true;
+  }
+  for (const k of DESKTOP_ONLY_ACTION_KEYS) next[k] = desktopLevel === "crud";
+  for (const k of SHARED_ACTION_KEYS) next[k] = desktopLevel === "crud" || mobileLevel === "crud";
+  return next;
+}
+
 const EMPTY_FORM = {
   username: "",
   name: "",
@@ -29,7 +77,10 @@ const EMPTY_FORM = {
   password: "",
   role: "staff",
   readOnly: false,
-  perms: { ...DEFAULT_PERMISSIONS, manageDelegates: true },
+  // Read-only/Read-only — the conservative starting point for the two
+  // dropdowns; an admin explicitly grants write access per surface rather
+  // than a new account starting with any create/edit/delete capability.
+  perms: applyAccessLevels(DEFAULT_PERMISSIONS, "readonly", "readonly"),
 };
 
 // Exactly two roles — role is now an independent field, submitted as-is
@@ -125,11 +176,6 @@ export default function AccountControlPage() {
   // wherever the mouse was released after dragging to select text in a
   // username/password field.
   const downOnBackdrop = useRef(false);
-  // Which PERM_GROUPS sections are collapsed in the New/Edit modal — a Set
-  // of group keys, so state persists across re-renders but resets (all
-  // expanded) every time the modal is freshly opened, see openCreate/
-  // openEdit below.
-  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
 
   // Search / filter / sort for the accounts table.
   const [search, setSearch] = useState("");
@@ -377,7 +423,6 @@ export default function AccountControlPage() {
     setEditingId(null);
     setForm({ ...EMPTY_FORM, perms: { ...EMPTY_FORM.perms } });
     setFormErr("");
-    setCollapsedGroups(new Set(PERM_GROUPS.map((g) => g.key)));
     setModalOpen(true);
   }
 
@@ -395,45 +440,48 @@ export default function AccountControlPage() {
       readOnly: !!a.readOnly,
     });
     setFormErr("");
-    setCollapsedGroups(new Set(PERM_GROUPS.map((g) => g.key)));
     setModalOpen(true);
   }
 
-  function togglePerm(key) {
-    setForm((f) => ({ ...f, perms: { ...f.perms, [key]: !f.perms[key] } }));
-  }
-
   function selectRole(role) {
-    setForm((f) => ({ ...f, role, readOnly: role === "admin" ? f.readOnly : false, perms: { ...f.perms, ...ROLE_PRESETS[role] } }));
+    setForm((f) => ({
+      ...f,
+      role,
+      readOnly: role === "admin" ? f.readOnly : false,
+      // Switching TO staff always lands on the clean Read-only/Read-only
+      // starting point (see applyAccessLevels above) rather than
+      // ROLE_PRESETS' raw per-key defaults, so the two dropdowns always show
+      // a predictable state right after a role switch.
+      perms: role === "admin" ? { ...f.perms, ...ROLE_PRESETS.admin } : applyAccessLevels(f.perms, "readonly", "readonly"),
+    }));
   }
 
   function toggleReadOnly() {
     setForm((f) => ({ ...f, readOnly: !f.readOnly }));
   }
 
+  // The two access dropdowns (2026-07-31 — see applyAccessLevels above).
+  function setDesktopAccess(level) {
+    setForm((f) => ({ ...f, perms: applyAccessLevels(f.perms, level, accessLevelFor(f.perms, "mobile")) }));
+  }
+  function setMobileAccess(level) {
+    setForm((f) => ({ ...f, perms: applyAccessLevels(f.perms, accessLevelFor(f.perms, "desktop"), level) }));
+  }
+
+  // "Access role" quick-fill dropdown (2026-07-31 — "add back the role to
+  // the permission") — re-added as a third dropdown, ABOVE the two simple
+  // ones: applies a named template's full, fine-grained permission set in
+  // one pick, same as before this was simplified, just a <select> instead
+  // of a row of buttons. The two Desktop/Mobile dropdowns below still work
+  // afterward — accessLevelFor() reads whatever ends up in form.perms
+  // regardless of whether a template or a dropdown set it, and re-picking
+  // either dropdown still fully overrides the template's fine print for
+  // that surface's actions.
   function applyTemplate(templateId) {
-    const tpl = roleTemplates.find((t) => t.id === templateId);
+    if (!templateId) return;
+    const tpl = roleTemplates.find((r) => r.id === templateId);
     if (!tpl) return;
     setForm((f) => ({ ...f, perms: { ...f.perms, ...tpl.permissions } }));
-  }
-
-  function toggleGroupCollapsed(groupKey) {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey);
-      return next;
-    });
-  }
-
-  // "Select all" toggles to "Deselect all" once every checkbox in the group
-  // is already ticked — same on/off convention as the accounts table's own
-  // header "select all" checkbox.
-  function setAllInGroup(groupKey, value) {
-    setForm((f) => {
-      const perms = { ...f.perms };
-      for (const p of PERMISSIONS) if (p.group === groupKey) perms[p.key] = value;
-      return { ...f, perms };
-    });
   }
 
   function mapError(e, fallbackCode) {
@@ -1006,30 +1054,48 @@ export default function AccountControlPage() {
               </label>
             )}
 
+            {/* Simplified to 3 dropdowns (2026-07-31 — "when I add new
+                account, just need 2 dropdown ... keep it simple", then "add
+                back the role to the permission") — replaces the access-role
+                template picker BUTTONS + full per-permission checkbox tree
+                that used to live here with a template SELECT plus the two
+                simple Desktop/Mobile ones. The detailed checkbox tree still
+                exists unchanged in "Manage roles" (PermissionCheckboxGroups
+                below), which is what BUILDS a named template in the first
+                place. Every page/tab stays visible regardless of dropdown
+                state; only write (create/edit/delete) capability is what
+                "Read-only" revokes — see applyAccessLevels above. */}
             {form.role === "staff" && (
               <>
-                <label className="field-label" style={{ marginTop: 14 }}>{t("Apply an access role")}</label>
-                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <label className="field-label" style={{ marginTop: 14 }}>{t("Access role")}</label>
+                <select className="input" value={matchRoleTemplate(form.perms, roleTemplates) || ""}
+                  onChange={(e) => applyTemplate(e.target.value)}>
+                  <option value="" disabled>{t("Custom")}</option>
                   {roleTemplates.map((tpl) => (
-                    <button key={tpl.id} type="button" className="btn btn-ghost" style={{ fontSize: 13 }}
-                      onClick={() => applyTemplate(tpl.id)}>
-                      {tpl.label}
-                    </button>
+                    <option key={tpl.id} value={tpl.id}>{tpl.label}</option>
                   ))}
-                  {roleTemplates.length === 0 && <span className="muted" style={{ fontSize: 12.5 }}>{t("No role templates yet.")}</span>}
-                </div>
-                <p className="muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>
-                  {t("Fills in the checkboxes below — still fully editable afterward, and nothing is saved until you click Save.")}
+                </select>
+                <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  {t("Quick-fills the two dropdowns below from a named template (edit templates under \"Manage roles\") — still fully overridable per surface afterward.")}
                 </p>
 
-                <PermissionCheckboxGroups
-                  perms={form.perms}
-                  onToggle={togglePerm}
-                  collapsedGroups={collapsedGroups}
-                  onToggleCollapsed={toggleGroupCollapsed}
-                  onSelectAllInGroup={setAllInGroup}
-                  t={t}
-                />
+                <label className="field-label" style={{ marginTop: 14 }}>{t("Desktop web view")}</label>
+                <select className="input" value={accessLevelFor(form.perms, "desktop")}
+                  onChange={(e) => setDesktopAccess(e.target.value)}>
+                  <option value="crud">{t("Full access (create, edit, delete)")}</option>
+                  <option value="readonly">{t("Read-only")}</option>
+                </select>
+
+                <label className="field-label" style={{ marginTop: 14 }}>{t("Mobile view")}</label>
+                <select className="input" value={accessLevelFor(form.perms, "mobile")}
+                  onChange={(e) => setMobileAccess(e.target.value)}>
+                  <option value="crud">{t("Full access (create, edit, delete)")}</option>
+                  <option value="readonly">{t("Read-only")}</option>
+                </select>
+
+                <p className="muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 4 }}>
+                  {t("Read-only can see every page and tab, but can't create, edit, delete, or check anyone in. For finer per-feature control, build a named template under \"Manage roles\" instead.")}
+                </p>
               </>
             )}
 
@@ -1234,7 +1300,7 @@ function RoleTemplatesModal({ templates, onClose, onChanged, t }) {
         {!editing ? (
           <>
             <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 14 }}>
-              {t("Named permission presets for the account form's quick-fill buttons and the Accounts list's Access-role filter.")}
+              {t("Named, fine-grained permission presets for the Accounts list's Access-role filter and badges — the New/Edit account form itself now uses the two simple Desktop/Mobile access dropdowns instead of applying a template directly.")}
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {templates.map((tpl) => (

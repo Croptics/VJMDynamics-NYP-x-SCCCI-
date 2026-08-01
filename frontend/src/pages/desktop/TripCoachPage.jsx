@@ -75,6 +75,12 @@ import {
   ChevronDown, Check,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../lib/api.js";
+// Offline-capable READ (2026-07-31) — the Trip/coach board is one of the
+// pages flagged as most important ("the manual, attendance, exception,
+// trip"): fetchAll() below used to just error out on any failure, including
+// a dead signal. See lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 import TripsListPage, { useTfTheme } from "./TripsListPage.jsx";
@@ -1740,6 +1746,8 @@ function CoachBoardView({ tripId }) {
   const [itinerary, setItinerary] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loadError, setLoadError] = useState(null);
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
 
   const [showItinerary, setShowItinerary] = useState(false);
   const [showAddDelegate, setShowAddDelegate] = useState(false);
@@ -1777,17 +1785,23 @@ function CoachBoardView({ tripId }) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [tripData, coachData, itinData, delData] = await Promise.all([
-        apiGet(`/trips/${tripId}/summary`),
-        apiGet(`/trips/${tripId}/coaches`),
-        apiGet(`/trips/${tripId}/itinerary`),
-        apiGet(`/delegates?tripId=${tripId}`),
+      const [tripRes, coachRes, itinRes, delRes] = await Promise.all([
+        cachedFetch(`trip-summary:${tripId}`, () => apiGet(`/trips/${tripId}/summary`)),
+        cachedFetch(`trip-coaches:${tripId}`, () => apiGet(`/trips/${tripId}/coaches`)),
+        cachedFetch(`trip-itinerary:${tripId}`, () => apiGet(`/trips/${tripId}/itinerary`)),
+        cachedFetch(`trip-delegates:${tripId}`, () => apiGet(`/delegates?tripId=${tripId}`)),
       ]);
-      setTrip(tripData);
-      setCoaches(coachData.coaches);
-      setItinerary(itinData.items);
-      setCategories(itinData.categories || []);
-      setDelegates(delData.delegates);
+      // Offline-capable READ (2026-07-31, "the manual, attendance, exception,
+      // trip" — this is the "trip" one): see lib/cachedFetch.js.
+      const stale = tripRes.stale || coachRes.stale || itinRes.stale || delRes.stale;
+      setCacheStale(stale);
+      setCacheAt([tripRes, coachRes, itinRes, delRes].find((r) => r.stale)?.at || null);
+      setTrip(tripRes.data);
+      setCoaches(coachRes.data.coaches);
+      setItinerary(itinRes.data.items);
+      setCategories(itinRes.data.categories || []);
+      setDelegates(delRes.data.delegates);
+      setLoadError(null); // got usable data either way (fresh or cached) — clear any prior real error
     } catch (e) { setLoadError(e.message); }
   }, [tripId]);
 
@@ -2094,6 +2108,7 @@ function CoachBoardView({ tripId }) {
     <div className={tfRootClass}>
       <div className="tf-page">
         <ToastStack toasts={toasts} onDismiss={dismissToast} />
+        <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 14 }} />
         {confirmState && <ConfirmDialog title={confirmState.title} message={confirmState.message} tone={confirmState.tone} onCancel={() => closeConfirm(false)} onConfirm={() => closeConfirm(true)} />}
         {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}

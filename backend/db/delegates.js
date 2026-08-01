@@ -17,6 +17,7 @@
 
 import { all, get, run } from "./connection.js";
 import { logActivity } from "./history.js";
+import { syncDelegateStatus } from "./exceptionSync.js";
 
 /* ---- Helpers ------------------------------------------------------------ */
 function initialsOf(name) {
@@ -251,6 +252,14 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   // callers now log a single consolidated summary entry themselves instead —
   // this flag just skips the per-delegate one so it isn't logged twice.
   if (!silent) await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
+  // Bi-directional exception linking (2026-07-31) — keep the delegate's
+  // auto-generated Exceptions ticket in sync whenever their status actually
+  // changes. Covers every write path that goes through updateDelegate()
+  // (dashboard edits, QR/face scan check-ins, checkpoint auto-transitions,
+  // bulk onboarding) for free; the two raw-SQL check-in routes that
+  // deliberately bypass this function call syncDelegateStatus() themselves —
+  // see routes/exceptions.js.
+  if (changes.status) await syncDelegateStatus(id, merged.status);
   return {
     ...merged, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,

@@ -8,6 +8,11 @@ import { Siren, Check, ArrowRight } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { isAlertSoundMuted } from "../lib/alertSound.js";
+// Trip-scoped (2026-07-31 — "if you escalate, it should be only the trip
+// within, not other trip can see that") — this used to poll every open
+// escalation across every trip regardless of which one was on screen. Same
+// "current trip" signal DashboardPage.jsx's own trip switcher writes to.
+import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../lib/activeTrip.js";
 
 // Polls for open escalations on every authenticated page (mounted once in
 // Layout.jsx) — deliberately more frequent than most of this app's polls
@@ -28,7 +33,9 @@ export default function EscalationBanner() {
     let alive = true;
     async function poll() {
       try {
-        const r = await apiGet("/escalations/open");
+        const tripId = getActiveTripId();
+        const qs = tripId ? `?tripId=${encodeURIComponent(tripId)}` : "";
+        const r = await apiGet(`/escalations/open${qs}`);
         if (!alive) return;
         const list = r.escalations || [];
         // Chime once per NEW escalation id, not on every poll tick for one
@@ -43,7 +50,11 @@ export default function EscalationBanner() {
     }
     poll();
     const iv = setInterval(poll, POLL_MS);
-    return () => { alive = false; clearInterval(iv); };
+    // Re-poll immediately on a trip switch (2026-07-31) — otherwise switching
+    // trips left a stale escalation from the PREVIOUS trip showing for up to
+    // POLL_MS, or hid a real one for the new trip just as long.
+    window.addEventListener(ACTIVE_TRIP_EVENT, poll);
+    return () => { alive = false; clearInterval(iv); window.removeEventListener(ACTIVE_TRIP_EVENT, poll); };
   }, []);
 
   // Tab-title flash (Tier 2) — alternates between the real title and an

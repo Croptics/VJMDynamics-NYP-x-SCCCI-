@@ -47,6 +47,12 @@ import {
   BedDouble,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../lib/api.js";
+// Offline-capable READ (2026-07-31) — the Dashboard/All-delegates table is
+// one of the pages flagged as most important ("the manual, attendance,
+// exception, trip"): load() below used to just error out the whole page on
+// any failure, including a dead signal. See lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
 import { ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
@@ -96,6 +102,53 @@ function saveSelectedTripId(id) {
   // bare localStorage write only fires the browser's `storage` event in OTHER
   // tabs, never this one.
   window.dispatchEvent(new CustomEvent(ACTIVE_TRIP_EVENT, { detail: id }));
+}
+
+/** A History tracker row that expands to list the affected delegates for a
+ *  consolidated system entry (2026-07-31 — "give me option to view detail by
+ *  dropdown ... to see which delegate"). `a.changes.affected` (see
+ *  db/history.js's logActivity()) is only ever present on the "System reset
+ *  N delegates..."/"System marked N delegates late..." batch entries from
+ *  routes/checkpoints.js — a normal single-delegate edit's `changes` is
+ *  still the plain {field:{from,to}} diff shape HistoryLogPage's Rollback
+ *  reads, untouched by this. */
+function HistoryEntryRow({ a, t, onDelete, canDelete }) {
+  const [open, setOpen] = useState(false);
+  const affected = a.changes?.affected;
+  return (
+    <div style={{ flexShrink: 0 }}>
+      <div className="row between" style={{ gap: 12, alignItems: "flex-start" }}>
+        <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+          <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
+          <div>
+            <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
+            <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
+            {affected?.length > 0 && (
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11.5, padding: "2px 8px", marginTop: 6 }}
+                onClick={() => setOpen((v) => !v)}
+              >
+                {open ? t("Hide delegates") : t("View delegates")} ({affected.length}) <ChevronDown size={12} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+              </button>
+            )}
+            {open && affected?.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                {affected.map((d) => (
+                  <span key={d.id} className="badge badge-neutral">{d.name}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        {canDelete && (
+          <button onClick={() => onDelete(a.id)} aria-label="Delete" style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 const EMPTY_FORM = {
@@ -187,6 +240,8 @@ export default function DashboardPage() {
   const [delegates, setDelegates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
   // Live wall clock for the header chip (2026-07-29). Ticks every 15s rather
   // than every second: the display is HH:MM, so a per-second interval would
   // re-render the whole Dashboard 60x a minute to change nothing. 15s bounds
@@ -289,6 +344,12 @@ export default function DashboardPage() {
   const [historyShowAll, setHistoryShowAll] = useState(false);
   useEffect(() => { setHistoryShowAll(false); }, [selectedTripId, historyScope]);
   const [exportOpen, setExportOpen] = useState(false);
+  // Confirmation toast after a successful Excel export (2026-07-31 — "add
+  // this pop up when I try to export my excel" — same "Exported N tickets"
+  // pattern Jayden's Exceptions inbox already shows, so downloading a
+  // workbook doesn't just silently close the modal with no feedback).
+  const [toast, setToast] = useState("");
+  function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2800); }
   const delegateTableRef = useRef(null);
   // Set by showDelegatesFiltered() when a KPI drill-down needs to scroll to the
   // roster table AFTER the tab switch has mounted it (2026-07-28).
@@ -445,6 +506,27 @@ export default function DashboardPage() {
       return next;
     });
   }
+  // "Escalate all" (2026-07-31 — "add button to Escalate all in dashboard
+  // alert and exception") — fires a real escalation for every currently
+  // Missing, not-yet-escalated delegate shown in this modal's Missing
+  // section, in one click, instead of opening the picker once per person.
+  // Uses a generic message and the server's own default recipients (every
+  // admin) — same fallback the single-delegate modal already uses.
+  const [escalateAllBusy, setEscalateAllBusy] = useState(false);
+  async function escalateAllMissing() {
+    if (!missingNotEscalated.length) return;
+    setEscalateAllBusy(true);
+    let ok = 0, already = 0, failed = 0;
+    for (const m of missingNotEscalated) {
+      try {
+        const r = await apiPost("/escalations", { tripId: currentTripUuid || null, delegateId: m.id });
+        if (r.alreadyOpen) already += 1; else ok += 1;
+      } catch { failed += 1; }
+    }
+    setEscalateAllBusy(false);
+    load();
+  }
+
   async function submitEscalation() {
     setEscalateSaving(true);
     setEscalateErr(null);
@@ -481,10 +563,10 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [dash, miss, dels, hist, checkpoints] = await Promise.all([
-        apiGet(`/trips/${selectedTripId}/dashboard`),
-        apiGet(`/trips/${selectedTripId}/missing`),
-        apiGet(`/trips/${selectedTripId}/delegates`),
+      const [dashRes, missRes, delsRes, hist, checkpoints] = await Promise.all([
+        cachedFetch(`dashboard-dash:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/dashboard`)),
+        cachedFetch(`dashboard-missing:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/missing`)),
+        cachedFetch(`dashboard-delegates:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/delegates`)),
         // This is the small inline "History tracker" card (360px scroll box on
         // the dashboard, not the full audit log — that's HistoryLogPage.jsx,
         // fetched separately at limit=1000 only when you open /history).
@@ -494,6 +576,14 @@ export default function DashboardPage() {
         apiGet(`/activity?limit=30${historyScope === "trip" ? `&tripId=${selectedTripId}` : ""}`),
         apiGet(`/trips/${selectedTripId}/checkpoints`).catch(() => null), // never blocks the rest of the dashboard
       ]);
+      const dash = dashRes.data, miss = missRes.data, dels = delsRes.data;
+      // Offline-capable READ (2026-07-31, "the manual, attendance, exception,
+      // trip" — this page's delegate list is the "attendance" one): see
+      // lib/cachedFetch.js. Only these 3 core calls fall back to a cache —
+      // history/checkpoints are best-effort extras already tolerant of
+      // failure and not worth caching.
+      setCacheStale(dashRes.stale || missRes.stale || delsRes.stale);
+      setCacheAt(dashRes.stale ? dashRes.at : missRes.stale ? missRes.at : delsRes.at);
       setData(dash);
       setMissing(miss.missing || []);
       setDelegates(dels.delegates || []);
@@ -1390,6 +1480,8 @@ export default function DashboardPage() {
         )}
       </div>
 
+      <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginTop: 20 }} />
+
       {/* ---- Error banner (shared by both tabs) --------------------------- */}
       {error && (
         <div
@@ -1415,7 +1507,22 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {exportOpen && <ExportModal tripId={selectedTripId} onClose={() => setExportOpen(false)} />}
+      {exportOpen && (
+        <ExportModal
+          tripId={selectedTripId}
+          onClose={() => setExportOpen(false)}
+          onExported={() => flash(t("Workbook downloaded"))}
+        />
+      )}
+      {toast && (
+        <div style={{
+          position: "fixed", left: "50%", bottom: 28, transform: "translateX(-50%)", zIndex: 80,
+          background: "var(--ink)", color: "var(--surface)", padding: "10px 18px", borderRadius: 999,
+          fontSize: 13.5, fontWeight: 500, boxShadow: "var(--shadow-lg)", maxWidth: "90vw", textAlign: "center",
+        }}>
+          {toast}
+        </div>
+      )}
 
       {headcountOpen && (
         <div style={S.overlay}
@@ -1908,20 +2015,7 @@ export default function DashboardPage() {
                   <div className="muted" style={{ fontSize: 13 }}>{t("Nothing today yet.")}</div>
                 )}
                 {shown.map((a) => (
-                  <div key={a.id} className="row between" style={{ gap: 12, alignItems: "flex-start", flexShrink: 0 }}>
-                    <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
-                      <span style={{ ...S.dot, background: activityColor(a.kind), marginTop: 6 }} />
-                      <div>
-                        <div style={{ fontSize: 14 }}>{translateActivityText(a.text, t)}</div>
-                        <div className="muted" style={{ fontSize: 12 }}>{a.time} · {a.via === "you" ? t("you") : a.via}</div>
-                      </div>
-                    </div>
-                    {perms.manageDelegates && (
-                      <button onClick={() => removeHistoryEntry(a.id)} aria-label="Delete" style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
-                        <Trash2 size={14} />
-                      </button>
-                    )}
-                  </div>
+                  <HistoryEntryRow key={a.id} a={a} t={t} onDelete={removeHistoryEntry} canDelete={perms.manageDelegates} />
                 ))}
                 {!historyShowAll && earlierCount > 0 && (
                   <button className="btn btn-ghost" style={{ fontSize: 12.5, alignSelf: "flex-start", flexShrink: 0 }} onClick={() => setHistoryShowAll(true)}>
@@ -2693,7 +2787,21 @@ export default function DashboardPage() {
                 <Bell size={18} color="var(--ink-3)" />
                 <h2 style={{ fontSize: 16 }}>{t("Alerts")}</h2>
               </div>
-              <button onClick={() => setAlertsOpen(false)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+              <div className="row" style={{ gap: 6 }}>
+                {/* 2026-07-31 — "add a button to link to the exception page,
+                    cause the alert is under exception also": Missing/Escalated
+                    delegates shown here now have a matching auto-generated
+                    ticket in the Exceptions inbox (see db/exceptionSync.js) —
+                    this is the shortcut over to the full record. */}
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12.5, padding: "5px 10px" }}
+                  onClick={() => { setAlertsOpen(false); navigate("/exceptions"); }}
+                >
+                  {t("View Exceptions")} <ChevronRight size={14} />
+                </button>
+                <button onClick={() => setAlertsOpen(false)} style={S.iconBtn} aria-label={t("Close")}><X size={18} /></button>
+              </div>
             </div>
 
             {missingNotEscalated.length === 0 && lateDelegates.length === 0 && cancelledDelegates.length === 0 && activeEscalations.length === 0 && (
@@ -2788,9 +2896,19 @@ export default function DashboardPage() {
                   <div className="row" style={{ gap: 6, color: "var(--st-missing)", fontWeight: 700, fontSize: 13.5 }}>
                     <AlertTriangle size={15} /> {missingNotEscalated.length} {t("Missing")}
                   </div>
-                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
-                    {t("View all")}
-                  </button>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12, padding: "3px 8px", color: "var(--st-missing)" }}
+                      onClick={escalateAllMissing}
+                      disabled={escalateAllBusy}
+                    >
+                      <Siren size={12} /> {escalateAllBusy ? t("Escalating…") : t("Escalate all")}
+                    </button>
+                    <button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 8px" }} onClick={() => { setAlertsOpen(false); showDelegatesFiltered("MISSING"); }}>
+                      {t("View all")}
+                    </button>
+                  </div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {missingNotEscalated.slice(0, 5).map((m) => (

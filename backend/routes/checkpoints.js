@@ -194,7 +194,7 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
     if (minutesUntil < 0 || minutesUntil > item.resetWindowMinutes) continue; // not in the pre-window
 
     const candidates = await all(
-      `SELECT id FROM delegates
+      `SELECT id, name FROM delegates
        WHERE trip_id = $1 AND "coachId" IS NOT NULL AND status IN ('ARRIVED', 'LATE', 'PRESENT')
          AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
       [item.tripId, item.id]
@@ -205,16 +205,22 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
     // delegate via updateDelegate()'s own default logging, which read as a
     // wall of identical "X: Y → Assigned" rows for what's really one system
     // event. silent:true skips that per-row entry.
+    //
+    // `affected` (2026-07-31, "give me option to view detail by dropdown ...
+    // to see which delegate") — the consolidated entry used to name only the
+    // COUNT; this records exactly which delegates so the frontend can render
+    // an expandable list instead of a bare "reset 3 delegates".
     let resetCount = 0;
+    const affected = [];
     for (const d of candidates) {
       const result = await updateDelegate(d.id, { status: "ASSIGNED" }, "System", { silent: true });
-      if (result) { updated++; resetCount++; }
+      if (result) { updated++; resetCount++; affected.push({ id: d.id, name: d.name }); }
     }
     if (resetCount > 0) {
       const label = item.title || "the next check-in";
       await logActivity(
         `System reset ${resetCount} delegate${resetCount === 1 ? "" : "s"} to Assigned ahead of ${label}.`,
-        "reassign", "System", { tripUuid: item.tripId }
+        "reassign", "System", { tripUuid: item.tripId, affected }
       );
     }
   }
@@ -252,11 +258,12 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
     const itemMinutes = h * 60 + m;
     if (nowMinutes - itemMinutes <= CHECKPOINT_GRACE_MINUTES) continue; // still current or upcoming
 
-    const delegates = await all(`SELECT id, status FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
+    const delegates = await all(`SELECT id, name, status FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
     // One consolidated History Log entry per checkpoint, same reasoning as
     // resetArrivedBeforeNextCheckpoint() above (2026-07-31) — was one entry
     // PER delegate via updateDelegate()'s default logging.
     let lateCount = 0;
+    const affected = [];
     for (const d of delegates) {
       const inserted = await get(
         `INSERT INTO checkpoint_checkins (itinerary_item_id, delegate_id, status, method, scanned_by)
@@ -293,10 +300,17 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
       // comment above already promises, instead of re-litigating a
       // long-past, already-resolved stop on every tick.
       if (inserted && d.status === "ASSIGNED") {
-        await updateDelegate(d.id, { status: "LATE" }, "System").catch((err) =>
-          console.error("  Checkpoint late-cutoff status sync failed:", err.message || err)
-        );
+        await updateDelegate(d.id, { status: "LATE" }, "System", { silent: true })
+          .then((result) => { if (result) { lateCount++; affected.push({ id: d.id, name: d.name }); } })
+          .catch((err) => console.error("  Checkpoint late-cutoff status sync failed:", err.message || err));
       }
+    }
+    if (lateCount > 0) {
+      const label = item.title || "a checkpoint";
+      await logActivity(
+        `System marked ${lateCount} delegate${lateCount === 1 ? "" : "s"} late for ${label}.`,
+        "reassign", "System", { tripUuid: item.tripId, affected }
+      );
     }
   }
   return { checked: items.length, updated };
@@ -600,16 +614,25 @@ router.get("/api/delegates/:id/checkpoint-timeline", requireAuth(), wrap(async (
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only view delegates on your own coach." });
   }
 
+  // BUG FIX (2026-07-31 — "currently on this delegate show day 3 and 4 even
+  // though this trip only have 2 day"): this join matched purely on
+  // itinerary_item_id with no check that the item actually belongs to the
+  // SAME trip as the delegate. A delegate who was ever moved between trips
+  // (or whose earlier trip's itinerary has since shrunk/been replaced) kept
+  // showing checkpoint rows tied to a DIFFERENT trip's itinerary_items —
+  // e.g. a 5-day trip's "Day 4 · Hotel breakfast" bleeding into a delegate
+  // now on a 2-day trip. Scoping the join to delegate.tripId keeps this
+  // strictly to the delegate's own trip's stops.
   const timeline = await all(
     `SELECT cc.id, cc.status, cc.method, cc.scanned_by AS "scannedBy",
             cc.created_at AS "createdAt", cc.updated_at AS "updatedAt",
             i.title AS "checkpointLabel", TO_CHAR(i.start_time, 'HH24:MI') AS "scheduledTime",
             i.day_number AS "dayNumber"
      FROM checkpoint_checkins cc
-     JOIN itinerary_items i ON i.id = cc.itinerary_item_id
+     JOIN itinerary_items i ON i.id = cc.itinerary_item_id AND i.trip_id = $2
      WHERE cc.delegate_id = $1
      ORDER BY i.day_number DESC, cc.updated_at DESC`,
-    [req.params.id]
+    [req.params.id, delegate.tripId]
   );
   res.json({ delegateId: delegate.id, delegateName: delegate.name, timeline });
 }));

@@ -30,7 +30,7 @@ import { Router } from "express";
 // `../lib/auth.js`, not `../auth.js` (re-applied at integration 2026-07-29):
 // JQ's server.js split moved auth into lib/, so this branch's original path no
 // longer resolves and the whole router would fail to load.
-import { requireAuth, requireKioskOrPermission } from "../lib/auth.js";
+import { requireAuth, requireKioskOrPermission, accountFromReq } from "../lib/auth.js";
 import {
   listDelegates,
   getDelegateById,
@@ -40,6 +40,9 @@ import {
   getDashboard,
   // Needed by the trip-scoping below — also re-applied at integration.
   resolveTripUuid,
+  // Coach-captain scoping (2026-07-31) — see the /api/attendance/coaches and
+  // /api/enroll/* routes below.
+  getVisibleCoachIds,
 } from "../data.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
@@ -300,8 +303,8 @@ const timeNow = () =>
  * so the scanner's trip switcher can test check-in against any trip, not
  * just the base one. Re-applied at integration 2026-07-29: this branch
  * predated it and dropping it would have broken the scanner's trip switcher. */
-async function liveDashboard(tripUuid = null) {
-  return getDashboard(tripUuid);
+async function liveDashboard(tripUuid = null, visibleCoachIds = null) {
+  return getDashboard(tripUuid, visibleCoachIds);
 }
 
 /* ============================================================================
@@ -311,10 +314,17 @@ async function liveDashboard(tripUuid = null) {
  * Optional ?tripId= (a "t-1"/uuid, resolved the same way the dashboard does)
  * scopes the coach list to that trip instead of the default base trip.
  * Re-applied at integration 2026-07-29 — see liveDashboard() above.
- * ========================================================================== */
+ *
+ * Coach-captain scoping (2026-07-31 — "same for the qr, face scanner and
+ * manual, should only see coach 1"): this fed the QR/Face/Manual scanner's
+ * "CHECKING IN TO" coach picker with EVERY coach on the trip regardless of
+ * who was asking, unlike /trips/:id/dashboard which already enforces
+ * getVisibleCoachIds() (see db/dashboard.js). Same helper, same null-for-
+ * admin/unrestricted-staff contract. */
 router.get("/api/attendance/coaches", requireAuth(), wrap(async (req, res) => {
   const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
-  const dash = await liveDashboard(tripUuid);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  const dash = await liveDashboard(tripUuid, visibleCoachIds);
   const trip = dash.trip || (await getTrip());
   res.json({
     trip: {
@@ -809,8 +819,26 @@ router.post("/api/attendance/demo-seed", requireAuth(), wrap(async (req, res) =>
  * Returns minimal fields only (id, name, coach, what's already enrolled):
  *   ?id=<delegateId>  exact record (used by the notification deep-link)
  *   ?name=<2+ chars>  name filter
+ *   ?tripId=<trip>    scope the roster to one trip (2026-07-31 — "add the
+ *                     trip change to exception"; the staff roster browse from
+ *                     MobileEnrolmentPage.jsx now passes the mobile trip
+ *                     switcher's current trip here instead of pooling every
+ *                     delegate from every trip into one list). Left off
+ *                     entirely by the emailed magic-link flow (?t=/?id=),
+ *                     which has no trip-switcher concept and must keep
+ *                     resolving across all trips exactly as before.
  *   (neither)         the full roster, so the enrol page can show a browsable
- *                     picker with everyone's coach instead of a blind search. */
+ *                     picker with everyone's coach instead of a blind search.
+ *
+ * Coach-captain scoping (2026-07-31 — "enrollment should only show coach 1
+ * delegate, admin can see all"): this route is deliberately UNAUTHENTICATED
+ * (see the block comment above) so the emailed magic-link flow works with no
+ * account at all — but the staff roster browse from MobileEnrolmentPage.jsx
+ * DOES call this signed in, sending the same Bearer token every other call
+ * carries. accountFromReq() resolves that token when present without
+ * REQUIRING one, so a captain-scoped Staff account gets the same
+ * getVisibleCoachIds() restriction as everywhere else, while an anonymous
+ * magic-link request (no token) still resolves to null == unrestricted. */
 router.get("/api/enroll/lookup", wrap(async (req, res) => {
   // ?t=<signed invite token> — the emailed link. Resolves to exactly one
   // delegate, and only while the token is still valid.
@@ -822,7 +850,11 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
     return fail(res, 410, "INVITE_EXPIRED", "That enrolment link has expired. Ask staff to send a new one.");
   }
   const q = String((req.query && req.query.name) || "").trim().toLowerCase();
-  const all = await listDelegates();
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  const account = await accountFromReq(req);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, account);
+  let all = await listDelegates(tripUuid);
+  if (visibleCoachIds) all = all.filter((d) => visibleCoachIds.has(d.coachId));
   const dash = await liveDashboard();
   const bios = await bioMap();
   const coachName = (cid) => {
@@ -974,12 +1006,22 @@ router.post("/api/enroll/invite", requireAuth(), wrap(async (req, res) => {
   res.json({ delegateId: delegate.id, name: delegate.name, ...result });
 }));
 
-/* POST /api/enroll/invite-all  { onlyMissing = true }
+/* POST /api/enroll/invite-all  { onlyMissing = true, tripId? }
  * Bulk-invites the roster. Defaults to only those NOT yet enrolled, and skips
- * anyone with no email on file (reported back so staff can fill them in). */
+ * anyone with no email on file (reported back so staff can fill them in).
+ * tripId (2026-07-31) scopes the bulk send to one trip, matching whatever
+ * MobileEnrolmentPage.jsx currently has on screen — without it this used to
+ * email EVERY delegate across every trip, not just the ones staff were
+ * looking at. Omit for the old all-trips behaviour. Also coach-captain
+ * scoped (same day) — a captain-scoped Staff account's bulk send only ever
+ * reaches their own coach's delegates, same as everywhere else this is
+ * enforced; req.account is already set here by requireAuth() above. */
 router.post("/api/enroll/invite-all", requireAuth(), wrap(async (req, res) => {
   const onlyMissing = (req.body || {}).onlyMissing !== false;
-  const all = await listDelegates();
+  const tripUuid = req.body?.tripId ? await resolveTripUuid(req.body.tripId) : null;
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
+  let all = await listDelegates(tripUuid);
+  if (visibleCoachIds) all = all.filter((d) => visibleCoachIds.has(d.coachId));
   const bios = await bioMap();
   const trip = await getTrip();
 
@@ -1016,9 +1058,17 @@ router.post("/api/enroll/invite-all", requireAuth(), wrap(async (req, res) => {
 
 /* GET /api/enroll/stats — how much of the roster is enrolled. Powers the
  * progress panel on the enrolment page so staff can see coverage at a glance
- * ("34 of 42 enrolled") instead of checking delegates one by one. */
-router.get("/api/enroll/stats", wrap(async (_req, res) => {
-  const all = await listDelegates();
+ * ("34 of 42 enrolled") instead of checking delegates one by one.
+ * ?tripId=<trip> scopes the coverage to one trip (2026-07-31), same as
+ * /enroll/lookup above — omit for the all-trips total. Same coach-captain
+ * scoping as /enroll/lookup too (accountFromReq resolves the Bearer token
+ * when present, without requiring one — see that route's comment). */
+router.get("/api/enroll/stats", wrap(async (req, res) => {
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  const account = await accountFromReq(req);
+  const visibleCoachIds = await getVisibleCoachIds(tripUuid, account);
+  let all = await listDelegates(tripUuid);
+  if (visibleCoachIds) all = all.filter((d) => visibleCoachIds.has(d.coachId));
   const bios = await bioMap();
   let face = 0, voice = 0, either = 0;
   for (const d of all) {

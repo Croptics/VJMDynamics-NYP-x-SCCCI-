@@ -30,20 +30,45 @@ import {
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import LogExceptionModal from "../../components/LogExceptionModal.jsx";
-import { getPermissions } from "../../lib/api.js";
+import EscalateModal from "../../components/EscalateModal.jsx";
+import ConfirmDialog from "../../components/ConfirmDialog.jsx";
+import { getPermissions, apiPost } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import {
   listExceptions, resolveException, deleteException, manualOverride, updatePriority,
   subscribeStream, fmtTime, issueLabel, ageMinutes, fmtAge, ageLevel, resolveMinutes,
   exportTicketsCsv, isCheckedIn,
 } from "../../lib/exceptionsApi.js";
+// Follows the same trip DashboardPage/TripCoachPage have selected (2026-07-31
+// — "add the trip change to exception"), instead of the fixed base TRIP_ID
+// this inbox used to always read regardless of the trip switcher.
+import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
+// Offline-capable READ (2026-07-31) — the Exceptions inbox is one of the
+// pages flagged as most important ("the manual, attendance, exception,
+// trip"): load() below used to just error out on any failure, including a
+// dead signal. See lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 import "./ExceptionInboxPage.css";
 
+// Every tab is mutually exclusive by design (2026-07-31 — "for the all tab,
+// hide the resolved one" / "pls fix the for critical tab also" / "the open
+// tab shouldn't show critical") — a ticket belongs on exactly ONE of
+// Critical/Open/Resolved, and All is just Critical+Open together, so nothing
+// is ever double-counted or double-shown across tabs:
+//   All      = every OPEN ticket, any priority
+//   Critical = OPEN + CRITICAL
+//   Open     = OPEN + NOT critical
+//   Resolved = RESOLVED, any priority
+// `count` computes each badge directly from the server's counts object
+// (open/criticalOpen) instead of a single countKey, since "Open"'s badge is
+// now a subtraction (open minus criticalOpen) that no single server field
+// already holds.
 const TABS = [
-  { key: "All",      countKey: "all",      filter: {} },
-  { key: "Critical", countKey: "critical", filter: { priority: "CRITICAL" } },
-  { key: "Open",     countKey: "open",     filter: { status: "OPEN" } },
-  { key: "Resolved", countKey: "resolved", filter: { status: "RESOLVED" } },
+  { key: "All",      count: (c) => c.open ?? 0,                          filter: { excludeStatus: "RESOLVED" } },
+  { key: "Critical", count: (c) => c.criticalOpen ?? 0,                  filter: { priority: "CRITICAL", excludeStatus: "RESOLVED" } },
+  { key: "Open",     count: (c) => Math.max(0, (c.open ?? 0) - (c.criticalOpen ?? 0)), filter: { status: "OPEN", excludePriority: "CRITICAL" } },
+  { key: "Resolved", count: (c) => c.resolved ?? 0,                      filter: { status: "RESOLVED" } },
 ];
 
 /* Donut slice colours, reused from the status palette so the chart reads as
@@ -73,6 +98,12 @@ export default function ExceptionInboxPage() {
   const [selected, setSelected] = useState(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
+  // Escalate pop-up + Resolve/Delete confirmations (2026-07-31 — "add the
+  // pop-up to select who to escalate to" / "add warning to delete, resolve").
+  const [escalatingTicket, setEscalatingTicket] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null); // { type: "resolve" | "delete", ticket }
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), AGE_TICK_MS);
@@ -81,8 +112,12 @@ export default function ExceptionInboxPage() {
 
   const load = useCallback(async () => {
     setError("");
+    const tripId = getActiveTripId();
     try {
-      const { tickets, counts } = await listExceptions(); // unfiltered — sliced below
+      const r = await cachedFetch(`exceptions:${tripId}`, () => listExceptions({}, tripId)); // unfiltered — sliced below
+      const { tickets, counts } = r.data;
+      setCacheStale(r.stale);
+      setCacheAt(r.at);
       setAllTickets(tickets);
       setCounts(counts);
       // Drop selections for tickets that no longer exist or are no longer open.
@@ -115,6 +150,14 @@ export default function ExceptionInboxPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 
+  // Re-load if the trip switcher changes elsewhere (Dashboard/TripCoachPage)
+  // while this inbox is still mounted, same signal the ChatBubble follows.
+  useEffect(() => {
+    const onSwitch = () => { setLoading(true); load(); };
+    window.addEventListener(ACTIVE_TRIP_EVENT, onSwitch);
+    return () => window.removeEventListener(ACTIVE_TRIP_EVENT, onSwitch);
+  }, [load]);
+
   function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2800); }
 
   async function act(id, fn, okMsg) {
@@ -131,6 +174,38 @@ export default function ExceptionInboxPage() {
     }
   }
 
+  /** Fires the actual Resolve/Delete after the confirm dialog's "Confirm"
+   *  (2026-07-31 — "pls add warning to delete, resolve button"). */
+  function runConfirmedAction() {
+    const { type, ticket } = confirmAction;
+    setConfirmAction(null);
+    if (type === "resolve") act(ticket.id, () => resolveException(ticket.id), t("Ticket resolved"));
+    else act(ticket.id, () => deleteException(ticket.id), t("Ticket deleted"));
+  }
+
+  /** "Escalate" on a ticket (2026-07-31 — "for the exception escalate button
+   *  also have the same feature to my escalate" / "add the pop-up to select
+   *  who to escalate to"). Opens the SAME real "Escalate to office" modal
+   *  Dashboard's own Escalate button uses (message + recipient picker), via
+   *  the shared EscalateModal component — rather than firing a real alert
+   *  silently with no way to say what's happening or pick who gets it. The
+   *  backend's escalation-create hook (routes/escalations.js ->
+   *  db/exceptionSync.js) already bumps this delegate's tracked ticket to
+   *  CRITICAL on its own; the direct updatePriority call in
+   *  onEscalated() below is the fallback for a manually-logged ticket (no
+   *  linked auto-ticket for that hook to find). */
+  function openEscalate(tk) {
+    if (!tk.delegateId) return;
+    setEscalatingTicket(tk);
+  }
+  async function onTicketEscalated() {
+    const tk = escalatingTicket;
+    setEscalatingTicket(null);
+    flash(t("Escalated to office — alert sent"));
+    if (tk) await updatePriority(tk.id, "CRITICAL").catch(() => {});
+    load();
+  }
+
   function handleCreated(_tk, wasCritical) {
     setModalOpen(false);
     flash(wasCritical ? t("Critical alert pushed to all staff devices") : t("Exception logged"));
@@ -141,7 +216,10 @@ export default function ExceptionInboxPage() {
   const byTab = useMemo(() => {
     const f = TABS.find((x) => x.key === tab).filter;
     return allTickets.filter(
-      (tk) => (!f.status || tk.status === f.status) && (!f.priority || tk.priority === f.priority)
+      (tk) => (!f.status || tk.status === f.status)
+        && (!f.excludeStatus || tk.status !== f.excludeStatus)
+        && (!f.priority || tk.priority === f.priority)
+        && (!f.excludePriority || tk.priority !== f.excludePriority)
     );
   }, [allTickets, tab]);
 
@@ -217,6 +295,35 @@ export default function ExceptionInboxPage() {
     flash(bits.join(" · "));
   }
 
+  /** "Escalate all" (2026-07-31 — "add button to Escalate all in dashboard
+   *  alert and exception") — real escalations (email/SMS/WhatsApp + an
+   *  `escalations` row, same as the single-ticket Escalate button), sent for
+   *  every SELECTED open ticket that has a delegate. No per-ticket message
+   *  picker for a bulk action this size — uses a generic message and the
+   *  server's own default recipients (every admin), same fallback the
+   *  EscalateModal itself uses when nothing's been unchecked. Tickets with
+   *  no delegateId (a general "Dead phone" note with nobody identified) are
+   *  skipped — there's no one to escalate. */
+  async function escalateSelected() {
+    const targets = tickets.filter((tk) => selected.has(tk.id) && tk.delegateId);
+    if (!targets.length) return;
+    setBulkBusy(true);
+    let ok = 0, already = 0, failed = 0;
+    for (const tk of targets) {
+      try {
+        const r = await apiPost("/escalations", { tripId: getActiveTripId(), delegateId: tk.delegateId, message: tk.note || undefined });
+        if (r.alreadyOpen) already += 1; else ok += 1;
+      } catch { failed += 1; }
+    }
+    setSelected(new Set());
+    setBulkBusy(false);
+    await load();
+    const bits = [`${ok} ${t("escalated")}`];
+    if (already) bits.push(`${already} ${t("already escalated")}`);
+    if (failed) bits.push(`${failed} ${t("failed")}`);
+    flash(bits.join(" · "));
+  }
+
   function handleExport() {
     if (!tickets.length) { flash(t("Nothing to export in this view")); return; }
     const stamp = new Date().toISOString().slice(0, 10);
@@ -227,51 +334,43 @@ export default function ExceptionInboxPage() {
   const critical = tickets.find((tk) => tk.priority === "CRITICAL" && tk.status === "OPEN");
 
   /* ---- Row actions -------------------------------------------------------
-   * Override is the manual attendance fallback: LOST_BADGE / FACE_MATCH_FAILED /
-   * DEAD_PHONE all describe someone standing right there who simply cannot be
-   * scanned, and resolving the ticket only closes the admin task — it does not
-   * (and must not) mark attendance, since a VIP_REQUEST or OTHER ticket has no
-   * attendance meaning at all. So the button stays, but only while it can still
-   * do something: once the delegate is checked in it is replaced by a marker,
-   * which also stops repeat clicks writing duplicate check_in_logs rows.
-   *
-   * "Checked in" is isCheckedIn(), not a bare === "ARRIVED", so a delegate still
-   * carrying the legacy PRESENT value is recognised too.
+   * Override (the manual "count present without a scan" fallback) was
+   * removed entirely (2026-07-31 — "can you remove the override button from
+   * exception") — Resolve/Escalate/Delete cover ticket handling; marking
+   * actual attendance now happens on the Attendance sheet/Scanner instead.
    * ----------------------------------------------------------------------- */
   const rowActions = (tk) => {
     if (!canEdit) return null;
-    const present = isCheckedIn(tk.delegateStatus);
     return (
       <div className="exc-actions">
         {tk.status === "OPEN" && (
           <>
             <button className="exc-btn-sm resolve" disabled={busyId === tk.id}
-              onClick={() => act(tk.id, () => resolveException(tk.id), t("Ticket resolved"))}>
+              onClick={() => setConfirmAction({ type: "resolve", ticket: tk })}>
               {t("Resolve")}
             </button>
-            {tk.priority !== "CRITICAL" && (
+            {/* Only MISSING_PERSON opens the real "Escalate to office" pop-up
+                (2026-07-31 — "for other issue, the escalate button should be
+                how originally my teammate have. only the missing person
+                should follow mine.") — every other issue type keeps Jayden's
+                original one-click local priority bump. */}
+            {tk.priority !== "CRITICAL" && tk.type === "MISSING_PERSON" && (
               <button className="exc-btn-sm escalate" disabled={busyId === tk.id}
-                title={t("Raise to critical — pushes an alert to all staff devices")}
+                title={t("Escalate to office — emails/SMS/WhatsApps the admin team, same as Escalate to office elsewhere")}
+                onClick={() => openEscalate(tk)}>
+                <ChevronsUp size={14} /> {t("Escalate")}
+              </button>
+            )}
+            {tk.priority !== "CRITICAL" && tk.type !== "MISSING_PERSON" && (
+              <button className="exc-btn-sm escalate" disabled={busyId === tk.id}
                 onClick={() => act(tk.id, () => updatePriority(tk.id, "CRITICAL"), t("Escalated — alert pushed to all staff"))}>
                 <ChevronsUp size={14} /> {t("Escalate")}
               </button>
             )}
-            {tk.delegateId && !present && (
-              <button className="exc-btn-sm" disabled={busyId === tk.id}
-                title={t("Count this delegate present without a scan")}
-                onClick={() => act(tk.id, () => manualOverride(tk.delegateId), `${tk.delegateName} ${t("marked present")}`)}>
-                <UserCheck size={14} /> {t("Override")}
-              </button>
-            )}
-            {tk.delegateId && present && (
-              <span className="exc-present-tag" title={t("Already checked in — nothing to override")}>
-                <CheckCircle2 size={14} /> {t("Present")}
-              </span>
-            )}
           </>
         )}
         <button className="exc-btn-sm danger" disabled={busyId === tk.id}
-          onClick={() => act(tk.id, () => deleteException(tk.id), t("Ticket deleted"))}>
+          onClick={() => setConfirmAction({ type: "delete", ticket: tk })}>
           {t("Delete")}
         </button>
       </div>
@@ -373,6 +472,8 @@ export default function ExceptionInboxPage() {
             kept because his stream handler still sets it; only the pill goes. */}
       </div>
 
+      <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 14 }} />
+
       {tiles}
 
       {critical && (
@@ -400,10 +501,10 @@ export default function ExceptionInboxPage() {
 
       <div className="exc-toolbar">
         <div className="exc-tabs" role="tablist">
-          {TABS.map(({ key, countKey }) => (
+          {TABS.map(({ key, count }) => (
             <button key={key} role="tab" aria-selected={tab === key}
               className={"exc-tab" + (tab === key ? " active" : "")} onClick={() => setTab(key)}>
-              {t(key)} <span className="count">· {counts[countKey] ?? 0}</span>
+              {t(key)} <span className="count">· {count(counts)}</span>
             </button>
           ))}
         </div>
@@ -446,6 +547,9 @@ export default function ExceptionInboxPage() {
           <span><strong>{selected.size}</strong> {t("selected")}</span>
           <div className="row" style={{ gap: 8 }}>
             <button className="exc-btn-sm" onClick={() => setSelected(new Set())} disabled={bulkBusy}>{t("Clear")}</button>
+            <button className="exc-btn-sm escalate" onClick={escalateSelected} disabled={bulkBusy}>
+              <ChevronsUp size={15} /> {bulkBusy ? t("Escalating…") : `${t("Escalate all")}`}
+            </button>
             <button className="btn btn-primary" onClick={resolveSelected} disabled={bulkBusy}>
               <CheckCircle2 size={15} /> {bulkBusy ? t("Resolving…") : `${t("Resolve")} ${selected.size}`}
             </button>
@@ -552,7 +656,29 @@ export default function ExceptionInboxPage() {
         {error && <div className="exc-state">{error} <button className="exc-btn-sm" onClick={load}>{t("Retry")}</button></div>}
       </div>
 
-      {modalOpen && <LogExceptionModal onClose={() => setModalOpen(false)} onCreated={handleCreated} />}
+      {modalOpen && <LogExceptionModal onClose={() => setModalOpen(false)} onCreated={handleCreated} tripId={getActiveTripId()} />}
+      {escalatingTicket && (
+        <EscalateModal
+          delegateId={escalatingTicket.delegateId}
+          delegateName={escalatingTicket.delegateName || t("Unidentified")}
+          tripId={getActiveTripId()}
+          defaultMessage={escalatingTicket.note || undefined}
+          onClose={() => setEscalatingTicket(null)}
+          onEscalated={onTicketEscalated}
+        />
+      )}
+      {confirmAction && (
+        <ConfirmDialog
+          title={confirmAction.type === "resolve" ? t("Resolve this ticket?") : t("Delete this ticket?")}
+          message={confirmAction.type === "resolve"
+            ? t("This marks the exception as handled. It'll move to the Resolved tab and stay in the record.")
+            : t("This permanently removes the ticket — there's no undo.")}
+          confirmLabel={confirmAction.type === "resolve" ? t("Resolve") : t("Delete")}
+          tone={confirmAction.type === "delete" ? "danger" : "default"}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={runConfirmedAction}
+        />
+      )}
       {toast && <div className="exc-toast">{toast}</div>}
     </div>
   );

@@ -14,6 +14,7 @@ import ChatBubble from "./ChatBubble.jsx";
 import EscalationBanner from "./EscalationBanner.jsx";
 import SyncStatus from "./SyncStatus.jsx";
 import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
+import { getActiveTripId } from "../lib/activeTrip.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
 import { getPermissions, apiGet } from "../lib/api.js";
@@ -66,7 +67,7 @@ export default function Layout({ onLogout }) {
   // previously hitting the backend twice every 15s forever.
   useVisiblePolling(async () => {
     try {
-      setOpenExceptions(await getCriticalOpenCount());
+      setOpenExceptions(await getCriticalOpenCount(getActiveTripId()));
     } catch {
       // Exception module unreachable/not seeded yet — leave the badge at 0
       // rather than showing a stale or broken count.

@@ -91,6 +91,13 @@ async function main() {
   if (!accs.length) throw new Error("No account found — start the server once so it seeds staff_194.");
   const raiser = accs[0].id;
 
+  // exception_tickets.trip_id is now trips.uuid_id, not the legacy TRIP_ID
+  // ("t-1") string (2026-07-31 migration in routes/exceptions.js) — resolve
+  // it once here rather than inserting the legacy id and violating the FK.
+  const { rows: [tripRow] } = await q("SELECT uuid_id FROM trips WHERE id = $1", [TRIP_ID]);
+  if (!tripRow?.uuid_id) throw new Error(`Trip "${TRIP_ID}" not found — start the server once so it seeds the base trip.`);
+  const tripUuid = tripRow.uuid_id;
+
   const byName = Object.fromEntries(delegates.map((d) => [d.name, d]));
   let n = 0;
   for (const [type, priority, status, note, delegateName] of TICKETS) {
@@ -101,7 +108,7 @@ async function main() {
          (id, trip_id, delegate_id, coach_id, type, priority, status, note,
           raised_by, resolved_by, client_event_id, created_at, resolved_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now() - ($12 || ' minutes')::interval, $13)`,
-      [randomUUID(), TRIP_ID, d?.id || null, d?.coachId || null, type, priority, status, note,
+      [randomUUID(), tripUuid, d?.id || null, d?.coachId || null, type, priority, status, note,
        raiser, resolved ? raiser : null, randomUUID(), String(n * 7), resolved ? new Date() : null]
     );
     n++;

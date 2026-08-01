@@ -38,8 +38,11 @@ import { Router } from "express";
 import { randomUUID } from "crypto";
 import pg from "pg";
 import { requireAuth, requirePermission } from "../lib/auth.js";
-import { resolveTripUuid } from "../data.js";
+import { resolveTripUuid, updateDelegate, resolveEscalation } from "../data.js";
 import { syncCurrentCheckpointStatus } from "./checkpoints.js";
+// Bi-directional exception linking (2026-07-31) — see that module's header
+// for why this is a standalone leaf module rather than living in this file.
+import { syncDelegateStatus, escalateAutoTicket, registerExceptionBroadcast } from "../db/exceptionSync.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
 // desmond.js's own edits already use; exported from there rather than
@@ -171,6 +174,46 @@ export async function initExceptions() {
   // migration. Capped in the column as well as the UI — never trust the client.
   await q(`ALTER TABLE exception_tickets ADD COLUMN IF NOT EXISTS type_other VARCHAR(${TYPE_OTHER_MAX})`);
 
+  // Bi-directional exception linking (2026-07-31) — distinguishes a ticket
+  // db/exceptionSync.js auto-generated from a delegate's live status from one
+  // staff raised by hand via Log Exception, so the auto-sync only ever
+  // touches its own tickets. See that file's header for the full picture.
+  await q(`ALTER TABLE exception_tickets ADD COLUMN IF NOT EXISTS is_auto BOOLEAN NOT NULL DEFAULT false`);
+
+  // Re-scope trip_id to trips.uuid_id (2026-07-31 — "add the trip change to
+  // exception"). This table was built (deviation #1 above) before the rest of
+  // the app settled on trips.uuid_id as the one real trip identifier, resolved
+  // everywhere else via resolveTripUuid() (dashboard, delegates, checkpoints,
+  // escalations, history, announcements, room assignment, exports — every one
+  // of them). exception_tickets was the sole holdout still FK'd to trips(id),
+  // the legacy varchar column ("t-1") — so no matter which trip was selected
+  // on the trip switcher, Exceptions could only ever show/write Beijing's
+  // tickets. Guarded on the column's current type so this only ever runs once
+  // per database: every row here pre-migration is trip_id='t-1' (the base
+  // only ever seeded exceptions for the one demo trip), so the backfill is a
+  // single unconditional join, not a per-row lookup.
+  const { rows: [tripIdCol] } = await q(
+    `SELECT data_type FROM information_schema.columns
+      WHERE table_name = 'exception_tickets' AND column_name = 'trip_id'`
+  );
+  if (tripIdCol?.data_type !== "uuid") {
+    await q(`ALTER TABLE exception_tickets ADD COLUMN trip_uuid UUID REFERENCES trips(uuid_id)`);
+    await q(`UPDATE exception_tickets x SET trip_uuid = t.uuid_id FROM trips t WHERE x.trip_id = t.id`);
+    await q(`ALTER TABLE exception_tickets ALTER COLUMN trip_uuid SET NOT NULL`);
+    await q(`ALTER TABLE exception_tickets DROP COLUMN trip_id`);
+    await q(`ALTER TABLE exception_tickets RENAME COLUMN trip_uuid TO trip_id`);
+    // The two indexes above were created on the old varchar column and dropped
+    // along with it — recreate them now that trip_id is the uuid column.
+    await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_trip ON exception_tickets(trip_id, status)`);
+    await q(`CREATE INDEX IF NOT EXISTS idx_exceptions_pri  ON exception_tickets(trip_id, priority) WHERE status = 'OPEN'`);
+    console.log("  Migrated exception_tickets.trip_id -> trips.uuid_id");
+  }
+
+  // Hands db/exceptionSync.js our SSE broadcast() closure (declared below,
+  // but hoisted — see that module's own header for why this is a callback
+  // registration rather than exceptionSync.js importing this file directly).
+  registerExceptionBroadcast(broadcast);
+
   console.log("  Exception module ready -> exception_tickets, check_in_logs");
 }
 
@@ -243,10 +286,16 @@ const shape = (r) => ({
  *  ROUTES — paths follow HIGH_LEVEL_DESIGN.md §3.6
  * ============================================================================= */
 
-/** GET /api/trips/:id/exceptions — list tickets (+ counts). Any signed-in user. */
+/** GET /api/trips/:id/exceptions — list tickets (+ counts). Any signed-in user.
+ *  :id follows every other trip-scoped route (dashboard/delegates/checkpoints/
+ *  …) in accepting either the legacy "t-1" alias or a real trip uuid_id,
+ *  resolved through the shared resolveTripUuid() — see the migration note in
+ *  initExceptions() above for why exception_tickets used to be the exception. */
 router.get("/api/trips/:id/exceptions", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  if (!tripUuid) return res.status(404).json({ error: "TRIP_NOT_FOUND", message: "Trip not found." });
   const { status, priority } = req.query;
-  const params = [req.params.id];
+  const params = [tripUuid];
   let where = "WHERE x.trip_id = $1";
   if (status)   { params.push(status);   where += ` AND x.status = $${params.length}`; }
   if (priority) { params.push(priority); where += ` AND x.priority = $${params.length}`; }
@@ -265,7 +314,7 @@ router.get("/api/trips/:id/exceptions", requireAuth(), wrap(async (req, res) => 
             COUNT(*) FILTER (WHERE status   = 'RESOLVED')::int AS resolved,
             COUNT(*) FILTER (WHERE priority = 'CRITICAL' AND status = 'OPEN')::int AS "criticalOpen"
        FROM exception_tickets WHERE trip_id = $1`,
-    [req.params.id]
+    [tripUuid]
   );
 
   res.json({ tickets: rows.map(shape), counts: c });
@@ -275,14 +324,16 @@ router.get("/api/trips/:id/exceptions", requireAuth(), wrap(async (req, res) => 
  * GET /api/trips/:id/exceptions/critical-count — cheap count for the sidebar badge.
  * Returns only the number of UNRESOLVED CRITICAL tickets, so the badge can stay
  * accurate without the sidebar pulling the whole ticket list on every page.
- * Any signed-in user.
+ * Any signed-in user. Same :id contract as the list route above.
  */
 router.get("/api/trips/:id/exceptions/critical-count", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  if (!tripUuid) return res.status(404).json({ error: "TRIP_NOT_FOUND", message: "Trip not found." });
   const { rows: [r] } = await q(
     `SELECT COUNT(*)::int AS n
        FROM exception_tickets
       WHERE trip_id = $1 AND priority = 'CRITICAL' AND status = 'OPEN'`,
-    [req.params.id]
+    [tripUuid]
   );
   res.json({ criticalOpen: r.n });
 }));
@@ -296,6 +347,8 @@ router.get("/api/exceptions/:id", requireAuth(), wrap(async (req, res) => {
 
 /** POST /api/trips/:id/exceptions — raise a ticket; CRITICAL pushes to devices. Needs manageExceptions. */
 router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), wrap(async (req, res) => {
+  const tripUuid = await resolveTripUuid(req.params.id);
+  if (!tripUuid) return res.status(404).json({ error: "TRIP_NOT_FOUND", message: "Trip not found." });
   const { delegateId, coachId, type, typeOther, priority, note, clientEventId } = req.body || {};
   if (!type) return res.status(400).json({ error: "TYPE_REQUIRED", message: "An issue type is required." });
 
@@ -329,6 +382,27 @@ router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), 
     return res.status(200).json({ ...shape(rows[0]), duplicate: true });
   }
 
+  // One open ticket per delegate at a time (2026-07-31 — "when you create new
+  // exception log, it should only allow one delegate at a time to log. if it
+  // same delegate, should not allow"). Staff logging a second ticket for a
+  // delegate who already has one open just fragments the same real-world
+  // issue across multiple rows instead of adding a note/escalating the
+  // existing one — this rejects it up front with a pointer to the ticket
+  // that's already open, rather than silently piling up duplicates.
+  if (delegateId) {
+    const existing = await q(
+      `SELECT id FROM exception_tickets WHERE trip_id = $1 AND delegate_id = $2 AND status = 'OPEN' LIMIT 1`,
+      [tripUuid, delegateId]
+    );
+    if (existing.rows.length) {
+      return res.status(409).json({
+        error: "DELEGATE_ALREADY_HAS_OPEN_TICKET",
+        message: "This delegate already has an open exception ticket. Resolve or escalate it instead of logging a new one.",
+        ticketId: existing.rows[0].id,
+      });
+    }
+  }
+
   // Derive the coach from the delegate when not supplied.
   let coach = coachId || null;
   if (!coach && delegateId) {
@@ -342,7 +416,7 @@ router.post("/api/trips/:id/exceptions", requirePermission("manageExceptions"), 
     `INSERT INTO exception_tickets
        (id, trip_id, delegate_id, coach_id, type, type_other, priority, status, note, raised_by, client_event_id, is_offline_origin)
      VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN',$8,$9,$10,$11)`,
-    [id, req.params.id, delegateId || null, coach, type, otherLabel, pri, note || null,
+    [id, tripUuid, delegateId || null, coach, type, otherLabel, pri, note || null,
      req.account.id, eventId, !!req.body?.isOfflineOrigin]
   );
 
@@ -363,11 +437,45 @@ router.patch("/api/exceptions/:id", requirePermission("manageExceptions"), wrap(
     const upd = await q(
       `UPDATE exception_tickets
           SET status='RESOLVED', resolved_at=now(), resolved_by=$1
-        WHERE id=$2 AND status='OPEN'`,
+        WHERE id=$2 AND status='OPEN'
+        RETURNING type, delegate_id`,
       [req.account.id, req.params.id]
     );
     if (!upd.rowCount) {
       return res.status(409).json({ error: "ALREADY_RESOLVED", message: "That ticket is already resolved." });
+    }
+    // Bi-directional exception linking (2026-07-31) — resolving a missing-
+    // person ticket from the Exceptions page checks the delegate back in,
+    // the reverse of syncDelegateStatus() opening/closing this same ticket
+    // off the delegate's OWN status. Resolve the ticket FIRST (above), so the
+    // updateDelegate() call below finds no open ticket left to re-resolve —
+    // avoids a duplicate no-op broadcast.
+    const { type: ticketType, delegate_id: ticketDelegateId } = upd.rows[0];
+    if (ticketType === "MISSING_PERSON" && ticketDelegateId) {
+      // If this delegate also has an open/acknowledged escalation (the
+      // Dashboard's "Alerts" Emergency banner — 2026-07-31, "if i resolve
+      // this [ticket] then on the dashboard alert should also resolve"),
+      // resolve THAT — db/escalations.js's own resolveEscalation() already
+      // flips the delegate to ARRIVED itself, so this covers both at once
+      // and keeps a single source of truth for the "how do I un-escalate a
+      // delegate" logic. Only falls back to flipping status directly when
+      // there's no escalation to resolve (a plain Missing ticket that was
+      // never escalated).
+      const esc = await q(
+        `SELECT id FROM escalations WHERE delegate_id = $1 AND status IN ('open','acknowledged')`,
+        [ticketDelegateId]
+      );
+      if (esc.rows.length) {
+        await resolveEscalation(esc.rows[0].id, actorOf(req));
+      } else {
+        // Only flip if they're STILL Missing — a ticket resolved long after
+        // the delegate was already checked in some other way shouldn't
+        // clobber whatever their current (correct) status is.
+        const d = await q('SELECT status FROM delegates WHERE id = $1', [ticketDelegateId]);
+        if (d.rows[0]?.status === "MISSING") {
+          await updateDelegate(ticketDelegateId, { status: "ARRIVED" }, actorOf(req));
+        }
+      }
     }
   } else {
     const sets = [];
@@ -441,6 +549,12 @@ router.post("/api/checkins/manual", requirePermission("manageExceptions"), wrap(
   // the override on the delegate so the dashboard head-count agrees.
   await q(`UPDATE delegates SET status='ARRIVED', "lastSeen"=$1 WHERE id=$2`,
     [`Manual override · ${new Date().toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", hour12: false })}`, delegateId]);
+  // Bi-directional exception linking (2026-07-31) — this route bypasses
+  // updateDelegate() (see the file-header note further down), so it can't
+  // pick up db/delegates.js's own syncDelegateStatus() call for free; done
+  // explicitly here instead. Clears any auto-generated Missing ticket the
+  // instant staff manually check this delegate in.
+  await syncDelegateStatus(delegateId, "ARRIVED");
 
   // Keep the checkpoint-scoped view (the scanner page's Boarded/Late/Missing
   // KPIs) in sync — a manual mark-present used to only flip the GLOBAL
@@ -503,6 +617,11 @@ router.post("/api/checkins/manual/undo", requirePermission("manageExceptions"), 
   if (lastLog.rows.length) await q(`DELETE FROM check_in_logs WHERE id = $1`, [lastLog.rows[0].id]);
 
   await q(`UPDATE delegates SET status=$1, "lastSeen"=NULL WHERE id=$2`, [restoredStatus, delegateId]);
+  // Bi-directional exception linking (2026-07-31) — same reasoning as the
+  // mark-present route above: undo can restore MISSING (the delegate was
+  // missing before an accidental "Mark present"), which should re-open their
+  // ticket exactly as if they'd just gone missing normally.
+  await syncDelegateStatus(delegateId, restoredStatus);
 
   if (checkpointTripId) {
     const tripUuid = await resolveTripUuid(checkpointTripId);

@@ -129,6 +129,22 @@ async function run(sql, params = []) { await pool.query(sql, params); }
  * day the moment its last item is deleted — this only takes over once an
  * itinerary actually exists. Called after every itinerary create/update/
  * delete. */
+/** Clears a stale "Current day" override and immediately recomputes it
+ *  (2026-07-31 — "checkpoint is the problem of why delegate didn't auto
+ *  change to assigned/late back"). Editing the itinerary is exactly the
+ *  moment a manually-frozen dayOf becomes most misleading — staff just
+ *  changed the schedule, so the system's idea of "today's stops" should
+ *  reflect it, not stay stuck on a value hand-typed before the edit. Without
+ *  this, both checkpoint auto-transition schedulers (routes/checkpoints.js)
+ *  keep matching against the WRONG day's itinerary indefinitely, since
+ *  syncTripDayOf() itself refuses to touch dayOf while the manual flag is on.
+ *  Called after every itinerary create/update/delete, same as
+ *  syncTotalDaysToItinerary() above. */
+async function clearManualDayOfAndResync(tripId) {
+  await run(`UPDATE trips SET "dayOfIsManual" = false WHERE uuid_id = $1`, [tripId]);
+  await syncTripDayOf(tripId);
+}
+
 async function syncTotalDaysToItinerary(tripId) {
   await run(
     `UPDATE trips t
@@ -624,7 +640,29 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     sets.push(`status = $${i++}`); params.push(b.status);
   }
   if (b.totalDays !== undefined) { sets.push(`"totalDays" = $${i++}`); params.push(Math.max(1, Number(b.totalDays) || 1)); }
-  if (b.startDate !== undefined) { sets.push(`"startDate" = $${i++}`); params.push(String(b.startDate).trim() || null); }
+  if (b.startDate !== undefined) {
+    sets.push(`"startDate" = $${i++}`); params.push(String(b.startDate).trim() || null);
+    // BUG FIX (2026-07-31 — "checkpoint is the problem of why delegate didn't
+    // auto change to assigned/late back"): syncTripDayOf() (below) refuses to
+    // touch "dayOf" while dayOfIsManual is true — its own WHERE clause
+    // excludes manual-override trips — so a startDate change used to call
+    // syncTripDayOf() and get silently ignored if "Current day" had EVER been
+    // hand-set once. A stale/frozen dayOf then makes BOTH auto-transition
+    // schedulers (applyCheckpointLateCutoff / resetArrivedBeforeNextCheckpoint
+    // in routes/checkpoints.js) look at the wrong day's itinerary — today's
+    // real stops never match `i.day_number = t."dayOf"`, so delegates stop
+    // auto-flipping Assigned<->Late entirely. Changing the actual start date
+    // is a strong enough signal that the override is stale — clear it here
+    // (unless this SAME request is also hand-setting `dayOf`, or already
+    // sending resetDayOfAuto:true — both handled below; pushing here TOO
+    // would add a second `"dayOfIsManual" = ...` to the same UPDATE's SET
+    // list, which Postgres rejects outright as "multiple assignments to
+    // same column" — surfaced to the user as a bare "Something went wrong
+    // on the server" with zero indication why. TripsListPage.jsx's Edit
+    // trip form always sends BOTH startDate and resetDayOfAuto together on
+    // every save, which is exactly the combination that hit this.)
+    if (b.dayOf === undefined && b.resetDayOfAuto !== true) sets.push(`"dayOfIsManual" = false`);
+  }
   if (b.departureTime !== undefined) {
     const dt = b.departureTime ? String(b.departureTime).trim() : null;
     if (dt && !HHMM_RE.test(dt)) return res.status(400).json({ error: "BAD_DEPARTURE_TIME", message: "Departure time must be HH:MM." });
@@ -987,6 +1025,7 @@ router.post("/api/trips/:tripId/itinerary", writeAccess, withTripUuid, wrap(asyn
     [req.tripUuid, Number(dayNumber), startTime, title.trim(), (location || "").trim() || null, Number(sortOrder) || 0, normalizeCategory(category), st, delay]
   );
   await syncTotalDaysToItinerary(req.tripUuid);
+  await clearManualDayOfAndResync(req.tripUuid);
   await recordEvent(req.tripUuid, req, {
     action: "itinerary.create", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" added to Day ${item.dayNumber}.`,
@@ -1015,6 +1054,7 @@ router.patch("/api/trips/:tripId/itinerary/:itemId", writeAccess, withTripUuid, 
   );
   if (!item) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
   await syncTotalDaysToItinerary(req.tripUuid);
+  await clearManualDayOfAndResync(req.tripUuid);
   await recordEvent(req.tripUuid, req, {
     action: "itinerary.update", entity: "itinerary", entityId: item.id, kind: "itinerary",
     summary: `Itinerary: "${item.title}" updated.`,
@@ -1080,6 +1120,7 @@ router.delete("/api/trips/:tripId/itinerary/:itemId", writeAccess, withTripUuid,
   );
   if (!deleted) return res.status(404).json({ error: "NOT_FOUND", message: "Itinerary item not found." });
   await syncTotalDaysToItinerary(req.tripUuid);
+  await clearManualDayOfAndResync(req.tripUuid);
   await recordEvent(req.tripUuid, req, {
     action: "itinerary.delete", entity: "itinerary", entityId: deleted.id, kind: "itinerary",
     summary: `Itinerary: "${deleted.title}" removed.`,

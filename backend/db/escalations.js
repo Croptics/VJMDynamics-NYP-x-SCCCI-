@@ -44,17 +44,27 @@ export async function createEscalation({ tripId, delegateId, message }, actor) {
  *  ("Cliff Chai — not answering calls", not just a bare id). Feeds ONLY the
  *  top banner — deliberately just 'open', not 'acknowledged' too, so
  *  acknowledging something actually clears it off the banner (see
- *  listActiveEscalations() below for where it goes instead). */
-export async function listOpenEscalations() {
-  return all(`
-    SELECT e.id, e.trip_id AS "tripId", t.name AS "tripName", e.delegate_id AS "delegateId",
-           d.name AS "delegateName", e.message, e.status, e.created_by AS "createdBy", e.created_at AS "createdAt"
-    FROM escalations e
-    LEFT JOIN trips t ON t.uuid_id = e.trip_id
-    LEFT JOIN delegates d ON d.id = e.delegate_id
-    WHERE e.status = 'open'
-    ORDER BY e.created_at DESC
-  `);
+ *  listActiveEscalations() below for where it goes instead).
+ *
+ *  tripId (2026-07-31 — "if you escalate, it should be only the trip within,
+ *  not other trip can see that") scopes the banner to whichever trip is
+ *  currently selected on the Dashboard — this used to return EVERY open
+ *  escalation across EVERY trip regardless of which one you were looking at,
+ *  so an emergency for a totally different trip could flash the banner while
+ *  you had another trip's dashboard open. Optional and defaults to
+ *  unscoped (null) so any other caller that still wants the app-wide view
+ *  keeps working unchanged. */
+export async function listOpenEscalations(tripId = null) {
+  return all(
+    `SELECT e.id, e.trip_id AS "tripId", t.name AS "tripName", e.delegate_id AS "delegateId",
+            d.name AS "delegateName", e.message, e.status, e.created_by AS "createdBy", e.created_at AS "createdAt"
+       FROM escalations e
+       LEFT JOIN trips t ON t.uuid_id = e.trip_id
+       LEFT JOIN delegates d ON d.id = e.delegate_id
+      WHERE e.status = 'open' ${tripId ? "AND e.trip_id = $1" : ""}
+      ORDER BY e.created_at DESC`,
+    tripId ? [tripId] : []
+  );
 }
 
 /** Every escalation that's open OR acknowledged (i.e. NOT yet resolved) —

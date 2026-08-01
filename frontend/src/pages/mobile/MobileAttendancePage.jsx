@@ -15,6 +15,12 @@ import { getMobileTripId } from "../../lib/mobileTrip.js";
 // on-site must survive a dead signal. See lib/outbox.js.
 import { patchDelegate, applyQueuedPatches } from "../../lib/delegateWrites.js";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
+// Offline-capable delegate READS (2026-07-31) — this is one of the pages
+// flagged as most important ("the manual, attendance, exception, trip"): a
+// dead signal used to mean load() below throws and the whole roster
+// disappears behind an error banner. See lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 // UNASSIGNED is deliberately excluded — delegates are assigned to a coach by
 // staff on the desktop admin pages BEFORE the event; mobile's job during the
 // event is tracking who's arrived/late/missing, not doing the assignment
@@ -109,6 +115,8 @@ export default function MobileAttendancePage() {
   const [coaches, setCoaches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState(() => {
     const s = (searchParams.get("status") || "ALL").toUpperCase();
@@ -190,10 +198,14 @@ export default function MobileAttendancePage() {
     setLoading(true);
     setError(null);
     try {
-      const [{ delegates: d }, dash] = await Promise.all([
-        apiGet(`/trips/${TRIP_ID}/delegates`),
-        apiGet(`/trips/${TRIP_ID}/dashboard`),
+      const [delegatesRes, dashRes] = await Promise.all([
+        cachedFetch(`mobile-attendance-delegates:${TRIP_ID}`, () => apiGet(`/trips/${TRIP_ID}/delegates`)),
+        cachedFetch(`mobile-attendance-dashboard:${TRIP_ID}`, () => apiGet(`/trips/${TRIP_ID}/dashboard`)),
       ]);
+      const { delegates: d } = delegatesRes.data;
+      const dash = dashRes.data;
+      setCacheStale(delegatesRes.stale || dashRes.stale);
+      setCacheAt(delegatesRes.stale ? delegatesRes.at : dashRes.at);
       // Re-checked here, not just at the top of load() (2026-07-30 — "weird
       // when i mark as cancelled, but then it reset it"): the entry guard
       // above only stops a NEW poll from starting while a save is underway —
@@ -426,6 +438,8 @@ export default function MobileAttendancePage() {
           arriving via a ?status=MISSING deep link read "10 delegates" above a
           list of 3 — actively misleading at the exact moment staff are
           counting people. */}
+
+      <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 10 }} />
 
       {error && (
         <div className="mobile-card" style={{ borderColor: "var(--st-missing)", background: "var(--st-missing-bg)" }}>

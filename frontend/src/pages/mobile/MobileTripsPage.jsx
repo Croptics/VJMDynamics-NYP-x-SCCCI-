@@ -4,6 +4,8 @@ import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from ".
 import { useLang } from "../../lib/i18n.jsx";
 import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 import DelegateTimeline from "../../components/DelegateTimeline.jsx";
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 
 function initials(name) {
   return (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
@@ -392,20 +394,29 @@ function TripDetail({ tripId, onBack }) {
   const [error, setError] = useState(null);
   const [selectedDelegate, setSelectedDelegate] = useState(null);
   const [attItem, setAttItem] = useState(null);
+  const [cacheStale, setCacheStale] = useState(false);
+  const [cacheAt, setCacheAt] = useState(null);
   const busy = useRef(false);
 
   const load = useCallback(async () => {
     if (busy.current) return;
     busy.current = true;
     try {
-      const [summary, coaches, itin, del] = await Promise.all([
-        apiGet(`/trips/${tripId}/summary`),
-        apiGet(`/trips/${tripId}/coaches`),
-        apiGet(`/trips/${tripId}/itinerary`),
-        apiGet(`/delegates?tripId=${tripId}`),
+      const [summaryRes, coachRes, itinRes, delRes] = await Promise.all([
+        cachedFetch(`trip-summary:${tripId}`, () => apiGet(`/trips/${tripId}/summary`)),
+        cachedFetch(`trip-coaches:${tripId}`, () => apiGet(`/trips/${tripId}/coaches`)),
+        cachedFetch(`trip-itinerary:${tripId}`, () => apiGet(`/trips/${tripId}/itinerary`)),
+        cachedFetch(`trip-delegates:${tripId}`, () => apiGet(`/delegates?tripId=${tripId}`)),
       ]);
-      setData({ summary, coaches: coaches.coaches || [], itinerary: itin.items || [], delegates: del.delegates || [] });
-      setError(null);
+      // Offline-capable READ (2026-07-31, "the manual, attendance, exception,
+      // trip" — this is the "trip" one, mirroring desktop TripCoachPage.jsx):
+      // see lib/cachedFetch.js. Same cache keys as the desktop board, so
+      // whichever side loaded last while online is what's available offline.
+      const stale = summaryRes.stale || coachRes.stale || itinRes.stale || delRes.stale;
+      setCacheStale(stale);
+      setCacheAt([summaryRes, coachRes, itinRes, delRes].find((r) => r.stale)?.at || null);
+      setData({ summary: summaryRes.data, coaches: coachRes.data.coaches || [], itinerary: itinRes.data.items || [], delegates: delRes.data.delegates || [] });
+      setError(null); // got usable data either way (fresh or cached)
     } catch (e) { setError(e.message); }
     finally { busy.current = false; }
   }, [tripId]);
@@ -443,23 +454,6 @@ function TripDetail({ tripId, onBack }) {
   const currentDay = trip?.dayOf ?? 1;
   const stops = (data?.itinerary || []).slice().sort((a, b) => (a.dayNumber - b.dayNumber) || a.startTime.localeCompare(b.startTime));
   const shownStops = mode === "live" ? stops.filter((s) => s.dayNumber === currentDay) : stops;
-  // Scoped counts for the command-centre KPI row.
-  const statDelegates = scopedToCoach ? (data?.delegates || []).filter((d) => myCoachIds.has(d.coachId)) : (data?.delegates || []);
-  const stats = {
-    present: statDelegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
-    late: statDelegates.filter((d) => d.status === "LATE").length,
-    missing: statDelegates.filter((d) => d.status === "MISSING").length,
-    unassigned: scopedToCoach ? 0 : (data?.delegates || []).filter((d) => !(d.coachId && coachIds.has(d.coachId))).length,
-    coaches: scopedToCoach ? 1 : (data?.coaches || []).length,
-    total: statDelegates.length,
-  };
-  const opsKpi = (n, label, tone) => (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "10px 12px", borderRadius: 12, background: "var(--surface)", border: "1px solid var(--line)", borderTop: `3px solid var(--st-${tone}, var(--ink))` }}>
-      <span style={{ fontSize: 22, fontWeight: 800, lineHeight: 1, color: `var(--st-${tone}, var(--ink))` }}>{n}</span>
-      <span style={{ fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--ink-3)" }}>{label}</span>
-    </div>
-  );
-
   // m-fade-in to match the rest of the mobile UI (2026-07-29).
   return (
     <div className="m-fade-in">
@@ -474,6 +468,7 @@ function TripDetail({ tripId, onBack }) {
           {t("Couldn't reach the backend")} — {error}
         </div>
       )}
+      <CachedDataBadge stale={cacheStale} at={cacheAt} style={{ marginBottom: 10 }} />
 
       {!trip ? <div className="muted">{t("Loading…")}</div> : (
         <>
@@ -488,15 +483,10 @@ function TripDetail({ tripId, onBack }) {
               : `${(data.coaches || []).length} ${t("coaches")} · ${(data.delegates || []).length} ${t("delegates")}`}
           </div>
 
-          {/* Command-centre KPIs (live) */}
-          {mode === "live" && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginTop: 14 }}>
-              {opsKpi(`${stats.present}/${stats.total}`, t("Checked in"), "present")}
-              {opsKpi(stats.late, t("Late"), "late")}
-              {opsKpi(stats.missing, t("Missing"), "missing")}
-              {opsKpi(stats.unassigned, t("Unassigned"), "late")}
-            </div>
-          )}
+          {/* Command-centre KPI row removed (2026-07-31 — "remove the button
+              kpi under trip") — duplicated the same Checked in/Missing/Late
+              numbers the Ops screen's own "Live headcount" card above the
+              Delegates/Exceptions/Trips switch already shows. */}
 
           {/* Itinerary */}
           <div className="mobile-card" style={{ marginTop: 14, border: "1px solid var(--line)", background: "var(--surface)" }}>

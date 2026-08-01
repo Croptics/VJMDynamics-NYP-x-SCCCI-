@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
-import { LogOut, ShieldCheck, HelpCircle, ChevronRight, Settings, Moon, Sun, Languages, Zap, Monitor, Smartphone, ChevronDown, Pencil, Mail, X } from "lucide-react";
-import { getUser, getPermissions, clearToken, apiPatch, updateSession } from "../../lib/api.js";
+import { LogOut, ShieldCheck, HelpCircle, ChevronRight, Settings, Moon, Sun, Languages, Zap, Monitor, Smartphone, ChevronDown, Pencil, Mail, X, Camera, Trash2 } from "lucide-react";
+import { getUser, getPermissions, clearToken, apiPatch, apiPost, apiDelete, updateSession } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
 import PasskeyManager from "../../components/PasskeyManager.jsx";
+// Profile photo (2026-07-31 — "mobile add profile add image") — reuses the
+// EXACT same crop/upload flow SettingsPage.jsx's desktop self-service profile
+// already has (POST/DELETE /api/auth/me/photo), just via mobile's native file
+// picker instead of desktop's "take a photo (webcam) / upload a file" menu —
+// a phone's own file picker already offers "Camera" as one of its options,
+// so there's no separate getUserMedia capture step needed here.
+import PhotoCropModal from "../../components/PhotoCropModal.jsx";
 // Same source Account control's Edit-role modal reads (2026-07-30 — "organise
 // this permission part, improve the uiux") — this page was dumping raw
 // camelCase keys (`viewMobileAllTrips`, `manageAnnouncements`...) as a flat,
@@ -42,6 +49,45 @@ export default function MobileProfilePage() {
   const [profileForm, setProfileForm] = useState(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileErr, setProfileErr] = useState(null);
+  // Profile photo — same PATCH-adjacent flow as SettingsPage.jsx (see the
+  // import comment above).
+  const [cropFile, setCropFile] = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [enlargePhoto, setEnlargePhoto] = useState(false);
+  const fileInputRef = useRef(null);
+  function pickPhoto() { fileInputRef.current?.click(); }
+  function onPhotoChosen(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file later
+    if (file) setCropFile(file);
+  }
+  async function handleCropSave(blob) {
+    setCropFile(null);
+    setPhotoBusy(true);
+    setProfileErr(null);
+    try {
+      const form = new FormData();
+      form.append("photo", blob, "avatar.jpg");
+      const result = await apiPost("/auth/me/photo", form, true);
+      updateSession({ user: { photoUrl: result.photoUrl } });
+    } catch (e) {
+      setProfileErr(e.message);
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+  async function removePhoto() {
+    setPhotoBusy(true);
+    setProfileErr(null);
+    try {
+      await apiDelete("/auth/me/photo");
+      updateSession({ user: { photoUrl: null } });
+    } catch (e) {
+      setProfileErr(e.message);
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
   const PROFILE_ERR_TEXT = {
     USERNAME_REQUIRED: t("Username is required."),
     USERNAME_TAKEN: t("That username is already taken."),
@@ -130,9 +176,34 @@ export default function MobileProfilePage() {
 
       <div className="mobile-card row between" style={{ gap: 12, alignItems: "flex-start" }}>
         <div className="row" style={{ gap: 12, minWidth: 0 }}>
-          <span className="avatar" style={{ width: 44, height: 44, background: "var(--scc-red-tint)", color: "var(--scc-red)", fontSize: 15, flexShrink: 0 }}>
-            {initials}
-          </span>
+          <div style={{ position: "relative", flexShrink: 0 }}>
+            {user.photoUrl ? (
+              <img
+                src={user.photoUrl}
+                alt=""
+                onClick={() => setEnlargePhoto(true)}
+                style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", cursor: "pointer", border: "1px solid var(--line)" }}
+              />
+            ) : (
+              <span className="avatar" style={{ width: 44, height: 44, background: "var(--scc-red-tint)", color: "var(--scc-red)", fontSize: 15 }}>
+                {initials}
+              </span>
+            )}
+            <button
+              onClick={pickPhoto}
+              disabled={photoBusy}
+              aria-label={t("Change photo")}
+              title={t("Change photo")}
+              style={{
+                position: "absolute", right: -2, bottom: -2, width: 18, height: 18, borderRadius: "50%",
+                background: "var(--surface)", border: "1px solid var(--line)", display: "grid", placeItems: "center",
+                cursor: photoBusy ? "default" : "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", padding: 0,
+              }}
+            >
+              <Camera size={10} />
+            </button>
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={onPhotoChosen} style={{ display: "none" }} />
+          </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: 15 }}>{displayName}</div>
             <span className="badge badge-neutral" style={{ padding: "1px 8px", fontSize: 11, marginTop: 3, display: "inline-block" }}>{roleLabel}</span>
@@ -142,12 +213,37 @@ export default function MobileProfilePage() {
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</span>
               </div>
             )}
+            {user.photoUrl && (
+              <button
+                className="btn btn-ghost"
+                onClick={removePhoto}
+                disabled={photoBusy}
+                style={{ fontSize: 11.5, padding: "2px 8px", height: "auto", marginTop: 5 }}
+              >
+                <Trash2 size={11} /> {t("Remove photo")}
+              </button>
+            )}
           </div>
         </div>
         <button className="btn btn-ghost" style={{ flexShrink: 0, padding: "6px 10px", fontSize: 12.5 }} onClick={openEditProfile}>
           <Pencil size={13} /> {t("Edit profile")}
         </button>
       </div>
+
+      {cropFile && (
+        <PhotoCropModal file={cropFile} onCancel={() => setCropFile(null)} onSave={handleCropSave} t={t} />
+      )}
+      {enlargePhoto && user.photoUrl && (
+        <div
+          onClick={() => setEnlargePhoto(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "grid", placeItems: "center", zIndex: 60, cursor: "zoom-out" }}
+        >
+          <img src={user.photoUrl} alt="" style={{ maxWidth: "min(80vw, 480px)", maxHeight: "80vh", borderRadius: 12 }} />
+        </div>
+      )}
+      {profileErr && !editingProfile && (
+        <div style={{ color: "var(--scc-red)", fontSize: 12.5, marginTop: -8, marginBottom: 12 }}>{profileErr}</div>
+      )}
 
       {editingProfile && (
         <div

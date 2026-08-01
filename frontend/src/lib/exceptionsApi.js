@@ -59,36 +59,38 @@ export function issueLabel(ticket) {
 }
 
 /**
- * List tickets for the active trip.
+ * List tickets for a trip (defaults to the base TRIP_ID for any caller that
+ * hasn't been updated to pass one).
  * @param {{status?: string, priority?: string}} filter
+ * @param {string} [tripId]  trip switcher's current trip (uuid_id), or "t-1"
  * @returns {Promise<{tickets: Array, counts: {all:number,critical:number,open:number,resolved:number}}>}
  */
-export async function listExceptions(filter = {}) {
+export async function listExceptions(filter = {}, tripId = TRIP_ID) {
   const qs = new URLSearchParams();
   if (filter.status) qs.set("status", filter.status);
   if (filter.priority) qs.set("priority", filter.priority);
   const suffix = qs.toString() ? `?${qs}` : "";
-  return apiGet(`/trips/${TRIP_ID}/exceptions${suffix}`);
+  return apiGet(`/trips/${tripId}/exceptions${suffix}`);
 }
 
 /**
  * Number of UNRESOLVED CRITICAL tickets — drives the sidebar badge.
  * Cheap: the server returns a single integer, not the ticket list.
  */
-export async function getCriticalOpenCount() {
-  const data = await apiGet(`/trips/${TRIP_ID}/exceptions/critical-count`);
+export async function getCriticalOpenCount(tripId = TRIP_ID) {
+  const data = await apiGet(`/trips/${tripId}/exceptions/critical-count`);
   return data.criticalOpen ?? 0;
 }
 
 /** Delegates for the picker. Reads JQ's existing delegate endpoint. */
-export async function getDelegates() {
-  const data = await apiGet(`/trips/${TRIP_ID}/delegates`);
+export async function getDelegates(tripId = TRIP_ID) {
+  const data = await apiGet(`/trips/${tripId}/delegates`);
   return data.delegates || [];
 }
 
 /** Coaches (from the shared dashboard view), keyed id → "Coach 2". */
-export async function getCoaches() {
-  const data = await apiGet(`/trips/${TRIP_ID}/dashboard`);
+export async function getCoaches(tripId = TRIP_ID) {
+  const data = await apiGet(`/trips/${tripId}/dashboard`);
   return data.coaches || [];
 }
 
@@ -100,17 +102,18 @@ export async function getCoaches() {
  * @param {string} [o.typeOther]    free-text label, required when type === 'OTHER'
  * @param {string} [o.priority]     'CRITICAL' | 'NORMAL' | 'LOW'
  * @param {boolean}[o.markCritical] legacy shorthand — forces CRITICAL
+ * @param {string} [o.tripId]       trip switcher's current trip; defaults to TRIP_ID
  *
  * `markCritical` is honoured for backwards compatibility and always wins, since
  * the Critical toggle is the escalation switch. Otherwise the explicit
  * `priority` is used, defaulting to NORMAL.
  */
-export async function createException({ type, typeOther, delegateId, coachId, note, priority, markCritical }) {
+export async function createException({ type, typeOther, delegateId, coachId, note, priority, markCritical, tripId = TRIP_ID }) {
   const finalPriority = markCritical
     ? "CRITICAL"
     : (["CRITICAL", "NORMAL", "LOW"].includes(priority) ? priority : "NORMAL");
 
-  return apiPost(`/trips/${TRIP_ID}/exceptions`, {
+  return apiPost(`/trips/${tripId}/exceptions`, {
     type,
     typeOther: type === "OTHER" ? (typeOther || "").trim().slice(0, TYPE_OTHER_MAX) : null,
     delegateId: delegateId || null,

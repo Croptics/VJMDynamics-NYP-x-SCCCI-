@@ -22,7 +22,7 @@ const UNASSIGNED_KEY = "__unassigned";
  * editable — the AI never produces the file directly). Download streams a
  * polished multi-sheet workbook from POST /api/trips/:id/export.
  */
-export default function ExportModal({ tripId, onClose }) {
+export default function ExportModal({ tripId, onClose, onExported }) {
   const { t, lang } = useLang();
   const [opts, setOpts] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
@@ -136,6 +136,11 @@ export default function ExportModal({ tripId, onClose }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+      // Confirmation toast (2026-07-31 — "add this pop up when I try to
+      // export my excel") — same idea as Jayden's "Exported N tickets" toast
+      // on the Exceptions inbox; downloading a workbook used to just close
+      // this modal with no feedback that anything happened.
+      onExported?.();
       onClose();
     } catch (e) {
       setErr(e.message || t("Export failed"));

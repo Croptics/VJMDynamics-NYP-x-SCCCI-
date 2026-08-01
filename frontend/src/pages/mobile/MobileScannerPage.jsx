@@ -50,6 +50,12 @@ import MobileManualCheckIn from "./MobileManualCheckIn.jsx";
 // the base trip and undoes the mobile trip switcher. Read per-render instead so
 // switching trips on Home propagates here.
 import { getMobileTripId } from "../../lib/mobileTrip.js";
+// Offline-capable READ (2026-07-31) — Manual check-in is one of the pages
+// flagged as most important for this ("the manual, attendance, exception,
+// trip"): fetchCoach() below used to just null out the whole roster on any
+// failure, including a dead signal — see lib/cachedFetch.js.
+import { cachedFetch } from "../../lib/cachedFetch.js";
+import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 
 // Offline queue — check-ins captured while the phone has no signal (on a
 // highway between venues) are stashed in localStorage and replayed to the
@@ -193,6 +199,8 @@ export default function MobileScannerPage({ lockMode }) {
   const [coaches, setCoaches] = useState([]);
   const [coachId, setCoachId] = useState(null);
   const [coach, setCoach] = useState(null);
+  const [coachStale, setCoachStale] = useState(false);
+  const [coachCacheAt, setCoachCacheAt] = useState(null);
   const [loadErr, setLoadErr] = useState("");
 
   const [scanMode, setScanMode] = useState(lockMode || "face"); // face | qr | manual
@@ -254,7 +262,7 @@ export default function MobileScannerPage({ lockMode }) {
   const fetchCoaches = useCallback(async () => {
     try {
       setLoadErr("");
-      const data = await apiGet("/attendance/coaches");
+      const { data } = await cachedFetch("mobile-manual-checkin-coach-list", () => apiGet("/attendance/coaches"));
       setCoaches(data.coaches || []);
       setCoachId((prev) => {
         if (prev && (data.coaches || []).some((c) => c.id === prev)) return prev;
@@ -269,9 +277,13 @@ export default function MobileScannerPage({ lockMode }) {
   const fetchCoach = useCallback(async (id) => {
     if (!id) { setCoach(null); return; }
     try {
-      setCoach(await apiGet(`/attendance/${TRIP_ID}/coach/${id}`));
+      const r = await cachedFetch(`mobile-manual-checkin-coach:${TRIP_ID}:${id}`, () => apiGet(`/attendance/${TRIP_ID}/coach/${id}`));
+      setCoach(r.data);
+      setCoachStale(r.stale);
+      setCoachCacheAt(r.at);
     } catch {
       setCoach(null);
+      setCoachStale(false);
     }
   }, []);
 
@@ -910,6 +922,7 @@ export default function MobileScannerPage({ lockMode }) {
           camera feed. Everything camera-shaped below is skipped in this mode. */}
       {scanMode === "manual" && (
         <>
+          <CachedDataBadge stale={coachStale} at={coachCacheAt} style={{ marginBottom: 10 }} />
           <MobileManualCheckIn
             key={resetTick}
             coach={coach}

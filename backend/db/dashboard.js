@@ -158,6 +158,12 @@ export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
   const late = d.filter((x) => x.status === "LATE").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
   const assigned = d.filter((x) => x.status === "ASSIGNED").length;
+  // Surfaced as its own KPI (2026-07-31 — mobile Ops "Live headcount" card:
+  // "add the cancelled status") — a cancelled delegate is forced to
+  // UNASSIGNED (see normalize(), db/delegates.js) so it was previously only
+  // visible buried inside that count, with no way to tell "nobody's assigned
+  // them yet" apart from "they're not coming".
+  const cancelled = d.filter((x) => x.cancelled).length;
   // Delegates actually on a coach's roster right now — everyone EXCEPT
   // Unassigned (2026-07-24). Unassigned covers two cases that can never
   // meaningfully be "missing": a delegate who hasn't been given a coach yet,
@@ -197,6 +203,7 @@ export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
       late,
       unassigned,
       assigned,
+      cancelled,
       openExceptions: 0,
       criticalExceptions: 0,
       normalExceptions: 0,

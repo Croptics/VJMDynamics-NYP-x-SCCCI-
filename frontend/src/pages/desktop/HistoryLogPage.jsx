@@ -4,7 +4,7 @@
  * ============================================================================= */
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, Trash2, ChevronLeft, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
+import { Activity, Trash2, ChevronLeft, ChevronDown, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
 import { apiGet, apiPost, apiDelete, getPermissions } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
@@ -43,6 +43,10 @@ export default function HistoryLogPage() {
   const [error, setError] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [rollingBack, setRollingBack] = useState(null); // activity id currently being rolled back
+  // Which consolidated "System reset/marked N delegates..." entries are
+  // expanded to show their affected-delegate list (2026-07-31 — "give me
+  // option to view detail by dropdown ... to see which delegate").
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
   const loadingRef = useRef(false);
 
   // Search / filter for this page's mixed-everything feed (2026-07-24) — with
@@ -328,6 +332,33 @@ export default function HistoryLogPage() {
                             </div>
                           ))}
                         </div>
+                      )}
+                      {/* Affected-delegate list for a consolidated system entry
+                          (2026-07-31 — "give me option to view detail by
+                          dropdown ... to see which delegate"). See
+                          db/history.js's logActivity() for the `affected` shape. */}
+                      {a.changes?.affected?.length > 0 && (
+                        <>
+                          <button
+                            className="btn btn-ghost"
+                            style={{ fontSize: 11.5, padding: "2px 8px", marginTop: 6 }}
+                            onClick={() => setExpandedIds((prev) => {
+                              const next = new Set(prev);
+                              next.has(a.id) ? next.delete(a.id) : next.add(a.id);
+                              return next;
+                            })}
+                          >
+                            {expandedIds.has(a.id) ? t("Hide delegates") : t("View delegates")} ({a.changes.affected.length})
+                            <ChevronDown size={12} style={{ transform: expandedIds.has(a.id) ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                          </button>
+                          {expandedIds.has(a.id) && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                              {a.changes.affected.map((d) => (
+                                <span key={d.id} className="badge badge-neutral">{d.name}</span>
+                              ))}
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                     {canRollback && (

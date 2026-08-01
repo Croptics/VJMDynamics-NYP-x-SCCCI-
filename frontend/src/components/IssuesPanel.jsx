@@ -73,13 +73,13 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
   const load = useCallback(async () => {
     try {
       setLoadError("");
-      const data = await listExceptions({ status: "OPEN" });
+      const data = await listExceptions({ status: "OPEN" }, tripId);
       setTickets(data.tickets || []);
       setCounts(data.counts || { all: 0, critical: 0, open: 0, resolved: 0 });
     } catch (e) {
       setLoadError(e.message || "Could not load exceptions.");
     }
-  }, []);
+  }, [tripId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -110,6 +110,7 @@ export default function IssuesPanel({ tripId, coachId, coach, onLogged }) {
         coachId,
         note,
         priority: critical ? "CRITICAL" : priority,
+        tripId,
       });
       flash(critical ? "Critical alert sent to all staff" : "Exception logged");
       setNote("");

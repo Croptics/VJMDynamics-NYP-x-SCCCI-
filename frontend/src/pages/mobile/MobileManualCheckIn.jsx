@@ -278,6 +278,7 @@ export default function MobileManualCheckIn({ coach, coachLabel, coachId, tripId
       note: `${t("Manual check-in")}${list.length > 1 ? ` ×${list.length}` : ""} · ${coachLabel || t("Coach")} · ${names}`
         + (why.note ? ` · ${why.note}` : ""),
       priority: "LOW",
+      tripId,
     }).catch(() => { /* audit note only — the check-in itself already succeeded */ });
   }
 

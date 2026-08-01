@@ -71,10 +71,12 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
 
   const k = data?.kpis;
 
-  const tone = (v, good) => ({
-    fontWeight: 800, fontSize: 18, lineHeight: 1.1,
-    color: v > 0 && !good ? "var(--st-missing)" : good ? "var(--st-present)" : "var(--ink)",
-  });
+  // BUG FIX (2026-07-31 — "fix color"): the old tone() treated EVERY metric
+  // as "bad if > 0" unless explicitly marked "good" — so Total (never marked
+  // good) rendered in the Missing/red colour just for having a nonzero
+  // headcount, same as an actual missing delegate. Each stat below now picks
+  // its own colour by what it actually means, not a shared >0-is-red default.
+  const statStyle = (color) => ({ fontWeight: 800, fontSize: 18, lineHeight: 1.1, color });
 
   return (
     <div>
@@ -92,12 +94,17 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
           </button>
         </div>
 
+        {/* Merged Total+Arrived into one "X/Y Checked in" stat (2026-07-31 —
+            "merge total and arrive so it like 0/5, name it checked in") and
+            added Cancelled (backend now surfaces it — see db/dashboard.js's
+            getDashboard()) so this card covers every status a delegate can
+            actually be in: Checked in / Missing / Late / Cancelled. */}
         {k && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginTop: 12 }}>
-            <Kpi label={t("Total")} value={k.total} style={tone(k.total)} />
-            <Kpi label={t("Arrived")} value={k.arrived ?? k.present ?? 0} style={tone(k.arrived ?? k.present ?? 0, true)} />
-            <Kpi label={t("Missing")} value={k.missing} style={tone(k.missing)} />
-            <Kpi label={t("Late")} value={k.late ?? 0} style={tone(k.late ?? 0)} />
+            <Kpi label={t("Checked in")} value={`${k.arrived ?? k.present ?? 0}/${k.total ?? 0}`} style={statStyle("var(--st-present)")} />
+            <Kpi label={t("Missing")} value={k.missing ?? 0} style={statStyle((k.missing ?? 0) > 0 ? "var(--st-missing)" : "var(--ink)")} />
+            <Kpi label={t("Late")} value={k.late ?? 0} style={statStyle((k.late ?? 0) > 0 ? "var(--st-late)" : "var(--ink)")} />
+            <Kpi label={t("Cancelled")} value={k.cancelled ?? 0} style={statStyle("var(--ink-3)")} />
           </div>
         )}
       </div>

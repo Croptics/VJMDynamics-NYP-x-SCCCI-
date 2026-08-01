@@ -30,6 +30,9 @@ import { resolveTripUuid } from "../db/dashboard.js";
 import { logActivity } from "../db/history.js";
 import { createEscalation, listOpenEscalations, listActiveEscalations, acknowledgeEscalation, acknowledgeAllOpen, resolveEscalation } from "../db/escalations.js";
 import { sendEscalationEmails, sendEscalationSms, sendEscalationWhatsApp, buildEscalationHtml } from "../lib/notify.js";
+// Bi-directional exception linking (2026-07-31) — see db/exceptionSync.js's
+// header for why this is a standalone leaf module.
+import { escalateAutoTicket } from "../db/exceptionSync.js";
 
 const router = Router();
 
@@ -175,11 +178,20 @@ router.post("/api/escalations", requirePermission("manageDelegates"), wrap(async
     "escalation", actor, { delegateId: escalation.delegateId, tripUuid: escalation.tripId }
   );
 
+  // Bi-directional exception linking (2026-07-31) — an escalated delegate
+  // surfaces in the Exceptions inbox's Critical tab too, not just this
+  // Alerts banner. Creates the tracked ticket if one isn't open yet, or
+  // bumps an existing (e.g. already-Missing) one straight to Critical.
+  if (escalation.delegateId) {
+    await escalateAutoTicket(escalation.delegateId, escalation.message ? `Escalated to office — ${escalation.message}` : "Escalated to office.");
+  }
+
   res.status(201).json({ escalation, alreadyOpen: false, notified: { emailSent, sms, whatsapp, to: recipients } });
 }));
 
-router.get("/api/escalations/open", requireAuth(), wrap(async (_req, res) => {
-  res.json({ escalations: await listOpenEscalations() });
+router.get("/api/escalations/open", requireAuth(), wrap(async (req, res) => {
+  const tripUuid = req.query.tripId ? await resolveTripUuid(req.query.tripId) : null;
+  res.json({ escalations: await listOpenEscalations(tripUuid) });
 }));
 
 // Feeds the Alerts modal's "Emergency" section (2026-07-25) — open AND

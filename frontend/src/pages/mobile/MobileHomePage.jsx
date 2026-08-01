@@ -101,9 +101,22 @@ export default function MobileHomePage() {
       // rest of the page (fetched via the working "t-1" fallback) correctly
       // showed Beijing, a visible mismatch. Same fix as the desktop
       // assistant's trip switcher (AssistantConversation.jsx).
+      //
+      // BUG FIX (2026-07-31, "currently it hiding other existing trip" — the
+      // switcher itself was fine; every OTHER mobile page went stale): this
+      // used to only call setTripId(), correcting this page's OWN local
+      // state, but never wrote the correction back to localStorage via
+      // setMobileTripId(). Every other mobile page (Ops, Trips, QR/Face/
+      // Manual check-in) reads getMobileTripId() directly, not this page's
+      // state — so a stale/no-longer-"In progress" persisted trip (e.g. one
+      // that got completed/archived since it was picked) left Home showing
+      // the corrected trip while every other screen kept showing the old
+      // one, permanently out of sync until a manual re-switch.
       if (list.length && !list.some((tr) => tr.id === tripId)) {
         const seed = list.find((tr) => (tr.name || "").toLowerCase().includes("beijing"));
-        setTripId(seed?.id || list[0].id);
+        const correctedId = seed?.id || list[0].id;
+        setTripId(correctedId);
+        setMobileTripId(correctedId);
       }
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -209,49 +222,9 @@ export default function MobileHomePage() {
 
       {/* Active trip — signature red hero. */}
       {trip && (
-        <div className="m-hero" style={{ marginTop: 18, position: "relative" }}>
+        <div style={{ marginTop: 18, position: "relative" }}>
+        <div className="m-hero" style={{ position: "relative" }}>
           <div className="m-hero-glow" />
-          {/* Trip switcher (2026-07-31, "as admin, i should be able to switch
-              trip on mobile ... add it in the red box") — admin-only, and only
-              shown once there's more than one trip to pick from. Every other
-              mobile page already reads getMobileTripId(), so switching here is
-              enough to re-scope the whole app — no other page needed changes.
-              An icon-only button (2026-07-31, "improve the switcher ...
-              remove the text") — a native <select> squeezed into the hero's
-              corner had no room for a real trip name ("Yunnan Cross-Bo",
-              arrow overlapping) and there's no good width to give it here
-              alongside the trip's own (already long) name on the line below.
-              A menu below the button shows every name in full instead. */}
-          {isAdmin && trips.length > 1 && (
-            <div style={{ position: "absolute", top: 14, right: 14, zIndex: 2 }} ref={tripMenuRef}>
-              <button
-                onClick={() => setTripMenuOpen((v) => !v)}
-                aria-label={t("Switch trip")}
-                title={t("Switch trip")}
-                style={{ width: 30, height: 30, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.4)", background: "rgba(0,0,0,0.2)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
-              >
-                <ChevronDown size={15} style={{ transform: tripMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
-              </button>
-              {tripMenuOpen && (
-                <div className="card" style={{ position: "absolute", top: 36, right: 0, minWidth: 200, padding: 6, zIndex: 3, boxShadow: "0 12px 32px rgba(0,0,0,0.25)" }}>
-                  {trips.map((tr) => (
-                    <button
-                      key={tr.id}
-                      onClick={() => { switchTrip(tr.id); setTripMenuOpen(false); }}
-                      style={{
-                        display: "block", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 8, border: "none",
-                        background: tr.id === tripId ? "var(--scc-red-tint)" : "transparent",
-                        color: tr.id === tripId ? "var(--scc-red)" : "var(--ink)",
-                        fontSize: 13, fontWeight: tr.id === tripId ? 700 : 500, cursor: "pointer",
-                      }}
-                    >
-                      {tr.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
           <div className="m-hero-eyebrow">{t("Active trip")}</div>
           <div style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 19, marginTop: 4, position: "relative" }}>
             {trip.name}{trip.countryTo ? ` (${trip.countryTo})` : ""}
@@ -279,6 +252,56 @@ export default function MobileHomePage() {
               </span>
             ) : null;
           })()}
+        </div>
+        {/* Trip switcher (2026-07-31, "as admin, i should be able to switch
+            trip on mobile ... add it in the red box") — admin-only, and only
+            shown once there's more than one trip to pick from. Every other
+            mobile page already reads getMobileTripId(), so switching here is
+            enough to re-scope the whole app — no other page needed changes.
+            An icon-only button (2026-07-31, "improve the switcher ... remove
+            the text") — a native <select> squeezed into the hero's corner had
+            no room for a real trip name ("Yunnan Cross-Bo", arrow
+            overlapping). A menu below the button shows every name in full
+            instead.
+            MOVED OUT of .m-hero (2026-07-31, "make the dropdown visible
+            outside of the box") — .m-hero has `overflow: hidden` (needed to
+            clip its own corner-glow radial gradient to the card's rounded
+            corners), which was ALSO clipping this dropdown's lower items the
+            instant the menu grew taller than the hero card itself — with 3+
+            trips, anything past the first item or two was invisibly cut off,
+            not actually missing. Now a sibling of .m-hero inside a shared
+            `position: relative` wrapper, positioned identically (top-right)
+            but no longer inside anything with `overflow: hidden`. */}
+        {isAdmin && trips.length > 1 && (
+          <div style={{ position: "absolute", top: 14, right: 14, zIndex: 2 }} ref={tripMenuRef}>
+            <button
+              onClick={() => setTripMenuOpen((v) => !v)}
+              aria-label={t("Switch trip")}
+              title={t("Switch trip")}
+              style={{ width: 30, height: 30, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.4)", background: "rgba(0,0,0,0.2)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
+            >
+              <ChevronDown size={15} style={{ transform: tripMenuOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+            </button>
+            {tripMenuOpen && (
+              <div className="card" style={{ position: "absolute", top: 36, right: 0, minWidth: 200, maxHeight: 260, overflowY: "auto", padding: 6, zIndex: 3, boxShadow: "0 12px 32px rgba(0,0,0,0.25)" }}>
+                {trips.map((tr) => (
+                  <button
+                    key={tr.id}
+                    onClick={() => { switchTrip(tr.id); setTripMenuOpen(false); }}
+                    style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 8, border: "none",
+                      background: tr.id === tripId ? "var(--scc-red-tint)" : "transparent",
+                      color: tr.id === tripId ? "var(--scc-red)" : "var(--ink)",
+                      fontSize: 13, fontWeight: tr.id === tripId ? 700 : 500, cursor: "pointer",
+                    }}
+                  >
+                    {tr.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         </div>
       )}
 

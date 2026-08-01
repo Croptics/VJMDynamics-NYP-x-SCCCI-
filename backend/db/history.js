@@ -23,7 +23,18 @@ import { all, get, run } from "./connection.js";
 export async function logActivity(text, kind, actor = null, meta = null) {
   const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const delegateId = meta?.delegateId || null;
-  const changes = meta?.changes && Object.keys(meta.changes).length ? meta.changes : null;
+  // `affected` (2026-07-31 — "give me option to view detail by dropdown ...
+  // to see which delegate") — the consolidated "System reset 3 delegates to
+  // Assigned ahead of X" / "System marked N delegates late" entries
+  // (checkpoints.js) previously named only the COUNT, with the actual
+  // affected delegates nowhere in the record. Reuses this same `changes`
+  // JSON column (still a single field-diff object — {field:{from,to}} — for
+  // a normal delegate edit) under a distinct `affected` key so the two shapes
+  // never collide; the frontend checks which key is present before deciding
+  // how to render it (a Rollback prompt vs. an expandable delegate list).
+  const changes = meta?.affected?.length
+    ? { affected: meta.affected }
+    : (meta?.changes && Object.keys(meta.changes).length ? meta.changes : null);
   const tripUuid = meta?.tripUuid || null;
   await run(
     `INSERT INTO activity_log (id, text, kind, actor, delegate_id, changes, trip_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`,

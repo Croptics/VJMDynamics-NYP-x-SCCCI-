@@ -32,7 +32,7 @@ const ISSUE_TYPES = [
  * (max TYPE_OTHER_MAX chars) so staff can be specific without a new enum
  * value for every one-off.
  */
-export default function LogExceptionModal({ onClose, onCreated }) {
+export default function LogExceptionModal({ onClose, onCreated, tripId }) {
   const { t } = useLang();
   const [delegates, setDelegates] = useState([]);
   const [type, setType] = useState("MISSING_PERSON");
@@ -50,11 +50,11 @@ export default function LogExceptionModal({ onClose, onCreated }) {
   const downOnBackdrop = useRef(false);
 
   useEffect(() => {
-    getDelegates().then(setDelegates).catch(() => setDelegates([]));
+    getDelegates(tripId).then(setDelegates).catch(() => setDelegates([]));
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, tripId]);
 
   const isOther = type === "OTHER";
   const otherLabel = typeOther.trim();
@@ -76,6 +76,7 @@ export default function LogExceptionModal({ onClose, onCreated }) {
         delegateId,
         note,
         priority: effectivePriority,
+        tripId,
       });
       onCreated(created, critical);
     } catch (e) {
