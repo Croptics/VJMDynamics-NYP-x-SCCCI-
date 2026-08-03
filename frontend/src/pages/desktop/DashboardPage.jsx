@@ -55,7 +55,12 @@ import { cachedFetch } from "../../lib/cachedFetch.js";
 import CachedDataBadge from "../../components/CachedDataBadge.jsx";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../lib/geolocation.js";
 import { useVisiblePolling } from "../../lib/useVisiblePolling.js";
-import { ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
+// getActiveTripId/setActiveTripId aliased to this file's original local names
+// (2026-08-02 audit — was a byte-for-byte duplicate: same storage key
+// "mg_dashboard_trip", same fallback "t-1", same dispatchEvent) so every
+// existing call site below is untouched.
+import { getActiveTripId as loadSelectedTripId, setActiveTripId as saveSelectedTripId } from "../../lib/activeTrip.js";
+import { effectiveStatus } from "../../lib/delegateStatus.js";
 import StatusBadge from "../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../components/AnalyticsPanel.jsx";
 import DelegateAvatar, { statusTone } from "../../components/DelegateAvatar.jsx";
@@ -90,19 +95,11 @@ const TRIP_ID = "t-1";
 // plain useState(TRIP_ID) silently reset to Beijing every time you left the
 // page and returned. localStorage survives the unmount; falls back to
 // TRIP_ID if nothing's stored yet, or storage is unavailable.
-const DASHBOARD_TRIP_KEY = "mg_dashboard_trip";
-function loadSelectedTripId() {
-  try { return localStorage.getItem(DASHBOARD_TRIP_KEY) || TRIP_ID; } catch { return TRIP_ID; }
-}
-function saveSelectedTripId(id) {
-  try { localStorage.setItem(DASHBOARD_TRIP_KEY, id); } catch { /* ignore */ }
-  // Notify same-tab listeners (2026-07-31) — the floating ChatBubble assistant
-  // auto-follows whichever trip is on-screen here (see lib/activeTrip.js) so
-  // it needs to hear about a switch immediately, not just on its own reload. A
-  // bare localStorage write only fires the browser's `storage` event in OTHER
-  // tabs, never this one.
-  window.dispatchEvent(new CustomEvent(ACTIVE_TRIP_EVENT, { detail: id }));
-}
+//
+// loadSelectedTripId/saveSelectedTripId (2026-08-02 audit) are no longer
+// defined here — they were a byte-for-byte duplicate of lib/activeTrip.js's
+// getActiveTripId/setActiveTripId (same storage key, same fallback, same
+// dispatchEvent), aliased on import above instead of reimplemented.
 
 /** A History tracker row that expands to list the affected delegates for a
  *  consolidated system entry (2026-07-31 — "give me option to view detail by
@@ -1020,11 +1017,6 @@ export default function DashboardPage() {
     const c = coaches.find((x) => x.id === id);
     return c ? coachDisplayName(c) : t("Unassigned");
   };
-
-  // Legacy rows may still hold "PRESENT" (routes that haven't migrated to
-  // writing "ARRIVED" yet) — alias for filtering/sorting so those rows show
-  // up under "Arrived" instead of silently vanishing from that filter.
-  const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
 
   // Feeds the new Alerts card (2026-07-24) — "if it's missing, it will
   // mention, late will be brief and show who's late... those who are

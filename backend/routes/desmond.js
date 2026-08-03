@@ -696,6 +696,55 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     `SELECT name, status, "dateRange", "lead", "dayOf", "totalDays", "startDate" FROM trips WHERE uuid_id = $1`,
     [req.tripUuid]
   );
+  if (!tripBefore) return res.status(404).json({ error: "NOT_FOUND", message: "Trip not found." });
+
+  // Staff single-active-trip guardrail (2026-08-02, "Staff Single-Trip
+  // Assignment Guardrails & Status Override Logic") — only fires on a real
+  // transition INTO "In progress" (re-saving other fields on an already-live
+  // trip can't newly conflict). Every captain currently assigned to a coach
+  // on THIS trip is checked against every OTHER trip that's already
+  // "In progress" — if any of them are double-booked, interrupt with a 409
+  // so the frontend can show a confirm/cancel warning instead of silently
+  // either blocking the whole status change or silently double-booking staff.
+  let autoUnassigned = [];
+  if (b.status === "In progress" && tripBefore.status !== "In progress") {
+    const thisTripCaptains = await all(
+      `SELECT cc.account_id AS "accountId", a.name, a.username, c.id AS "coachId", c.label AS "coachLabel"
+         FROM coach_captains cc
+         JOIN coaches c ON c.id = cc.coach_id
+         JOIN accounts a ON a.id = cc.account_id
+        WHERE c.trip_id = $1`,
+      [req.tripUuid]
+    );
+    const accountIds = Array.from(new Set(thisTripCaptains.map((r) => r.accountId)));
+    const conflicts = await findCaptainTripConflicts(accountIds, req.tripUuid);
+    if (conflicts.length) {
+      const conflictByAccount = new Map(conflicts.map((c) => [c.accountId, c]));
+      // Merge in which coach(es) ON THIS TRIP each conflicting account holds,
+      // so the frontend can name both "unassigned from Coach X" and "already
+      // on trip Y" in the same warning.
+      const merged = thisTripCaptains
+        .filter((r) => conflictByAccount.has(r.accountId))
+        .map((r) => ({ ...conflictByAccount.get(r.accountId), coachId: r.coachId, coachLabel: r.coachLabel }));
+      if (req.body.confirmUnassignConflicts !== true) {
+        const first = merged[0];
+        const who = first.name || first.username;
+        return res.status(409).json({
+          error: "STAFF_TRIP_CONFLICT",
+          message: `${who} is currently assigned to an active In-progress trip (${first.conflictTripName}). Updating this trip to In progress will automatically unassign ${who} from this trip. Do you wish to proceed?`,
+          conflicts: merged,
+        });
+      }
+      // Confirmed — auto-unassign each conflicting captain from THIS trip's
+      // coach specifically (they keep their existing assignment on the trip
+      // they're already actively captaining; only this NEW one loses them).
+      for (const r of merged) {
+        await run(`DELETE FROM coach_captains WHERE coach_id = $1 AND account_id = $2`, [r.coachId, r.accountId]);
+        autoUnassigned.push(r);
+      }
+    }
+  }
+
   params.push(req.tripUuid);
   let trip = await get(
     `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
@@ -718,7 +767,15 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     before: tripBefore && { name: tripBefore.name, status: tripBefore.status, dateRange: tripBefore.dateRange, lead: tripBefore.lead, dayOf: tripBefore.dayOf, totalDays: tripBefore.totalDays, startDate: tripBefore.startDate },
     after: { name: trip.name, status: trip.status, dateRange: trip.dateRange, lead: trip.lead, dayOf: trip.dayOf, totalDays: trip.totalDays, startDate: trip.startDate },
   });
-  res.json(trip);
+  if (autoUnassigned.length) {
+    const names = autoUnassigned.map((a) => `${a.name || a.username} (${a.coachLabel})`).join(", ");
+    await recordEvent(req.tripUuid, req, {
+      action: "trip.autoUnassignConflicts", entity: "trip", entityId: req.tripUuid, kind: "coach",
+      summary: `${autoUnassigned.length} staff auto-unassigned when "${trip.name}" went In progress (already captaining another active trip): ${names}.`,
+      after: { autoUnassigned: autoUnassigned.map((a) => ({ accountId: a.accountId, coachId: a.coachId, conflictTripId: a.conflictTripId })) },
+    });
+  }
+  res.json({ ...trip, unassigned: autoUnassigned.map((a) => ({ accountId: a.accountId, name: a.name || a.username, coachId: a.coachId, coachLabel: a.coachLabel })) });
 }));
 
 router.delete("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, res) => {
@@ -866,15 +923,59 @@ router.post("/api/coaches/generate", writeAccess, wrap(async (req, res) => {
   res.status(201).json({ created });
 }));
 
-// Every staff member currently holding a coach, across ALL trips — powers the
-// "already assigned elsewhere" hint in the Add/Edit Coach modal.
+// Every ACCOUNT currently captaining a coach, across ALL trips — powers the
+// "already assigned elsewhere" hint in the Add/Edit Coach modal, so an admin
+// sees a double-booking risk WHILE PICKING a staff member, not just after
+// Save bounces off the 409 guardrail (2026-08-02, "add like text to indicate
+// each coach is assigned currently to trip instead of just when i click").
+//
+// Rewritten 2026-08-02 audit (was querying `coaches.staff_user_id`, the old
+// single-captain column that `coach_captains` replaced 2026-07-31 — this had
+// been silently returning nothing for any coach staffed the current way,
+// since nothing writes staff_user_id anymore). Uses the same
+// coach_captains -> coaches -> trips join as findCaptainTripConflicts above.
 router.get("/api/coaches/staff-assignments", readAccess, wrap(async (_req, res) => {
   const rows = await all(`
-    SELECT c.staff_user_id AS "staffUserId", c.id AS "coachId", c.label AS "coachLabel", c.trip_id AS "tripId"
-      FROM coaches c WHERE c.staff_user_id IS NOT NULL
+    SELECT cc.account_id AS "accountId", c.id AS "coachId", c.label AS "coachLabel",
+           t.uuid_id AS "tripId", t.name AS "tripName", t.status AS "tripStatus"
+      FROM coach_captains cc
+      JOIN coaches c ON c.id = cc.coach_id
+      JOIN trips t ON t.uuid_id = c.trip_id
   `);
   res.json({ assignments: rows });
 }));
+
+/* ---- Staff single-active-trip guardrail (2026-08-02) -----------------------
+ * A staff member can only captain a coach on ONE "In progress" trip at a time
+ * — captaining several PLANNING trips at once is fine (that's just future
+ * scheduling, no one's on the ground yet), but two concurrently LIVE trips is
+ * a real double-booking risk. Two call sites share this:
+ *   (a) assigning a captain directly onto a coach whose trip is ALREADY
+ *       "In progress" — hard-blocked below (POST /api/coaches, PATCH
+ *       /api/coaches/:id) with a 409, no override.
+ *   (b) flipping a trip's own status from Planning (or Cancelled) to
+ *       "In progress" while one of ITS captains already captains a
+ *       different in-progress trip — warn-then-confirm below (PATCH
+ *       /api/trips/:tripId), since the admin may genuinely want to proceed
+ *       and auto-unassign that captain from the trip going live.
+ * Returns one row per (conflicting account, the OTHER in-progress trip they
+ * already captain) — excludes `excludeTripUuid` itself so a trip's own
+ * existing captains never show up as conflicting with themselves. */
+async function findCaptainTripConflicts(accountIds, excludeTripUuid) {
+  if (!accountIds.length) return [];
+  return all(
+    `SELECT DISTINCT cc.account_id AS "accountId", a.name, a.username,
+            ot.uuid_id AS "conflictTripId", ot.name AS "conflictTripName"
+       FROM coach_captains cc
+       JOIN coaches oc ON oc.id = cc.coach_id
+       JOIN trips ot ON ot.uuid_id = oc.trip_id
+       JOIN accounts a ON a.id = cc.account_id
+      WHERE cc.account_id = ANY($1)
+        AND ot.status = 'In progress'
+        AND ot.uuid_id <> $2`,
+    [accountIds, excludeTripUuid]
+  );
+}
 
 const MAX_CAPTAINS = 3;
 
@@ -903,6 +1004,24 @@ router.post("/api/coaches", writeAccess, wrap(async (req, res) => {
   if (accountIds.length) {
     captains = await all(`SELECT id, name, username FROM accounts WHERE id = ANY($1)`, [accountIds]);
     if (captains.length !== accountIds.length) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "One of those login accounts doesn't exist." });
+  }
+
+  // Staff single-active-trip guardrail (2026-08-02) — only relevant when THIS
+  // trip is already live; assigning a captain onto a still-Planning trip is
+  // always fine (see findCaptainTripConflicts's doc comment above).
+  if (accountIds.length) {
+    const tripRow = await get(`SELECT status FROM trips WHERE uuid_id = $1`, [tripUuid]);
+    if (tripRow?.status === "In progress") {
+      const conflicts = await findCaptainTripConflicts(accountIds, tripUuid);
+      if (conflicts.length) {
+        const c = conflicts[0];
+        return res.status(409).json({
+          error: "CAPTAIN_TRIP_CONFLICT",
+          message: `${c.name || c.username} is already assigned to an active In-progress trip (${c.conflictTripName}) and can't be assigned to another in-progress trip at the same time.`,
+          conflicts,
+        });
+      }
+    }
   }
 
   const maxRow = await get(`SELECT COALESCE(MAX(sort_order), -1) AS m FROM coaches WHERE trip_id = $1`, [tripUuid]);
@@ -955,6 +1074,25 @@ router.patch("/api/coaches/:id", writeAccess, wrap(async (req, res) => {
     if (accountIds.length > MAX_CAPTAINS) return res.status(400).json({ error: "TOO_MANY_CAPTAINS", message: `A coach can have at most ${MAX_CAPTAINS} captains.` });
     captains = accountIds.length ? await all(`SELECT id, name, username FROM accounts WHERE id = ANY($1)`, [accountIds]) : [];
     if (captains.length !== accountIds.length) return res.status(404).json({ error: "ACCOUNT_NOT_FOUND", message: "One of those login accounts doesn't exist." });
+
+    // Staff single-active-trip guardrail (2026-08-02) — only relevant when
+    // THIS coach's own trip is already live (see findCaptainTripConflicts's
+    // doc comment above). An existing captain of THIS SAME coach never
+    // conflicts with themselves — the query excludes this coach's own trip.
+    if (accountIds.length) {
+      const tripRow = await get(`SELECT status FROM trips WHERE uuid_id = $1`, [existing.trip_id]);
+      if (tripRow?.status === "In progress") {
+        const conflicts = await findCaptainTripConflicts(accountIds, existing.trip_id);
+        if (conflicts.length) {
+          const c = conflicts[0];
+          return res.status(409).json({
+            error: "CAPTAIN_TRIP_CONFLICT",
+            message: `${c.name || c.username} is already assigned to an active In-progress trip (${c.conflictTripName}) and can't be assigned to another in-progress trip at the same time.`,
+            conflicts,
+          });
+        }
+      }
+    }
   }
 
   const updated = await get(

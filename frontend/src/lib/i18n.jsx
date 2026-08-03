@@ -1860,6 +1860,12 @@ const DICT = {
 
   // --- i18n.jsx (placeholder key found by the extractor itself) ---
   "...": "...",
+
+  // --- TripsListPage (staff single-active-trip guardrail, 2026-08-02) ---
+  "Auto-unassigned": "已自动取消分配",
+  "Update anyway": "仍然更新",
+  "already captaining another active trip.": "正在负责另一个进行中的行程。",
+  "Also on": "同时在",
 };
 
 /**

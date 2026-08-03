@@ -18,12 +18,13 @@ export function getActiveTripId() {
   try { return localStorage.getItem(ACTIVE_TRIP_KEY) || DEFAULT_TRIP_ID; } catch { return DEFAULT_TRIP_ID; }
 }
 
-// Not currently called from here directly — DashboardPage.jsx still owns the
-// write (via its own saveSelectedTripId) since it also needs to happen inside
-// its existing effects/handlers. It dispatches ACTIVE_TRIP_EVENT after every
-// write so same-tab listeners (the ChatBubble, mounted the whole time) notice
-// immediately — a bare localStorage write alone only fires the browser's
-// `storage` event in OTHER tabs, never the tab that made the write.
+// DashboardPage.jsx imports this directly (aliased to its own
+// loadSelectedTripId/saveSelectedTripId names, 2026-08-02 audit — its local
+// copies were a byte-for-byte duplicate of this pair). Dispatches
+// ACTIVE_TRIP_EVENT after every write so same-tab listeners (the ChatBubble,
+// mounted the whole time) notice immediately — a bare localStorage write
+// alone only fires the browser's `storage` event in OTHER tabs, never the
+// tab that made the write.
 export function setActiveTripId(id) {
   try { localStorage.setItem(ACTIVE_TRIP_KEY, id); } catch { /* ignore */ }
   window.dispatchEvent(new CustomEvent(ACTIVE_TRIP_EVENT, { detail: id }));

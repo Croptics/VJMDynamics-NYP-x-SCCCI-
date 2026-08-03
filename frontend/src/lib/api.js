@@ -117,6 +117,10 @@ async function toError(res, method, path) {
   const err = new Error(body.message || `${method} ${path} failed (${res.status})`);
   err.status = res.status;
   err.code = body.error; // e.g. "WEAK_PASSWORD", "USERNAME_TAKEN"
+  // Full body (2026-08-02) — some errors carry more than message/code, e.g.
+  // STAFF_TRIP_CONFLICT's `conflicts` array, needed to render a confirm modal
+  // with the specific staff/trip names involved, not just a generic message.
+  err.data = body;
   return err;
 }
 

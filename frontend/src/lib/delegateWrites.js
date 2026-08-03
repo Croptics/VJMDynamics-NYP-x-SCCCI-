@@ -70,7 +70,11 @@ export function queuedPatchesFor(delegateId) {
     .map((e) => e.payload.patch);
 }
 
-/** True when this delegate has an unsynced change. */
+/** True when this delegate has an unsynced change. Covered directly by
+ *  tests/jq/delegateWrites.test.js — a 2026-08-02 audit pass initially
+ *  removed this as "no external callers" without checking tests/, which
+ *  isn't under frontend/src or backend/; restored once the resulting test
+ *  failure caught the mistake. */
 export function hasQueuedPatch(delegateId) {
   return queuedPatchesFor(delegateId).length > 0;
 }

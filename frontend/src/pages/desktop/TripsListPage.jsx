@@ -252,7 +252,13 @@ function TripFormModal({ trip, onClose, onSaved }) {
   // worth a second look (e.g. picked the wrong month) rather than saving
   // silently — shows an inline "are you sure" instead of a hard block.
   const [pastDateWarningShown, setPastDateWarningShown] = useState(false);
-  const set = (k, v) => { setForm((f) => ({ ...f, [k]: v })); setPastDateWarningShown(false); };
+  // Staff single-active-trip guardrail (2026-08-02) — set when the backend's
+  // PATCH /trips/:id responds 409 STAFF_TRIP_CONFLICT (see desmond.js): one of
+  // this trip's own coach captains already captains a different trip that's
+  // already "In progress". Confirming resends the same save with
+  // confirmUnassignConflicts:true, which auto-unassigns them from THIS trip.
+  const [staffConflictWarning, setStaffConflictWarning] = useState(null);
+  const set = (k, v) => { setForm((f) => ({ ...f, [k]: v })); setPastDateWarningShown(false); setStaffConflictWarning(null); };
 
   // Matches the backend's own "today" for the auto-day feature (syncTripDayOf
   // computes in Asia/Singapore, not the browser's local zone or UTC — see
@@ -261,11 +267,11 @@ function TripFormModal({ trip, onClose, onSaved }) {
   const todaySGT = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Singapore" }).format(new Date());
   const isPastStartDate = !!form.startDate && form.startDate < todaySGT();
 
-  async function handleSubmit(confirmedPastDate = false) {
+  async function handleSubmit(confirmedPastDate = false, confirmedStaffConflict = false) {
     if (!form.name.trim()) { setError(t("A trip name is required.")); return; }
     if (!form.startDate) { setError(t("Actual start date is required.")); return; }
     if (isPastStartDate && !confirmedPastDate) { setPastDateWarningShown(true); return; }
-    setSaving(true); setError(null); setPastDateWarningShown(false);
+    setSaving(true); setError(null); setPastDateWarningShown(false); setStaffConflictWarning(null);
     try {
       const payload = {
         name: form.name.trim(), dateRange: computeDateRange(form.startDate, form.totalDays), status: form.status,
@@ -275,6 +281,7 @@ function TripFormModal({ trip, onClose, onSaved }) {
         countryFrom: form.countryFrom.trim() || null,
         countryTo: form.countryTo.trim() || null,
       };
+      if (confirmedStaffConflict) payload.confirmUnassignConflicts = true;
       // ALWAYS reset to automatic on save now (2026-07-30 — "the logic for
       // the actual start date is broken... set ytd start so today should be
       // day 2, not day 5"): "Current day" was hidden from this form entirely
@@ -298,7 +305,14 @@ function TripFormModal({ trip, onClose, onSaved }) {
       }
       onSaved(saved, editing);
       onClose();
-    } catch (e) { setError(e.message); setSaving(false); }
+    } catch (e) {
+      if (e.code === "STAFF_TRIP_CONFLICT") {
+        setStaffConflictWarning({ message: e.message, conflicts: e.data?.conflicts || [] });
+        setSaving(false);
+        return;
+      }
+      setError(e.message); setSaving(false);
+    }
   }
 
   return (
@@ -328,6 +342,16 @@ function TripFormModal({ trip, onClose, onSaved }) {
               <TripLeadSelect value={form.lead} onChange={(v) => set("lead", v)} />
             </div>
           </div>
+
+          {staffConflictWarning && (
+            <div style={{ background: "rgba(220,38,38,0.08)", border: "1px solid var(--tf-red)", borderRadius: 8, padding: 10, marginBottom: 14 }}>
+              <p style={{ fontSize: 13, color: "var(--tf-red)", margin: 0 }}>{staffConflictWarning.message}</p>
+              <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                <button type="button" className="tf-btn tf-btn-ghost" onClick={() => setStaffConflictWarning(null)}>{t("Cancel")}</button>
+                <button type="button" className="tf-btn tf-btn-primary" style={{ background: "var(--tf-red)", color: "#fff" }} onClick={() => handleSubmit(true, true)}>{t("Update anyway")}</button>
+              </div>
+            </div>
+          )}
 
           <label className="tf-field-label">{t("Actual start date (for auto day tracking)")} <span style={{ color: "var(--tf-red)" }}>*</span></label>
           <input type="date" className="tf-input" style={{ marginBottom: 4 }} value={form.startDate}
@@ -477,6 +501,13 @@ export default function TripsListPage() {
   const [deleteTripState, setDeleteTripState] = useState(null);
   const [captainTripIds, setCaptainTripIds] = useState(null); // Set of trip ids this account captains
   const canEdit = getPermissions().manageTrips; // gate edit controls (see permissions.js)
+  // Staff single-active-trip guardrail (2026-08-02) — brief toast when a
+  // Planning -> In-progress save auto-unassigned a double-booked captain
+  // (see TripFormModal's staffConflictWarning confirm flow and desmond.js's
+  // PATCH /trips/:tripId). Same local toast+timeout pattern MediaManager.jsx
+  // already uses — this app has no shared toast component.
+  const [unassignNotice, setUnassignNotice] = useState(null);
+  const unassignNoticeTimer = useRef(null);
 
   // A non-admin who captains at least one coach is a "coach captain": they see
   // ONLY the trip(s) they're assigned to, and can't create/seed trips. Admins
@@ -676,7 +707,15 @@ export default function TripsListPage() {
         <TripFormModal
           trip={formTrip}
           onClose={() => setFormTrip(null)}
-          onSaved={() => { setFormTrip(null); fetchTrips(); }}
+          onSaved={(saved) => {
+            setFormTrip(null); fetchTrips();
+            if (saved?.unassigned?.length) {
+              const names = saved.unassigned.map((u) => `${u.name} (${u.coachLabel})`).join(", ");
+              setUnassignNotice(`${t("Auto-unassigned")}: ${names} — ${t("already captaining another active trip.")}`);
+              clearTimeout(unassignNoticeTimer.current);
+              unassignNoticeTimer.current = setTimeout(() => setUnassignNotice(null), 6000);
+            }
+          }}
         />
       )}
       {deleteTripState && (
@@ -685,6 +724,15 @@ export default function TripsListPage() {
           onClose={() => setDeleteTripState(null)}
           onDeleted={fetchTrips}
         />
+      )}
+      {unassignNotice && (
+        <div style={{
+          position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 200,
+          background: "var(--tf-red)", color: "#fff", padding: "10px 16px", borderRadius: 8,
+          fontSize: 13, fontWeight: 600, boxShadow: "var(--shadow-md)", maxWidth: "90vw",
+        }}>
+          {unassignNotice}
+        </div>
       )}
     </div>
   );

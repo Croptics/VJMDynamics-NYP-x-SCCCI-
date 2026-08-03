@@ -11,6 +11,7 @@ import DelegateLocationMap from "../../components/DelegateLocationMap.jsx";
 import DelegateTimeline from "../../components/DelegateTimeline.jsx";
 
 import { getMobileTripId } from "../../lib/mobileTrip.js";
+import { effectiveStatus } from "../../lib/delegateStatus.js";
 // Offline-capable delegate writes (2026-07-28) — attendance decisions taken
 // on-site must survive a dead signal. See lib/outbox.js.
 import { patchDelegate, applyQueuedPatches } from "../../lib/delegateWrites.js";
@@ -59,9 +60,6 @@ const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING", "CANCELLED"];
 //    what method. Flipping status straight to ARRIVED here would mark someone
 //    present with NO audit trail, so the head-count and the log would disagree.
 const STATUS_OPTIONS = ["ASSIGNED", "MISSING"];
-// Legacy alias — some check-in routes still write "PRESENT" directly (see
-// normalize() in backend/data.js), not yet migrated to "ARRIVED".
-const effectiveStatus = (d) => (d.status === "PRESENT" ? "ARRIVED" : d.status);
 const STATUS_BADGE_CLASS = {
   PRESENT: "badge-arrived", ARRIVED: "badge-arrived", ASSIGNED: "badge-assigned",
   LATE: "badge-late", MISSING: "badge-missing", UNASSIGNED: "badge-unassigned",

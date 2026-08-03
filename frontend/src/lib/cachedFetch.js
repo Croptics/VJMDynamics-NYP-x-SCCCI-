@@ -36,8 +36,10 @@ function store() {
   }
 }
 
-/** Read whatever's cached for this key, or null if nothing/corrupted. */
-export function getCached(key) {
+/** Read whatever's cached for this key, or null if nothing/corrupted.
+ *  Internal only (2026-08-02 audit — nothing outside this file ever imports
+ *  it, same as its setCached sibling below). */
+function getCached(key) {
   const s = store();
   if (!s) return null;
   try {

@@ -69,7 +69,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
-  PencilLine, UserPlus, Loader2, AlertCircle, GripVertical, CheckCircle2,
+  PencilLine, UserPlus, Loader2, AlertCircle, AlertTriangle, GripVertical, CheckCircle2,
   Star, X, Plus, Trash2, Edit2, Bus, Users, MessageSquare, MapPin,
   Building2, Landmark, UtensilsCrossed, Factory, Plane, Accessibility, Navigation, Clock, Circle,
   ChevronDown, ChevronRight, ChevronLeft, Check, CloudOff,
@@ -1473,7 +1473,46 @@ function captainLabel(a) {
   return sameAsUsername ? `${name} (${a.role})` : `${name} · ${a.username} (${a.role})`;
 }
 
-function CaptainSelect({ value, onChange, accounts }) {
+// "Also assigned elsewhere" hint (2026-08-02 — "add like text to indicate
+// each coach is assigned currently to trip instead of just when i click then
+// i know"). Shows proactively while picking a staff member, not just after
+// Save bounces off the backend's 409 CAPTAIN_TRIP_CONFLICT guardrail. Red +
+// AlertTriangle only for an ALREADY-"In progress" trip — that's the one that
+// actually blocks a save; a Planning-trip assignment is just informational
+// (staff can captain several of those at once, see permissions.js's own
+// mobileView note on the same guardrail).
+function elsewhereLabel(t, elsewhere) {
+  if (!elsewhere || !elsewhere.length) return null;
+  const conflict = elsewhere.find((e) => e.tripStatus === "In progress");
+  const shown = conflict || elsewhere[0];
+  const text = `${t("Also on")} ${shown.coachLabel} · ${shown.tripName} (${t(shown.tripStatus)})`;
+  return { text, isConflict: !!conflict };
+}
+
+// Shared by AddCoachModal/EditCoachStaffModal so the fetch+groupby isn't
+// duplicated in both. Best-effort — a failed fetch just means no hint shows,
+// it never blocks the actual form.
+function useStaffAssignmentsMap() {
+  const [map, setMap] = useState(new Map());
+  useEffect(() => {
+    let alive = true;
+    apiGet("/coaches/staff-assignments")
+      .then((r) => {
+        if (!alive) return;
+        const m = new Map();
+        for (const row of r.assignments || []) {
+          if (!m.has(row.accountId)) m.set(row.accountId, []);
+          m.get(row.accountId).push(row);
+        }
+        setMap(m);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  return map;
+}
+
+function CaptainSelect({ value, onChange, accounts, assignmentsByAccount, currentTripId }) {
   const { t } = useLang();
   const { open, setOpen, rootRef } = useDropdown();
   const ids = value || [];
@@ -1483,6 +1522,13 @@ function CaptainSelect({ value, onChange, accounts }) {
     if (ids.includes(id)) onChange(ids.filter((x) => x !== id));
     else if (!atMax) onChange([...ids, id]);
   };
+  // Assignments on a DIFFERENT trip only — captaining another coach on THIS
+  // SAME trip isn't "elsewhere" and isn't part of the cross-trip guardrail.
+  const elsewhereFor = (accountId) =>
+    (assignmentsByAccount?.get(accountId) || []).filter((e) => e.tripId !== currentTripId);
+  const selectedElsewhere = selectedAccounts
+    .map((a) => ({ a, hint: elsewhereLabel(t, elsewhereFor(a.id)) }))
+    .filter((x) => x.hint);
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
       <button type="button" className="tf-input tf-select-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
@@ -1493,12 +1539,21 @@ function CaptainSelect({ value, onChange, accounts }) {
         )}
         <ChevronDown size={16} style={{ flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
       </button>
+      {/* Visible on the CLOSED button too, not just inside the open dropdown —
+          the whole point is seeing this before clicking anything. */}
+      {selectedElsewhere.map(({ a, hint }) => (
+        <p key={a.id} className="tf-flex tf-gap-6" style={{ alignItems: "center", fontSize: 12, marginTop: 6, marginBottom: 0, color: hint.isConflict ? "var(--tf-red)" : "var(--tf-text-3)" }}>
+          {hint.isConflict && <AlertTriangle size={12} style={{ flexShrink: 0 }} />}
+          {(a.name || a.username)}: {hint.text}
+        </p>
+      ))}
       {open && (
         <div className="tf-select-menu" role="listbox" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, maxHeight: 260, zIndex: 30 }}>
           <div className="tf-select-empty">{t("Select up to")} {MAX_CAPTAINS} {t("staff")}{ids.length ? ` (${ids.length}/${MAX_CAPTAINS})` : ""}</div>
           {accounts.map((a) => {
             const checked = ids.includes(a.id);
             const disabled = !checked && atMax;
+            const hint = elsewhereLabel(t, elsewhereFor(a.id));
             return (
               <button key={a.id} type="button" role="option" aria-selected={checked}
                 className={"tf-select-item" + (checked ? " active" : "")}
@@ -1506,7 +1561,14 @@ function CaptainSelect({ value, onChange, accounts }) {
                 style={disabled ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
                 onClick={() => toggle(a.id)}>
                 <span className="tf-select-check">{checked && <Check size={11} />}</span>
-                {captainLabel(a)}
+                <span>
+                  {captainLabel(a)}
+                  {hint && (
+                    <span className="tf-flex tf-gap-6" style={{ alignItems: "center", display: "block", fontSize: 11.5, marginTop: 2, color: hint.isConflict ? "var(--tf-red)" : "var(--tf-text-3)" }}>
+                      {hint.isConflict && <AlertTriangle size={11} style={{ flexShrink: 0 }} />} {hint.text}
+                    </span>
+                  )}
+                </span>
               </button>
             );
           })}
@@ -1525,6 +1587,7 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const assignmentsByAccount = useStaffAssignmentsMap();
 
   useEffect(() => {
     (async () => {
@@ -1578,7 +1641,7 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
           second "who's in charge" concept with no login behind it, which
           just duplicated what the account picker already covers. */}
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")}</label>
-      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} />
+      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} assignmentsByAccount={assignmentsByAccount} currentTripId={tripId} />
       <p className="tf-help">{t("Optional, up to 3. Each login sees only this coach on the board (admins always see all).")}</p>
 
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center", marginTop: 14 }}><Navigation size={13} /> {t("Driver name")}</label>
@@ -1588,7 +1651,7 @@ function AddCoachModal({ tripId, existingCount, onClose, onAdded }) {
   );
 }
 
-function EditCoachStaffModal({ coach, onClose, onSaved }) {
+function EditCoachStaffModal({ coach, onClose, onSaved, tripId }) {
   const { t } = useLang();
   const [driverName, setDriverName] = useState(coach.driverName || "");
   const [accountIds, setAccountIds] = useState((coach.captains || []).map((c) => c.id));
@@ -1603,6 +1666,7 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
   const [accounts, setAccounts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const assignmentsByAccount = useStaffAssignmentsMap();
 
   useEffect(() => {
     (async () => {
@@ -1642,7 +1706,7 @@ function EditCoachStaffModal({ coach, onClose, onSaved }) {
           login-account picker labelled "Coach captains") into just this one,
           renamed and moved to the top. See AddCoachModal's matching note. */}
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Users size={13} /> {t("Staff member")}</label>
-      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} />
+      <CaptainSelect value={accountIds} onChange={setAccountIds} accounts={accounts} assignmentsByAccount={assignmentsByAccount} currentTripId={tripId} />
       <p className="tf-muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 14 }}>{t("Optional, up to 3. Each login sees only this coach on the board (admins always see all).")}</p>
 
       <label className="tf-field-label tf-flex tf-gap-6" style={{ alignItems: "center" }}><Navigation size={13} /> {t("Driver name")}</label>
@@ -2341,7 +2405,7 @@ function CoachBoardView({ tripId }) {
             onOverride={() => { const { delegate, coach } = capacityPrompt; setCapacityPrompt(null); doReassign(delegate, coach.id, { override: true }); }}
           />
         )}
-        {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
+        {editStaffCoach && <EditCoachStaffModal coach={editStaffCoach} tripId={tripId} onClose={() => setEditStaffCoach(null)} onSaved={(updated) => { setCoaches((cs) => cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))); pushToast(t("Save changes") + " ✓"); }} />}
         {showItinerary && <EditItineraryModal tripId={tripId} itinerary={itinerary} categories={categories} onClose={() => setShowItinerary(false)} onRefresh={refreshItinerary} askConfirm={askConfirm} />}
         {showAddDelegate && <AddDelegateModal tripId={tripId} onClose={() => setShowAddDelegate(false)} onAdded={handleDelegateAdded} />}
         {showAddCoach && <AddCoachModal tripId={tripId} existingCount={coaches.length} onClose={() => setShowAddCoach(false)} onAdded={(c) => { fetchAll(); pushToast(`${c.label} ${t("added")}.`); }} />}

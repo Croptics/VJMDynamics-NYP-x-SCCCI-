@@ -207,8 +207,15 @@ initDb()
   .then(initExceptions) // creates exception_tickets/check_in_logs after the base schema exists
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`\n  MusterGo backend running -> http://localhost:${PORT}`);
-      console.log(`  Login: staff_194 / password123!\n`);
+      console.log(`\n  MusterGo backend running -> http://localhost:${PORT}\n`);
+      // 2026-08-02 audit: this used to also print a working demo login
+      // (username + password, in plaintext) to stdout on every single boot,
+      // unconditionally — including on a production deploy of the same seed
+      // data. Removed rather than gated behind an env check: the demo
+      // credentials are already documented in README/PROJECT_STRUCTURE.md for
+      // local dev, so nothing is lost by not also handing them out in logs
+      // (which a hosting platform's log viewer may expose more widely than a
+      // developer's own terminal).
     });
     startLateCutoffScheduler();
   })
