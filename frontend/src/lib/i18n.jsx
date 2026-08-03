@@ -1,3 +1,12 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — shared i18n, imported by every teammate's pages
+ *
+ *  TEAMMATES: add your own missing-translation keys directly to DICT below —
+ *  that part is safe and expected. Don't restructure useLang()/translate()
+ *  themselves without flagging JQ first, since every page in the app depends
+ *  on their current shape.
+ * ============================================================================= */
 import { createContext, useCallback, useContext, useState } from "react";
 
 /**

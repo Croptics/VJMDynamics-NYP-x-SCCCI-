@@ -1,5 +1,5 @@
 /**
- * Unit tests — offline delegate writes (JQ, frontend/src/lib/delegateWrites.js).
+ * Unit tests — offline delegate writes (JQ, frontend/src/lib/localstorage/delegateWrites.js).
  *
  * Covers the mobile Attendance sheet's path: a status change ("missing, last
  * seen at Gate 3") or a cancellation taken with no signal must survive, replay
@@ -20,8 +20,8 @@ class FakeStorage {
 globalThis.localStorage = new FakeStorage();
 globalThis.crypto ??= (await import("node:crypto")).webcrypto;
 
-const outbox = await import("../../frontend/src/lib/outbox.js");
-const dw = await import("../../frontend/src/lib/delegateWrites.js");
+const outbox = await import("../../frontend/src/lib/localstorage/outbox.js");
+const dw = await import("../../frontend/src/lib/localstorage/delegateWrites.js");
 
 beforeEach(() => {
   globalThis.localStorage.clear();

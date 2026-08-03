@@ -176,9 +176,40 @@ images, only text).
    var needed unless it's running somewhere other than localhost
    (`OLLAMA_HOST=http://...`).
 
-**Setup — Anthropic (optional paid fallback):** see **`AI_DEPLOYMENT.md`** in
-this same folder for the full walkthrough (getting a key, where to set it on
-whatever hosting platform is used, cost expectations).
+**Setup — Anthropic (optional paid fallback):**
+1. Go to **console.anthropic.com** and sign in (or sign up).
+2. Add a payment method under **Billing** — pay-as-you-go, no free tier. Cost
+   stays low here since Claude is only ever a *fallback* when Ollama isn't
+   available.
+3. **Settings → API Keys → Create Key**. Name it something identifiable
+   (e.g. `mustergo-prod`) and copy it immediately — it starts with
+   `sk-ant-...` and is only shown once.
+4. Set in `backend/.env`:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+5. **Never commit this file** — `backend/.env` is already gitignored. The key
+   belongs in an environment variable on whatever host runs the backend
+   (Render/Railway/Fly.io's own "Environment Variables" settings page, exactly
+   like `DATABASE_URL` and the other keys on this page), never hardcoded into
+   a route file or pasted anywhere outside `.env`.
+6. No code changes needed — `backend/routes/insights.js` and
+   `backend/routes/dashboard/dashboard.js`/`vance.js` already read
+   `process.env.ANTHROPIC_API_KEY` directly.
+
+**One hosting note:** the backend keeps a scheduler running in the background
+(the late-cutoff checker in `server.js`), so it needs to run on a host that
+keeps a Node process alive continuously — a traditional server/VM, Render,
+Railway, or Fly.io all work; a serverless/functions-only platform (plain
+Vercel Functions) is not a good fit for the *backend* specifically (the
+*frontend* is fine on Vercel, it's just static files).
+
+**Why Anthropic (Claude) specifically, not another provider:** the
+document-parsing feature's scanned-document reading (passports, boarding
+passes) uses Claude's vision capability directly, with local Tesseract OCR as
+the no-key fallback for images. Switching providers would mean rewriting that
+vision path, not just swapping a key — so unless cost becomes a real blocker,
+staying on one provider keeps the codebase simpler.
 
 ---
 

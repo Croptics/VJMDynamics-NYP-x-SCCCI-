@@ -17,10 +17,10 @@ import { useLang } from "../../lib/i18n.jsx";
 import {
   listContacts, getThread, sendMessage, editMessage, deleteMessage,
   listGroups, getGroupThread, sendGroupMessage,
-} from "../../lib/messagesApi.js";
-import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
-import { TRIP_ID } from "../../lib/exceptionsApi.js";
-import { formatClock as hhmm, formatListStamp, dayLabel, isSameDay } from "../../lib/chatTime.js";
+} from "../../lib/musterchat/messagesApi.js";
+import { parseDocument, confirmDelegates } from "../../lib/document/claudeParse.js";
+import { TRIP_ID } from "../../lib/exception/exceptionsApi.js";
+import { formatClock as hhmm, formatListStamp, dayLabel, isSameDay } from "../../lib/musterchat/chatTime.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 import ContactAvatar from "./ContactAvatar.jsx";

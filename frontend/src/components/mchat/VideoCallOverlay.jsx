@@ -7,7 +7,7 @@
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Video, VideoOff, PhoneOff, Phone, SwitchCamera, Users } from "lucide-react";
-import callManager, { fmtCallDuration } from "../../lib/callManager.js";
+import callManager, { fmtCallDuration } from "../../lib/musterchat/callManager.js";
 
 const initialsOf = (n) => (n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 

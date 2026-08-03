@@ -10,17 +10,17 @@ import {
   Send, Paperclip, Phone, Video, FileText, Film, Check, CheckCheck, X,
   Smile, Pencil, Trash2, Ban,
 } from "lucide-react";
-import { getThread, sendMessage, editMessage, deleteMessage } from "../../lib/messagesApi.js";
-import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
+import { getThread, sendMessage, editMessage, deleteMessage } from "../../lib/musterchat/messagesApi.js";
+import { parseDocument, confirmDelegates } from "../../lib/document/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 import ContactAvatar from "./ContactAvatar.jsx";
-import callManager from "../../lib/callManager.js";
+import callManager from "../../lib/musterchat/callManager.js";
 // Shared trip id constant (integration patch 2026-07-27) — was a duplicated
 // local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
 // exactly that duplication.
-import { TRIP_ID } from "../../lib/exceptionsApi.js";
-import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/chatTime.js";
+import { TRIP_ID } from "../../lib/exception/exceptionsApi.js";
+import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/musterchat/chatTime.js";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024; // ~8MB clip → ~11MB base64 (under backend cap)
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { MapPin, Clock, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { getTripPulse } from "../lib/claudeParse.js";
+import { getTripPulse } from "../lib/document/claudeParse.js";
 import { useLang } from "../lib/i18n.jsx";
 
 /**

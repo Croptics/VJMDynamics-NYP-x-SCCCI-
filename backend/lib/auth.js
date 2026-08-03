@@ -4,7 +4,7 @@
  * ============================================================================= */
 /**
  * Signed session tokens + auth middleware, shared by server.js and any
- * teammate route files (e.g. routes/insights.js) that need to require a
+ * teammate route files (e.g. routes/dashboard/insights.js) that need to require a
  * signed-in caller.
  *
  * Tokens are JWTs signed with JWT_SECRET (set it in backend/.env for

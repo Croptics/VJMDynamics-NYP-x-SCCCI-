@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAssignmentList } from "../../backend/routes/roomAssign.js";
+import { parseAssignmentList } from "../../backend/routes/dashboard/roomAssign.js";
 
 const roster = [
   { id: "d1", name: "Chen Hao Ming" },

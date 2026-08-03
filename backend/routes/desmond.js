@@ -15,7 +15,7 @@
  *
  * Self-contained: opens its own pg Pool (server.js/data.js don't export
  * theirs). Auth reuses this branch's existing auth.js (requireAuth()) — same
- * signed JWTs server.js and routes/insights.js already use.
+ * signed JWTs server.js and routes/dashboard/insights.js already use.
  *
  * CORS — NOT configured again here; backend/server.js already runs cors()
  * before any router (including this one) is mounted.
@@ -74,7 +74,7 @@ import { updateDelegate } from "../db/delegates.js";
 // syncCurrentCheckpointStatus to keep the checkpoint view honest on a status
 // change. None of these files are edited; only their exports are called.
 import { logActivity as logHistory } from "../db/history.js";
-import { syncCurrentCheckpointStatus } from "./checkpoints.js";
+import { syncCurrentCheckpointStatus } from "./dashboard/checkpoints.js";
 // Pure reassignment decision core (no DB) — kept in its own file so tests can
 // import it without this module's Postgres pool. See reassign-core.js.
 import { evaluateReassign } from "./reassign-core.js";
@@ -147,7 +147,7 @@ async function run(sql, params = []) { await pool.query(sql, params); }
  *  moment a manually-frozen dayOf becomes most misleading — staff just
  *  changed the schedule, so the system's idea of "today's stops" should
  *  reflect it, not stay stuck on a value hand-typed before the edit. Without
- *  this, both checkpoint auto-transition schedulers (routes/checkpoints.js)
+ *  this, both checkpoint auto-transition schedulers (routes/dashboard/checkpoints.js)
  *  keep matching against the WRONG day's itinerary indefinitely, since
  *  syncTripDayOf() itself refuses to touch dayOf while the manual flag is on.
  *  Called after every itinerary create/update/delete, same as
@@ -537,7 +537,7 @@ router.get("/api/trips/:tripId/summary", readAccess, withTripUuid, wrap(async (r
 // HH:MM stored on trips.lateCutoffTime, edited via a "Trip settings" modal on
 // this board and enforced by applyLateCutoff() in db/delegates.js — has been
 // RETIRED in favour of JQ's itinerary-driven model. Every scheduled itinerary
-// stop is now its own cutoff: applyCheckpointLateCutoff() (routes/checkpoints.js,
+// stop is now its own cutoff: applyCheckpointLateCutoff() (routes/dashboard/checkpoints.js,
 // run every 60s from server.js) auto-flips un-scanned delegates to LATE per
 // stop, reading THIS feature's itinerary_items directly. That fully answers the
 // client's "derive the late-flip from the itinerary, not a fixed time" ask —
@@ -661,7 +661,7 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     // syncTripDayOf() and get silently ignored if "Current day" had EVER been
     // hand-set once. A stale/frozen dayOf then makes BOTH auto-transition
     // schedulers (applyCheckpointLateCutoff / resetArrivedBeforeNextCheckpoint
-    // in routes/checkpoints.js) look at the wrong day's itinerary — today's
+    // in routes/dashboard/checkpoints.js) look at the wrong day's itinerary — today's
     // real stops never match `i.day_number = t."dayOf"`, so delegates stop
     // auto-flipping Assigned<->Late entirely. Changing the actual start date
     // is a strong enough signal that the override is stale — clear it here

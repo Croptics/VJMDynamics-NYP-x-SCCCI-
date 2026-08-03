@@ -26,7 +26,7 @@ import {
   ScanFace, QrCode, LogOut, CheckCircle2, AlertTriangle, ShieldCheck, Camera, SwitchCamera,
   Mic, Moon, Sun, Zap, Turtle,
 } from "lucide-react";
-import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../lib/faceScan.js";
+import { vectorizeFaceLandmarks, vectorizeVoiceprint, isValidBiometricToken, playErrorTone } from "../lib/scanner/faceScan.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const TRIP_ID = "t-1";

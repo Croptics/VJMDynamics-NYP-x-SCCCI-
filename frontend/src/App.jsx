@@ -1,3 +1,12 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — the router, shared by every teammate's pages
+ *
+ *  TEAMMATES: add your own <Route>s here as you build pages — that part is
+ *  safe and expected. Don't restructure ViewGate/firstAllowedRoute/the
+ *  fallback-order arrays without flagging JQ first, since every route in the
+ *  app (yours included) goes through them.
+ * ============================================================================= */
 import { useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
@@ -6,35 +15,34 @@ import { getToken, clearToken, getPermissions, getUser, apiPost } from "./lib/ap
 // Vance — fully built
 import LoginPage from "./pages/LoginPage.jsx";
 import RegisterPage from "./pages/RegisterPage.jsx";
-import OnboardingPage from "./pages/desktop/OnboardingPage.jsx";
+import OnboardingPage from "./pages/desktop/document/OnboardingPage.jsx";
 
 // Scaffolds — owned by teammates
-import DashboardPage from "./pages/desktop/DashboardPage.jsx";
-import AnnouncementsPage from "./pages/desktop/AnnouncementsPage.jsx";
-import TripCoachPage from "./pages/desktop/TripCoachPage.jsx";
-import UnifiedScannerPage from "./pages/desktop/UnifiedScannerPage.jsx";
+import DashboardPage from "./pages/desktop/dashboard/DashboardPage.jsx";
+import AnnouncementsPage from "./pages/desktop/announcements/AnnouncementsPage.jsx";
+import TripCoachPage from "./pages/desktop/trip/TripCoachPage.jsx";
 import ExceptionInboxPage from "./pages/desktop/ExceptionInboxPage.jsx";
-import AccountControlPage from "./pages/desktop/AccountControlPage.jsx";
+import AccountControlPage from "./pages/desktop/accountcontrol/AccountControlPage.jsx";
 import SettingsPage from "./pages/desktop/SettingsPage.jsx";
-import HistoryLogPage from "./pages/desktop/HistoryLogPage.jsx";
-import UserGuidePage from "./pages/desktop/UserGuidePage.jsx";
+import HistoryLogPage from "./pages/desktop/dashboard/HistoryLogPage.jsx";
+import UserGuidePage from "./pages/desktop/userguide/UserGuidePage.jsx";
 import ChatAssistantPage from "./pages/desktop/ChatAssistantPage.jsx";
 
 // Mobile UI — responsive pages, own layout/nav
 import MobileLayout from "./pages/mobile/MobileLayout.jsx";
-import MobileHomePage from "./pages/mobile/MobileHomePage.jsx";
+import MobileHomePage from "./pages/mobile/home/MobileHomePage.jsx";
 // MobileAttendancePage / MobileTripsPage are NOT imported here any more — both
 // are reached only through MobileOpsPage, which composes them behind its
 // Delegates/Trips switch. They were left as unused imports when the Ops screen
 // took over both routes (2026-07-29 cleanup).
-import MobileOpsPage from "./pages/mobile/MobileOpsPage.jsx";
-import MobileProfilePage from "./pages/mobile/MobileProfilePage.jsx";
-import MobileIssuesPage from "./pages/mobile/MobileIssuesPage.jsx";
-import MobileExceptionsPage from "./pages/mobile/MobileExceptionsPage.jsx";
+import MobileOpsPage from "./pages/mobile/ops/MobileOpsPage.jsx";
+import MobileProfilePage from "./pages/mobile/me/MobileProfilePage.jsx";
+import MobileIssuesPage from "./pages/mobile/ops/MobileIssuesPage.jsx";
+import MobileExceptionsPage from "./pages/mobile/ops/MobileExceptionsPage.jsx";
 import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
-import MobileUserGuidePage from "./pages/mobile/MobileUserGuidePage.jsx";
-import MobileAnnouncementsPage from "./pages/mobile/MobileAnnouncementsPage.jsx";
-import MobileEnrolmentPage from "./pages/mobile/MobileEnrolmentPage.jsx";
+import MobileUserGuidePage from "./pages/mobile/me/MobileUserGuidePage.jsx";
+import MobileAnnouncementsPage from "./pages/mobile/home/MobileAnnouncementsPage.jsx";
+import MobileEnrolmentPage from "./pages/mobile/face/MobileEnrolmentPage.jsx";
 import KioskScannerPage from "./pages/KioskScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
@@ -339,16 +347,20 @@ export default function App() {
             /mobile/enrolment. Anyone with the old URL bookmarked now falls
             through to the catch-all redirect below. */}
 
-        {/* Unified desktop scanner (Face + QR + Manual) — an entrance-kiosk
-            page hosting all three real check-in paths on one screen.
-            Temporarily hidden (2026-07-27, "hide this page for now, don't
-            show it on frontend") — redirects to the dashboard instead of
-            rendering, so even a direct /scanner visit doesn't show it while
-            the sidebar link is also commented out (Sidebar.jsx). The
-            viewScanner permission that used to gate this was removed entirely
-            2026-08-02 (it had no nav entry point and was pure clutter in the
-            Account control editor) — if this page is ever restored, add a
-            fresh permission for it rather than reaching for the old key. */}
+        {/* Unified desktop scanner (Face + QR + Manual) — was an entrance-
+            kiosk page hosting all three real check-in paths on one screen.
+            Hidden 2026-07-27 ("hide this page for now, don't show it on
+            frontend"), then `UnifiedScannerPage.jsx` itself was deleted
+            entirely 2026-08-02 — confirmed first that nothing else imported
+            it (App.jsx's own import was the only reference left, and it was
+            never actually rendered — this route already redirected away)
+            and that the mobile Face/QR scanner has its own fully independent
+            imports of the shared face/QR libraries, so removing this had no
+            effect on it. The `viewScanner` permission that used to gate this
+            page was removed the same day, for the same reason. This route
+            just redirects any old /scanner bookmark to /dashboard now — if a
+            desktop kiosk scanner is ever wanted again, it needs building
+            fresh, not restoring from this file. */}
         <Route path="/scanner" element={<Navigate to="/dashboard" replace />} />
 
         {/* Account control — needs the manage-accounts permission. Kept on

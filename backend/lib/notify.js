@@ -2,7 +2,7 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Emergency escalations
  *
- *  Outbound notification channels for escalations (routes/escalations.js).
+ *  Outbound notification channels for escalations (routes/dashboard/escalations.js).
  *  Three tiers, per the user's request:
  *   1. In-app banner (frontend, polls GET /api/escalations/open) — always on.
  *   2. Tab-flash/chime (frontend) — always on, no config needed.

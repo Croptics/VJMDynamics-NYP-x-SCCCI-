@@ -4,7 +4,7 @@ import { Home, ClipboardList, User, Bus, ScanFace, QrCode } from "lucide-react";
 import { getPermissions, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
-import MobileChatBubble from "./MobileChatBubble.jsx";
+import MobileChatBubble from "../../components/mchat/MobileChatBubble.jsx";
 // Re-added after taking Vimal's mobile UI wholesale (2026-07-29). These two
 // are FUNCTION, not styling, and his branch predates them:
 //   SyncStatus       — the offline "N changes waiting to sync" pill. Without it
@@ -17,7 +17,7 @@ import MobileChatBubble from "./MobileChatBubble.jsx";
 // desktop to see it") — the full-width red banner on every mobile route was
 // too intrusive for on-ground staff; Escalate-to-office alerts stay a
 // desktop/admin-only surface (Layout.jsx still renders it there).
-import SyncStatus from "../../components/SyncStatus.jsx";
+import SyncStatus from "../../components/localstorage/SyncStatus.jsx";
 import { getMobileTripId } from "../../lib/mobileTrip.js";
 import "../../styles/mobile.css";
 // Light haptic tick on tab taps / actions — a native-app touch. No-op on

@@ -24,10 +24,10 @@ import {
   RefreshCw, ArrowLeft, Trash2, BadgeCheck, Lock, Loader2, X, Bus, Sparkles, ChevronRight,
 } from "lucide-react";
 import { apiGet, apiPost, getToken } from "../lib/api.js";
-import { captureVoiceEmbedding, vectorizeVoiceprint } from "../lib/faceScan.js";
+import { captureVoiceEmbedding, vectorizeVoiceprint } from "../lib/scanner/faceScan.js";
 import {
   loadHuman, detectFace, gate, averageEmbeddings, sampleConsistency, buildEmbeddingToken, MATCH_THRESHOLD,
-} from "../lib/humanFace.js";
+} from "../lib/scanner/humanFace.js";
 
 const TICK_MS = 350;       // live-gate cadence
 const HOLD_TICKS = 4;      // aligned+live frames before capture starts (~1.4s)

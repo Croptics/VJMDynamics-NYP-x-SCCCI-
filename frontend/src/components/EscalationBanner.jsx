@@ -7,7 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { Siren, Check, ArrowRight } from "lucide-react";
 import { apiGet, apiPost } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
-import { isAlertSoundMuted } from "../lib/alertSound.js";
+import { isAlertSoundMuted } from "../lib/dashboard/alertSound.js";
 // Trip-scoped (2026-07-31 — "if you escalate, it should be only the trip
 // within, not other trip can see that") — this used to poll every open
 // escalation across every trip regardless of which one was on screen. Same

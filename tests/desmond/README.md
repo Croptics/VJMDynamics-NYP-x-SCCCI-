@@ -21,7 +21,7 @@ node --test "tests/desmond/*.test.js"
 | File | Unit under test | Focus |
 |------|-----------------|-------|
 | `reassign-logic.test.js` | `backend/routes/reassign-core.js` → `evaluateReassign()` | The server-side guards on `PATCH /api/trips/:tripId/reassign`: delegate/coach must be real and on this trip (no cross-trip "wrong coach"), seat **capacity** (409 unless overridden), **optimistic locking** vs. concurrent moves (409 CONFLICT), captain scoping, and the "status follows the coach" rule. |
-| `reassign-queue.test.js` | `frontend/src/lib/reassignQueue.js` | Offline reassignment via the shared outbox: a move is **queued** when offline (and resolves so the optimistic UI stands), **survives a reload** (`applyQueuedReassigns` overlay), **replays in order** on reconnect, and a genuine refusal (capacity/conflict) still **throws** instead of being swallowed. |
+| `reassign-queue.test.js` | `frontend/src/lib/trip/reassignQueue.js` | Offline reassignment via the shared outbox: a move is **queued** when offline (and resolves so the optimistic UI stands), **survives a reload** (`applyQueuedReassigns` overlay), **replays in order** on reconnect, and a genuine refusal (capacity/conflict) still **throws** instead of being swallowed. |
 
 ## Why these two modules exist
 
@@ -32,4 +32,4 @@ it *can* be unit-tested the same way the rest of the team's suites are:
   opens a Postgres pool at import time, so importing it directly hangs the
   runner). The route imports this and does only the I/O around it.
 - `reassignQueue.js` — the offline queue helpers, shared by the desktop and
-  mobile boards, built on JQ's `lib/outbox.js` exactly like `lib/delegateWrites.js`.
+  mobile boards, built on JQ's `lib/localstorage/outbox.js` exactly like `lib/localstorage/delegateWrites.js`.

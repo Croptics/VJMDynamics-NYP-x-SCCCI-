@@ -197,7 +197,7 @@ router.patch("/api/auth/me", requireAuth(), wrap(async (req, res) => {
 }));
 
 // Profile photo uploads — memory storage (never touches local disk), same
-// 5MB/image-only guard as the delegate photo route in routes/delegates.js.
+// 5MB/image-only guard as the delegate photo route in routes/dashboard/delegates.js.
 const profilePhotoUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },

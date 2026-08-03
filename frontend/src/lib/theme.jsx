@@ -1,3 +1,7 @@
+/* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ)
+ *  PART OF:   MusterGo base — shared app-wide light/dark theme
+ * ============================================================================= */
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 
 /**

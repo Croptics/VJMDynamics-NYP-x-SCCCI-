@@ -27,16 +27,16 @@ import { apiGet, apiPost, getPermissions } from "../../lib/api.js";
 import {
   vectorizeFaceLandmarks, vectorizeVoiceprint, captureVoiceEmbedding, isValidBiometricToken, playErrorTone,
   faceAlignment, parseFaceVector, averageFaceVectors, buildFaceToken, captureFrame, FACE_CROP,
-} from "../../lib/faceScan.js";
+} from "../../lib/scanner/faceScan.js";
 // Real face recognition (deep embedding + liveness/anti-spoof) — the scan path
 // now uses this so check-in matches the delegate's Human enrolment.
-import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbeddingToken } from "../../lib/humanFace.js";
+import { loadHuman, detectFace, gate as faceGate, averageEmbeddings, buildEmbeddingToken } from "../../lib/scanner/humanFace.js";
 
 // Scans average this many vectorized frames, the same way enrollment does, so
 // a single blurred frame can't cause a false rejection.
 const SCAN_SAMPLES = 3;
 import { useLang } from "../../lib/i18n.jsx";
-import QRScannerPanel from "../../components/QRScannerPanel.jsx";
+import QRScannerPanel from "../../components/exception/QRScannerPanel.jsx";
 // Manual check-in is mobile's OWN screen, not the desktop panel (2026-07-29,
 // Vimal). components/ManualTrackingPanel.jsx is `position:absolute; inset:0` —
 // built to fill the desktop scanner's fixed camera square — so mounting it in
@@ -44,7 +44,7 @@ import QRScannerPanel from "../../components/QRScannerPanel.jsx";
 // height: the list was invisible on a phone. MobileManualCheckIn is the
 // touch-first replacement (swipe to check in, multi-select, session reason,
 // undo snackbar). The desktop scanner still uses the original panel.
-import MobileManualCheckIn from "./MobileManualCheckIn.jsx";
+import MobileManualCheckIn from "./ops/MobileManualCheckIn.jsx";
 // Re-applied at integration 2026-07-29: this branch hardcoded
 // `const TRIP_ID = "t-1"` at module scope, which silently pins the scanner to
 // the base trip and undoes the mobile trip switcher. Read per-render instead so
@@ -54,8 +54,8 @@ import { getMobileTripId } from "../../lib/mobileTrip.js";
 // flagged as most important for this ("the manual, attendance, exception,
 // trip"): fetchCoach() below used to just null out the whole roster on any
 // failure, including a dead signal — see lib/cachedFetch.js.
-import { cachedFetch } from "../../lib/cachedFetch.js";
-import CachedDataBadge from "../../components/CachedDataBadge.jsx";
+import { cachedFetch } from "../../lib/localstorage/cachedFetch.js";
+import CachedDataBadge from "../../components/localstorage/CachedDataBadge.jsx";
 
 // Offline queue — check-ins captured while the phone has no signal (on a
 // highway between venues) are stashed in localStorage and replayed to the

@@ -39,7 +39,7 @@ import { randomUUID } from "crypto";
 import pg from "pg";
 import { requireAuth, requirePermission } from "../lib/auth.js";
 import { resolveTripUuid, updateDelegate, resolveEscalation } from "../data.js";
-import { syncCurrentCheckpointStatus } from "./checkpoints.js";
+import { syncCurrentCheckpointStatus } from "./dashboard/checkpoints.js";
 // Bi-directional exception linking (2026-07-31) — see that module's header
 // for why this is a standalone leaf module rather than living in this file.
 import { syncDelegateStatus, escalateAutoTicket, registerExceptionBroadcast } from "../db/exceptionSync.js";

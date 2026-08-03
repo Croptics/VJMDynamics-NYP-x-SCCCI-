@@ -15,7 +15,6 @@ import {
   Languages,
   Sun,
   Moon,
-  ScanFace,
   HelpCircle,
   Megaphone,
   Settings,

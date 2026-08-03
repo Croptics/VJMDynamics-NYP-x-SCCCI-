@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import StatusBadge from "../../components/StatusBadge.jsx";
-import LogExceptionModal from "../../components/LogExceptionModal.jsx";
+import LogExceptionModal from "../../components/exception/LogExceptionModal.jsx";
 import EscalateModal from "../../components/EscalateModal.jsx";
 import ConfirmDialog from "../../components/ConfirmDialog.jsx";
 import { getPermissions, apiPost } from "../../lib/api.js";
@@ -38,7 +38,7 @@ import {
   listExceptions, resolveException, deleteException, manualOverride, updatePriority,
   subscribeStream, fmtTime, issueLabel, ageMinutes, fmtAge, ageLevel, resolveMinutes,
   exportTicketsCsv, isCheckedIn,
-} from "../../lib/exceptionsApi.js";
+} from "../../lib/exception/exceptionsApi.js";
 // Follows the same trip DashboardPage/TripCoachPage have selected (2026-07-31
 // — "add the trip change to exception"), instead of the fixed base TRIP_ID
 // this inbox used to always read regardless of the trip switcher.
@@ -47,9 +47,9 @@ import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
 // pages flagged as most important ("the manual, attendance, exception,
 // trip"): load() below used to just error out on any failure, including a
 // dead signal. See lib/cachedFetch.js.
-import { cachedFetch } from "../../lib/cachedFetch.js";
-import CachedDataBadge from "../../components/CachedDataBadge.jsx";
-import "./ExceptionInboxPage.css";
+import { cachedFetch } from "../../lib/localstorage/cachedFetch.js";
+import CachedDataBadge from "../../components/localstorage/CachedDataBadge.jsx";
+import "../../styles/ExceptionInboxPage.css";
 
 // Every tab is mutually exclusive by design (2026-07-31 — "for the all tab,
 // hide the resolved one" / "pls fix the for critical tab also" / "the open

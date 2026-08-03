@@ -6,14 +6,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { Search, Bot, Users, Plus, X, Check } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
-import { listContacts, listGroups, createGroup } from "../../lib/messagesApi.js";
+import { listContacts, listGroups, createGroup } from "../../lib/musterchat/messagesApi.js";
 import AssistantConversation from "./AssistantConversation.jsx";
 import HumanThread from "./HumanThread.jsx";
 import GroupThread from "./GroupThread.jsx";
 import ContactAvatar from "./ContactAvatar.jsx";
 import VideoCallOverlay from "./VideoCallOverlay.jsx";
-import callManager from "../../lib/callManager.js";
-import { formatListStamp as hhmm } from "../../lib/chatTime.js";
+import callManager from "../../lib/musterchat/callManager.js";
+import { formatListStamp as hhmm } from "../../lib/musterchat/chatTime.js";
 
 
 const AI = { kind: "ai", id: "assistant", name: "Trip Assistant" };

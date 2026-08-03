@@ -10,16 +10,16 @@ import { Send, Users, Paperclip, Phone, Video, FileText, Film, X, Smile, Pencil,
 import {
   getGroupThread, sendGroupMessage, editMessage, deleteMessage,
   listContacts, getGroupMembers, editGroup, deleteGroup,
-} from "../../lib/messagesApi.js";
-import { parseDocument, confirmDelegates } from "../../lib/claudeParse.js";
+} from "../../lib/musterchat/messagesApi.js";
+import { parseDocument, confirmDelegates } from "../../lib/document/claudeParse.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
-import callManager from "../../lib/callManager.js";
+import callManager from "../../lib/musterchat/callManager.js";
 // Shared trip id constant (integration patch 2026-07-27) — was a duplicated
 // local `const TRIP_ID = "t-1"`; lib/mobileTrip.js explicitly warns against
 // exactly that duplication.
-import { TRIP_ID } from "../../lib/exceptionsApi.js";
-import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/chatTime.js";
+import { TRIP_ID } from "../../lib/exception/exceptionsApi.js";
+import { formatClock as hhmm, dayLabel, isSameDay } from "../../lib/musterchat/chatTime.js";
 
 const MAX_VIDEO_BYTES = 8 * 1024 * 1024;
 const fileToDataUrl = (file) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });

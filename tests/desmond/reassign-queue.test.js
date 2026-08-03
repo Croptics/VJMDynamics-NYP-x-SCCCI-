@@ -1,6 +1,6 @@
 /**
  * Unit tests — offline reassignment queue
- * (Desmond, frontend/src/lib/reassignQueue.js).
+ * (Desmond, frontend/src/lib/trip/reassignQueue.js).
  *
  * The Trips board's reassign must survive a dead signal: queued when offline,
  * still visible after a reload, resolved so the optimistic UI stands, replayed
@@ -42,8 +42,8 @@ function respond(status, body) {
 
 // Import AFTER the globals exist (outbox reads localStorage; the module
 // registers its outbox sender on import).
-const outbox = await import("../../frontend/src/lib/outbox.js");
-const rq = await import("../../frontend/src/lib/reassignQueue.js");
+const outbox = await import("../../frontend/src/lib/localstorage/outbox.js");
+const rq = await import("../../frontend/src/lib/trip/reassignQueue.js");
 
 beforeEach(() => {
   globalThis.localStorage.clear();

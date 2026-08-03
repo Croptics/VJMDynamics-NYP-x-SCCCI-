@@ -7,7 +7,7 @@ import { ShieldCheck, Sun, Moon, Languages, Timer, Camera, X, Pencil, Bell, Bell
 import { getUser, getPermissions, apiGet, apiPatch, apiPost, apiDelete, updateSession } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useTheme } from "../../lib/theme.jsx";
-import { isAlertSoundMuted, setAlertSoundMuted } from "../../lib/alertSound.js";
+import { isAlertSoundMuted, setAlertSoundMuted } from "../../lib/dashboard/alertSound.js";
 import MediaManager from "../../components/MediaManager.jsx";
 import PhotoCropModal from "../../components/PhotoCropModal.jsx";
 import CameraCaptureModal from "../../components/CameraCaptureModal.jsx";

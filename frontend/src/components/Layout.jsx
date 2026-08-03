@@ -10,15 +10,15 @@ import { useEffect, useState, useRef } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Menu, ClipboardCheck } from "lucide-react";
 import Sidebar from "./Sidebar.jsx";
-import ChatBubble from "./ChatBubble.jsx";
+import ChatBubble from "./mchat/ChatBubble.jsx";
 import EscalationBanner from "./EscalationBanner.jsx";
-import SyncStatus from "./SyncStatus.jsx";
-import { getCriticalOpenCount } from "../lib/exceptionsApi.js";
+import SyncStatus from "./localstorage/SyncStatus.jsx";
+import { getCriticalOpenCount } from "../lib/exception/exceptionsApi.js";
 import { getActiveTripId } from "../lib/activeTrip.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
 import { getPermissions, apiGet } from "../lib/api.js";
-import { countUnseenAnnouncements } from "../lib/announcementsSeen.js";
+import { countUnseenAnnouncements } from "../lib/announcements/announcementsSeen.js";
 import { useVisiblePolling } from "../lib/useVisiblePolling.js";
 
 // How often (ms) to refresh the sidebar's critical-exception badge. Kept

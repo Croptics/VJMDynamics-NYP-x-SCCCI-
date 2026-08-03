@@ -1,5 +1,5 @@
 /**
- * Unit tests — offline write queue (JQ, frontend/src/lib/outbox.js).
+ * Unit tests — offline write queue (JQ, frontend/src/lib/localstorage/outbox.js).
  *
  * The whole offline attendance feature rests on one property: a queued write is
  * applied EXACTLY ONCE, no matter how many times it's replayed. These tests
@@ -23,7 +23,7 @@ globalThis.localStorage = new FakeStorage();
 
 // Import AFTER localStorage exists, since the module reads it lazily but the
 // first call happens during these tests.
-const outbox = await import("../../frontend/src/lib/outbox.js");
+const outbox = await import("../../frontend/src/lib/localstorage/outbox.js");
 
 /** An HTTP-style failure, the shape lib/api.js throws (has .status). */
 function httpError(status, message = "boom") {
@@ -79,7 +79,7 @@ describe("enqueue — durable, ordered, idempotency key preserved", () => {
 
   test("survives a 'reload' — state lives in storage, not memory", async () => {
     outbox.enqueue({ kind: "checkins/manual", payload: PAYLOAD("evt-3") });
-    const fresh = await import("../../frontend/src/lib/outbox.js?reload=1");
+    const fresh = await import("../../frontend/src/lib/localstorage/outbox.js?reload=1");
     assert.equal(fresh.pendingCount(), 1);
   });
 });

@@ -1,8 +1,10 @@
 /* =============================================================================
+ *  OWNED BY:  InsightMetrics (JQ) — bridges into Jayden's Exception Logging
+ *             feature (writes exception_tickets); flag changes here to Jayden.
  *  PART OF:   MusterGo — Missing/Escalated <-> Exceptions auto-sync (2026-07-31)
  *
  *  "Bi-directional exception linking" — a delegate's live status (Missing) and
- *  escalation state (via the existing routes/escalations.js "Escalate to
+ *  escalation state (via the existing routes/dashboard/escalations.js "Escalate to
  *  office" feature — db/delegates.js's rowToDelegate() already derives an
  *  `escalated` flag off the same escalations table) now keep an
  *  auto-generated exception_tickets row in sync, instead of the Exceptions
@@ -13,7 +15,7 @@
  *  import cycle through ../data.js if this lived inside routes/exceptions.js
  *  itself: db/delegates.js (updateDelegate), routes/exceptions.js (the two
  *  raw-SQL check-in routes that intentionally bypass updateDelegate — see
- *  their own comments), and routes/escalations.js (createEscalation). SSE
+ *  their own comments), and routes/dashboard/escalations.js (createEscalation). SSE
  *  broadcasting is handled the same way: routes/exceptions.js registers its
  *  own broadcast() closure here once at boot (registerExceptionBroadcast, see
  *  initExceptions()) rather than this module importing that route back.
@@ -135,7 +137,7 @@ export async function syncDelegateStatus(delegateId, status) {
 }
 
 /**
- * "Escalate to office" (routes/escalations.js) also elevates the delegate's
+ * "Escalate to office" (routes/dashboard/escalations.js) also elevates the delegate's
  * tracked ticket to CRITICAL, so it surfaces in the Exceptions inbox's
  * Critical tab — the other half of the same escalations table db/delegates.js
  * already derives its `escalated` flag from. Creates the ticket if one isn't

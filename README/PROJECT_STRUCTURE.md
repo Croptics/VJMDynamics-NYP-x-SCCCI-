@@ -23,6 +23,66 @@ owned file/route, say so explicitly in the entry (see `INTEGRATION_NOTES.md`
 for the ownership map) — that's exactly the kind of thing a future session
 merging a branch needs to know.
 
+## Recent updates (2026-08-03, not yet folded into the sections below)
+
+**Large-scale folder reorganization — almost every file path below this point
+has moved.** Full narrative + reasoning in AI Log entries (194)–(211). This
+doc's per-file sections below (the `### FileName.jsx` entries) were written
+when everything lived flat in `pages/`, `lib/`, and `components/` — treat the
+FOLDER portion of any path mentioned below those headers as unreliable until
+folded; the file's own content/behavior described is still accurate, only its
+address changed. Quick old → new map for the files most referenced below:
+
+- **`pages/desktop/`** → subfoldered by feature: `dashboard/` (DashboardPage.jsx,
+  HistoryLogPage.jsx), `trip/` (TripCoachPage.jsx, TripsListPage.jsx),
+  `accountcontrol/` (AccountControlPage.jsx), `announcements/`
+  (AnnouncementsPage.jsx), `userguide/` (UserGuidePage.jsx), `document/`
+  (OnboardingPage.jsx, BoardingPassesView.jsx). `ExceptionInboxPage.jsx`,
+  `SettingsPage.jsx` stayed at `pages/desktop/` root (no folder fits yet).
+  `UnifiedScannerPage.jsx` was **deleted** (dead code, `/scanner` route already
+  redirected to `/dashboard` — see entry (199)).
+- **`pages/mobile/`** → `home/` (MobileHomePage.jsx, MobileAnnouncementsPage.jsx),
+  `ops/` (MobileOpsPage.jsx, MobileAttendancePage.jsx + its `attendance/`
+  subfolder now `ops/attendance/`, MobileExceptionsPage.jsx, MobileTripsPage.jsx,
+  MobileIssuesPage.jsx, MobileMissingPage.jsx, MobileManualCheckIn.jsx),
+  `face/` (MobileEnrolmentPage.jsx), `me/` (MobileProfilePage.jsx,
+  MobileUserGuidePage.jsx). `MobileAssistantPage.jsx`/`MobileChatBubble.jsx`
+  moved out of `pages/` entirely, into `components/mchat/` (they're a floating
+  widget, not a routed page). `MobileScannerPage.jsx`/`MobileLayout.jsx` stayed
+  at `pages/mobile/` root — the scanner serves both the qr and face routes from
+  one file, splitting it wasn't just a move.
+- **`lib/`** → subfoldered by feature: `dashboard/` (insightsStore.js,
+  chartCapture.js, useElapsedSeconds.js, delegateStatus.js, geolocation.js,
+  alertSound.js), `trip/` (reassignQueue.js), `announcements/`
+  (announcementsSeen.js), `musterchat/` (callManager.js, chatTime.js,
+  messagesApi.js), `document/` (claudeParse.js), `exception/`
+  (exceptionsApi.js), `scanner/` (faceScan.js, humanFace.js), `localstorage/`
+  (outbox.js, cachedFetch.js, delegateWrites.js — renamed from an initial
+  `storage/`/`local/` split, see entry (210)). `api.js`, `permissions.js`,
+  `i18n.jsx`, `theme.jsx`, `activeTrip.js`, `mobileTrip.js`, `outbox.js`'s
+  siblings, `useSessionGuard.js`, `useVisiblePolling.js`, `cachedFetch.js`'s
+  siblings stayed at `lib/` root — genuinely cross-cutting, used by the app
+  shell itself or by many unrelated features (see the reasoning for each in
+  entries (200)–(204)).
+- **`components/`** → subfoldered similarly: `dashboard/` (AnalyticsPanel.jsx,
+  ExportModal.jsx), `exception/` (IssuesPanel.jsx, LogExceptionModal.jsx,
+  ManualTrackingPanel.jsx, QRScannerPanel.jsx), `delegate/` (DelegateAvatar.jsx,
+  DelegateLocationMap.jsx, DelegateTimeline.jsx), `mchat/` (ChatBubble.jsx, plus
+  the two mobile files above), `localstorage/` (CachedDataBadge.jsx,
+  SyncStatus.jsx). `Layout.jsx`, `Sidebar.jsx`, `EscalationBanner.jsx`,
+  `StatusBadge.jsx`, `ConfirmDialog.jsx`, `EscalateModal.jsx`, and the
+  Settings-only modals (`MediaManager.jsx`, `CameraCaptureModal.jsx`,
+  `PhotoCropModal.jsx`, `PasskeyManager.jsx`, `PasskeySignIn.jsx`) stayed at
+  `components/` root.
+- **`backend/routes/roomAssign.js`** → `backend/routes/dashboard/roomAssign.js`
+  — the first subfolder under what had always been a flat `routes/`.
+
+**Two dead/orphaned files surfaced during the moves, not deleted** (moving a
+teammate's file is fine, deleting one wasn't asked for): `ManualTrackingPanel.jsx`
+and `pages/mobile/ops/MobileMissingPage.jsx` currently have zero real importers
+anywhere in the codebase. Flagged in `INTEGRATION_NOTES.md` for Jayden and for
+the team respectively.
+
 ## Recent updates (2026-07-31, not yet folded into the sections below)
 
 A long single-session batch, all JQ's own work on the MusterChat/assistant/trips surface. Full narrative in AI Log entries (177)–(184).
@@ -64,7 +124,7 @@ A large batch of new features, all JQ's own work. Two touch shared/teammate-adja
 - **Trip Announcements is now a real feature, not just a stub** (`backend/routes/announcements.js`, `backend/db/announcements.js`, `frontend/src/pages/desktop/AnnouncementsPage.jsx`). Admin-postable, trip-scoped updates optionally tagged to a specific itinerary stop, with Day-N tabs matching the trip's real itinerary length (not just days that already have a post). Up to 6 images + 2 videos per announcement (JSONB `images`/`videos` columns on the `announcements` table; the original single `imageUrl`/`imagePublicId` columns are now read-only legacy fallback for pre-existing rows). Full edit support (`PATCH /api/announcements/:id`, add/remove media independently). Click any photo/video to open a full-size lightbox. The trip switcher only lists trips with status "In progress" — Planning/Completed trips aren't shown here. New `manageAnnouncements` action permission (default off) gates posting/editing/deleting, separate from `manageAccounts`, which previously stood in for it.
 - **Coach-captain-based Staff visibility scoping** (`getVisibleCoachIds()` in `backend/db/dashboard.js`) — a Staff account now only sees delegates/KPIs/coach-status/history/export data for coaches they personally captain; an uncaptained coach is hidden from Staff entirely (not "open to everyone"); Admin always sees everything. Built on Desmond's EXISTING `coaches.account_id` "Coach captain" field (the Trips board's Switch-staff modal already set this), which had zero enforcement anywhere before this. Wired into `routes/dashboard.js`, `routes/delegates.js` (including CRUD guards — a scoped Staff account gets 403 trying to touch a delegate outside their coach), `routes/history.js`, and `routes/export.js`. See `INTEGRATION_NOTES.md`'s Permissions section for the full writeup and the "falls back to unrestricted if you captain zero coaches" safety detail.
 - **Room Management tab** (`DashboardPage.jsx`'s `RoomManagementTab`) gained pagination (rows-per-page + Prev/Next, matching the All-delegates table's own pattern), a +/− increment stepper per room-number field (`bumpRoomNumber()` — handles a trailing letter suffix like "12A", not just plain integers), and a bulk "set hotel for everyone" action. Delegates with no assigned coach are excluded from this tab entirely (they aren't confirmed for a hotel yet).
-- **Escalations UX + audit trail overhaul** (`routes/escalations.js`, `DashboardPage.jsx`, `EscalationBanner.jsx`, `HistoryLogPage.jsx`): resolving now shows a confirm dialog first (it silently sets the delegate to Arrived — easy to fat-finger otherwise); the top banner's "View" button opens the full Alerts modal instead of deep-linking to just the first escalated delegate (a busy trip could have several open at once); the Alerts modal's Emergency section gained search + cap-at-5-with-"show more" (was one unbounded scrollbox); a delegate already shown under Emergency is now hidden from the same modal's Missing section instead of appearing twice. **Escalations now write to the History Log at all** — create/acknowledge/resolve each log a `kind: "escalation"` `activity_log` entry (previously left NO audit trail whatsoever); `HistoryLogPage.jsx` and the Dashboard's inline History tracker card both got a dedicated Siren icon/red color for this kind, and `HistoryLogPage.jsx` entries also gained a "which coach" badge. See `CHECKPOINT_FEATURE_HANDOFF.md`'s 2026-07-27 entry for the live-test details.
+- **Escalations UX + audit trail overhaul** (`routes/escalations.js`, `DashboardPage.jsx`, `EscalationBanner.jsx`, `HistoryLogPage.jsx`): resolving now shows a confirm dialog first (it silently sets the delegate to Arrived — easy to fat-finger otherwise); the top banner's "View" button opens the full Alerts modal instead of deep-linking to just the first escalated delegate (a busy trip could have several open at once); the Alerts modal's Emergency section gained search + cap-at-5-with-"show more" (was one unbounded scrollbox); a delegate already shown under Emergency is now hidden from the same modal's Missing section instead of appearing twice. **Escalations now write to the History Log at all** — create/acknowledge/resolve each log a `kind: "escalation"` `activity_log` entry (previously left NO audit trail whatsoever); `HistoryLogPage.jsx` and the Dashboard's inline History tracker card both got a dedicated Siren icon/red color for this kind, and `HistoryLogPage.jsx` entries also gained a "which coach" badge. See `INTEGRATION_NOTES.md`'s "Feature Deep-Dive: Multi-Checkpoint Attendance" section (merged in 2026-08-03 from the former standalone `CHECKPOINT_FEATURE_HANDOFF.md`), 2026-07-27 entry, for the live-test details.
 - **User Guide walkthrough video** (`backend/db/guideVideo.js`, `backend/routes/guideVideo.js`, new single-row `guide_video` table) — an admin can upload/replace/remove a video shown on the Getting Started tab's "coming soon" placeholder; managed from the same generalized Settings → Image storage panel as everything else.
 - **User Guide restructure** (`UserGuidePage.jsx`) — top-level tabs now mirror the real sidebar nav (Getting started / Dashboard / Trips & Checkpoints / Scanner & kiosk / Account & permissions), with Dashboard gaining its own sub-tab bar (Overview/Announcements/Rooms/Escalations) since those all genuinely surface from Dashboard in the real app.
 - **Settings → Image storage generalized from delegate-photos-only into 3 folders** — see the `cloudinary.js` and `routes/media.js` entries below (both rewritten this pass) and `frontend/src/components/MediaManager.jsx` (now takes `folderKey`/`icon`/`title`/`desc` props and renders once per folder from `SettingsPage.jsx`, instead of being a single hardcoded delegate-photo component).
@@ -104,7 +164,7 @@ All of this batch is JQ's own work, on branch `InsightMetrics-(JQ)` — no teamm
 - **User Guide overhaul** — desktop `UserGuidePage.jsx` rewritten into a 5-tab page; a new dedicated `MobileUserGuidePage.jsx` fixes a routing bug where the mobile "User guide" link used to render with desktop chrome. See both entries under Frontend Pages.
 - **Dashboard KPI redesign** — added an "Assigned" count (`kpis.assigned` in `getDashboard()`) to both desktop and mobile. Desktop folded Arrived/Assigned/Unassigned into one compact "Roster breakdown" card instead of 5 equal-weight tiles; mobile added a 4th 2×2 tile.
 - **Mobile Attendance filter-chip color bug fixed** — every selected filter chip except Missing used to render green (`badge-present`) regardless of actual status; now each status keeps its own color when selected.
-- **`AI_DEPLOYMENT.md`** (in `README/`) — how to get an Anthropic API key and wire it into a cloud host's environment variables.
+- **`AI_DEPLOYMENT.md`** (in `README/`) — how to get an Anthropic API key and wire it into a cloud host's environment variables. _(Merged into `THIRD_PARTY_SERVICES.md`'s AI section 2026-08-03 — this standalone file no longer exists.)_
 
 ## Recent updates (2026-07-21, not yet folded into the sections below)
 
@@ -527,6 +587,8 @@ Shared hook (Layout.jsx + MobileLayout.jsx): polls GET /api/auth/session every 1
 /checkin Vimal's phone-frame staff check-in app — four tabs: Trips (live per-coach mobile dashboard), Scan (Face/QR/Manual pills), Issues (exception logging), Me (consent lifecycle + per-delegate check-in history). Briefly DELETED (2026-07-20) as part of "Mobile UI Consolidation" — its Trips and Me tabs were pure duplicates of the real desktop Trips board and /settings + /mobile/profile, its Scan tab is fully covered by UnifiedScannerPage. jsx below (which also has Manual now, see that entry), and its Issues tab moved to the mobile Issues page (see MobileIssuesPage.jsx below) — then RESTORED the same day at the user's explicit request: "have a backup of the checkin page and put a permission to hide the page." Restored via `git show HEAD:...` (the file was never actually committed as deleted, so the last real commit WAS the backup — no second copy kept under src/, which would just be dead code again). The /checkin route, its Sidebar nav item, and the viewCheckin permission are all back exactly as they were — an admin can now hide the page per account (uncheck "Check-in" under Desktop web views in Account control) instead of it being unconditionally deleted.
 
 ### `UnifiedScannerPage.jsx`
+
+> **File deleted 2026-08-02** ("do we need this under the desktop?" → "can remove it if it doesnt affect the mobile qr/face scanner feature"). It had been unreachable since 2026-07-27 (hidden from nav, `/scanner` redirects to `/dashboard` unconditionally) and its permission was already removed earlier the same day this note was written. Confirmed before deleting: `MobileScannerPage.jsx` has its own fully independent imports of `lib/faceScan.js`/`QRScannerPanel.jsx` and never imported from this file, so removing it had zero effect on the mobile scanner. Kept below as the historical record of what it did — if a desktop kiosk scanner is ever wanted again, it needs building fresh, not restoring from here.
 
 /scanner NEW (2026-07-20) — "Face Scan + QR Code Scan", a standalone desktop-native entrance-kiosk page. Re-mounts the same real check-in paths that used to live in the now-deleted QRCheckInPage.jsx (flip to ARRIVED on match) but strips everything that isn't a scanner input: no Trips/Issues/Me tabs, no low-light voice fallback, no "simulate slow" demo toggle, no biometric enrollment step. Three modes now (Manual added 2026-07-20 — see below): QR slot is Jayden's QRScannerPanel.jsx completely unmodified; Face slot is a trimmed LOCAL COPY of Vimal's zero-image face vectorizer + POST /attendance/scan call (kept local since QRCheckInPage never exported its internal helpers, and this page has no dependency on that mobile-app state machine); Manual slot is Jayden's ManualTrackingPanel. jsx, also unmodified. Two-column desktop layout: big 16:10 camera/panel viewport + Face/QR/Manual toggle + result card on the left, coach picker + boarded/missing stat tiles + still-missing list on the right. Ungated route (App.jsx) and Sidebar nav item — Staff and Admin roles alike can use it. Verified live as a genuine Staff-role test account (created + deleted via the real Account control API): confirmed sidebar/route access, then ran a real check-in through the QR manual-entry path end-to-end (delegate genuinely flipped to ARRIVED, reverted after). Manual mode added (2026-07-20): a third scanMode alongside Face/QR mounts Manual TrackingPanel.jsx in the same viewport (key={resetTick} like QRScannerPanel, so Reset also clears its search box) — the fallback for when a face/QR scan won't register, on the same page instead of a separate screen. Verified live: Manual mode renders the real Coach 7 roster, a real manual check-in was performed (delegate flipped to Present, coach counts updated live), reverted after via direct API. Reset button fix (2026-07-20): the top-right button used to only refetch coach data — a stuck/errored camera needed a hard reload to recover. Now a `resetTick` counter is in the Face camera effect's deps (bumping it restarts getUserMedia) AND is passed as QRScannerPanel's `key`, so a reset fully REMOUNTS the QR scanner from scratch — same guarantee a hard reload gives, without leaving the page. Renamed "Refresh" → "Reset scanner" since that's what it now does. Verified live: typed text into the QR manual-entry field, clicked reset, confirmed via DOM inspection the field came back genuinely empty (proof of a real remount, not just a data refetch).
 

@@ -10,9 +10,9 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X, History, AlertTriangle } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
-import { getTrips } from "../../lib/claudeParse.js";
+import { getTrips } from "../../lib/document/claudeParse.js";
 import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
-import { formatClock as hhmm } from "../../lib/chatTime.js";
+import { formatClock as hhmm } from "../../lib/musterchat/chatTime.js";
 import TripPulse from "../TripPulse.jsx";
 
 // Which trip the assistant is currently scoped to (2026-07-31, multi-trip
