@@ -1,5 +1,5 @@
 /* =============================================================================
- * backend/routes/vimal.js
+ * backend/routes/facescan.js (renamed from vimal.js 2026-08-03)
  * OWNED BY: FaceCheck-Pro (Vimal)
  * Feature:  Privacy-First Biometric & Multi-Modal Fusion Scanner
  *
@@ -17,7 +17,7 @@
  *    the TEAMMATE ZONE or in the other teammate routers (verified).
  *
  * MOUNTED in the server.js TEAMMATE ZONE (already done):
- *     import vimalRouter from "./routes/vimal.js";
+ *     import vimalRouter from "./routes/facescan.js";
  *     app.use(vimalRouter);
  *
  * PRIVACY DESIGN (PDPA): this server NEVER receives or stores an image or
@@ -46,9 +46,9 @@ import {
 } from "../data.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
-// desmond.js's own edits already use; exported from there rather than
+// trip.js's own edits already use; exported from there rather than
 // duplicated here.
-import { recordEvent } from "./desmond.js";
+import { recordEvent } from "./trip.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
 // Aliased: several handlers below use a local `all` for the delegate list.
@@ -431,7 +431,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
   const matched = best.d;
 
   // Recognised, but assigned to a DIFFERENT coach than this scanner is scoped
-  // to: say so specifically (mirrors the QR path in vance.js) so staff don't
+  // to: say so specifically (mirrors the QR path in document.js) so staff don't
   // rescan pointlessly.
   if (coachId && matched.coachId && matched.coachId !== coachId) {
     const dash0 = await liveDashboard();
@@ -457,7 +457,7 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
   // UNASSIGNED delegates (i.e. everyone who hasn't boarded yet) were refused
   // with a false "already X" instead of being checked in. Only PRESENT/
   // ARRIVED (the aliased "already boarded" values — see the QR check-in
-  // routes' own identical check in vance.js/exceptions.js) are genuinely
+  // routes' own identical check in document.js/exceptions.js) are genuinely
   // already checked in; every other status is a valid scan target.
   if (matched.status === "PRESENT" || matched.status === "ARRIVED") {
     return res.status(409).json({

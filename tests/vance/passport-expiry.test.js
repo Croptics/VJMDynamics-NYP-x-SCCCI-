@@ -12,7 +12,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { checkPassportExpiry, computeRisk, answerLocally } from "../../backend/routes/vance.js";
+import { checkPassportExpiry, computeRisk, answerLocally } from "../../backend/routes/document.js";
 
 const NOW = new Date("2026-07-20T00:00:00Z");
 

@@ -208,6 +208,19 @@ export default function AccountControlPage() {
     return pendingAccounts.filter((a) => `${a.username} ${a.email || ""}`.toLowerCase().includes(q));
   }, [pendingAccounts, pendingSearch]);
 
+  // Real pagination (2026-08-03 — "organise into smaller part so if got 50
+  // account created it won't be messy"), same Rows-per-page + Prev/Next
+  // pattern as the main Accounts table below, rather than just an internal
+  // scrollbar — a genuine 50-request volume is easier to work through 5/10
+  // at a time than by scrolling one long bounded list.
+  const [pendingPage, setPendingPage] = useState(0);
+  const [pendingPageSize, setPendingPageSize] = useState(5);
+  const pendingPageCount = Math.max(1, Math.ceil(visiblePendingAccounts.length / pendingPageSize));
+  const clampedPendingPage = Math.min(pendingPage, pendingPageCount - 1);
+  useEffect(() => { if (clampedPendingPage !== pendingPage) setPendingPage(clampedPendingPage); }, [clampedPendingPage, pendingPage]);
+  useEffect(() => { setPendingPage(0); }, [pendingSearch, pendingPageSize, pendingAccounts.length]);
+  const pendingShown = visiblePendingAccounts.slice(clampedPendingPage * pendingPageSize, (clampedPendingPage + 1) * pendingPageSize);
+
   // "Approve all"/"Reject all" (2026-07-24, requested while clearing 50 demo
   // pending accounts by hand) — a single bulk request instead of looping the
   // per-account endpoint. Asks for confirmation first since acting on every
@@ -611,17 +624,13 @@ export default function AccountControlPage() {
               )}
             </div>
           </div>
-          {/* Bounded, independently-scrollable list — same pattern as the
-              Reverse Headcount coach lists / Staff Ops active-sessions grid
-              elsewhere in this app, so a real volume of requests never
-              pushes the rest of Account control off-screen. */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto", paddingRight: 4 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {visiblePendingAccounts.length === 0 && (
               <div className="muted" style={{ fontSize: 13, textAlign: "center", padding: "12px 0" }}>
                 {t("No pending requests match your search.")}
               </div>
             )}
-            {visiblePendingAccounts.map((a) => (
+            {pendingShown.map((a) => (
               <div key={a.id} className="row between" style={{ padding: "10px 12px", background: "var(--surface)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", flexWrap: "wrap", gap: 10 }}>
                 <div style={{ minWidth: 0 }}>
                   <div className="row" style={{ gap: 8 }}>
@@ -649,6 +658,31 @@ export default function AccountControlPage() {
               </div>
             ))}
           </div>
+          {visiblePendingAccounts.length > 0 && (
+            <div className="row between" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)", flexWrap: "wrap", gap: 10 }}>
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                {t("Showing")} {clampedPendingPage * pendingPageSize + 1}–{Math.min((clampedPendingPage + 1) * pendingPageSize, visiblePendingAccounts.length)} {t("of")} {visiblePendingAccounts.length}
+              </span>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Rows per page")}</span>
+                <select className="select" style={{ width: 76, padding: "4px 8px" }} value={pendingPageSize}
+                  onChange={(e) => setPendingPageSize(Number(e.target.value))}>
+                  {[5, 10, 25, 50].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPendingPage === 0}
+                  onClick={() => setPendingPage((p) => Math.max(0, p - 1))}>
+                  {t("Prev")}
+                </button>
+                <span className="muted" style={{ fontSize: 12.5 }}>{t("Page")} {clampedPendingPage + 1} {t("of")} {pendingPageCount}</span>
+                <button className="btn btn-ghost" style={{ padding: "4px 10px" }} disabled={clampedPendingPage >= pendingPageCount - 1}
+                  onClick={() => setPendingPage((p) => Math.min(pendingPageCount - 1, p + 1))}>
+                  {t("Next")}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -783,13 +817,13 @@ export default function AccountControlPage() {
                     aria-label={t("Select all")}
                   />
                 </th>
-                <th>{t("Username")}</th><th>{t("Name")}</th><th>{t("Role")}</th><th>{t("Access")}</th><th style={{ width: 90 }} />
+                <th>{t("Username")}</th><th>{t("Name")}</th><th>{t("Role")}</th><th>{t("Access")}</th><th>{t("Status")}</th><th style={{ width: 90 }} />
               </tr>
             </thead>
             <tbody>
               {visibleAccounts.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
+                  <td colSpan={7} className="muted" style={{ padding: 24, fontSize: 14, textAlign: "center" }}>
                     {t("No accounts match your filters.")}
                   </td>
                 </tr>
@@ -858,6 +892,22 @@ export default function AccountControlPage() {
                       ) : (
                         <span className="badge badge-neutral">{t("Custom")}</span>
                       )}
+                    </td>
+                    {/* Status (2026-08-03 — "i reject this account why is it
+                        still here?"): rejecting/approving updates the row's
+                        status in place rather than deleting it (see
+                        rejectAccount()'s own comment — kept for an audit
+                        trail; a real delete is the separate trash icon), but
+                        the table had no way to SEE that, so a rejected row
+                        looked identical to a normal active one. Blank for
+                        the default "approved" case to avoid cluttering every
+                        row with a badge that's true 95%+ of the time. */}
+                    <td>
+                      {a.status === "rejected" ? (
+                        <span className="badge badge-missing" style={{ padding: "2px 8px" }}>{t("Rejected")}</span>
+                      ) : a.status === "pending" ? (
+                        <span className="badge badge-review" style={{ padding: "2px 8px" }}>{t("Pending")}</span>
+                      ) : null}
                     </td>
                     <td>
                       <div className="row" style={{ gap: 6 }}>

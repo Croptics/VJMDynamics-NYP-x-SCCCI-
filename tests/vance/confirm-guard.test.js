@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { isPlausibleDelegate } from "../../backend/routes/vance.js";
+import { isPlausibleDelegate } from "../../backend/routes/document.js";
 
 describe("isPlausibleDelegate — rejects junk, keeps real delegates", () => {
   describe("rejects stray / junk rows", () => {

@@ -12,7 +12,7 @@
  *  loadLists() directly after pulling the thread to refresh unread badges.
  * ============================================================================= */
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
-import { Search, Send, ArrowLeft, ExternalLink, Paperclip, Smile, FileText, Film, X, Pencil, Trash2, Check, Users } from "lucide-react";
+import { Search, Send, ArrowLeft, ExternalLink, Paperclip, Smile, FileText, Film, X, Pencil, Trash2, Check, Users, Phone, Video } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";
 import {
   listContacts, getThread, sendMessage, editMessage, deleteMessage,
@@ -21,6 +21,12 @@ import {
 import { parseDocument, confirmDelegates } from "../../lib/document/claudeParse.js";
 import { TRIP_ID } from "../../lib/exception/exceptionsApi.js";
 import { formatClock as hhmm, formatListStamp, dayLabel, isSameDay } from "../../lib/musterchat/chatTime.js";
+// Voice/video calling (2026-08-03 — "need mobile chat to be able to
+// video/face call"). QuickChat is shared by both the desktop AND mobile
+// floating bubbles, so this one addition covers both at once — matches the
+// exact `startCall(peer, mode)`/`startGroupCall(group, mode)` pattern
+// HumanThread.jsx/GroupThread.jsx already use in the full inbox.
+import callManager from "../../lib/musterchat/callManager.js";
 import DocShareCard from "./DocShareCard.jsx";
 import StickerPicker from "./StickerPicker.jsx";
 import ContactAvatar from "./ContactAvatar.jsx";
@@ -235,6 +241,17 @@ export default function QuickChat({ onOpenFull }) {
           <ContactAvatar name={active.name} kind={active.kind} photoUrl={active.photoUrl} style={{ flexShrink: 0, width: 30, height: 30, fontSize: 12 }} />
         )}
         <div style={{ fontWeight: 600, fontSize: 13.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{active.name}</div>
+        {isGroup ? (
+          <>
+            <button className="btn btn-ghost" title={t("Group voice call")} style={{ padding: 5 }} onClick={() => callManager.startGroupCall(active, "voice")}><Phone size={15} /></button>
+            <button className="btn btn-ghost" title={t("Group video call")} style={{ padding: 5 }} onClick={() => callManager.startGroupCall(active, "video")}><Video size={15} /></button>
+          </>
+        ) : (
+          <>
+            <button className="btn btn-ghost" title={t("Voice call")} style={{ padding: 5 }} onClick={() => callManager.startCall(active, "voice")}><Phone size={15} /></button>
+            <button className="btn btn-ghost" title={t("Video call")} style={{ padding: 5 }} onClick={() => callManager.startCall(active, "video")}><Video size={15} /></button>
+          </>
+        )}
         {onOpenFull && <button className="btn btn-ghost" title={t("Open full inbox")} style={{ padding: 5 }} onClick={openFull}><ExternalLink size={15} /></button>}
       </div>
 

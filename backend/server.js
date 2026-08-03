@@ -137,16 +137,16 @@ app.use(exportRouter);
 import mediaRouter from "./routes/media.js";
 app.use(mediaRouter);
 
-import desmondRouter from "./routes/desmond.js";
+import desmondRouter from "./routes/trip.js";
 app.use(desmondRouter);
 
 import exceptionsRouter, { initExceptions } from "./routes/exceptions.js";
 app.use(exceptionsRouter);
 
-import vanceRouter from "./routes/vance.js";
+import vanceRouter from "./routes/document.js";
 app.use(vanceRouter);
 
-import vimalRouter from "./routes/vimal.js";
+import vimalRouter from "./routes/facescan.js";
 app.use(vimalRouter);
 
 // Passkey (WebAuthn) sign-in — Face ID / Touch ID / fingerprint / Windows

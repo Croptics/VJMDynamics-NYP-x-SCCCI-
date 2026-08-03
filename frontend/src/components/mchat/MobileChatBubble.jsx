@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from "react";
 import { MessageCircle, X, Bot, MessageSquare } from "lucide-react";
 import MobileAssistantPage from "./MobileAssistantPage.jsx";
 import QuickChat from "./QuickChat.jsx";
+// Mounted globally so a call rings/runs on any mobile route, same as
+// ChatBubble.jsx (desktop) already does — mobile never had this at all
+// (2026-08-03 — "need mobile chat to be able to video/face call").
+import VideoCallOverlay from "./VideoCallOverlay.jsx";
 import { useLang } from "../../lib/i18n.jsx";
 import { getToken } from "../../lib/api.js";
 import { pollUpdates } from "../../lib/musterchat/messagesApi.js";
@@ -40,10 +44,15 @@ const CORNERS = {
  * bottom tab. Wraps the existing MobileAssistantPage UNCHANGED (via
  * `embedded`, which just hides its own small header — see that file).
  */
-export default function MobileChatBubble() {
+export default function MobileChatBubble({ restrictToHomeOnly = false }) {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState("assistant"); // "assistant" (AI) | "messages" (quick chat)
+  // Defaults to "messages" (not "assistant") for a staff account captaining
+  // zero coaches (2026-08-03 — "hide this ai assistant page... i currently
+  // login on a stuff account that is not assign to any trip"): the AI
+  // assistant only ever answers about trip data, which doesn't apply here.
+  // Team messaging stays available either way — it isn't trip-scoped.
+  const [tab, setTab] = useState(restrictToHomeOnly ? "messages" : "assistant"); // "assistant" (AI) | "messages" (quick chat)
   const [unread, setUnread] = useState(0);
   const [corner, setCorner] = useState(() => {
     try { return localStorage.getItem(CORNER_KEY) || "br"; } catch { return "br"; }
@@ -104,9 +113,11 @@ export default function MobileChatBubble() {
                 quick-chat for incoming team DMs (space-optimized for mobile). */}
             <div className="row between" style={{ padding: "10px 14px", borderBottom: "1px solid var(--line)", flexShrink: 0 }}>
               <div style={{ display: "flex", gap: 3, background: "var(--surface-2)", borderRadius: 9, padding: 3 }}>
-                <button onClick={() => setTab("assistant")} style={tabBtnStyle(tab === "assistant")}>
-                  <Bot size={13} style={{ marginRight: 5 }} /> {t("Assistant")}
-                </button>
+                {!restrictToHomeOnly && (
+                  <button onClick={() => setTab("assistant")} style={tabBtnStyle(tab === "assistant")}>
+                    <Bot size={13} style={{ marginRight: 5 }} /> {t("Assistant")}
+                  </button>
+                )}
                 <button onClick={() => setTab("messages")} style={tabBtnStyle(tab === "messages")}>
                   <MessageSquare size={13} style={{ marginRight: 5 }} /> {t("Messages")}
                   {unread > 0 && <span style={{ marginLeft: 6, background: "var(--scc-red)", color: "#fff", fontSize: 10, fontWeight: 800, borderRadius: 9, padding: "1px 6px" }}>{unread > 99 ? "99+" : unread}</span>}
@@ -128,6 +139,11 @@ export default function MobileChatBubble() {
           </div>
         </div>
       )}
+
+      {/* Mounted unconditionally (outside the `open &&` sheet above) so an
+          incoming call rings even while the bubble is collapsed, not only
+          while its sheet happens to be open. */}
+      <VideoCallOverlay />
 
       <button
         className="mg-mobile-chat-fab"

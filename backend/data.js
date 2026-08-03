@@ -14,8 +14,8 @@
  * dashboard views + history all in one place). This file's only job now is
  * to re-export everything from those submodules under the exact same names,
  * so every existing `import { X } from "../data.js"` (or "./data.js")
- * elsewhere in the backend — auth.js, server.js, routes/desmond.js,
- * routes/exceptions.js, routes/vance.js, routes/vimal.js, routes/dashboard/export.js,
+ * elsewhere in the backend — auth.js, server.js, routes/trip.js,
+ * routes/exceptions.js, routes/document.js, routes/facescan.js, routes/dashboard/export.js,
  * routes/dashboard/insights.js, routes/media.js, seed-demo.js, seed-team.js,
  * reset-login.js — keeps working completely unchanged. Nobody else's
  * imports needed to change for this split.

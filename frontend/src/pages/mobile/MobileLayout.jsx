@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { Home, ClipboardList, User, Bus, ScanFace, QrCode } from "lucide-react";
-import { getPermissions, apiGet } from "../../lib/api.js";
+import { getPermissions, getUser, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
 import MobileChatBubble from "../../components/mchat/MobileChatBubble.jsx";
@@ -109,6 +109,27 @@ export default function MobileLayout({ onLogout }) {
     window.addEventListener("offline", off);
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
   }, []);
+
+  // A staff account captaining zero coaches has nothing to do on Ops/QR/Face
+  // (2026-08-03 — "a stuff not assign to any trip. hide home, ops, qr,face,
+  // manual and only home and message should show"): no roster to work, no
+  // delegate to check in. Defaults to `true` (show everything) until the
+  // fetch resolves, so the common case (an assigned staff member, or any
+  // admin) never sees a flash of missing tabs while this loads. Admins are
+  // exempt — this is about an on-ground role having no trip work to do, not
+  // an access restriction, and an admin legitimately has none of their own
+  // coaches either. The floating MusterChat bubble is untouched — messaging
+  // isn't trip-scoped, so it stays available regardless.
+  const [hasAnyCoach, setHasAnyCoach] = useState(true);
+  useEffect(() => {
+    if (getUser()?.role === "admin") return;
+    let alive = true;
+    apiGet("/my-captain-coaches").then((data) => {
+      if (alive) setHasAnyCoach((data.coaches || []).length > 0);
+    }).catch(() => { /* best-effort — leave tabs as-is on a failed check */ });
+    return () => { alive = false; };
+  }, []);
+  const restrictToHomeOnly = getUser()?.role !== "admin" && !hasAnyCoach;
   // Same "mobileView" permission group as the /mobile/* route gates in
   // App.jsx — an account with a view unchecked doesn't see the tab either.
   // Profile stays ungated (account settings, not a feature view).
@@ -124,7 +145,7 @@ export default function MobileLayout({ onLogout }) {
     ...(perms.viewMobileHome
       ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
-    ...(perms.viewMobileAttendance || perms.viewMobileTrips
+    ...(!restrictToHomeOnly && (perms.viewMobileAttendance || perms.viewMobileTrips)
       ? [{ to: "/mobile/operations", label: "Ops", icon: ClipboardList, badge: missing }] : []),
     // Face and QR are separate tabs rather than modes of one scanner screen,
     // each on its OWN permission now (split 2026-08-02 from one combined
@@ -135,10 +156,10 @@ export default function MobileLayout({ onLogout }) {
     // it's the fallback you reach for when a scan won't cooperate, so it
     // lives one tap inside the scanner screens (gated by its own
     // viewMobileScannerManual permission there, not a tab-bar entry).
-    ...(perms.viewMobileScannerQr
+    ...(!restrictToHomeOnly && perms.viewMobileScannerQr
       ? [{ to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true }]
       : []),
-    ...(perms.viewMobileScannerFace
+    ...(!restrictToHomeOnly && perms.viewMobileScannerFace
       ? [{ to: "/mobile/scan/face", label: "Face", icon: ScanFace }]
       : []),
     { to: "/mobile/profile", label: "Me", icon: User },
@@ -147,7 +168,12 @@ export default function MobileLayout({ onLogout }) {
   const departsInDisplay = trip
     ? liveDepartsIn(trip.departureAt) ?? (trip.departsIn ? fmtDepartsIn(trip.departsIn) : null)
     : null;
-  const tripContext = trip
+  // Suppressed for the same "nothing to do with a trip" reason the Ops/QR/
+  // Face tabs are hidden above (2026-08-03 follow-up — "this still show the
+  // trip detail... i meant the header and the red box"): a staff account
+  // captaining zero coaches has no trip context worth showing in the
+  // persistent topbar either, on top of the tabs already being hidden.
+  const tripContext = trip && !restrictToHomeOnly
     ? [
         trip.name,
         trip.dayOf ? `${t("Day")} ${trip.dayOf}${trip.totalDays ? `/${trip.totalDays}` : ""}` : null,
@@ -185,7 +211,7 @@ export default function MobileLayout({ onLogout }) {
         )}
       </div>
       <div className="mobile-page">
-        <Outlet context={{ onLogout }} />
+        <Outlet context={{ onLogout, restrictToHomeOnly }} />
       </div>
       <nav className="mobile-tabbar" aria-label={t("Mobile navigation")}>
         {tabs.map(({ to, label, icon: Icon, end, badge, primary }) => (
@@ -210,7 +236,7 @@ export default function MobileLayout({ onLogout }) {
           </NavLink>
         ))}
       </nav>
-      {perms.viewMobileChatbot && <MobileChatBubble />}
+      {perms.viewMobileChatbot && <MobileChatBubble restrictToHomeOnly={restrictToHomeOnly} />}
       <SyncStatus />
     </div>
   );

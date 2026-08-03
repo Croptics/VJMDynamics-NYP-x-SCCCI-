@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { convoKey } from "../../backend/routes/vance.js";
+import { convoKey } from "../../backend/routes/document.js";
 
 describe("convoKey — staff ↔ staff", () => {
   test("is order-independent (A→B and B→A share one thread)", () => {

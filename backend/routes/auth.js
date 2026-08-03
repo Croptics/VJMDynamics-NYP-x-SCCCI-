@@ -72,8 +72,14 @@ router.post("/api/auth/login", authLimiter, wrap(async (req, res) => {
   // Start a fresh session — invalidates any token held by an older browser.
   const tokenVersion = await startNewSession(acc.id);
 
+  // "id" added (2026-08-03) — the delegate ownership/lock feature needs the
+  // signed-in account's OWN id client-side, to compare against a delegate's
+  // createdByAccountId and decide whether to show Edit/Delete/Lock as
+  // enabled — previously the login/session responses only ever returned
+  // role/name/username, never the account's own id.
   res.json({
     token: makeToken(acc.username, tokenVersion),
+    id: acc.id,
     role: acc.role,
     readOnly: !!acc.readOnly,
     name: acc.name,
@@ -143,6 +149,7 @@ router.get("/api/auth/session", wrap(async (req, res) => {
   if (!acc) return res.status(401).json({ error: "UNAUTHENTICATED", message: "Your session is no longer valid." });
   await touchLastSeen(acc.id); // powers the Staff Operations "active now" list
   res.json({
+    id: acc.id,
     username: acc.username,
     name: acc.name,
     email: acc.email || null,

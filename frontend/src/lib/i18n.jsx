@@ -369,6 +369,13 @@ const DICT = {
   "Planning": "筹备中",
   "Cancelled": "已取消",
   "trip": "个行程",
+
+  // --- Delegate ownership + lock (2026-08-03) ---
+  "Locked": "已锁定",
+  "Lock": "锁定",
+  "Unlock": "解锁",
+  "This delegate is locked.": "该代表已被锁定。",
+  "Created by someone else — you can't edit or delete this one.": "由他人创建 — 您无法编辑或删除此项。",
   "trips": "个行程",
   "No trips match your search.": "没有符合搜索的行程。",
   "Use “Seed more trips” above to explore the board, or wait for the admin team to add one.": "点击上方的「填充更多行程」浏览看板，或等待管理团队添加。",
@@ -682,6 +689,14 @@ const DICT = {
   // Mobile
   "Home": "首页",
   "Attendance": "出勤",
+  // Bottom tab bar labels (2026-08-03) — "Ops"/"QR"/"Me" had ZERO
+  // translation entries anywhere in this dictionary, so all three fell back
+  // to raw English in 中文 mode. Found while fixing the mobile user guide's
+  // own translations, since the guide's new "Ops" references share this
+  // same gap with the actual tab bar.
+  "Ops": "运营",
+  "QR": "二维码",
+  "Me": "我的",
   "Attendance sheet": "出勤表",
   "delegates": "位代表",
   "right now": "当前",
@@ -934,7 +949,12 @@ const DICT = {
 
   // MediaManager.jsx — Settings → Image storage
   "Image storage": "图片存储",
+  "Delegate photos": "代表照片",
   "Delegate profile photos stored in Cloudinary — delete individual images, or clear everything at once.": "存储在 Cloudinary 中的代表头像照片 — 可删除单张图片，或一次性清空全部。",
+  "Announcement media": "公告媒体",
+  "Images and videos attached to trip announcements — delete individual items, or clear everything at once.": "行程公告中附加的图片和视频 — 可删除单个项目，或一次性清空全部。",
+  "User Guide video": "用户指南视频",
+  "The walkthrough video shown on the User Guide's Getting Started tab.": "显示在用户指南「新手入门」分页中的演示视频。",
   "Cloudinary isn't configured for this deployment.": "此部署尚未配置 Cloudinary。",
   "Could not load images.": "无法加载图片。",
   "images": "张图片",
@@ -1373,6 +1393,13 @@ const DICT = {
   "Thinking — the first answer can take a moment while the local model warms up.":
     "思考中 — 首次回答可能需要一些时间以启动本地模型。",
   "Watch": "观看",
+  // Call button tooltips (2026-08-03 — added when QuickChat.jsx gained
+  // calling, so it's translated from the start unlike HumanThread.jsx/
+  // GroupThread.jsx's own identical buttons, which use hardcoded English).
+  "Voice call": "语音通话",
+  "Video call": "视频通话",
+  "Group voice call": "群组语音通话",
+  "Group video call": "群组视频通话",
 
   // --- mchat/MusterChatInbox ---
   "Add members": "添加成员",
@@ -1765,6 +1792,23 @@ const DICT = {
     "在首页点击具体的某辆车（而非「车辆状态」标题本身）会跳转至已按该车辆预先筛选好的出勤页面 — 适合你正站在某辆车旁、只需查看该车名单时使用。",
   "The full delegate roster. Search by name, filter by status or by coach (the coach dropdown next to the search box), and tap \"Update status\" on any card to change it — a bottom sheet lists all 5 statuses as big buttons, no tiny dropdown to aim for.":
     "完整的代表名单。可按姓名搜索、按状态或车辆筛选（搜索框旁的车辆下拉菜单），并点击任意卡片上的「更新状态」即可修改 — 底部弹出菜单会以大按钮列出全部5种状态，无需在小型下拉菜单中费力选择。",
+  // --- MobileUserGuidePage rewrite (2026-08-03), matching the current
+  // Home/Ops/QR/Face/Me nav structure — see the Attendance-era versions of
+  // several of these just above, kept for reference/consistency of phrasing.
+  "Your dashboard: the active trip, quick Missing/Late/Present counts, and a Coach status list. Tap any number or coach row to jump straight to that filtered list on Ops — you never need to set the filter by hand first.":
+    "您的仪表盘：当前行程、缺席／迟到／已到人数速览，以及车辆状态列表。点击任意数字或车辆行即可直接跳转至「运营」页面对应的筛选列表 — 无需手动先设置筛选条件。",
+  "The combined Delegates / Exceptions / Trips tab — switch between the three with the pill buttons at the top. Delegates is the full roster: search by name, filter by status or by coach, and tap \"Update status\" on any card to change it — a bottom sheet lists all 5 statuses as big buttons, no tiny dropdown to aim for.":
+    "整合了代表名单／异常事件／行程的分页 — 使用顶部的圆形按钮在三者间切换。「代表名单」即完整出勤名单：可按姓名搜索、按状态或车辆筛选，并点击任意卡片上的「更新状态」即可修改 — 底部弹出菜单会以大按钮列出全部5种状态，无需在小型下拉菜单中费力选择。",
+  "Tapping a specific coach on Home (not the \"Coach status\" header itself) takes you to Ops pre-filtered to just that coach's roster — useful when you're physically standing next to one bus and only care about its list.":
+    "在首页点击具体的某辆车（而非「车辆状态」标题本身）会跳转至已按该车辆预先筛选好的运营页面 — 适合你正站在某辆车旁、只需查看该车名单时使用。",
+  "Tap the QR or Face tab at the bottom to check someone in — both use your phone's camera (tap the flip-camera icon to switch between selfie and rear camera). Inside either screen, a Face / QR / Manual switch lets you fall back to Manual — a tap-to-mark-present roster — when a scan just won't cooperate.":
+    "点击底部的「二维码」或「人脸」分页即可为人员签到 — 两者皆使用手机摄像头（点击翻转镜头图标可在前后摄像头间切换）。在任一画面中，人脸／二维码／手动的切换选项都能让你在扫描无法配合时改用手动模式 — 直接点选签到的名单。",
+  "Open the Ops tab and switch to Exceptions, then tap \"Log exception\" to raise a new ticket (missing person, lost badge, dead phone, VIP request, or something else) — the same live inbox the desktop team sees, so raising one here reaches everyone instantly.":
+    "打开「运营」分页并切换至「异常事件」，然后点击「记录异常」即可上报新问题（人员失踪、胸卡遗失、手机没电、VIP 需求等）— 与桌面端团队看到的是同一个实时收件箱，因此在此上报会立即让所有人知晓。",
+  "In Ops → Delegates, every Missing or Late delegate gets a one-tap call button. The first time you use it for someone, it'll ask for their number and save it — after that, it just calls.":
+    "在「运营」→「代表名单」中，每位缺席或迟到的代表都配有一键致电按钮。首次为某人使用时会要求输入其号码并保存 — 之后即可直接拨打。",
+  "In Ops → Delegates, the map-pin icon next to a Missing delegate opens their last recorded location on a map — only shows up once someone's actually recorded one, so it's not present for delegates who are simply Unassigned or Late.":
+    "在「运营」→「代表名单」中，缺席代表旁的定位图标可在地图上打开其最后记录的位置 — 仅在已实际记录位置后才会出现，因此未分配或迟到的代表不会显示该图标。",
 
   // --- MobileAssistantPage ---
   "Ask me anything about this trip — headcounts, who's missing, or a quick report.": "询问我关于本次行程的任何问题 — 人数统计、缺席人员或快速报告。",
@@ -1875,6 +1919,12 @@ const DICT = {
   "Update anyway": "仍然更新",
   "already captaining another active trip.": "正在负责另一个进行中的行程。",
   "Also on": "同时在",
+
+  // --- TripsListPage (trip-completion flag-and-confirm, 2026-08-03) ---
+  "This trip's last day has passed — ready to complete?": "该行程的最后一天已过 — 是否标记为已完成？",
+  "Mark complete": "标记为已完成",
+  "freed for reassignment": "已释放，可重新分配",
+  "Couldn't mark this trip complete.": "无法将此行程标记为已完成。",
 };
 
 /**

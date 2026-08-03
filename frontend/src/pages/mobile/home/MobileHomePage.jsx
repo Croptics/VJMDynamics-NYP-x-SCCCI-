@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo base — mobile Home tab
  * ============================================================================= */
 import { useEffect, useState, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useOutletContext } from "react-router-dom";
 import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail, ChevronDown } from "lucide-react";
 import { apiGet, getUser } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
@@ -81,6 +81,13 @@ function greeting() {
 export default function MobileHomePage() {
   const { t, lang } = useLang();
   const navigate = useNavigate();
+  // A staff account captaining zero coaches (2026-08-03 — "this still show
+  // the trip detail... i meant the header and the red box", "i shouldn't see
+  // the see all link. hide the coach status", "hide total delegate") — same
+  // flag MobileLayout.jsx already computed to hide the Ops/QR/Face tabs and
+  // topbar trip chip; threaded down via Outlet context rather than
+  // re-fetching /my-captain-coaches a second time here.
+  const { restrictToHomeOnly } = useOutletContext() || {};
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -202,7 +209,7 @@ export default function MobileHomePage() {
               it would have kept claiming "Online · synced" even while
               genuinely offline. MobileLayout's topbar chip is the real,
               actually-wired connectivity indicator. */}
-          {k && (
+          {k && !restrictToHomeOnly && (
             <div style={{ marginTop: 6 }}>
               <span className="muted" style={{ fontSize: 12.5 }}>{t("Total delegates")}: {k.total}</span>
             </div>
@@ -225,7 +232,7 @@ export default function MobileHomePage() {
       {loading && !data && <div className="muted" style={{ marginTop: 16 }}>{t("Loading…")}</div>}
 
       {/* Active trip — signature red hero. */}
-      {trip && (
+      {trip && !restrictToHomeOnly && (
         <div style={{ marginTop: 18, position: "relative" }}>
         <div className="m-hero" style={{ position: "relative" }}>
           <div className="m-hero-glow" />
@@ -340,8 +347,9 @@ export default function MobileHomePage() {
       </div>
 
       {/* Coach status — header links to all-missing; each row jumps to that
-          coach's roster. */}
-      {data?.coaches && (
+          coach's roster. Hidden for a staff account with no coach at all
+          (2026-08-03) — nothing here would apply to them anyway. */}
+      {data?.coaches && !restrictToHomeOnly && (
         <div className="m-section">
           <div className="m-section-head">
             <span className="m-eyebrow">{t("Coach status")}</span>

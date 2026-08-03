@@ -11,6 +11,23 @@ import DelegateAvatar from "../../../components/delegate/DelegateAvatar.jsx";
 import StatusBadge from "../../../components/StatusBadge.jsx";
 import { coachDisplayName, fmt12h } from "../../../lib/dashboard/dashboardHelpers.js";
 
+/**
+ * Checkpoint history — every delegate's attendance across every itinerary stop,
+ * as a CARD GRID (2026-07-28 — "instead of seeing one by one", modelled on a
+ * live-headcount board the user shared).
+ *
+ * It replaced an expand-one-at-a-time list, which had two problems: you had to
+ * click through the roster to answer "who's been missing today", and it
+ * lazy-loaded one request PER delegate. Now a single
+ * `GET /api/trips/:id/checkpoint-matrix` returns the whole grid, so every
+ * delegate is scannable at once and it scales to a real roster.
+ *
+ * Each card carries one small chip per stop (colour = status), so a pattern like
+ * "fine all week, missing since lunch" is visible without opening anything.
+ * Clicking a card still expands the full stop-by-stop detail.
+ */
+const CPT_STATUS_LABEL = { ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
+
 export function CheckpointHistoryTab({ coaches, t, tripId }) {
   const [query, setQuery] = useState("");
   const [coachFilter, setCoachFilter] = useState("ALL");   // ALL | NONE | <coachId>

@@ -441,20 +441,3 @@ export function RoomManagementTab({ delegates, coaches, coachName, onSaved, t, l
  *  needed there). Fetched lazily per-delegate on first expand, not all
  *  upfront, so opening this tab with a large roster doesn't fire N requests
  *  before anyone's even clicked anything. */
-/**
- * Checkpoint history — every delegate's attendance across every itinerary stop,
- * as a CARD GRID (2026-07-28 — "instead of seeing one by one", modelled on a
- * live-headcount board the user shared).
- *
- * It replaced an expand-one-at-a-time list, which had two problems: you had to
- * click through the roster to answer "who's been missing today", and it
- * lazy-loaded one request PER delegate. Now a single
- * `GET /api/trips/:id/checkpoint-matrix` returns the whole grid, so every
- * delegate is scannable at once and it scales to a real roster.
- *
- * Each card carries one small chip per stop (colour = status), so a pattern like
- * "fine all week, missing since lunch" is visible without opening anything.
- * Clicking a card still expands the full stop-by-stop detail.
- */
-const CPT_STATUS_LABEL = { ARRIVED: "Arrived", LATE: "Late", MISSING: "Missing" };
-

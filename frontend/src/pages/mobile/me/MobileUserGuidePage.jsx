@@ -4,7 +4,7 @@
  * ============================================================================= */
 import { useNavigate } from "react-router-dom";
 import {
-  ChevronLeft, Home, ClipboardList, ScanFace, AlertTriangle, Phone,
+  ChevronLeft, Home, ClipboardList, QrCode, ScanFace, AlertTriangle, Phone,
   Filter, MapPin, Clock, HelpCircle,
 } from "lucide-react";
 import { useLang } from "../../../lib/i18n.jsx";
@@ -46,31 +46,31 @@ export default function MobileUserGuidePage() {
       </p>
 
       <GuideCard icon={Home} title={t("Home")}>
-        {t("Your dashboard: the active trip, quick Missing/Late/Present counts, and a Coach status list. Tap any number or coach row to jump straight to that filtered list on Attendance — you never need to set the filter by hand first.")}
+        {t("Your dashboard: the active trip, quick Missing/Late/Present counts, and a Coach status list. Tap any number or coach row to jump straight to that filtered list on Ops — you never need to set the filter by hand first.")}
       </GuideCard>
 
-      <GuideCard icon={ClipboardList} title={t("Attendance")}>
-        {t("The full delegate roster. Search by name, filter by status or by coach (the coach dropdown next to the search box), and tap \"Update status\" on any card to change it — a bottom sheet lists all 5 statuses as big buttons, no tiny dropdown to aim for.")}
+      <GuideCard icon={ClipboardList} title={t("Ops")}>
+        {t("The combined Delegates / Exceptions / Trips tab — switch between the three with the pill buttons at the top. Delegates is the full roster: search by name, filter by status or by coach, and tap \"Update status\" on any card to change it — a bottom sheet lists all 5 statuses as big buttons, no tiny dropdown to aim for.")}
       </GuideCard>
 
       <GuideCard icon={Filter} title={t("Filtering by coach")}>
-        {t("Tapping a specific coach on Home (not the \"Coach status\" header itself) takes you to Attendance pre-filtered to just that coach's roster — useful when you're physically standing next to one bus and only care about its list.")}
+        {t("Tapping a specific coach on Home (not the \"Coach status\" header itself) takes you to Ops pre-filtered to just that coach's roster — useful when you're physically standing next to one bus and only care about its list.")}
       </GuideCard>
 
-      <GuideCard icon={ScanFace} title={t("Scanning people in")}>
-        {t("Open Scanner from Home's Scanner card. Face and QR modes both use your phone's camera (tap the flip-camera icon to switch between selfie and rear camera); Manual mode lists the roster to tap someone present by hand when a scan just won't cooperate.")}
+      <GuideCard icon={QrCode} title={t("Scanning people in")}>
+        {t("Tap the QR or Face tab at the bottom to check someone in — both use your phone's camera (tap the flip-camera icon to switch between selfie and rear camera). Inside either screen, a Face / QR / Manual switch lets you fall back to Manual — a tap-to-mark-present roster — when a scan just won't cooperate.")}
       </GuideCard>
 
       <GuideCard icon={AlertTriangle} title={t("Reporting an issue")}>
-        {t("The Issues card on Home shows how many open critical tickets exist. Tap it to log a new one (missing person, lost badge, dead phone, VIP request, or something else) or check on existing tickets — the same live inbox the desktop team sees, so raising one here reaches everyone instantly.")}
+        {t("Open the Ops tab and switch to Exceptions, then tap \"Log exception\" to raise a new ticket (missing person, lost badge, dead phone, VIP request, or something else) — the same live inbox the desktop team sees, so raising one here reaches everyone instantly.")}
       </GuideCard>
 
       <GuideCard icon={Phone} title={t("Calling a Missing or Late delegate")}>
-        {t("On Attendance, every Missing or Late delegate gets a one-tap call button. The first time you use it for someone, it'll ask for their number and save it — after that, it just calls.")}
+        {t("In Ops → Delegates, every Missing or Late delegate gets a one-tap call button. The first time you use it for someone, it'll ask for their number and save it — after that, it just calls.")}
       </GuideCard>
 
       <GuideCard icon={MapPin} title={t("Checking a delegate's last known location")}>
-        {t("The map-pin icon next to a Missing delegate opens their last recorded location on a map — only shows up once someone's actually recorded one, so it's not present for delegates who are simply Unassigned or Late.")}
+        {t("In Ops → Delegates, the map-pin icon next to a Missing delegate opens their last recorded location on a map — only shows up once someone's actually recorded one, so it's not present for delegates who are simply Unassigned or Late.")}
       </GuideCard>
 
       <GuideCard icon={Clock} title={t("Why did someone turn orange (Late) on their own?")}>

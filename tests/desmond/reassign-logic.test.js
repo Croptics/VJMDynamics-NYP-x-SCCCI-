@@ -1,7 +1,7 @@
 /**
  * Unit tests — reassignment decision core
  * (Desmond, backend/routes/reassign-core.js — the pure heart of
- *  PATCH /api/trips/:tripId/reassign in desmond.js).
+ *  PATCH /api/trips/:tripId/reassign in trip.js).
  *
  * The Trips board's reassign is the one write that MUST be defended server-side:
  * it can overfill a coach, cross trips, or be raced by a second coordinator.

@@ -509,6 +509,32 @@ export default function TripsListPage() {
   const [unassignNotice, setUnassignNotice] = useState(null);
   const unassignNoticeTimer = useRef(null);
 
+  // "Ready to complete" confirm flow (2026-08-03 — "auto change the trip
+  // status to complete and remove the assign stuff... pls advise", confirmed
+  // flag-and-confirm over silent automation). `trip.readyToComplete` comes
+  // pre-computed from the backend (GET /all-trips) — true once the trip's
+  // real last calendar day has passed while it's still "In progress".
+  const [completingId, setCompletingId] = useState(null);
+  async function markComplete(trip) {
+    setCompletingId(trip.id);
+    try {
+      const saved = await apiPatch(`/trips/${trip.id}`, { status: "Completed" });
+      await fetchTrips();
+      if (saved?.completedUnassigned?.length) {
+        const names = saved.completedUnassigned.map((u) => `${u.name} (${u.coachLabel})`).join(", ");
+        setUnassignNotice(`${t("Trip completed")} — ${t("freed for reassignment")}: ${names}.`);
+        clearTimeout(unassignNoticeTimer.current);
+        unassignNoticeTimer.current = setTimeout(() => setUnassignNotice(null), 6000);
+      }
+    } catch (err) {
+      setUnassignNotice(err.message || t("Couldn't mark this trip complete."));
+      clearTimeout(unassignNoticeTimer.current);
+      unassignNoticeTimer.current = setTimeout(() => setUnassignNotice(null), 6000);
+    } finally {
+      setCompletingId(null);
+    }
+  }
+
   // A non-admin who captains at least one coach is a "coach captain": they see
   // ONLY the trip(s) they're assigned to, and can't create/seed trips. Admins
   // and non-captain coordinators keep the full list.
@@ -687,6 +713,26 @@ export default function TripsListPage() {
                       <Users size={14} /> {trip.delegateCount} {t(trip.delegateCount === 1 ? "delegate" : "delegates")}
                     </span>
                   </div>
+
+                  {trip.readyToComplete && canManageTrips && (
+                    <div
+                      className="tf-flex tf-between"
+                      style={{ alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 8, background: "var(--tf-yellow-bg)", border: "1px solid var(--tf-yellow-line)" }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <span style={{ fontSize: 12, fontWeight: 600, color: "var(--tf-yellow)" }}>
+                        {t("This trip's last day has passed — ready to complete?")}
+                      </span>
+                      <button
+                        className="tf-btn tf-btn-primary"
+                        style={{ fontSize: 12, padding: "4px 10px", flexShrink: 0 }}
+                        disabled={completingId === trip.id}
+                        onClick={() => markComplete(trip)}
+                      >
+                        {completingId === trip.id ? t("Saving…") : t("Mark complete")}
+                      </button>
+                    </div>
+                  )}
 
                   <span className="tf-flex tf-gap-6" style={{ alignItems: "center", fontSize: 12.5, fontWeight: 700, color: "var(--tf-blue)", marginTop: 2 }}>
                     {t("Open board")} →

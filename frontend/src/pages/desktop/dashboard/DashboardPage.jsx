@@ -40,8 +40,10 @@ import {
   LocateFixed,
   Siren,
   BedDouble,
+  Lock,
+  Unlock,
 } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getPermissions } from "../../../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../../lib/api.js";
 // Offline-capable READ (2026-07-31) — the Dashboard/All-delegates table is
 // one of the pages flagged as most important ("the manual, attendance,
 // exception, trip"): load() below used to just error out the whole page on
@@ -127,6 +129,24 @@ export default function DashboardPage() {
   // per-account viewAnalytics toggle was removed from permissions.js the same
   // day, so Analytics is back to role-based, not grantable.
   const isAdmin = !!perms.manageAccounts;
+  // Delegate ownership + lock (2026-08-03) — client-side mirror of the
+  // backend's canModifyDelegate()/canLockDelegate() (db/delegates.js), so
+  // Edit/Delete/Lock render correctly disabled up front instead of every
+  // blocked click round-tripping to a 403. `isAdmin` above already means
+  // "full access" specifically (manageAccounts is zeroed for a read-only
+  // admin too — see the comment on isAdmin), matching the backend's own
+  // "full access admin" bypass exactly, so it's reused as-is here rather
+  // than re-deriving a second concept of "admin."
+  const me = getUser() || {};
+  const canModifyDelegate = (d) => {
+    if (isAdmin) return true;
+    if (d.locked) return false;
+    return !d.createdByAccountId || d.createdByAccountId === me.id;
+  };
+  const canLockDelegate = (d) => {
+    if (isAdmin) return true;
+    return !!d.createdByAccountId && d.createdByAccountId === me.id;
+  };
   const { t, lang } = useLang();
   const navigate = useNavigate();
   const location = useLocation();
@@ -853,6 +873,21 @@ export default function DashboardPage() {
     }
   }
 
+  // Lock/unlock (2026-08-03 — "create a option for staff to lock things they
+  // have created"). A locked delegate blocks EVERY other field edit
+  // (canModifyDelegate on the backend), including the creator's own — this
+  // toggle is checked against the SEPARATE canLockDelegate rule instead, so
+  // the creator (or a full-access admin) can always reach it regardless of
+  // the current locked state.
+  async function toggleLock(d) {
+    try {
+      await apiPatch(`/delegates/${d.id}`, { locked: !d.locked });
+      await load();
+    } catch (e) {
+      setError(e.message || "Couldn't change the lock.");
+    }
+  }
+
   // Mark/unmark a delegate as Cancelled (2026-07-24) — for an Assigned
   // delegate who won't make it after all, usually found out day-of. The
   // backend always forces status back to UNASSIGNED and clears coachId when
@@ -921,7 +956,17 @@ export default function DashboardPage() {
       : `Delete ALL ${delegates.length} delegates? This cannot be undone.`;
     if (!window.confirm(msg)) return;
     try {
-      await apiDelete(`/trips/${selectedTripId}/delegates`);
+      const result = await apiDelete(`/trips/${selectedTripId}/delegates`);
+      // Ownership + lock (2026-08-03) — "Delete all" now skips locked/
+      // not-yours delegates instead of wiping everything unconditionally;
+      // surface that so it doesn't look like a silent partial failure.
+      if (result?.blocked) {
+        setError(
+          lang === "zh"
+            ? `已删除 ${result.deleted} 位；${result.blocked} 位因已锁定或由他人创建而被跳过。`
+            : `Deleted ${result.deleted}; skipped ${result.blocked} (locked or created by someone else).`
+        );
+      }
       setSelectedDelegateIds(new Set());
       await load();
     } catch (e) {
@@ -2126,6 +2171,11 @@ export default function DashboardPage() {
                     <td>
                       <div className="row" style={{ gap: 6 }}>
                         <StatusBadge state={d.status} />
+                        {d.locked && (
+                          <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>
+                            <Lock size={11} /> {t("Locked")}
+                          </span>
+                        )}
                         {d.cancelled && <span className="badge badge-neutral" style={{ padding: "2px 8px" }}>{t("Cancelled")}</span>}
                         {d.escalated && (
                           <span className="badge badge-missing" style={{ padding: "2px 8px" }}>
@@ -2147,14 +2197,42 @@ export default function DashboardPage() {
                             stays. */}
                         {perms.manageDelegates && (
                           <>
-                            <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
-                              style={S.iconBtn}>
-                              <Pencil size={16} />
-                            </button>
-                            <button onClick={() => remove(d)} aria-label={`${t("Delete")} ${d.name}`}
-                              style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
-                              <Trash2 size={16} />
-                            </button>
+                            {canModifyDelegate(d) ? (
+                              <>
+                                <button onClick={() => openEdit(d)} aria-label={`${t("Edit")} ${d.name}`}
+                                  style={S.iconBtn}>
+                                  <Pencil size={16} />
+                                </button>
+                                <button onClick={() => remove(d)} aria-label={`${t("Delete")} ${d.name}`}
+                                  style={{ ...S.iconBtn, color: "var(--st-missing)" }}>
+                                  <Trash2 size={16} />
+                                </button>
+                              </>
+                            ) : (
+                              // Ownership/lock blocked this account specifically — a
+                              // disabled lock icon explains WHY Edit/Delete are
+                              // missing (2026-08-03) rather than the row just
+                              // silently having fewer buttons than others, which
+                              // would read as a bug.
+                              <span
+                                title={d.locked
+                                  ? t("This delegate is locked.")
+                                  : t("Created by someone else — you can't edit or delete this one.")}
+                                style={{ ...S.iconBtn, color: "var(--ink-3)", cursor: "default" }}
+                              >
+                                <Lock size={16} />
+                              </span>
+                            )}
+                            {canLockDelegate(d) && (
+                              <button
+                                onClick={() => toggleLock(d)}
+                                aria-label={d.locked ? `${t("Unlock")} ${d.name}` : `${t("Lock")} ${d.name}`}
+                                title={d.locked ? t("Unlock") : t("Lock")}
+                                style={S.iconBtn}
+                              >
+                                {d.locked ? <Unlock size={16} /> : <Lock size={16} />}
+                              </button>
+                            )}
                           </>
                         )}
                       </div>
@@ -2528,7 +2606,7 @@ export default function DashboardPage() {
                     <Siren size={14} /> {t("Escalate to office")}
                   </button>
                 )}
-                {perms.manageDelegates && !profileDelegate.escalated && (
+                {perms.manageDelegates && !profileDelegate.escalated && canModifyDelegate(profileDelegate) && (
                   <button
                     className="btn btn-ghost"
                     style={{ fontSize: 13, padding: "6px 12px" }}

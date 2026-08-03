@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { computeRisk } from "../../backend/routes/vance.js";
+import { computeRisk } from "../../backend/routes/document.js";
 
 describe("computeRisk — ranks concerns most-urgent first", () => {
   test("returns nothing when there is nothing to worry about", () => {

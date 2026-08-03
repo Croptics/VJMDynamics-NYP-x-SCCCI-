@@ -3,7 +3,7 @@
  * OWNED BY: FaceCheck-Pro (Vimal)
  *
  * A small, self-contained, framework-free biometric matching engine. It is
- * deliberately kept out of the Express router (vimal.js) so it can be reasoned
+ * deliberately kept out of the Express router (facescan.js) so it can be reasoned
  * about and unit-tested in isolation — the router just wires HTTP to these
  * pure functions.
  *

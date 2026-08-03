@@ -44,7 +44,11 @@ const KIOSK_CSS = `
 .k-corner.br { bottom: 16px; right: 16px; border-left: none; border-top: none; border-radius: 0 0 10px 0; }
 @keyframes k-pop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .k-pop { animation: k-pop .18s ease-out; }
-@media (prefers-reduced-motion: reduce) { .k-line { animation: none; top: 48%; } .k-pop { animation: none; } }
+@keyframes k-focus-ring { 0% { transform: translate(-50%, -50%) scale(1.3); opacity: 1; }
+  100% { transform: translate(-50%, -50%) scale(0.85); opacity: 0; } }
+.k-focus-ring { position: absolute; width: 64px; height: 64px; border-radius: 50%;
+  border: 2px solid var(--st-present); pointer-events: none; animation: k-focus-ring .5s ease-out forwards; }
+@media (prefers-reduced-motion: reduce) { .k-line { animation: none; top: 48%; } .k-pop { animation: none; } .k-focus-ring { animation: none; opacity: 0; } }
 `;
 
 export default function KioskScannerPage() {
@@ -56,7 +60,12 @@ export default function KioskScannerPage() {
   const [camError, setCamError] = useState("");
   const [tokenReady, setTokenReady] = useState(false);
   const [tokenErr, setTokenErr] = useState("");
-  const [facing, setFacing] = useState("user"); // user (selfie) | environment (rear)
+  // Defaults to the rear/outward-facing camera (2026-08-03) — a kiosk is a
+  // fixed device facing approaching people, not a phone someone holds up to
+  // their own face, so "user" (selfie) was the wrong default even in Face
+  // mode. The flip-camera button still lets staff switch back if the kiosk's
+  // actual mounted orientation needs it.
+  const [facing, setFacing] = useState("environment"); // user (selfie) | environment (rear)
 
   // Low-light voice fallback + slow-scan demo — same feature as the
   // desktop/mobile scanners (see UnifiedScannerPage.jsx/MobileScannerPage.jsx),
@@ -129,17 +138,27 @@ export default function KioskScannerPage() {
   const [checkpoints, setCheckpoints] = useState([]);
   const [activeCheckpointId, setActiveCheckpointId] = useState("");
 
+  // Always tracks whichever checkpoint is "current" — no manual override
+  // (2026-08-03, explicit request: "remove the dropdown, always auto-use
+  // current"). Polls every 60s rather than fetching once on mount, since a
+  // kiosk left running through a whole day needs to auto-advance from one
+  // checkpoint to the next as the schedule moves forward, with no one there
+  // to pick the next one by hand.
   useEffect(() => {
     if (!tokenReady) return;
-    kioskGet(`/trips/${TRIP_ID}/checkpoints`).then((data) => {
+    let alive = true;
+    const load = () => kioskGet(`/trips/${TRIP_ID}/checkpoints`).then((data) => {
+      if (!alive) return;
       const flat = [];
       for (const day of data.days || []) {
         for (const cp of day.checkpoints || []) flat.push({ ...cp, dayNumber: day.dayNumber });
       }
       setCheckpoints(flat);
-      // Auto-focus on whatever checkpoint is relevant right now.
-      setActiveCheckpointId((prev) => prev || flat.find((c) => c.timeState === "current")?.id || "");
-    }).catch(() => {}); // Checkpoint Selector just stays empty
+      setActiveCheckpointId(flat.find((c) => c.timeState === "current")?.id || "");
+    }).catch(() => {}); // stays on whatever checkpoint it last knew about
+    load();
+    const id = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(id); };
   }, [tokenReady, kioskGet]);
 
   function recordCheckpointCheckin(delegateId, method) {
@@ -233,6 +252,31 @@ export default function KioskScannerPage() {
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
+
+  // Tap-to-focus (2026-08-03, QR mode) — a QR code held at an angle or too
+  // close/far can sit outside a webcam's continuous-autofocus sweet spot.
+  // `pointsOfInterest`/`focusMode` are real MediaTrackConstraints, but only
+  // Chrome on Android with camera2 hardware actually honors them — everywhere
+  // else this is a silent no-op, same fail-soft pattern as the rest of this
+  // codebase's optional hardware/third-party features (AMap, Cloudinary).
+  // The focus-ring animation fires regardless, so tapping always FEELS
+  // responsive even on hardware that ignores the underlying constraint.
+  const [focusPoint, setFocusPoint] = useState(null);
+  function tapToFocus(e) {
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    setFocusPoint({ left: e.clientX - rect.left, top: e.clientY - rect.top });
+    if (track && typeof track.getCapabilities === "function") {
+      const caps = track.getCapabilities();
+      if (caps.pointsOfInterest) {
+        const advanced = [{ pointsOfInterest: [{ x, y }] }];
+        if (caps.focusMode?.includes("single-shot")) advanced[0].focusMode = "single-shot";
+        track.applyConstraints({ advanced }).catch(() => {}); // unsupported on this device — ring still shows
+      }
+    }
+  }
 
   useEffect(() => {
     if (scanMode === "face" && lowLight) { stopCamera(); return undefined; }
@@ -457,30 +501,30 @@ export default function KioskScannerPage() {
           Passwordless entrance kiosk · Face &amp; QR check-in only
         </div>
 
-        {/* Checkpoint Selector (2026-07-22) — optional, scanning works fine
-            with none picked. Kept deliberately minimal (no stats shown) —
-            the kiosk token can only list checkpoints and record a check-in,
-            not read back live counts; see auth.js's requireKioskOrAuth. */}
-        {checkpoints.length > 0 && (
-          <select
-            className="select"
-            value={activeCheckpointId}
-            onChange={(e) => setActiveCheckpointId(e.target.value)}
-            style={{ width: "100%", marginTop: 8 }}
-          >
-            <option value="">Not scanning for a checkpoint</option>
-            {checkpoints.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.timeState === "current" ? "→ " : ""}
-                Day {c.dayNumber} · {c.scheduledTime ? `${c.scheduledTime} · ` : ""}{c.label}
-                {c.status === "delayed" && c.delayMinutes > 0 ? ` (Delayed +${c.delayMinutes}m)` : ""}
-                {c.timeState === "past" ? " (Done)" : c.timeState === "current" ? " (Now)" : ""}
-              </option>
-            ))}
-          </select>
-        )}
+        {/* Checkpoint status (2026-07-22, dropdown removed 2026-08-03 —
+            "remove the dropdown, always auto-use current"). No manual
+            override anymore — this is read-only, just confirming which
+            checkpoint a scan will record against right now. Kept
+            deliberately minimal (no stats shown) — the kiosk token can only
+            list checkpoints and record a check-in, not read back live
+            counts; see auth.js's requireKioskOrAuth. */}
+        {checkpoints.length > 0 && (() => {
+          const active = checkpoints.find((c) => c.id === activeCheckpointId);
+          return (
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+              {active
+                ? <>→ Day {active.dayNumber} · {active.scheduledTime ? `${active.scheduledTime} · ` : ""}{active.label}
+                    {active.status === "delayed" && active.delayMinutes > 0 ? ` (Delayed +${active.delayMinutes}m)` : ""}
+                    {" (Now)"}</>
+                : "Not scanning for a checkpoint right now"}
+            </div>
+          );
+        })()}
 
-        <div style={S.viewport}>
+        <div
+          style={{ ...S.viewport, cursor: scanMode === "qr" ? "crosshair" : S.viewport.cursor }}
+          onClick={scanMode === "qr" ? tapToFocus : undefined}
+        >
           {!(scanMode === "face" && lowLight) && (
             <>
               <video ref={videoRef} autoPlay playsInline muted
@@ -488,6 +532,13 @@ export default function KioskScannerPage() {
               <span className="k-corner tl" /><span className="k-corner tr" />
               <span className="k-corner bl" /><span className="k-corner br" />
               {scanning && <span className="k-line" />}
+              {scanMode === "qr" && focusPoint && (
+                <span
+                  className="k-focus-ring"
+                  style={{ left: focusPoint.left, top: focusPoint.top }}
+                  onAnimationEnd={() => setFocusPoint(null)}
+                />
+              )}
             </>
           )}
 

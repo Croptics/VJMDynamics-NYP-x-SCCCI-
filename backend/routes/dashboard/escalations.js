@@ -103,7 +103,7 @@ async function resolveEmailRecipients(recipientEmails, tripId) {
 // id "t-1" (JQ's seeded primary trip, still used by the Dashboard/mobile)
 // didn't just fail to match, it threw `invalid input syntax for type uuid`
 // and 500'd. Today's callers happen to pass an already-resolved uuid, so this
-// wasn't live-reachable, but it's the same bug that WAS live in desmond.js
+// wasn't live-reachable, but it's the same bug that WAS live in trip.js
 // (fixed the same day) and every other route file already resolves here.
 // tripId is an optional refinement on this route (it only floats the trip's
 // own lead to the top of the list), so an id that resolves to nothing is

@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { answerLocally } from "../../backend/routes/vance.js";
+import { answerLocally } from "../../backend/routes/document.js";
 
 /** A small, internally-consistent snapshot: 3 missing across 2 coaches. */
 function snap() {

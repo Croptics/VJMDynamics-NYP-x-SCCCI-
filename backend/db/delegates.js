@@ -32,7 +32,7 @@ function initialsOf(name) {
 
 function rowToDelegate(row) {
   return {
-    ...row, vip: !!row.vip, cancelled: !!row.cancelled,
+    ...row, vip: !!row.vip, cancelled: !!row.cancelled, locked: !!row.locked,
     // Derived from the escalations LEFT JOIN in listDelegates() below — a
     // delegate is "escalated" for as long as they have an open/acknowledged
     // escalation, mirroring the `cancelled` flag's shape (2026-07-25, "make
@@ -104,9 +104,9 @@ export async function getDelegateById(id) {
   return row ? rowToDelegate(row) : null;
 }
 
-export async function createDelegate(input, tripUuid = null, actor = null) {
+export async function createDelegate(input, tripUuid = null, actor = null, actorAccountId = null) {
   const d = normalize(input, await nextId());
-  // Optional — most callers (vance.js's bulk onboarding, vimal.js's scan
+  // Optional — most callers (document.js's bulk onboarding, facescan.js's scan
   // flow, seed scripts) never pass these and they land as null, same as
   // before. The Dashboard's Add-delegate modal shares its form with Edit
   // (see the PROFILE_FIELDS note on updateDelegate() below), so it can now
@@ -117,12 +117,12 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
   // comment on this column for why it's cleared otherwise.
   const cancelReason = d.cancelled ? (input.cancelReason || "").trim() || null : null;
   await run(
-    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, cancelled, cancel_reason, "lastSeen", "lastLocation", trip_id, "createdBy",
+    `INSERT INTO delegates (id, name, initials, "coachId", status, vip, cancelled, cancel_reason, "lastSeen", "lastLocation", trip_id, "createdBy", "createdByAccountId",
        company, role, industry, email, phone, website, passport_no, nationality, passport_expiry, accessibility_notes, notes,
        hotel_name, room_number)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
     [
-      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.cancelled, cancelReason, d.lastSeen, d.lastLocation, tripUuid, actor,
+      d.id, d.name, d.initials, d.coachId, d.status, d.vip, d.cancelled, cancelReason, d.lastSeen, d.lastLocation, tripUuid, actor, actorAccountId,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
       profile.hotel_name, profile.room_number,
@@ -130,7 +130,7 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
   );
   await logActivity(`${d.name} added`, d.status === "PRESENT" ? "checkin" : "reassign", actor, { tripUuid });
   return {
-    ...d, createdBy: actor, cancelReason,
+    ...d, createdBy: actor, createdByAccountId: actorAccountId, locked: false, cancelReason,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
@@ -139,15 +139,53 @@ export async function createDelegate(input, tripUuid = null, actor = null) {
   };
 }
 
+/**
+ * Ownership + lock enforcement (2026-08-03). A "full access" admin (role
+ * admin, readOnly false) bypasses both checks entirely — matches the exact
+ * "Full access" designation Account control already shows for that same
+ * admin/readOnly combination, reused here rather than inventing a new
+ * permission concept. A delegate with no recorded creator (legacy row, or
+ * created by a route that never passed an actor) has no owner to restrict
+ * to, so any staff with manageDelegates can still edit it — this feature
+ * only restricts delegates that DO have a known creator.
+ */
+function isFullAccessAdmin(account) {
+  return account?.role === "admin" && !account?.readOnly;
+}
+
+/** Checked before applying any field change OTHER than `locked` itself. */
+export function canModifyDelegate(delegate, account) {
+  if (isFullAccessAdmin(account)) return { ok: true };
+  if (delegate.locked) {
+    return { ok: false, code: "LOCKED", message: "This delegate is locked. Unlock it first to make changes." };
+  }
+  if (delegate.createdByAccountId && delegate.createdByAccountId !== account?.id) {
+    return { ok: false, code: "NOT_OWNER", message: "This delegate was created by someone else — ask them, or an admin with full access, to modify it." };
+  }
+  return { ok: true };
+}
+
+/** Checked specifically for a `locked` field change — deliberately INDEPENDENT
+ *  of the delegate's current locked state (the whole point of "unlock" is to
+ *  act on an already-locked delegate), but still gated on being the creator
+ *  or a full-access admin. A delegate with no recorded creator can only be
+ *  locked/unlocked by a full-access admin — no staff can claim ownership of
+ *  a legacy/unowned delegate just by locking it. */
+export function canLockDelegate(delegate, account) {
+  if (isFullAccessAdmin(account)) return { ok: true };
+  if (delegate.createdByAccountId && delegate.createdByAccountId === account?.id) return { ok: true };
+  return { ok: false, code: "NOT_OWNER", message: "Only the delegate's creator, or an admin with full access, can lock or unlock it." };
+}
+
 // Extended profile fields the Dashboard's Edit modal can now set — added
 // alongside the core CRUD fields below rather than through normalize()
 // (which only ever returns the fixed 8-field shape used for validation), so
 // a PATCH carrying these previously landed here, matched nothing in the
 // UPDATE statement, and was silently dropped — the delegate stayed NULL on
 // company/role/industry/etc. forever, even after "saving" from the modal.
-// Same COALESCE-style "only touch what's provided" pattern vance.js's own
+// Same COALESCE-style "only touch what's provided" pattern document.js's own
 // onboarding/confirm UPDATE already uses for these same columns.
-// Frontend field names match the ones vance.js's onboarding/confirm route
+// Frontend field names match the ones document.js's onboarding/confirm route
 // already established for these same columns (e.g. "passportNumber", not
 // "passportNo") — one convention per column across the app.
 const PROFILE_FIELDS = [
@@ -175,17 +213,21 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   const cancelReason = merged.cancelled
     ? (patch.cancelReason !== undefined ? (patch.cancelReason || "").trim() || null : existing.cancel_reason)
     : null;
+  // Ownership lock (2026-08-03) — same "only touch what's provided" pattern
+  // as every PROFILE_FIELDS column above; the route layer already checked
+  // WHO is allowed to flip this (canLockDelegate) before calling in here.
+  const locked = patch.locked !== undefined ? !!patch.locked : !!existing.locked;
   await run(
     `UPDATE delegates SET name=$1, initials=$2, "coachId"=$3, status=$4, vip=$5, cancelled=$6, cancel_reason=$7, "lastSeen"=$8, "lastLocation"=$9,
        company=$10, role=$11, industry=$12, email=$13, phone=$14, website=$15,
        passport_no=$16, nationality=$17, passport_expiry=$18, accessibility_notes=$19, notes=$20,
-       hotel_name=$21, room_number=$22
-     WHERE id=$23`,
+       hotel_name=$21, room_number=$22, locked=$23
+     WHERE id=$24`,
     [
       merged.name, merged.initials, merged.coachId, merged.status, merged.vip, merged.cancelled, cancelReason, merged.lastSeen, merged.lastLocation,
       profile.company, profile.role, profile.industry, profile.email, profile.phone, profile.website,
       profile.passport_no, profile.nationality, profile.passport_expiry, profile.accessibility_notes, profile.notes,
-      profile.hotel_name, profile.room_number,
+      profile.hotel_name, profile.room_number, locked,
       id,
     ]
   );
@@ -231,6 +273,9 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   // stale snapshot" approach used elsewhere (e.g. HistoryLogPage's own coach
   // badge) — one small extra query, only when actually needed.
   let text = `${merged.name} updated`;
+  if (patch.locked !== undefined && locked !== !!existing.locked) {
+    text = locked ? `${merged.name} locked` : `${merged.name} unlocked`;
+  }
   if (changes.coachId) {
     const ids = [changes.coachId.from, changes.coachId.to].filter(Boolean);
     const rows = ids.length ? await all(`SELECT id, COALESCE(name, label) AS label FROM coaches WHERE id = ANY($1)`, [ids]) : [];
@@ -261,7 +306,7 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   // see routes/exceptions.js.
   if (changes.status) await syncDelegateStatus(id, merged.status);
   return {
-    ...merged, cancelReason,
+    ...merged, cancelReason, locked,
     company: profile.company, role: profile.role, industry: profile.industry,
     email: profile.email, phone: profile.phone, website: profile.website,
     passportNumber: profile.passport_no, nationality: profile.nationality, passportExpiry: profile.passport_expiry,
@@ -390,11 +435,25 @@ export async function clearPhotoByPublicId(publicIds) {
 /* ---- Bulk delete (dashboard "Delete all") -------------------------------
  * tripUuid scopes the wipe to just that trip's delegates; null (the base t-1
  * unfiltered view) keeps the original behaviour of clearing every delegate. */
-export async function deleteAllDelegates(tripUuid = null, actor = null) {
+// Ownership + lock (2026-08-03) — "Delete all" used to be an unconditional
+// wipe, bypassing both checks entirely (found by tracing every writer of the
+// delegates table). Now skips whatever THIS account isn't allowed to delete
+// (locked, or created by someone else) and deletes the rest — a full-access
+// admin still gets the old unconditional-wipe behavior, since
+// canModifyDelegate() bypasses both checks for that account type. `account`
+// has no default that means "unrestricted" — omitting it is the MOST
+// restrictive case (every owned/locked row gets skipped), not the least, so
+// the one real caller (routes/dashboard/delegates.js) always passes
+// `req.account` explicitly rather than relying on a default.
+export async function deleteAllDelegates(tripUuid = null, actor = null, account = null) {
   const where = tripUuid ? "WHERE trip_id = $1" : "";
   const params = tripUuid ? [tripUuid] : [];
-  const count = Number((await get(`SELECT COUNT(*) AS c FROM delegates ${where}`, params))?.c || 0);
-  await run(`DELETE FROM delegates ${where}`, params);
-  if (count > 0) await logActivity(`All delegates removed (${count})`, "exception", actor, { tripUuid });
-  return count;
+  const rows = await all(`SELECT id, "createdByAccountId", locked FROM delegates ${where}`, params);
+  const deletableIds = rows.filter((r) => canModifyDelegate(r, account).ok).map((r) => r.id);
+  const blocked = rows.length - deletableIds.length;
+  if (deletableIds.length) {
+    await run(`DELETE FROM delegates WHERE id = ANY($1)`, [deletableIds]);
+    await logActivity(`All delegates removed (${deletableIds.length})`, "exception", actor, { tripUuid });
+  }
+  return { count: deletableIds.length, blocked };
 }

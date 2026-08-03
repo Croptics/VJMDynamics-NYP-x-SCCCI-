@@ -7,7 +7,7 @@
  * has set up on their phone or laptop. No extra app, no new enrolment.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * HOW THIS DIFFERS FROM FaceCheck (routes/vimal.js) — they are NOT the same
+ * HOW THIS DIFFERS FROM FaceCheck (routes/facescan.js) — they are NOT the same
  * ─────────────────────────────────────────────────────────────────────────────
  * FaceCheck answers "WHICH delegate is this?" — a 1:N identification against
  * face templates we store, used to check people in.

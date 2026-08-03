@@ -49,7 +49,7 @@ export async function getTrip(tripUuid = null) {
  *  scheduler (server.js) so "Day X of Y" stays correct across midnight
  *  without anyone editing it by hand — and also called once immediately
  *  after a trip's startDate changes or its override is cleared (see
- *  routes/desmond.js), so the UI doesn't have to wait for the next tick.
+ *  routes/trip.js), so the UI doesn't have to wait for the next tick.
  *  Pass a tripUuid to scope to one trip; omit to sync every trip.
  *
  *  Uses Asia/Singapore, NOT the database session's default timezone (Neon

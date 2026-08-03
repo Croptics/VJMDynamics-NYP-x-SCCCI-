@@ -2,7 +2,7 @@
 
 Unit tests for my individual code contributions (Screen 4 — Document Parsing /
 Onboarding, and the confirm-time data-quality guard). They exercise the **pure,
-side-effect-free helpers** in `backend/routes/vance.js` directly, so no database
+side-effect-free helpers** in `backend/routes/document.js` directly, so no database
 or HTTP server is needed and every run is deterministic.
 
 ## How to run

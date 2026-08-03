@@ -1,12 +1,12 @@
 /* =============================================================================
  *  OWNED BY:  Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
  *
- *  Pure decision core for a delegate reassignment. Extracted out of desmond.js
- *  on purpose: desmond.js opens a Postgres pool at module load, so importing it
+ *  Pure decision core for a delegate reassignment. Extracted out of trip.js
+ *  on purpose: trip.js opens a Postgres pool at module load, so importing it
  *  from a test hangs the runner on the open connection. This file has ZERO
  *  imports and no side effects, so tests/desmond/reassign-logic.test.js can
  *  import evaluateReassign() directly and run instantly, with no DB and no
- *  server. desmond.js imports it and does the actual row loads + atomic write
+ *  server. trip.js imports it and does the actual row loads + atomic write
  *  around it — see PATCH /api/trips/:tripId/reassign there.
  * ============================================================================= */
 

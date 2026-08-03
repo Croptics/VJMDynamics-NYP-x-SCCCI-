@@ -70,7 +70,7 @@ async function main() {
   await initDb();
   const pool = new Pool(readConfig());
 
-  // Ops columns (normally added by desmond.js at boot) — defensive.
+  // Ops columns (normally added by trip.js at boot) — defensive.
   await pool.query(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'scheduled'`);
   await pool.query(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS delay_minutes INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`ALTER TABLE itinerary_items ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT false`);

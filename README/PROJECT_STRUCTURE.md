@@ -76,6 +76,10 @@ address changed. Quick old → new map for the files most referenced below:
   `components/` root.
 - **`backend/routes/roomAssign.js`** → `backend/routes/dashboard/roomAssign.js`
   — the first subfolder under what had always been a flat `routes/`.
+- **`backend/routes/desmond.js`/`vance.js`/`vimal.js` renamed (not just
+  relocated) to `trip.js`/`document.js`/`facescan.js`** — matching the
+  feature-name-not-owner-name convention above, for the last 3 files under
+  `routes/` still named after a person.
 
 **Two dead/orphaned files surfaced during the moves, not deleted** (moving a
 teammate's file is fine, deleting one wasn't asked for): `ManualTrackingPanel.jsx`

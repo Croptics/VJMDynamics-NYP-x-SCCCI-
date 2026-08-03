@@ -23,6 +23,8 @@ import {
   setDelegatePhoto,
   clearDelegatePhoto,
   getVisibleCoachIds,
+  canModifyDelegate,
+  canLockDelegate,
 } from "../../data.js";
 import { syncCurrentCheckpointStatus } from "./checkpoints.js";
 
@@ -54,8 +56,8 @@ router.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
 // trip is currently selected; the base t-1 view (resolveTripUuid -> null)
 // keeps the original "clear everything" behaviour.
 router.delete("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
-  const deleted = await deleteAllDelegates(await resolveTripUuid(req.params.id), actorOf(req));
-  res.json({ deleted });
+  const { count, blocked } = await deleteAllDelegates(await resolveTripUuid(req.params.id), actorOf(req), req.account);
+  res.json({ deleted: count, ...(blocked ? { blocked } : {}) });
 }));
 
 router.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wrap(async (req, res) => {
@@ -75,7 +77,7 @@ router.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wr
   if (visibleCoachIds && (!body.coachId || !visibleCoachIds.has(body.coachId))) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only add delegates to your own coach." });
   }
-  const delegate = await createDelegate(body, tripUuid, actorOf(req));
+  const delegate = await createDelegate(body, tripUuid, actorOf(req), req.account?.id || null);
   res.status(201).json(delegate);
 }));
 
@@ -83,6 +85,24 @@ router.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(as
   const patch = req.body || {};
   const existing = await getDelegateById(req.params.id);
   if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  // Ownership + lock (2026-08-03) — a `locked` change is checked on its OWN
+  // rule (creator or full-access admin, independent of the CURRENT locked
+  // state — that's the whole point of "unlock"). Every OTHER field in the
+  // same patch is checked against canModifyDelegate(), which uses the
+  // EXISTING locked/ownership state — deliberately NOT the post-unlock
+  // state, so unlocking and editing other fields in the same request isn't
+  // supported (the frontend sends two separate PATCHes for that combo:
+  // unlock, then edit). Keeps this check simple and unambiguous rather than
+  // reasoning about a patch that changes its own preconditions mid-request.
+  if (patch.locked !== undefined) {
+    const lockCheck = canLockDelegate(existing, req.account);
+    if (!lockCheck.ok) return res.status(403).json({ error: lockCheck.code, message: lockCheck.message });
+  }
+  const otherFields = Object.keys(patch).filter((k) => k !== "locked");
+  if (otherFields.length) {
+    const modCheck = canModifyDelegate(existing, req.account);
+    if (!modCheck.ok) return res.status(403).json({ error: modCheck.code, message: modCheck.message });
+  }
   // Validate against the RESULT of applying this patch, not just the patch
   // alone — e.g. changing only the status on an already-unassigned delegate
   // still needs a coach if the new status isn't Unassigned.
@@ -119,6 +139,8 @@ router.patch("/api/delegates/:id", requirePermission("manageDelegates"), wrap(as
 router.delete("/api/delegates/:id", requirePermission("manageDelegates"), wrap(async (req, res) => {
   const existing = await getDelegateById(req.params.id);
   if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const ownerCheck = canModifyDelegate(existing, req.account);
+  if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
   const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
   if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only delete delegates on your own coach." });
@@ -150,6 +172,8 @@ router.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (r
   if (!req.file) return res.status(400).json({ error: "FILE_REQUIRED", message: "Please choose an image." });
   const existing = await getDelegateById(req.params.id);
   if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const ownerCheck = canModifyDelegate(existing, req.account);
+  if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
   const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
   if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only edit delegates on your own coach." });
@@ -165,6 +189,8 @@ router.post("/api/delegates/:id/photo", requirePermission("manageDelegates"), (r
 router.delete("/api/delegates/:id/photo", requirePermission("manageDelegates"), wrap(async (req, res) => {
   const existing = await getDelegateById(req.params.id);
   if (!existing) return res.status(404).json({ error: "NOT_FOUND" });
+  const ownerCheck = canModifyDelegate(existing, req.account);
+  if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
   const visibleCoachIds = await getVisibleCoachIds(existing.trip_id, req.account);
   if (visibleCoachIds && !visibleCoachIds.has(existing.coachId)) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only edit delegates on your own coach." });

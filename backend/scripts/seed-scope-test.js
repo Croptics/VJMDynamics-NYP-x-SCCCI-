@@ -70,7 +70,7 @@ async function main() {
   await initDb(); // ensure the accounts table exists
   const pool = new Pool(readConfig());
 
-  // The captain link normally comes from desmond.js's ensureOpsSchema at server
+  // The captain link normally comes from trip.js's ensureOpsSchema at server
   // boot; add it here too so this script works even on a fresh DB.
   await pool.query(`ALTER TABLE coaches ADD COLUMN IF NOT EXISTS account_id VARCHAR(64)`);
 

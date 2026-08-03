@@ -36,7 +36,7 @@ import { Router } from "express";
 import { wrap } from "../../lib/wrap.js";
 import { requirePermission } from "../../lib/auth.js";
 import { actorOf } from "../../lib/actor.js";
-import { resolveTripUuid, listDelegates, updateDelegate, getVisibleCoachIds } from "../../data.js";
+import { resolveTripUuid, listDelegates, updateDelegate, getVisibleCoachIds, canModifyDelegate } from "../../data.js";
 
 const router = Router();
 
@@ -437,9 +437,16 @@ router.post("/api/trips/:id/rooms/ai-apply", requirePermission("manageDelegates"
 
   const actor = actorOf(req);
   let applied = 0;
+  let blocked = 0;
   for (const u of updates) {
     const delegate = byId.get(u?.delegateId);
     if (!delegate) continue; // re-validated here too — never trust the client's list
+    // Ownership + lock (2026-08-03) — bulk room-assign wrote via updateDelegate()
+    // directly, bypassing the check on routes/dashboard/delegates.js's PATCH
+    // entirely (found by tracing every writer of the delegates table). Skips
+    // just this one row rather than failing the whole batch — matches the
+    // "delete all" bulk action's own skip-not-fail behavior for the same reason.
+    if (!canModifyDelegate(delegate, req.account).ok) { blocked++; continue; }
     // Placeholder-aware on the WRITE path as well (2026-07-28). A value of
     // "none"/"n/a"/"-" means "leave it alone", so it must fall back to what the
     // delegate already has instead of being written literally. A genuinely
@@ -454,7 +461,7 @@ router.post("/api/trips/:id/rooms/ai-apply", requirePermission("manageDelegates"
     await updateDelegate(u.delegateId, { hotelName, roomNumber }, actor);
     applied++;
   }
-  res.json({ applied });
+  res.json({ applied, ...(blocked ? { blocked } : {}) });
 }));
 
 // Exported for tests/jq/roomAssignParser.test.js — the router itself never

@@ -3,7 +3,7 @@
  *  PART OF:   MusterGo — Screen 4 (Document Parsing) + Screen 6 (Trip Assistant)
  *
  *  This is a self-contained feature module (same pattern as Jayden's
- *  exceptions.js and Desmond's desmond.js). It does NOT edit any of JQ's base
+ *  exceptions.js and Desmond's trip.js). It does NOT edit any of JQ's base
  *  files (server.js / data.js / permissions.js) beyond the two mount lines in
  *  server.js's TEAMMATE ZONE.
  *
@@ -43,9 +43,9 @@ import {
 } from "../data.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
-// desmond.js's own edits already use; exported from there rather than
+// trip.js's own edits already use; exported from there rather than
 // duplicated here.
-import { recordEvent } from "./desmond.js";
+import { recordEvent } from "./trip.js";
 // The REAL Delegate history log (activity_log, db/history.js — a SEPARATE
 // system from recordEvent's trip_event_log above) — this route also updates
 // `delegates` with raw SQL, bypassing updateDelegate() (db/delegates.js),

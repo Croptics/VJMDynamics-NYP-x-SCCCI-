@@ -17,7 +17,7 @@ import { getCriticalOpenCount } from "../lib/exception/exceptionsApi.js";
 import { getActiveTripId } from "../lib/activeTrip.js";
 import { useSessionGuard } from "../lib/useSessionGuard.js";
 import { useLang } from "../lib/i18n.jsx";
-import { getPermissions, apiGet } from "../lib/api.js";
+import { getPermissions, getUser, apiGet } from "../lib/api.js";
 import { countUnseenAnnouncements } from "../lib/announcements/announcementsSeen.js";
 import { useVisiblePolling } from "../lib/useVisiblePolling.js";
 
@@ -46,6 +46,7 @@ export default function Layout({ onLogout }) {
   const { t } = useLang();
   const [openExceptions, setOpenExceptions] = useState(0);
   const [unseenAnnouncements, setUnseenAnnouncements] = useState(0);
+  const [pendingAccounts, setPendingAccounts] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
   // Same drag-to-select-text guard used across every modal in the app —
@@ -88,6 +89,26 @@ export default function Layout({ onLogout }) {
     }
   }, EXCEPTION_BADGE_INTERVAL_MS);
 
+  // New-account badge on the "Account control" nav item (2026-08-03 —
+  // "add the badge so can see new account") — same live-count pattern as
+  // Exceptions above, just against GET /accounts/pending. Gated the same way
+  // Sidebar itself decides whether to show the Account control link at all
+  // (a read-only Admin can still VIEW pending accounts, just not act on
+  // them), so a Staff account doesn't fire a 403 every poll for a link it
+  // never even sees.
+  useVisiblePolling(async () => {
+    const perms = getPermissions();
+    const user = getUser();
+    const isAdmin = !!perms.manageAccounts || (user?.role === "admin" && user?.readOnly);
+    if (!isAdmin) return;
+    try {
+      const data = await apiGet("/accounts/pending");
+      setPendingAccounts((data.accounts || []).length);
+    } catch {
+      // Leave the last known count rather than flashing the badge to 0.
+    }
+  }, EXCEPTION_BADGE_INTERVAL_MS);
+
   return (
     <div className="app-shell">
       {/* Hamburger topbar — hidden on desktop widths via CSS, only rendered
@@ -114,7 +135,7 @@ export default function Layout({ onLogout }) {
         />
       )}
 
-      <Sidebar exceptionCount={openExceptions} announcementCount={unseenAnnouncements} onLogout={onLogout} open={sidebarOpen} />
+      <Sidebar exceptionCount={openExceptions} announcementCount={unseenAnnouncements} pendingAccountsCount={pendingAccounts} onLogout={onLogout} open={sidebarOpen} />
       <main className="main">
         <EscalationBanner />
         <Outlet />

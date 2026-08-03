@@ -26,10 +26,12 @@ import { useTheme } from "../lib/theme.jsx";
 
 /**
  * Left navigation rail. Mirrors the MusterGo admin shell (Screens 2–6).
- * `exceptionCount` drives the red pill on the Exceptions item.
+ * `exceptionCount` drives the red pill on the Exceptions item;
+ * `pendingAccountsCount` drives the same pill on Account control, for
+ * pending self-registrations awaiting approval.
  * The account block + Log out button sit pinned to the bottom.
  */
-export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onLogout, open = false }) {
+export default function Sidebar({ exceptionCount = 0, announcementCount = 0, pendingAccountsCount = 0, onLogout, open = false }) {
   // Re-render when Settings updates the session (name/photo/etc.) — plain
   // storage writes (updateSession) don't trigger React on their own.
   const [, forceUpdate] = useState(0);
@@ -89,7 +91,7 @@ export default function Sidebar({ exceptionCount = 0, announcementCount = 0, onL
     // Account control stays on the manageAccounts ACTION permission, not a
     // view toggle — only a real admin should ever grant/revoke everyone
     // else's access (see permissions.js's group doc for why).
-    ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck }] : []),
+    ...(isAdmin ? [{ to: "/accounts", label: "Account control", icon: ShieldCheck, badge: pendingAccountsCount }] : []),
   ];
 
   const user = getUser() || {};

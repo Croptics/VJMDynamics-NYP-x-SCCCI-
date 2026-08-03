@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { answerLocally } from "../../backend/routes/vance.js";
+import { answerLocally } from "../../backend/routes/document.js";
 
 /** A representative snapshot in the exact shape buildSnapshot() produces. */
 function makeSnapshot() {

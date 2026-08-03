@@ -45,7 +45,7 @@ import { syncCurrentCheckpointStatus } from "./dashboard/checkpoints.js";
 import { syncDelegateStatus, escalateAutoTicket, registerExceptionBroadcast } from "../db/exceptionSync.js";
 // Audit trail (2026-07-30 — "the history log didn't track the qr, face
 // scanner and manual update right?" — confirmed: it didn't). Same helper
-// desmond.js's own edits already use; exported from there rather than
+// trip.js's own edits already use; exported from there rather than
 // duplicated here. This powers the Trip board's OWN small "History" panel
 // (trip_event_log) — a SEPARATE system from the real Delegate history log
 // page below, which turned out to need a second, different fix entirely
@@ -55,7 +55,7 @@ import { syncDelegateStatus, escalateAutoTicket, registerExceptionBroadcast } fr
 // updateDelegate() — so this route, unlike Face/Voice scans which DO go
 // through updateDelegate(), never reached the real activity_log table at
 // all, regardless of the recordEvent() fix already in place here).
-import { recordEvent } from "./desmond.js";
+import { recordEvent } from "./trip.js";
 import { logActivity } from "../db/history.js";
 import { actorOf } from "../lib/actor.js";
 

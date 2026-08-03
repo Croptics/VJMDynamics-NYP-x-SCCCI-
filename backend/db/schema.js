@@ -86,6 +86,26 @@ export async function createSchema() {
   // that doesn't pass an actor (e.g. teammate check-in modules importing a
   // roster directly) — those show "—" in the UI rather than a guessed name.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdBy" VARCHAR(255)`);
+  // Ownership + lock (2026-08-03 — "stuff can only add update del their own
+  // creation... unless have full permission" + "option for staff to lock
+  // things they created"). Deliberately a SEPARATE column from "createdBy"
+  // above: that one stores a DISPLAY NAME (via actorOf(), name-or-username,
+  // not stable if the account is later renamed) purely for the UI's "Added
+  // by X" text — this one stores the actual accounts.id for real ownership
+  // enforcement, which needs a stable identity, not a display string. No FK
+  // constraint, matching "createdBy"'s own plain-VARCHAR precedent just
+  // above (also: the accounts table isn't created until just below this
+  // line, so a FK here would fail on a fresh database anyway). NULL for
+  // every row created before this column existed — treated as "no specific
+  // owner recorded", so legacy delegates stay editable by any staff with
+  // manageDelegates rather than retroactively locking everyone out of data
+  // that predates this feature.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdByAccountId" VARCHAR(64)`);
+  // Locking blocks EVERYONE from editing, including the creator themselves,
+  // until explicitly unlocked (2026-08-03, confirmed: "blocks everyone
+  // including the creator") — a deliberate "finalize" step, not just a
+  // shield against other staff.
+  await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS locked BOOLEAN NOT NULL DEFAULT false`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
     password VARCHAR(255), role VARCHAR(32), permissions TEXT, "createdAt" VARCHAR(64)
@@ -172,7 +192,7 @@ export async function createSchema() {
   await run(`UPDATE trips SET uuid_id = gen_random_uuid() WHERE uuid_id IS NULL`);
   // Per-trip Late-status cutoff ("HH:MM", 24-hour, server-local) — was a
   // single hardcoded 10:00 global constant in applyLateCutoff() (db/delegates
-  // .js); admins can now set this per trip (desmond.js's PATCH /api/trips/:id/
+  // .js); admins can now set this per trip (trip.js's PATCH /api/trips/:id/
   // late-cutoff). DEFAULT '10:00' both for brand-new trips AND backfills
   // every existing trip row to the same value this used to be hardcoded to,
   // so nothing's behavior silently changes for a trip nobody has touched.
@@ -254,7 +274,7 @@ export async function createSchema() {
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS accessibility_notes TEXT`);
   // Room allocation (2026-07-26) — hotel name + room number, editable from
   // the delegate profile/Edit modal and the dedicated Room Management tab;
-  // pre-fillable from Vance's document parser (routes/vance.js) when a
+  // pre-fillable from Vance's document parser (routes/document.js) when a
   // parsed itinerary/rooming list includes them.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS hotel_name          VARCHAR(255)`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS room_number         VARCHAR(32)`);
@@ -269,7 +289,7 @@ export async function createSchema() {
       CHECK (category IN ('hotel','attraction','meal','factory','airport','transport','other'))
   )`);
 
-  // Indexes for the trip-scoped lookups desmond.js runs.
+  // Indexes for the trip-scoped lookups trip.js runs.
   await run(`CREATE INDEX IF NOT EXISTS idx_coaches_trip   ON coaches(trip_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_delegates_trip ON delegates(trip_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_itinerary_trip ON itinerary_items(trip_id, day_number, sort_order)`);
@@ -320,7 +340,7 @@ export async function createSchema() {
    * member already sees on /trips ("Forbidden City tour, 12:45, Delayed
    * +20m"), not a disconnected parallel list. This needed no changes to
    * Desmond's schema/routes/pages — itinerary_items is read directly here,
-   * same read-only-shared-table pattern Vimal's vimal.js already uses for
+   * same read-only-shared-table pattern Vimal's facescan.js already uses for
    * the `delegates` table. The old trip_days/checkpoints tables are dropped
    * (created only hours earlier this session, zero real dependents).
    * See backend/routes/dashboard/checkpoints.js for the endpoints.

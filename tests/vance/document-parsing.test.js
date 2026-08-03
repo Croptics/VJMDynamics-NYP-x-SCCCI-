@@ -17,7 +17,7 @@ import {
   preferRomanised,
   finalizeRecords,
   toRow,
-} from "../../backend/routes/vance.js";
+} from "../../backend/routes/document.js";
 
 describe("extractRecords — robustly pulls a records array out of an LLM reply", () => {
   test("parses a bare JSON array", () => {

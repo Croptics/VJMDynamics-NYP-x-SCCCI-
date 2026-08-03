@@ -24,11 +24,11 @@
  * Boarding"); that was a disconnected duplicate of data that already
  * existed, so it was dropped in favor of reading itinerary_items directly —
  * needed ZERO changes to Desmond's schema/routes/pages, since this reads the
- * shared table read-only, the same pattern Vimal's vimal.js already uses for
+ * shared table read-only, the same pattern Vimal's facescan.js already uses for
  * the `delegates` table.
  *
- * Deliberately NOT wired into the existing scan endpoints (vimal.js's
- * /api/attendance/scan, vance.js's /api/onboarding/checkin, exceptions.js's
+ * Deliberately NOT wired into the existing scan endpoints (facescan.js's
+ * /api/attendance/scan, document.js's /api/onboarding/checkin, exceptions.js's
  * /api/checkins/manual) — those stay exactly as they are and keep updating
  * the global delegates.status like always. The checkpoint-aware scanner UI
  * calls POST /api/checkpoints/:id/checkins as a SECOND, separate write right
@@ -442,8 +442,8 @@ router.patch("/api/trips/:id/itinerary-buffer", requireAuth(), wrap(async (req, 
  * Body: { delegateId, status, method? }
  *
  * requireKioskOrPermission: a signed-in account needs manageDelegates, OR
- * the passwordless kiosk token — same pattern as vimal.js's /attendance/scan
- * and vance.js's /onboarding/checkin, so the entrance kiosk can also record
+ * the passwordless kiosk token — same pattern as facescan.js's /attendance/scan
+ * and document.js's /onboarding/checkin, so the entrance kiosk can also record
  * a checkpoint-scoped check-in. This is the ONLY checkpoint route the kiosk
  * token can reach besides the list above — reading full check-in lists
  * stays off-limits to a passwordless device.

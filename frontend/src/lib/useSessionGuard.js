@@ -53,8 +53,13 @@ export function useSessionGuard(onLogout) {
         // label fell back to showing the raw Staff ID, which read as a bug.
         // Syncing it here means that self-corrects on the next 15s poll or
         // tab focus, without needing a fresh login.
-        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role || fresh.readOnly !== before.readOnly) {
-          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role, readOnly: fresh.readOnly } });
+        // id added (2026-08-03, delegate ownership/lock feature) — same
+        // self-correcting sync as role above: a session cached from before
+        // login started returning `id` had none at all, which would make
+        // every "did I create this?" check silently fail for an
+        // already-logged-in account until they next logged out and back in.
+        if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role || fresh.readOnly !== before.readOnly || fresh.id !== before.id) {
+          updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role, readOnly: fresh.readOnly, id: fresh.id } });
         }
       } catch (e) {
         // 401 means the token no longer resolves to any account — it was

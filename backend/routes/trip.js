@@ -1,5 +1,5 @@
 /* =============================================================================
- * backend/routes/desmond.js
+ * backend/routes/trip.js (renamed from desmond.js 2026-08-03)
  * Owner: Desmond — "TransitFlow" — Trip Booking & Dynamic Coach Management
  *
  * v2 — adds the fields/endpoints behind the "operations dashboard" redesign
@@ -65,7 +65,7 @@ import { syncTripDayOf, resolveTripUuid, getVisibleCoachIds } from "../db/dashbo
 // delegates table showing a stale status. Going through updateDelegate()
 // (not a raw UPDATE) also means this shows up in the History Log like every
 // other status change, not just a silent side effect.
-import { updateDelegate } from "../db/delegates.js";
+import { updateDelegate, canModifyDelegate } from "../db/delegates.js";
 // Phase 5 (reassignment robustness, Desmond 2026-08-02) — read-only use of
 // teammates' helpers, exactly as JQ's own PATCH /api/delegates/:id does:
 // getVisibleCoachIds (added to the db/dashboard.js import above) for
@@ -74,6 +74,7 @@ import { updateDelegate } from "../db/delegates.js";
 // syncCurrentCheckpointStatus to keep the checkpoint view honest on a status
 // change. None of these files are edited; only their exports are called.
 import { logActivity as logHistory } from "../db/history.js";
+import { emailConfigured, sendEscalationEmails } from "../lib/notify.js";
 import { syncCurrentCheckpointStatus } from "./dashboard/checkpoints.js";
 // Pure reassignment decision core (no DB) — kept in its own file so tests can
 // import it without this module's Postgres pool. See reassign-core.js.
@@ -119,7 +120,7 @@ function readConfig() {
 const pool = new Pool(readConfig());
 // Without this listener an idle client error would crash the whole Node
 // process — node-postgres treats an unhandled pool "error" as fatal.
-pool.on("error", (err) => console.error("desmond.js pg pool error:", err));
+pool.on("error", (err) => console.error("trip.js pg pool error:", err));
 
 async function all(sql, params = []) { return (await pool.query(sql, params)).rows; }
 async function get(sql, params = []) { return (await all(sql, params))[0] || null; }
@@ -176,7 +177,7 @@ async function syncTotalDaysToItinerary(tripId) {
 /* ---- Additive schema: live operational-status fields -----------------------
  * Columns this feature added AFTER the base schema was frozen in data.js
  * (JQ's, off-limits). Added idempotently at startup — the same additive
- * `ADD COLUMN IF NOT EXISTS` pattern vance.js uses — so data.js is untouched.
+ * `ADD COLUMN IF NOT EXISTS` pattern document.js uses — so data.js is untouched.
  * Best-effort: a failure here (DB briefly unreachable) is logged, not fatal;
  * the SELECTs below use COALESCE so they still work if a column isn't there
  * yet on the very first boot.
@@ -261,7 +262,7 @@ const COACH_ARRIVALS = ["not_arrived", "en_route", "arrived"];
     )`);
     await run(`CREATE INDEX IF NOT EXISTS attendance_log_item_at ON attendance_log (itinerary_item_id, at DESC)`);
   } catch (e) {
-    console.error("desmond.js ensureOpsSchema (non-fatal):", e.message);
+    console.error("trip.js ensureOpsSchema (non-fatal):", e.message);
   }
 })();
 
@@ -366,7 +367,7 @@ function logActivity(tripId, text, kind = "system") {
  * it's describing, so the INSERT is wrapped and its error swallowed. */
 // Exported (2026-07-30 — "the history log didn't track the qr, face scanner
 // and manual update right?" — confirmed true, none of those check-in routes
-// ever called this) so vimal.js/exceptions.js/vance.js can log a check-in the
+// ever called this) so facescan.js/exceptions.js/document.js can log a check-in the
 // same way every desktop edit already does, instead of each duplicating this
 // non-trivial function. Nothing about its own behaviour changes.
 export async function recordEvent(tripId, req, { action, entity, entityId = null, summary, before = null, after = null, kind = "system" }) {
@@ -383,7 +384,7 @@ export async function recordEvent(tripId, req, { action, entity, entityId = null
       ]
     );
   } catch (e) {
-    console.error("desmond.js recordEvent (non-fatal):", e.message);
+    console.error("trip.js recordEvent (non-fatal):", e.message);
   }
 }
 
@@ -461,7 +462,7 @@ router.post("/api/trips/:tripId/activity", readAccess, withTripUuid, wrap(async 
        `reported.${kind || "system"}`, "delegate", null, String(text).trim().slice(0, 300),
        before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null]
     );
-  } catch (e) { console.error("desmond.js activity persist (non-fatal):", e.message); }
+  } catch (e) { console.error("trip.js activity persist (non-fatal):", e.message); }
   res.status(201).json(entry);
 }));
 
@@ -489,11 +490,22 @@ router.get("/api/all-trips", readAccess, wrap(async (_req, res) => {
   // IDENTICAL bug again — "the To (country) never saved" turned out to mean
   // it saved fine, but reopening Edit Trip re-seeds its form from THIS list,
   // which never selected the new columns, so it always looked blank again.
+  // "readyToComplete" (2026-08-03 — "auto change the trip status to
+  // complete... pls advise", confirmed: flag it, don't auto-complete
+  // silently) — true once the trip's real LAST calendar day has passed
+  // while it's still "In progress". Computed fresh from startDate/totalDays
+  // every read, same "derive, don't store a stale snapshot" pattern as
+  // "dayOf"/"departureAt" elsewhere in this file — a trip with no startDate
+  // set (nothing to compare against) never qualifies.
   const trips = await all(`
     SELECT
       t.uuid_id AS id, t.name, t."dateRange", t.status, t."lead",
       t."dayOf", t."totalDays", t."startDate", t."dayOfIsManual",
       t."departureTime", t."countryFrom", t."countryTo",
+      (t.status = 'In progress' AND t."startDate" IS NOT NULL
+        AND (NOW() AT TIME ZONE 'Asia/Singapore')::date
+            > (t."startDate"::date + (t."totalDays" - 1) * INTERVAL '1 day')::date
+      ) AS "readyToComplete",
       COUNT(DISTINCT c.id) AS "coachCount",
       COUNT(DISTINCT d.id) AS "delegateCount"
     FROM trips t
@@ -745,6 +757,30 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     }
   }
 
+  // Trip completion — every captain freed at once (2026-08-03, "auto change
+  // the trip status to complete and remove the assign stuff so they can be
+  // assign to another trip and notify the user"). Deliberately NOT automatic
+  // — a scheduler flagging every "In progress" trip whose last day has
+  // passed as `readyToComplete` (see GET /api/all-trips above) so an admin
+  // sees a prompt and confirms, rather than a background job silently
+  // closing out a trip that's just running late. Only fires on a genuine
+  // transition INTO "Completed" — re-saving an already-completed trip's
+  // other fields can't re-trigger this.
+  let completedUnassigned = [];
+  if (b.status === "Completed" && tripBefore.status !== "Completed") {
+    completedUnassigned = await all(
+      `SELECT cc.account_id AS "accountId", a.name, a.username, a.email, c.id AS "coachId", c.label AS "coachLabel"
+         FROM coach_captains cc
+         JOIN coaches c ON c.id = cc.coach_id
+         JOIN accounts a ON a.id = cc.account_id
+        WHERE c.trip_id = $1`,
+      [req.tripUuid]
+    );
+    if (completedUnassigned.length) {
+      await run(`DELETE FROM coach_captains WHERE coach_id IN (SELECT id FROM coaches WHERE trip_id = $1)`, [req.tripUuid]);
+    }
+  }
+
   params.push(req.tripUuid);
   let trip = await get(
     `UPDATE trips SET ${sets.join(", ")} WHERE uuid_id = $${i}
@@ -775,7 +811,32 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
       after: { autoUnassigned: autoUnassigned.map((a) => ({ accountId: a.accountId, coachId: a.coachId, conflictTripId: a.conflictTripId })) },
     });
   }
-  res.json({ ...trip, unassigned: autoUnassigned.map((a) => ({ accountId: a.accountId, name: a.name || a.username, coachId: a.coachId, coachLabel: a.coachLabel })) });
+  if (completedUnassigned.length) {
+    const names = completedUnassigned.map((a) => `${a.name || a.username} (${a.coachLabel})`).join(", ");
+    await recordEvent(req.tripUuid, req, {
+      action: "trip.completedUnassign", entity: "trip", entityId: req.tripUuid, kind: "coach",
+      summary: `"${trip.name}" marked Completed — ${completedUnassigned.length} staff freed up for reassignment: ${names}.`,
+      after: { unassigned: completedUnassigned.map((a) => ({ accountId: a.accountId, coachId: a.coachId })) },
+    });
+    // Best-effort — a missing/unconfigured SMTP setup (see notify.js) must
+    // never block the actual status change/unassign, which already happened
+    // above regardless of whether this email goes out.
+    if (emailConfigured()) {
+      const recipients = completedUnassigned.filter((a) => a.email).map((a) => a.email);
+      if (recipients.length) {
+        sendEscalationEmails(recipients, {
+          subject: `MusterGo — "${trip.name}" has ended`,
+          text: `"${trip.name}" has been marked Completed. You've been unassigned as captain and are now free to be assigned to another trip.`,
+          html: `<p>"<strong>${trip.name}</strong>" has been marked Completed. You've been unassigned as captain and are now free to be assigned to another trip.</p>`,
+        }).catch(() => {}); // fire-and-forget — a send failure shouldn't fail this response
+      }
+    }
+  }
+  res.json({
+    ...trip,
+    unassigned: autoUnassigned.map((a) => ({ accountId: a.accountId, name: a.name || a.username, coachId: a.coachId, coachLabel: a.coachLabel })),
+    completedUnassigned: completedUnassigned.map((a) => ({ accountId: a.accountId, name: a.name || a.username, coachId: a.coachId, coachLabel: a.coachLabel })),
+  });
 }));
 
 router.delete("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, res) => {
@@ -1416,10 +1477,10 @@ router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
 
   const id = await nextDelegateId();
   const delegate = await get(
-    `INSERT INTO delegates (id, trip_id, name, initials, "coachId", status, vip, notes, company, accessibility_notes)
-     VALUES ($1,$2,$3,$4,NULL,'UNASSIGNED',$5,$6,$7,$8)
-     RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl"`,
-    [id, tripUuid, name.trim(), initialsOf(name), !!vip, (notes || "").trim() || null, (company || "").trim() || null, (accessibilityNotes || "").trim() || null]
+    `INSERT INTO delegates (id, trip_id, name, initials, "coachId", status, vip, notes, company, accessibility_notes, "createdByAccountId")
+     VALUES ($1,$2,$3,$4,NULL,'UNASSIGNED',$5,$6,$7,$8,$9)
+     RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes", "photoUrl", "createdByAccountId"`,
+    [id, tripUuid, name.trim(), initialsOf(name), !!vip, (notes || "").trim() || null, (company || "").trim() || null, (accessibilityNotes || "").trim() || null, req.account?.id || null]
   );
   await recordEvent(tripUuid, req, {
     action: "delegate.create", entity: "delegate", entityId: delegate.id, kind: "delegate",
@@ -1435,6 +1496,15 @@ router.post("/api/delegates", writeAccess, wrap(async (req, res) => {
 // Every field is optional — omit a field to leave it unchanged.
 router.patch("/api/delegates/:id/details", writeAccess, wrap(async (req, res) => {
   const body = req.body || {};
+  // Ownership + lock (2026-08-03) — this endpoint writes name/vip/notes/
+  // company/accessibilityNotes via raw SQL below, a real bypass of the
+  // check on routes/dashboard/delegates.js's PATCH, found by tracing every
+  // writer of the delegates table.
+  const existingForOwnerCheck = await get(`SELECT "createdByAccountId", locked FROM delegates WHERE id = $1`, [req.params.id]);
+  if (existingForOwnerCheck) {
+    const ownerCheck = canModifyDelegate(existingForOwnerCheck, req.account);
+    if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
+  }
   const sets = [];
   const params = [];
   let i = 1;
@@ -1475,6 +1545,13 @@ router.patch("/api/delegates/:id/details", writeAccess, wrap(async (req, res) =>
 // Kept for backwards compatibility with the v1 frontend build.
 router.patch("/api/delegates/:id/notes", writeAccess, wrap(async (req, res) => {
   const { notes } = req.body || {};
+  // Ownership + lock (2026-08-03) — same bypass as /details above, this
+  // legacy route has its own separate raw-SQL write.
+  const existingForOwnerCheck = await get(`SELECT "createdByAccountId", locked FROM delegates WHERE id = $1`, [req.params.id]);
+  if (existingForOwnerCheck) {
+    const ownerCheck = canModifyDelegate(existingForOwnerCheck, req.account);
+    if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
+  }
   const delegate = await get(
     `UPDATE delegates SET notes = $1 WHERE id = $2
      RETURNING id, name, initials, "coachId", status, vip, "lastSeen", notes, company, accessibility_notes AS "accessibilityNotes"`,
@@ -1526,7 +1603,19 @@ router.patch("/api/trips/:tripId/reassign", writeAccess, withTripUuid, wrap(asyn
   if (!delegateId) return res.status(400).json({ error: "DELEGATE_REQUIRED", message: "A delegate is required." });
 
   // ---- Load the rows the decision needs (this is the route's job: I/O) ----
-  const del = await get(`SELECT id, name, trip_id AS "tripId", "coachId", status FROM delegates WHERE id = $1`, [delegateId]);
+  const del = await get(`SELECT id, name, trip_id AS "tripId", "coachId", status, "createdByAccountId", locked FROM delegates WHERE id = $1`, [delegateId]);
+  // Ownership + lock (2026-08-03) — added here on request, after finding this
+  // reassign endpoint was a real bypass: it writes "coachId"/status via raw
+  // SQL below, entirely separate from routes/dashboard/delegates.js's PATCH,
+  // so a locked/not-owned delegate could be freely reassigned to another
+  // coach through the Trips board with the earlier check never firing.
+  // Checked BEFORE evaluateReassign() (not inside it) so its own pure,
+  // unit-tested decision logic — tests/desmond/reassign-logic.test.js —
+  // stays untouched.
+  if (del) {
+    const ownerCheck = canModifyDelegate(del, req.account);
+    if (!ownerCheck.ok) return res.status(403).json({ error: ownerCheck.code, message: ownerCheck.message });
+  }
   const fromCoachId = del ? (del.coachId || null) : null;
   // Target coach + its current occupancy (excluding this delegate). Only fetched
   // when actually assigning to a coach, and only if the delegate resolved at all.
@@ -1602,7 +1691,7 @@ router.patch("/api/trips/:tripId/reassign", writeAccess, withTripUuid, wrap(asyn
   const changes = { coachId: { from: fromCoachId, to: toCoachId } };
   if (nextStatus !== del.status) changes.status = { from: del.status, to: nextStatus };
   try { await logHistory(summary, "reassign", actorOf(req), { delegateId, changes, tripUuid }); }
-  catch (e) { console.error("desmond.js reassign history (non-fatal):", e.message); }
+  catch (e) { console.error("trip.js reassign history (non-fatal):", e.message); }
 
   res.json(updated);
 }));
