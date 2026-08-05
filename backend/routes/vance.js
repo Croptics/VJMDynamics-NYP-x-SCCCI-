@@ -984,13 +984,14 @@ function passInitials(company) {
   return (src || String(company || "?")[0] || "?").toUpperCase();
 }
 
-// Table-based, image-free pass. We deliberately DON'T inline the QR: Gmail's
-// Android app won't render inline cid: images (shows a broken box), and a
-// LAN-hosted image can't be fetched by Gmail's image proxy. So the email is a
-// clean, always-rendering card (code + company chip are pure HTML) whose primary
-// action opens the hosted pass PAGE — where the scannable QR and the flip
-// company badge live. The QR also rides along as a downloadable attachment.
-function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl }) {
+// Table-based email that mirrors the in-app / webpage boarding pass: brand band
+// → company identity band → the (branded, logo-centre) QR → code → name. The QR
+// is inlined as a cid image so the pass looks complete in Gmail web, Apple Mail
+// and Outlook (the usual demo/desktop clients). Gmail's ANDROID app is the one
+// client that won't render an inline cid image — there the code + company chip
+// still render, and the "Open your boarding pass" button leads to the hosted
+// flip page (the reliable phone QR). The QR also downloads via that attachment.
+function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl, hasQr }) {
   const brand = passBrandColor(company);
   const initials = passInitials(company);
   return `
@@ -1002,30 +1003,29 @@ function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeU
 
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e6e6ea;border-radius:16px;border-collapse:separate;overflow:hidden">
           <tr><td style="background:${brand};height:8px;line-height:8px;font-size:0">&nbsp;</td></tr>
-          <tr><td align="center" style="padding:26px 20px 10px">
-            <div style="font-weight:800;font-size:11px;letter-spacing:2px;color:${brand}">BOARDING PASS</div>
-            <div style="font-family:'Courier New',monospace;font-weight:700;font-size:30px;color:#111;margin-top:10px;letter-spacing:2px">${escHtml(code || "")}</div>
-            <div style="color:#999;font-size:12px;margin-top:8px">Open your pass for the scannable QR</div>
-          </td></tr>
-          <tr><td style="padding:6px 20px 22px">
+          <tr><td style="background:#fafafb;padding:12px 18px;border-bottom:1px solid #eee">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-              <td width="48" valign="middle">
-                <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-                  <td width="46" height="46" align="center" valign="middle" bgcolor="${brand}" style="background:${brand};color:#ffffff;font-weight:800;font-size:16px;border-radius:12px">${escHtml(initials)}</td>
-                </tr></table>
-              </td>
-              <td valign="middle" style="padding-left:12px">
-                <div style="font-weight:800;font-size:16px;color:#1a1a1a">${escHtml(name)}</div>
-                <div style="color:#666;font-size:13px;margin-top:1px">${escHtml(role || "Delegate")}${company ? ` &middot; ${escHtml(company)}` : ""}</div>
-                ${industry ? `<div style="color:#999;font-size:12px;margin-top:3px">${escHtml(industry)}</div>` : ""}
-                <div style="color:#999;font-size:12px;margin-top:1px">${escHtml(coachLabel || "")}</div>
+              <td width="42" valign="middle"><table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                <td width="40" height="40" align="center" valign="middle" bgcolor="${brand}" style="background:${brand};color:#fff;font-weight:800;font-size:14px;border-radius:10px">${escHtml(initials)}</td>
+              </tr></table></td>
+              <td valign="middle" style="padding-left:11px">
+                <div style="font-weight:700;font-size:14px;color:#1a1a1a">${escHtml(company || "—")}</div>
+                ${industry ? `<div style="color:#999;font-size:11.5px;margin-top:1px">${escHtml(industry)}</div>` : ""}
               </td>
             </tr></table>
+          </td></tr>
+          <tr><td align="center" style="padding:22px 20px 20px">
+            ${hasQr
+              ? `<img src="cid:passqr" width="196" height="196" alt="Boarding QR ${escHtml(code || "")}" style="display:block;margin:0 auto;border-radius:10px;border:1px solid #eee"/>`
+              : `<div style="width:196px;height:196px;margin:0 auto;border:1px dashed #ddd;border-radius:10px"></div>`}
+            <div style="font-family:'Courier New',monospace;font-weight:700;font-size:16px;color:#111;margin-top:12px;letter-spacing:1.5px">${escHtml(code || "")}</div>
+            <div style="font-weight:800;font-size:16px;color:#1a1a1a;margin-top:8px">${escHtml(name)}</div>
+            <div style="color:#666;font-size:12.5px;margin-top:1px">${escHtml(role || "Delegate")}${coachLabel ? ` &middot; ${escHtml(coachLabel)}` : ""}</div>
           </td></tr>
         </table>
 
         ${badgeUrl ? `<div style="text-align:center;margin-top:20px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 28px;border-radius:10px">Open your boarding pass &rarr;</a></div>
-        <p style="margin:12px 0 0;color:#aaa;font-size:11.5px;text-align:center">Your scannable QR &amp; flip company badge are on the pass page. The QR is also attached (boarding-pass.png).</p>` : ""}
+        <p style="margin:12px 0 0;color:#aaa;font-size:11.5px;text-align:center">Tap for the interactive flip badge. Your QR is also attached (boarding-pass.png).</p>` : ""}
         <p style="margin:18px 0 0;color:#bbb;font-size:11px;text-align:center">A Singapore Chinese Chamber of Commerce &amp; Industry initiative.</p>
       </td></tr>
     </table>
@@ -1047,19 +1047,21 @@ router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manag
   const t = passMailer();
   if (!t) return res.status(503).json({ error: "EMAIL_NOT_CONFIGURED", message: "Email (SMTP) isn't configured on the server." });
 
-  // Attach the QR as a normal downloadable file (NOT inline cid) — an inline
-  // image renders as a broken box in Gmail's Android app; as an attachment it
-  // downloads cleanly everywhere, and the pass page is the primary QR surface.
+  // Inline the QR (cid) so the pass looks complete in Gmail web / Apple Mail /
+  // Outlook; it's the SAME part that downloads as boarding-pass.png. (Gmail's
+  // Android app is the lone client that won't render it inline — the button +
+  // hosted page cover that.)
   const attachments = [];
   const m = /^data:image\/(png|jpe?g);base64,(.+)$/.exec(qrDataUrl);
-  if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), contentType: `image/${m[1] === "jpg" ? "jpeg" : m[1]}` });
+  const hasQr = !!m;
+  if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), cid: "passqr", contentType: `image/${m[1] === "jpg" ? "jpeg" : m[1]}` });
 
   const coachLabel = del.coach_name ? `${del.coach_name}${del.coach_city ? ` · ${del.coach_city}` : ""}` : "No coach assigned";
   const base = (process.env.FRONTEND_URL || "https://localhost:5173").replace(/\/+$/, "");
   const badgeUrl = `${base}/badge/${encodeURIComponent(del.qr_code)}`;
   const html = passEmailHtml({
     name: del.name, role: del.role, company: del.company, industry: del.industry,
-    code: del.qr_code, coachLabel, badgeUrl,
+    code: del.qr_code, coachLabel, badgeUrl, hasQr,
   });
   const fromAddr = process.env.SMTP_FROM || process.env.SMTP_USER;
   try {
