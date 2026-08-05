@@ -211,6 +211,18 @@
   box-sizing: content-box;
 }
 
+/* A CRITICAL open exception. Same red as the normal badge (the palette has no
+   more-urgent red) so it's distinguished by MOTION instead — a static red pip
+   is already the resting state for the missing count, and this has to stand out
+   from it at a glance. Respects prefers-reduced-motion below. */
+.mobile-tab-badge.critical {
+  animation: mobile-badge-critical 1.4s ease-in-out infinite;
+}
+@keyframes mobile-badge-critical {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--scc-red) 70%, transparent); }
+  70%      { box-shadow: 0 0 0 7px color-mix(in srgb, var(--scc-red) 0%, transparent); }
+}
+
 /* Topbar connectivity + trip-context chips (native-app status header). */
 .mobile-sync-chip {
   display: inline-flex;
@@ -248,7 +260,8 @@
      background/transform transition moved onto it when the pill was split
      out of the tab cell, so reduced-motion needs to target it too or the
      active-state colour/scale would still animate. */
-  .mobile-tab-pill, .mobile-tab.active svg, .mobile-sync-dot.pulse { animation: none; transition: none; }
+  .mobile-tab-pill, .mobile-tab.active svg, .mobile-sync-dot.pulse,
+  .mobile-tab-badge.critical { animation: none; transition: none; }
 }
 
 /* ==========================================================================

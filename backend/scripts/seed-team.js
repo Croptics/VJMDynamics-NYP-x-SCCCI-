@@ -3,23 +3,17 @@
  *  Create one login account per team member, so nobody has to share
  *  "staff_194".
  *
- *  WHY THIS EXISTS: logins enforce a SINGLE ACTIVE SESSION per account (see
- *  auth.js — each login bumps token_version, invalidating older tokens). That
- *  is correct for one person, but the whole team shares ONE database, so when
- *  everyone logs in as the same `staff_194` account they constantly log each
- *  other out ("Your account is no longer valid. Please sign in again." every
- *  ~15s). Giving each person their OWN account fixes it: your session only
- *  ends when YOU log in somewhere else, not when a teammate does.
+ *  WHY THIS EXISTS: logins enforce a SINGLE ACTIVE SESSION per account (auth.js
+ *  bumps token_version on each login). The team shares ONE database, so sharing
+ *  `staff_194` means everyone logs each other out every ~15s. Own account = your
+ *  session only ends when YOU log in elsewhere.
  *
- *  Run once (safe to re-run — it never overwrites an account that already
- *  exists, so nobody's password gets reset):
+ *  Safe to re-run — never overwrites an existing account, so no password resets:
  *      cd backend && npm run seed:team
  *
- *  Everyone gets the "admin" role for development (full access, bypasses
- *  every permission check — see accountPermissions() in data.js). Change any
- *  account to "staff" afterwards in the Account control page if you want to
- *  demo the permission gates. Default password for every new account is
- *  "password123!".
+ *  Every dev account gets role "admin" (bypasses all permission checks — see
+ *  accountPermissions() in data.js); switch one to "staff" in Account control to
+ *  demo the gates.
  * ============================================================================= */
 
 import "dotenv/config";
@@ -62,12 +56,9 @@ function readConfig() {
 }
 
 async function nextAccountId(pool) {
-  // Matches db/accounts.js's own nextAccountId() — restricted to ids that are
-  // actually "u-<integer>" (2026-07-26 bugfix). Without this filter, the
-  // CAST blows up on any non-numeric id, e.g. the seeded "u-kiosk" row for
-  // __kiosk__ ("invalid input syntax for type integer: 'kiosk'") — never hit
-  // on the shared Neon DB since this script had already run there long
-  // before kiosk existed, but breaks immediately on any fresh database.
+  // Mirrors db/accounts.js's nextAccountId(). The `~ '^u-[0-9]+$'` filter is
+  // required: without it the CAST blows up on non-numeric ids like the seeded
+  // "u-kiosk" row, which breaks this script on any fresh database.
   const r = await pool.query(
     `SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts WHERE id ~ '^u-[0-9]+$'`
   );

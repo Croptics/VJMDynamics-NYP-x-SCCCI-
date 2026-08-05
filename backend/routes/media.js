@@ -9,19 +9,14 @@
  * Cloudinary storage management — GET/POST /api/media/:folderKey[...]
  *
  * Admin-only bulk view over the app's Cloudinary storage (Settings → Image
- * storage): list every asset actually sitting in a given folder, delete a
- * chosen subset, or purge the whole folder in one action. Gated on
- * manageAccounts — same tier as Account control, since this is an
- * account-wide infrastructure action, not routine per-feature editing.
+ * storage): list a folder's assets, delete a subset, or purge the folder.
+ * Gated on manageAccounts — account-wide infrastructure, not per-feature
+ * editing. Three folders (see FOLDERS below): delegates = images only,
+ * announcements = both, guide = video only.
  *
- * Generalised (2026-07-27, "give me the option to delete announcement image/
- * video upload, same for user guide") from a delegates-only single-folder
- * tool into three named folders (see FOLDERS below) — the delegates folder
- * is images only, announcements has both images and videos, guide is video
- * only. Every delete here (selected or purge) also unlinks whatever in the
- * app was pointing at that asset (a delegate's photoUrl, an announcement's
- * images/videos array, the guide_video row) so nothing keeps pointing at an
- * asset that no longer exists in storage.
+ * Every delete here (selected or purge) MUST also unlink whatever in the app
+ * pointed at that asset (a delegate's photoUrl, an announcement's images/videos
+ * array, the guide_video row) so nothing references a missing asset.
  */
 
 import { Router } from "express";
@@ -39,10 +34,8 @@ import { requirePermission } from "../lib/auth.js";
 const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// Every folder this admin tool can see/manage, and how to reconcile the rest
-// of the app after a delete. `hasImages`/`hasVideos` decide which Cloudinary
-// listing(s) to query; `unlink(publicIds)` runs after ANY delete (selected
-// or purge) in that folder.
+// `hasImages`/`hasVideos` decide which Cloudinary listing(s) to query;
+// `unlink(publicIds)` runs after ANY delete (selected or purge) in that folder.
 const FOLDERS = {
   delegates: {
     path: DELEGATE_PHOTO_FOLDER, label: "Delegate photos",
@@ -101,9 +94,8 @@ router.post("/api/media/:folderKey/delete", requirePermission("manageAccounts"),
   if (!isConfigured()) {
     return res.status(503).json({ error: "NOT_CONFIGURED", message: "Cloudinary isn't configured (CLOUDINARY_* in backend/.env)." });
   }
-  // items: [{publicId, type}] — type picks which Cloudinary resource_type to
-  // destroy with, since an image/video with the same publicId string would
-  // otherwise be ambiguous.
+  // items: [{publicId, type}] — `type` picks the Cloudinary resource_type;
+  // an image and a video can share the same publicId string.
   const items = Array.isArray(req.body?.items) ? req.body.items.filter((i) => i?.publicId && (i.type === "image" || i.type === "video")) : [];
   if (!items.length) return res.status(400).json({ error: "NO_ITEMS", message: "No media selected." });
 
@@ -124,10 +116,8 @@ router.post("/api/media/:folderKey/purge", requirePermission("manageAccounts"), 
   if (!isConfigured()) {
     return res.status(503).json({ error: "NOT_CONFIGURED", message: "Cloudinary isn't configured (CLOUDINARY_* in backend/.env)." });
   }
-  // A second, explicit confirmation carried in the request body (the UI
-  // requires literally typing "DELETE ALL" before this button even becomes
-  // clickable) — belt-and-suspenders against a stray/automated call, since
-  // this destroys every stored asset in the folder in one shot with no undo.
+  // Server-side confirmation phrase (the UI also makes you type it) — this
+  // destroys every asset in the folder with no undo, so guard stray calls too.
   if (req.body?.confirm !== "DELETE ALL") {
     return res.status(400).json({ error: "NOT_CONFIRMED", message: "Confirmation phrase missing or incorrect." });
   }

@@ -6,10 +6,9 @@
  *  the rest of the app is built on. Add your OWN feature files instead, and see
  *  README/INTEGRATION_NOTES.md for what's yours vs. what's off-limits.
  * ============================================================================= */
-/** Fixed structure used to seed the database (db/schema.js) and read
- *  elsewhere as a fallback shape (e.g. getTrip() in db/dashboard.js). Split
- *  out of the old monolithic data.js (2026-07-21) since both schema.js and
- *  dashboard.js need these without depending on each other. */
+/** Fixed structure used to seed the database (db/schema.js) and read elsewhere
+ *  as a fallback shape (e.g. getTrip() in db/dashboard.js). Kept separate so
+ *  schema.js and dashboard.js can both use it without depending on each other. */
 
 export const TRIP = {
   id: "t-1",

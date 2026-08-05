@@ -31,6 +31,9 @@ import {
 import { useLang } from "../../../lib/i18n.jsx";
 import BoardingPassesView from "./BoardingPassesView.jsx";
 import TripPulse from "../../../components/TripPulse.jsx";
+import { getActiveTripId, resolveActiveTripId, ACTIVE_TRIP_EVENT } from "../../../lib/activeTrip.js";
+import { apiGet, getUser } from "../../../lib/api.js";
+import { scopedTripIds } from "../../../lib/tripScope.js";
 
 /**
  * Screen 4 — AI Document Parsing & Attendee Onboarding (Vance).
@@ -85,6 +88,58 @@ export default function OnboardingPage() {
   const [parseKpi, setParseKpi] = useState(null);   // trip-scoped numbers for the "Assign to trip" selection
   const [tripId, setTripId] = useState(() => localStorage.getItem(LS_TRIP) || "");
   const [trips, setTrips] = useState([]);
+  // Boarding passes FOLLOWS the Dashboard's trip switcher, same as the
+  // Exceptions inbox — it's a read-only view, so it should always show the
+  // trip you're currently looking at rather than keeping its own selection.
+  //
+  // Deliberately does NOT drive the "Assign to trip" selector on the parsing
+  // tab: that one is a WRITE destination for the delegates you're about to
+  // create, so silently repointing it at whatever the Dashboard shows could
+  // onboard people into the wrong trip. Those two stay independent on purpose.
+  const [activeTripId, setActiveTripId] = useState(() => getActiveTripId());
+  useEffect(() => {
+    // Same-tab CustomEvent — a bare localStorage write fires no `storage`
+    // event in the tab that made it (see lib/activeTrip.js).
+    const onSwitch = (e) => setActiveTripId(e.detail || getActiveTripId());
+    window.addEventListener(ACTIVE_TRIP_EVENT, onSwitch);
+    return () => window.removeEventListener(ACTIVE_TRIP_EVENT, onSwitch);
+  }, []);
+
+  // "Assign to trip" is restricted to the staff member's OWN trip(s) — they
+  // could otherwise onboard delegates into a trip they aren't assigned to.
+  // null = admin (unrestricted); a Set = only these trip uuids.
+  const isAdmin = getUser()?.role === "admin";
+  const [myTripIds, setMyTripIds] = useState(null);
+  useEffect(() => {
+    if (isAdmin) { setMyTripIds(null); return; }
+    apiGet("/my-captain-coaches")
+      .then((r) => setMyTripIds(new Set(scopedTripIds(r.coaches))))
+      .catch(() => setMyTripIds(new Set()));
+  }, [isAdmin]);
+  const assignableTrips = myTripIds ? trips.filter((tr) => myTripIds.has(tr.id)) : trips;
+  // With one assignable trip, select it for real — the label below is only a
+  // display, and confirmAndAdd() hard-requires a non-empty tripId. The
+  // existing trips effect only auto-selects when the WHOLE system has one
+  // trip, which isn't the staff case.
+  // Depends on the id STRING, not the array — assignableTrips is a fresh
+  // identity every render, which would re-run this on each one.
+  const onlyAssignableId = !isAdmin && assignableTrips.length === 1 ? assignableTrips[0].id : null;
+  useEffect(() => {
+    if (!onlyAssignableId) return;
+    setTripId((cur) => (cur === onlyAssignableId ? cur : onlyAssignableId));
+  }, [onlyAssignableId]);
+
+  // "Assign to trip" tracks the Dashboard's trip rather than its own remembered
+  // mg_parse_trip value — landing here with a trip other than the one you're
+  // looking at is the surprising behaviour. Keyed on the RESOLVED id (so the
+  // "t-1" alias becomes a real uuid the <select> can match) and only re-runs
+  // when the Dashboard actually switches, so an admin's manual pick afterwards
+  // isn't clobbered on every render.
+  const resolvedActiveTripId = resolveActiveTripId(activeTripId, trips);
+  useEffect(() => {
+    if (!resolvedActiveTripId) return;
+    setTripId((cur) => (cur === resolvedActiveTripId ? cur : resolvedActiveTripId));
+  }, [resolvedActiveTripId]);
   const [job, setJob] = useState(null); // {id, fileName, status, done, total, method, error}
   const [rows, setRows] = useState([]);
   const [elapsed, setElapsed] = useState(0); // seconds the current parse has run (live) / took (frozen when done)
@@ -331,7 +386,7 @@ export default function OnboardingPage() {
         ))}
       </div>
 
-      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={tripId} onKpiChange={setPassesKpi} /></div>}
+      {view === "passes" && <div style={{ marginTop: 20 }}><BoardingPassesView tripId={resolvedActiveTripId} onKpiChange={setPassesKpi} /></div>}
 
       {view === "parse" && (<>
       {/* Upload + job status */}
@@ -365,19 +420,43 @@ export default function OnboardingPage() {
                 type="file"
                 accept="application/pdf,image/*"
                 hidden
-                onChange={(e) => e.target.files?.length && ingest(e.target.files)}
+                // 2026-08-04 ("idk why but have to upload 3 time to make it
+                // work") — this never reset its own value after a selection.
+                // A file input's `change` event only fires when its value
+                // STRING actually changes; picking the exact same file twice
+                // in a row through this same picker leaves the value
+                // identical, so the second attempt fires no event at all —
+                // no error, nothing — looking exactly like the upload just
+                // silently did nothing until a later, different attempt
+                // (e.g. drag-and-drop, which has no such quirk) finally
+                // worked. Clearing the value after reading the file(s) means
+                // re-picking the same file always re-fires the event.
+                onChange={(e) => {
+                  if (e.target.files?.length) ingest(e.target.files);
+                  e.target.value = "";
+                }}
               />
             </div>
 
             <label className="field-label" style={{ marginTop: 16 }}>{t("Assign to trip")}</label>
-            <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
-              <option value="">{t("Select a trip…")}</option>
-              {trips.map((trip) => (
-                <option key={trip.id} value={trip.id}>
-                  {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
-                </option>
-              ))}
-            </select>
+            {/* Scoped to the account's own trip(s) — see assignableTrips. With
+                exactly one there's nothing to choose, so it renders as a plain
+                read-only label instead of a one-option dropdown. */}
+            {!isAdmin && assignableTrips.length === 1 ? (
+              <div className="select" style={{ display: "flex", alignItems: "center", color: "var(--ink-2)" }}>
+                {assignableTrips[0].name}
+                {assignableTrips[0].dateRange ? ` · ${assignableTrips[0].dateRange}` : ""}
+              </div>
+            ) : (
+              <select className="select" value={tripId} onChange={(e) => setTripId(e.target.value)}>
+                <option value="">{t("Select a trip…")}</option>
+                {assignableTrips.map((trip) => (
+                  <option key={trip.id} value={trip.id}>
+                    {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Job status / progress */}

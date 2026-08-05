@@ -16,6 +16,7 @@ import { Router } from "express";
 import { wrap } from "../../lib/wrap.js";
 import { actorOf } from "../../lib/actor.js";
 import { requireAuth, requirePermission } from "../../lib/auth.js";
+import { guardTrip } from "../../lib/tripAccess.js";
 import { getActivity, deleteActivity, deleteAllActivity, rollbackActivity, applyLateCutoff, resolveTripUuid, getVisibleCoachIds } from "../../data.js";
 
 const router = Router();
@@ -25,6 +26,12 @@ const router = Router();
 router.get("/api/activity", requireAuth(), wrap(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 200, 1000);
   const tripUuid = await resolveTripUuid(req.query.tripId);
+  // Per-trip authorisation (2026-08-05). A non-admin must name a trip they're
+  // actually on: the coach filter below narrows WHICH entries they see, but it
+  // can't stop them asking for another trip's log — and with no tripId at all
+  // it returned every trip mixed together. guardTrip() fails closed on a null
+  // trip, so "all trips" stays admin-only. See lib/tripAccess.js, AI Log 262.
+  if (req.account?.role !== "admin" && !(await guardTrip(req, res, tripUuid))) return;
   const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
   let activity = await getActivity(limit, tripUuid);
   // Coach-scoped staff (2026-07-27 — see getVisibleCoachIds' doc) only sees

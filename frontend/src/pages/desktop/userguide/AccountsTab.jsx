@@ -1,8 +1,6 @@
 /* =============================================================================
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — User Guide's "Account & permissions" tab
- *
- *  Extracted from UserGuidePage.jsx (2026-08-02 modularization pass).
  * ============================================================================= */
 import { PencilLine, LayoutGrid, ShieldCheck, Users, BedDouble } from "lucide-react";
 import { Tip } from "./FlowChart.jsx";

@@ -32,7 +32,7 @@ import StatusBadge from "../../components/StatusBadge.jsx";
 import LogExceptionModal from "../../components/exception/LogExceptionModal.jsx";
 import EscalateModal from "../../components/EscalateModal.jsx";
 import ConfirmDialog from "../../components/ConfirmDialog.jsx";
-import { getPermissions, apiPost } from "../../lib/api.js";
+import { getPermissions, apiPost, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import {
   listExceptions, resolveException, deleteException, manualOverride, updatePriority,
@@ -42,7 +42,7 @@ import {
 // Follows the same trip DashboardPage/TripCoachPage have selected (2026-07-31
 // — "add the trip change to exception"), instead of the fixed base TRIP_ID
 // this inbox used to always read regardless of the trip switcher.
-import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
+import { getActiveTripId, resolveActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
 // Offline-capable READ (2026-07-31) — the Exceptions inbox is one of the
 // pages flagged as most important ("the manual, attendance, exception,
 // trip"): load() below used to just error out on any failure, including a
@@ -157,6 +157,28 @@ export default function ExceptionInboxPage() {
     window.addEventListener(ACTIVE_TRIP_EVENT, onSwitch);
     return () => window.removeEventListener(ACTIVE_TRIP_EVENT, onSwitch);
   }, [load]);
+
+  // Real trip name + day for the eyebrow above the title. This was hardcoded
+  // "Beijing study mission · Day 3" while the tickets below correctly followed
+  // the active trip, so the header actively lied on any other trip. /all-trips
+  // is cheap and already carries name/dayOf/totalDays — no need for the heavy
+  // dashboard aggregate just for a label.
+  const [tripMeta, setTripMeta] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const loadMeta = async () => {
+      try {
+        const r = await apiGet("/all-trips");
+        if (!alive) return;
+        const list = r.trips || [];
+        const id = resolveActiveTripId(getActiveTripId(), list);
+        setTripMeta(list.find((tr) => tr.id === id) || null);
+      } catch { /* label-only — leave it out rather than block the page */ }
+    };
+    loadMeta();
+    window.addEventListener(ACTIVE_TRIP_EVENT, loadMeta);
+    return () => { alive = false; window.removeEventListener(ACTIVE_TRIP_EVENT, loadMeta); };
+  }, []);
 
   function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2800); }
 
@@ -459,7 +481,11 @@ export default function ExceptionInboxPage() {
     <div className="page">
       <div className="exc-header">
         <div>
-          <div className="page-eyebrow">{t("Beijing study mission")} · {t("Day")} 3</div>
+          <div className="page-eyebrow">
+            {tripMeta
+              ? `${tripMeta.name}${tripMeta.dayOf ? ` · ${t("Day")} ${tripMeta.dayOf}${tripMeta.totalDays ? `/${tripMeta.totalDays}` : ""}` : ""}`
+              : t("Exceptions")}
+          </div>
           <h1 className="page-title">{t("Exception inbox")}</h1>
           <p className="page-sub">{t("Log and resolve on-site exceptions; critical alerts push to all staff.")}</p>
         </div>

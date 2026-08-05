@@ -3,13 +3,10 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 /**
- * Extracted 2026-08-02 (audit pass) — DashboardPage.jsx and
- * MobileAttendancePage.jsx each defined this exact one-liner independently.
- *
- * Legacy rows may still hold "PRESENT" (check-in routes that haven't
- * migrated to writing "ARRIVED" yet — see normalize() in backend/data.js) —
- * alias it for filtering/sorting so those rows show up under "Arrived"
- * instead of silently vanishing from that filter.
+ * Legacy rows may still hold "PRESENT" (check-in routes that haven't migrated
+ * to writing "ARRIVED" — see normalize() in backend/data.js). Alias PRESENT ->
+ * ARRIVED for filtering/sorting so those rows don't vanish from the "Arrived"
+ * filter. Shared by DashboardPage.jsx and MobileAttendancePage.jsx.
  */
 export function effectiveStatus(d) {
   return d.status === "PRESENT" ? "ARRIVED" : d.status;

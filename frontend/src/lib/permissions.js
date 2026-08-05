@@ -28,34 +28,23 @@
  *   label   — checkbox title shown to the user
  *   desc    — one-line description under the checkbox
  *   chip    — short label shown in the accounts table
- *   default — the value used for an account whose STORED permissions predate
- *             this key (see cleanPermissions below) — also what a brand-new
- *             account's checkbox starts as. Action permissions (things that
- *             let you CHANGE data) default closed; view permissions (things
- *             that just let you SEE a page) default open, so rolling out a
- *             new page-level toggle never silently locks out staff who could
- *             already reach that page before the toggle existed — an admin
- *             opts a specific account OUT going forward, rather than every
- *             existing account being opted out by default.
- *   group   — "action" (a capability, enforced by the backend too) |
- *             "desktopView" (can this account see this desktop page/route —
- *             frontend-only gating, alongside whatever action permission
- *             actually protects the writes on that page) | "mobileView"
- *             (same, for the /mobile/* routes). Purely groups the checkboxes
- *             in Account control into labelled sections — carries no other
- *             meaning.
- *   parent  — (optional) another permission's `key`. Purely a RENDERING hint
- *             for Account control — indents this checkbox under its parent's
- *             ("dashboard -> Delegate/Analytics", "Home -> QR + Face Scanner/
- *             Exception") so related toggles read as a group. Carries no
- *             enforcement meaning — a child is NOT auto-disabled if its
- *             parent is unticked; each key is still checked independently
- *             everywhere it's actually enforced.
- *   adminOnly — (optional) this permission is never rendered as a toggle for
- *             a Staff account — only Admins get it (Admin already bypasses
- *             every check regardless of what's stored). Used for things that
- *             should never be individually grantable to Staff, like Account
- *             control access.
+ *   default — value used for an account whose STORED permissions predate this key
+ *             (see cleanPermissions below), and the starting tick for a new
+ *             account. Rule: action permissions (CHANGE data) default closed;
+ *             view permissions (just SEE a page) default open, so a new
+ *             page-level toggle never silently locks out staff who could already
+ *             reach that page — an admin opts accounts OUT going forward.
+ *   group   — "action" (backend-enforced capability) | "desktopView" |
+ *             "mobileView" (frontend-only route gating, alongside whatever
+ *             action permission protects that page's writes). Only groups the
+ *             checkboxes into sections; no other meaning.
+ *   parent  — (optional) another permission's `key`. RENDERING hint only —
+ *             indents the checkbox under its parent in Account control. A child
+ *             is NOT auto-disabled when its parent is unticked; every key is
+ *             still checked independently where it's enforced.
+ *   adminOnly — (optional) never rendered as a Staff toggle; Admin-only (Admin
+ *             bypasses every check anyway). For things that must never be
+ *             individually grantable to Staff, like Account control access.
  */
 export const PERMISSIONS = [
   // ---- Action permissions: capabilities enforced by the backend --------
@@ -81,11 +70,8 @@ export const PERMISSIONS = [
     label: "View delegate details",
     desc: "Open a delegate's full profile — phone number, last known location, and checkpoint timeline",
     chip: "Delegate details",
-    // This view had no dedicated gate at all before (anyone who could see the
-    // roster row could open the full profile too) — default TRUE so no
-    // existing staff account silently loses access the moment this
-    // permission starts being checked; an admin narrows it per-account
-    // going forward (2026-07-25).
+    // Previously ungated (any roster row could be opened) — TRUE so no existing
+    // staff account silently loses access; admins narrow it per-account.
     default: true,
     group: "action",
     parent: "manageDelegates",
@@ -103,10 +89,8 @@ export const PERMISSIONS = [
     label: "Manage documents",
     desc: "Upload/parse documents and confirm extracted delegates onto the trip (Onboarding)",
     chip: "Documents",
-    // Carved out of manageDelegates (which used to gate this too) — default
-    // TRUE so no existing staff account silently loses upload/confirm access
-    // the moment this permission starts being checked; an admin can now
-    // narrow it per-account going forward.
+    // Carved out of manageDelegates — TRUE so no existing staff account silently
+    // loses upload/confirm access; admins narrow it per-account.
     default: true,
     group: "action",
   },
@@ -115,9 +99,8 @@ export const PERMISSIONS = [
     label: "Manage scanner",
     desc: "Perform Face/QR check-ins from a signed-in session (the passwordless entrance kiosk is unaffected either way)",
     chip: "Scanner",
-    // Check-in used to be open to any signed-in account with no dedicated
-    // permission at all — default TRUE for the same "don't silently revoke
-    // existing capability" reason as manageDocuments above.
+    // Check-in was previously open to any signed-in account — TRUE for the same
+    // "don't silently revoke existing capability" reason as manageDocuments.
     default: true,
     group: "action",
   },
@@ -134,12 +117,9 @@ export const PERMISSIONS = [
     label: "Manage announcements",
     desc: "Post, edit and delete trip announcements",
     chip: "Announcements",
-    // Genuinely new capability (2026-07-27 — "set permission so only admin
-    // can update/delete, staff can only view, but give the permission
-    // access") — default FALSE, same reasoning as manageTrips/
-    // manageExceptions above: a Staff account starts view-only (viewAnnouncements
-    // already covers that) and an admin opts specific accounts IN to also
-    // post/edit/delete, rather than this being hardcoded admin-only.
+    // FALSE like manageTrips/manageExceptions: Staff starts view-only
+    // (viewAnnouncements covers that) and an admin opts accounts IN to
+    // post/edit/delete — deliberately grantable rather than hardcoded admin-only.
     default: false,
     group: "action",
   },
@@ -150,19 +130,15 @@ export const PERMISSIONS = [
     chip: "Accounts",
     default: false,
     group: "action",
-    // Never offered as a Staff toggle — only a real Admin should ever be
-    // able to grant/revoke everyone else's access (see AccountControlPage.jsx,
-    // which filters this out of the Staff-role form entirely).
+    // Never a Staff toggle — only a real Admin may grant/revoke others' access
+    // (AccountControlPage.jsx filters it out of the Staff-role form).
     adminOnly: true,
   },
 
   // ---- Desktop web views: which /routes this account can even see -------
-  // Ordered and grouped to match the actual left sidebar (Sidebar.jsx),
-  // top to bottom: Dashboard, Trips, Documents, Exceptions, MusterChat —
-  // then Account control (its own manageAccounts permission, admin-only,
-  // not listed in this group at all). Announcements and Face + QR scan are
-  // NOT in that main list — see their own comments below for where (or
-  // whether) they actually show up right now.
+  // Ordered to match the left sidebar (Sidebar.jsx): Dashboard, Trips, Documents,
+  // Exceptions, MusterChat. Account control is admin-only via manageAccounts and
+  // isn't in this group; Announcements sits outside the main nav (see below).
   {
     key: "viewDashboard",
     label: "Main dashboard",
@@ -187,18 +163,14 @@ export const PERMISSIONS = [
     chip: "History",
     default: true,
     group: "desktopView",
-    // Nested two levels deep (Dashboard -> Delegate -> History logs) per
-    // request — Account control's rendering supports this recursively, see
-    // AccountControlPage.jsx's PermRow.
+    // Nested two levels deep (Dashboard -> Delegate -> History logs); Account
+    // control renders this recursively — see AccountControlPage.jsx's PermRow.
     parent: "viewDelegates",
   },
-  // NOTE: "viewAnalytics" was removed 2026-07-27 ("staff can view delegate +
-  // checkpoint, admin views all, regardless of account control — so remove
-  // analytics from permission"). The Dashboard's Analytics / Room Management /
-  // Staff operations tabs are now role-based (admin only), not per-account
-  // toggles. cleanPermissions() below only keeps keys listed here, so any
-  // stored viewAnalytics value is silently dropped on next read — no
-  // migration needed.
+  // NOTE: "viewAnalytics" was removed — the Dashboard's Analytics / Room
+  // Management / Staff operations tabs are role-based (admin only), not
+  // per-account toggles. cleanPermissions() keeps only keys listed here, so any
+  // stored value is dropped on next read; removing a key needs no migration.
   {
     key: "viewTrips",
     label: "Trips",
@@ -224,50 +196,37 @@ export const PERMISSIONS = [
     group: "desktopView",
   },
   {
-    // Gates TWO things together, same as mobile's scanner permission: the
-    // floating chat bubble (every route) AND the "MusterChat" sidebar nav
-    // item (/assistant, Vance's full inbox) — not just the bubble alone.
+    // Gates TWO things: the floating chat bubble (every route) AND the MusterChat
+    // sidebar item (/assistant, Vance's full inbox) — not just the bubble.
     key: "viewChatbot",
     label: "Chatbot",
     desc: "See the floating Trip Assistant chat bubble and the MusterChat sidebar item",
     chip: "Chatbot",
-    // Was open to every signed-in user with no gate at all — default TRUE so
-    // nobody silently loses the assistant when this permission starts being
-    // checked.
+    // Previously ungated — TRUE so nobody silently loses the assistant.
     default: true,
     group: "desktopView",
   },
   {
-    // NOT in the main sidebar list — it's its own icon in the footer utility
-    // row, beside the language/theme toggles (2026-07-27, "add another box
-    // beside the translation button for announcement"). Listed here after
-    // the main nav items since that's where it visually sits, off to the side.
+    // NOT in the main sidebar — its own icon in the footer utility row beside the
+    // language/theme toggles, which is why it's listed after the nav items.
     key: "viewAnnouncements",
     label: "Announcements",
     desc: "See the trip Announcements page (its own footer icon, not the main nav list)",
     chip: "Announcements",
-    // Brand-new page/capability (2026-07-26) — default TRUE per the original
-    // requirement ("all logged-in Staff and Admin accounts can view"); an
-    // admin can still narrow it per-account afterwards, same as every other
-    // view toggle here.
+    // TRUE per requirement: all logged-in Staff and Admin accounts can view;
+    // admins narrow per-account afterwards like any other view toggle.
     default: true,
     group: "desktopView",
   },
-  // NOTE: the desktop "Face + QR scan" permission (viewScanner) was removed
-  // 2026-08-02 ("remove face + qr scanner on desktop, include the
-  // permission") — it had no nav entry point at all (Sidebar.jsx's link was
-  // commented out 2026-07-27, and /scanner redirected straight to
-  // /dashboard), so keeping a toggle for it was pure clutter. If a desktop
-  // scanner is ever restored, re-add it here fresh rather than un-deleting
-  // this comment.
+  // NOTE: the desktop scanner permission (viewScanner) was removed — desktop has
+  // no scanner entry point (Sidebar link commented out, /scanner redirects to
+  // /dashboard). If one is ever restored, add a fresh key here.
 
   // ---- Mobile views: which /mobile/* routes this account can see -------
-  // Ordered and grouped to match the actual bottom tab bar in
-  // MobileLayout.jsx, left to right: Home, Ops (Attendance + Exception +
-  // Trips, all folded into ONE tab/screen), QR scanner, Face scanner, Manual
-  // check-in, then Chatbot last since its floating bubble isn't a tab at all.
-  // The always-visible Me tab is never listed here — it's account settings,
-  // not a gateable feature view.
+  // Ordered to match MobileLayout.jsx's bottom tab bar: Home, Ops (Attendance +
+  // Exception + Trips folded into ONE tab), then Chatbot (a floating bubble,
+  // not a tab). The always-visible Me tab isn't listed — it's account
+  // settings, not a gateable feature view.
   {
     key: "viewMobileHome",
     label: "Home",
@@ -278,10 +237,8 @@ export const PERMISSIONS = [
   },
   {
     // Attendance + Exception + Trips are three permissions but ONE nav tab:
-    // MobileLayout.jsx shows a single "Ops" tab whenever any of the three is
-    // on (MobileOpsPage.jsx composes Attendance/Trips together; Exception is
-    // a card reached from within Ops) — there's no separate "Attendance tab"
-    // or "Trips tab" to see on the phone.
+    // MobileLayout.jsx shows a single "Ops" tab if any of the three is on
+    // (MobileOpsPage.jsx composes Attendance/Trips; Exception is a card inside).
     key: "viewMobileAttendance",
     label: "Attendance",
     desc: "See the Attendance side of the mobile Ops tab (full roster on the go)",
@@ -307,49 +264,24 @@ export const PERMISSIONS = [
     group: "mobileView",
     parent: "viewMobileAttendance",
   },
-  // NOTE: "viewMobileAllTrips" was removed 2026-08-02 ("on mobile, should
-  // hide the trip that is not in progress status, for simplicity" +
-  // "this can remove") — MobileTripsPage.jsx no longer reads this permission
-  // at all; `canSeeAllTrips` is hardcoded `false` there now, so every account
-  // (including admins) only ever sees the In-progress trip on mobile.
-  // Keeping a toggle for a permission the code no longer checks would just
-  // be a lie in the Account control editor.
+  // NOTE: "viewMobileAllTrips" was removed — MobileTripsPage.jsx hardcodes
+  // `canSeeAllTrips = false`, so every account (admins included) only sees the
+  // In-progress trip on mobile. A toggle the code never checks would lie in the
+  // Account control editor.
   {
-    // Split from the old combined "viewMobileScanner" 2026-08-02 ("mobile
-    // view: ... qr code scanner / face scanner / manual") into three
-    // independent permissions — QR, Face, and Manual can now be granted or
-    // revoked separately instead of all-or-nothing. Each still gates its own
-    // route directly (App.jsx), so even if the in-page mode-switcher shows a
-    // link to a mode this account lacks, following it lands on that route's
-    // own ViewGate, not the actual scanner.
-    key: "viewMobileScannerQr",
-    label: "QR code scanner",
-    desc: "See the mobile QR entrance-scanner tab",
-    chip: "QR scanner",
-    default: true,
-    group: "mobileView",
-  },
-  {
+    // The QR/Face/Manual quick-scanner tabs this key used to gate were removed
+    // (2026-08-05, on request — a scan could check someone in with no admin
+    // approval). Kept as the gate for /mobile/enrolment instead of a fresh key,
+    // so no existing account's stored permissions need migrating.
     key: "viewMobileScannerFace",
-    label: "Face scanner",
-    desc: "See the mobile Face entrance-scanner tab",
-    chip: "Face scanner",
+    label: "Face/voice enrolment",
+    desc: "See the mobile face/voice enrolment management page",
+    chip: "Enrolment",
     default: true,
     group: "mobileView",
   },
   {
-    // Not its own nav tab — reached from inside the QR/Face scanner screens
-    // as a fallback for when a scan won't cooperate (see MobileScannerPage.jsx).
-    key: "viewMobileScannerManual",
-    label: "Manual",
-    desc: "See manual check-in, reached from inside the QR/Face scanner screens",
-    chip: "Manual check-in",
-    default: true,
-    group: "mobileView",
-  },
-  {
-    // Not a tab — a floating chat bubble rendered on every /mobile/* route,
-    // independent of which tab is active.
+    // Not a tab — a floating bubble on every /mobile/* route.
     key: "viewMobileChatbot",
     label: "Chatbot",
     desc: "See the floating Trip Assistant chat bubble on mobile",
@@ -368,11 +300,10 @@ export const DEFAULT_PERMISSIONS = Object.fromEntries(
 );
 
 /**
- * Coerce any input object into a clean { key: boolean } for every known key.
- * A key EXPLICITLY present in `input` (even `false`) always wins — that's a
- * real, saved admin decision. A key ABSENT from `input` (an account saved
- * before that permission existed) falls back to its declared `default`, not
- * a hardcoded false — see the `default` field doc above for why.
+ * Coerce any input into a clean { key: boolean } for every known key. A key
+ * EXPLICITLY present (even `false`) wins — that's a saved admin decision. An
+ * ABSENT key (account saved before the permission existed) falls back to its
+ * declared `default`, NOT hardcoded false — see the `default` field doc above.
  */
 export function cleanPermissions(input) {
   const out = {};

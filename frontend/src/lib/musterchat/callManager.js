@@ -331,7 +331,18 @@ class CallManager {
           }
         } catch { /* */ }
       }
-      setTimeout(loop, this.status === "idle" ? 1500 : 900);
+      // Idle 1500 -> 4000 (2026-08-04, perf audit — "page loading across the
+      // application has become significantly slower recently"). While IDLE
+      // this poll is only watching for an incoming invite, and at 1.5s it was
+      // 40 requests/minute per open client — on its own the single largest
+      // source of traffic in the whole app, and newly doubled that day when
+      // the mobile chat bubble started this same poll (AI Log 236), so both a
+      // phone and a laptop were each paying it. A worst-case 4s delay before a
+      // ring appears is imperceptible against a caller who waits 30s+, and
+      // costs 15/min instead of 40. IN-CALL stays fast (900ms): answer / ICE /
+      // hangup all arrive through this same loop, and those genuinely are
+      // latency-sensitive.
+      setTimeout(loop, this.status === "idle" ? 4000 : 900);
     };
     loop();
   }

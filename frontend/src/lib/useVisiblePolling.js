@@ -5,30 +5,13 @@
 import { useEffect, useRef } from "react";
 
 /**
- * Drop-in replacement for the `load(); setInterval(load, N)` pattern that was
- * copy-pasted across every live page — but it STOPS polling while the tab is
- * hidden, and catches up the moment you come back (2026-07-29).
+ * Drop-in replacement for the `load(); setInterval(load, N)` pattern used on
+ * every live page — but it STOPS polling while the tab is hidden and catches up
+ * on re-show. A background tab used to cost the same backend + Neon load as one
+ * being actively watched (Dashboard = 5 calls per 8s tick, per open tab).
  *
- * WHY (this is a real production cost, not a micro-optimisation): every poller
- * in this app used to run flat-out regardless of whether anyone was looking.
- * The Dashboard fires FIVE API calls per tick every 8s — ~2,250 calls/hour, or
- * ~18,000 across an 8-hour event day, PER OPEN TAB. So an admin who opened the
- * Dashboard on Monday and left it in a background tab all week generated
- * exactly the same backend + Neon load as someone actively watching a muster.
- * That's the same problem the 2s -> 8s slowdown (2026-07-24) was reaching for;
- * it treated the symptom (tick rate) rather than the cause (nobody's looking).
- * Pausing on `visibilitychange` is the actual fix, and it costs the UI nothing:
- * a hidden tab has no numbers on screen to keep fresh, and the catch-up fetch
- * on re-show means what you see when you switch back is never stale.
- *
- * Usage — replaces this:
- *     useEffect(() => {
- *       load();
- *       const id = setInterval(load, 8000);
- *       return () => clearInterval(id);
- *     }, [load]);
- * with this:
- *     useVisiblePolling(load, 8000, [load]);
+ * Usage: `useVisiblePolling(load, 8000, [load])` in place of a
+ * `useEffect(() => { load(); const id = setInterval(load, 8000); ... }, [load])`.
  *
  * @param callback   the refetch to run. Always invoked via a ref, so the timer
  *                   calls the LATEST version and can never fire a stale
@@ -42,13 +25,10 @@ import { useEffect, useRef } from "react";
  *                   behaviour is load-bearing on several pages and would
  *                   silently break if `callback` were only read from the ref.
  *
- * NOTE on why `callback` itself is deliberately NOT a dependency: a plain
- * inline function gets a new identity on every render, so depending on it
- * would restart the interval every render — which, on a page that re-renders
- * once a second, means the interval never survives long enough to fire. That
- * exact identity trap cost real debugging time earlier the same day on the
- * shared page-header chrome (see AI Log 154d), hence the ref + explicit
- * `deps` split here.
+ * `callback` is deliberately NOT a dependency: an inline function gets a new
+ * identity every render, so depending on it restarts the interval every render
+ * and on a page re-rendering once a second the interval never survives long
+ * enough to fire. Hence the ref + explicit `deps` split (AI Log 154d).
  */
 export function useVisiblePolling(callback, intervalMs, deps = []) {
   const cbRef = useRef(callback);
@@ -70,10 +50,9 @@ export function useVisiblePolling(callback, intervalMs, deps = []) {
       if (timer !== null) { clearInterval(timer); timer = null; }
     };
 
-    // Fetch once on mount / whenever `deps` change, exactly as the hand-rolled
-    // `load(); setInterval(...)` did. Runs even when hidden: a page mounting in
-    // a background tab (a restored session, an opened-in-new-tab link) should
-    // still have data ready by the time it's looked at.
+    // Fetch once on mount / whenever `deps` change. Runs even when hidden: a
+    // page mounting in a background tab (restored session, opened-in-new-tab)
+    // should still have data ready by the time it's looked at.
     cbRef.current?.();
     if (isVisible()) start();
 

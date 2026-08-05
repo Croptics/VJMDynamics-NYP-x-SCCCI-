@@ -6,31 +6,23 @@
  *  instead — see README/INTEGRATION_NOTES.md at the project root.
  * ============================================================================= */
 /**
- * Natural-language → Room Management suggestions (2026-07-27 — "add like an
- * ai feature so either i can type it out and it will update the delegate
- * room status, but give user the confirmation before update the changes").
+ * Natural-language → Room Management suggestions.
  *
  * BOUNDED + TRANSPARENT by design, same pattern as export.js's ai-filter and
- * insights.js's AI Insights: the model only ever picks delegateIds that
- * ACTUALLY exist on this trip's roomable roster (coach-assigned delegates,
- * same scope Room Management's own UI already uses) and only ever proposes
- * a hotelName/roomNumber pair — never anything else, never applied directly.
+ * insights.js: the model may only pick delegateIds that ACTUALLY exist on this
+ * trip's roomable roster (coach-assigned delegates, the scope Room Management's
+ * UI uses) and may only propose a hotelName/roomNumber pair.
  *
  * Two-step, both requiring manageDelegates:
- *   POST /api/trips/:id/rooms/ai-suggest → { suggestions: [{delegateId, name, hotelName, roomNumber}] }
- *     Read-only — writes NOTHING. The frontend merges these into its
- *     existing per-row "pending edit" state (the same dirty-row/Save
- *     affordance manual edits already use), so nothing is written until a
- *     human explicitly clicks Save on a row (or "Save all suggested").
- *   POST /api/trips/:id/rooms/ai-apply → re-validates every {delegateId,
- *     hotelName, roomNumber} against the SAME roomable roster server-side
- *     (never trusts the client's suggestion list blindly) before writing —
- *     this is the actual write path, only ever called after that explicit
- *     confirm click.
+ *   POST /api/trips/:id/rooms/ai-suggest → { suggestions: [{delegateId, name,
+ *     hotelName, roomNumber}] }. Read-only, writes NOTHING; the frontend merges
+ *     these into its per-row "pending edit" state so a human must click Save.
+ *   POST /api/trips/:id/rooms/ai-apply → the write path. Re-validates every
+ *     update against the SAME roomable roster server-side; never trusts the
+ *     client's suggestion list.
  *
- * Provider strategy mirrors export.js/insights.js exactly: local Ollama
- * first (free, nothing leaves the machine), Anthropic API fallback, a clear
- * 503 if neither is configured — never crashes, never silently no-ops.
+ * Provider strategy mirrors export.js/insights.js: local Ollama first (free,
+ * nothing leaves the machine), Anthropic fallback, clear 503 if neither is set.
  */
 import { Router } from "express";
 import { wrap } from "../../lib/wrap.js";
@@ -78,14 +70,10 @@ async function callAnthropic(prompt, maxTokens = 800) {
   return (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
-// Pull a JSON array out of a model reply. Two real shapes seen in practice
-// (2026-07-27 live-testing): a chatty model wraps the array in prose despite
-// instructions, AND — the actual bug found here — Ollama's `format: "json"`
-// mode constrains output to valid JSON but NOT specifically an array, so for
-// a single-delegate request the model happily returns one bare {...} object
-// instead of a [{...}] array; the prompt asking for an array doesn't override
-// that. Handles both: tries array-brackets first, falls back to a single
-// object wrapped in an array.
+// Pull a JSON array out of a model reply. Handles two shapes seen in practice:
+// a chatty model wrapping the array in prose, and — Ollama's `format: "json"`
+// constrains output to valid JSON but NOT to an array, so a single-delegate
+// request comes back as a bare {...}, prompt wording notwithstanding.
 function extractJsonArray(text) {
   if (!text) return null;
   const arrStart = text.indexOf("[");
@@ -107,13 +95,11 @@ function extractJsonArray(text) {
   return null;
 }
 
-/* Values the model might return meaning "leave this alone", which must NEVER be
- * written as if they were a real hotel name or room number (2026-07-28 bug: a
- * request about a ROOM NUMBER overwrote the delegate's hotel with the literal
- * string "none"). The old prompt caused it — it printed empty fields to the
- * model as hotel "none", so "none" became the model's vocabulary for empty and
- * it echoed it back as a value. The prompt no longer does that, AND anything in
- * this list is now treated as null regardless of what the model says. */
+/* Values the model might return meaning "leave this alone". These must NEVER be
+ * written as a real hotel name or room number — a request about a room number
+ * once overwrote the hotel with the literal string "none", because the prompt
+ * printed empty fields as "none" and the model echoed it back as a value. The
+ * prompt no longer does that, and anything here is treated as null regardless. */
 const PLACEHOLDER_VALUES = new Set([
   "", "-", "--", "—", "n/a", "na", "none", "null", "nil", "nan", "undefined",
   "unchanged", "no change", "nochange", "same", "same as before", "unset", "empty",

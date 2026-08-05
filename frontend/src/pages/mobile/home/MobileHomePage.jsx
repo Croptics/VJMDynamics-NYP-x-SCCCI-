@@ -5,25 +5,22 @@
 import { useEffect, useState, useRef } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import { RefreshCw, AlertTriangle, ChevronRight, Clock, Bus, Megaphone, Mail, ChevronDown } from "lucide-react";
-import { apiGet, getUser } from "../../../lib/api.js";
+import { apiGet, getUser, getPermissions } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
 import { getTrips } from "../../../lib/document/claudeParse.js";
 
-// Trip id comes from the mobile trip switcher, not a hardcoded base trip
-// (re-applied 2026-07-29 after taking Vimal's UI, which hardcoded "t-1").
-// The switcher itself didn't actually exist anywhere yet (2026-07-31 —
-// "as admin, i should be able to switch trip on mobile") — setMobileTripId()
-// had no caller in the whole frontend; this page renders it (admin-only, in
-// the red Active Trip hero) and every other mobile page picks it up for free
-// since they all already read getMobileTripId().
+// Trip id comes from the mobile trip switcher, never a hardcoded trip. This
+// page is the only renderer of the switcher (admin-only, in the red hero);
+// every other mobile page picks the choice up for free by reading
+// getMobileTripId().
 import { getMobileTripId, setMobileTripId } from "../../../lib/mobileTrip.js";
+import { setMobileCoachId } from "../../../lib/mobileCoach.js";
+import LogExceptionModal from "../../../components/exception/LogExceptionModal.jsx";
+import "../../../styles/ExceptionInboxPage.css"; // required for LogExceptionModal's .exc-modal sheet styles
 const TRIP_ID_FALLBACK = "t-1";
 
-// trip.departsIn ("04:53") is a COUNTDOWN duration, not a clock time —
-// reformatted as "4h 53m" rather than run through a 12h clock formatter,
-// which would print the nonsensical "4:53 AM" (2026-07-30 — "do the same for
-// these", re the itinerary's 12h-format fix; departsIn needed a different fix
-// since it isn't a time of day at all).
+// trip.departsIn ("04:53") is a COUNTDOWN duration, not a clock time — must
+// not go through a 12h clock formatter, which would print "4:53 AM".
 function fmtDepartsIn(hhmm) {
   if (!hhmm) return hhmm;
   const [h, m] = String(hhmm).split(":").map(Number);
@@ -32,13 +29,10 @@ function fmtDepartsIn(hhmm) {
   if (h) return `${h}h`;
   return `${m}m`;
 }
-// Genuine live countdown (2026-07-30 — "i see this one nvr change, is it
-// static?"). trip.departureAt is a real absolute instant computed
-// server-side (getTrip(), db/dashboard.js) from startDate + totalDays + the
-// new departureTime field. Computed at render time, not stored in state — it
-// piggybacks on this page's existing nowClock 15s re-render tick. Returns
-// null once departure has passed, so the pill disappears rather than
-// counting into negative numbers.
+// Live countdown. trip.departureAt is a real absolute instant computed
+// server-side (getTrip(), db/dashboard.js). Computed at render time, not
+// stored in state — piggybacks on the nowClock 15s re-render tick. Returns
+// null past departure so the pill disappears instead of going negative.
 function liveDepartsIn(departureAtIso) {
   if (!departureAtIso) return null;
   const diffMs = new Date(departureAtIso).getTime() - Date.now();
@@ -57,41 +51,34 @@ function greeting() {
 }
 
 /**
- * Mobile Home — pulls the same live summary as the desktop Dashboard
- * (GET /api/trips/:id/dashboard), condensed for a phone screen: a
- * personalized greeting header, a live Active Trip panel, a glanceable KPI
- * strip, an expandable Issues section (below), and a Coach status card.
- *   - The KPI strip is Missing/Present/Late (3 cards) — Unassigned stays
- *     reachable via the Attendance page's own filter chips, and Late gets
- *     the dedicated tile instead since it's the higher-risk operational
- *     number during a live trip. Total isn't a card here at all — it's a
- *     small text line under the page title instead, keeping the main tile
- *     row dedicated to actionable/at-risk statuses rather than a plain count.
- *   - The whole "Coach status" card is ONE tap target that jumps straight to
- *     the Attendance page pre-filtered to Missing. Each KPI tile is its own
- *     shortcut into Attendance, pre-filtered to that status.
- *   - Issues: an actionable card under the metric cards links to the
- *     dedicated /mobile/issues page (MobileIssuesPage.jsx). Was briefly an
- *     inline expandable accordion right here (2026-07-20, "Mobile UI
- *     Consolidation" Option A); moved to its own route the same day — the
- *     full log-a-ticket form + open-tickets list reads better as its own
- *     screen than squeezed into an accordion on a small viewport. This card
- *     just fetches the open-critical count for its badge and navigates.
+ * Mobile Home — same live summary as the desktop Dashboard
+ * (GET /api/trips/:id/dashboard), condensed for a phone: greeting header,
+ * live Active Trip hero, quick actions, and a Coach status card. Total
+ * delegates is a text line, not a tile, so the tile row stays actionable.
+ * Coach rows and KPI tiles are shortcuts into Attendance pre-filtered to a
+ * status. Issues/Exceptions live on their own routes, not inline here.
  */
 export default function MobileHomePage() {
   const { t, lang } = useLang();
   const navigate = useNavigate();
-  // A staff account captaining zero coaches (2026-08-03 — "this still show
-  // the trip detail... i meant the header and the red box", "i shouldn't see
-  // the see all link. hide the coach status", "hide total delegate") — same
-  // flag MobileLayout.jsx already computed to hide the Ops/QR/Face tabs and
-  // topbar trip chip; threaded down via Outlet context rather than
-  // re-fetching /my-captain-coaches a second time here.
+  // Staff account captaining zero coaches: hides the hero, Coach status and
+  // total-delegates line. Same flag MobileLayout.jsx computes for the
+  // Ops/QR/Face tabs, threaded down via Outlet context instead of re-fetching
+  // /my-captain-coaches here.
   const { restrictToHomeOnly } = useOutletContext() || {};
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const isAdmin = getUser()?.role === "admin";
+  // Gates the Exceptions quick action below on the same permission the
+  // /mobile/exceptions route uses, so the tile never offers something the
+  // account can't actually do.
+  const perms = getPermissions();
+  // "Log exception" opens LogExceptionModal right here rather than navigating —
+  // logging an issue is a 10-second interruption mid-muster, so it shouldn't
+  // cost you your place on Home.
+  const [logOpen, setLogOpen] = useState(false);
+  const [logToast, setLogToast] = useState("");
   const [trips, setTrips] = useState([]);
   const [tripId, setTripId] = useState(() => getMobileTripId() || TRIP_ID_FALLBACK);
   const [tripMenuOpen, setTripMenuOpen] = useState(false);
@@ -107,22 +94,14 @@ export default function MobileHomePage() {
     getTrips().then((list) => {
       setTrips(list);
       // /all-trips returns real uuids, never the legacy "t-1" short id this
-      // page (and getMobileTripId()) defaults to — so without this, the
-      // <select> would silently show whichever trip sorts first while the
-      // rest of the page (fetched via the working "t-1" fallback) correctly
-      // showed Beijing, a visible mismatch. Same fix as the desktop
-      // assistant's trip switcher (AssistantConversation.jsx).
+      // page defaults to, so the persisted id may not be in the list. Same
+      // correction as the desktop assistant's switcher
+      // (AssistantConversation.jsx).
       //
-      // BUG FIX (2026-07-31, "currently it hiding other existing trip" — the
-      // switcher itself was fine; every OTHER mobile page went stale): this
-      // used to only call setTripId(), correcting this page's OWN local
-      // state, but never wrote the correction back to localStorage via
-      // setMobileTripId(). Every other mobile page (Ops, Trips, QR/Face/
-      // Manual check-in) reads getMobileTripId() directly, not this page's
-      // state — so a stale/no-longer-"In progress" persisted trip (e.g. one
-      // that got completed/archived since it was picked) left Home showing
-      // the corrected trip while every other screen kept showing the old
-      // one, permanently out of sync until a manual re-switch.
+      // MUST call setMobileTripId() as well as setTripId(): every other mobile
+      // page reads getMobileTripId() from localStorage, not this state, so
+      // correcting only local state leaves Home right and every other screen
+      // stuck on the stale trip until a manual re-switch.
       if (list.length && !list.some((tr) => tr.id === tripId)) {
         const seed = list.find((tr) => (tr.name || "").toLowerCase().includes("beijing"));
         const correctedId = seed?.id || list[0].id;
@@ -138,15 +117,10 @@ export default function MobileHomePage() {
     setMobileTripId(id);
   }
 
-  // Live wall clock for the "Active trip" hero (2026-07-29 — "can you fix this
-  // for time 14:26 to show the current time"). It was rendering `trip.localTime`,
-  // a HARDCODED SEED STRING ("14:26" in backend/db/constants.js) written once
-  // and never updated — same root cause as the desktop Dashboard's identical
-  // frozen-clock bug fixed a few entries earlier, just a second, separate card
-  // that also read the same stale field. Ticks every 15s, not every second —
-  // the display is HH:MM, so a per-second interval would re-render this page
-  // 60x/min to change nothing. `hour12: true` forced explicitly (2026-07-30 —
-  // "fix to 12 hr format"): left locale-driven, this read as 24h here.
+  // Live wall clock for the hero. Do NOT use `trip.localTime` — it's a frozen
+  // hardcoded seed string (backend/db/constants.js). Ticks every 15s, not 1s:
+  // the display is HH:MM, so per-second would re-render 60x/min for nothing.
+  // hour12 forced explicitly; locale-driven, this rendered as 24h.
   const [nowClock, setNowClock] = useState(() =>
     new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: true })
   );
@@ -164,12 +138,15 @@ export default function MobileHomePage() {
 
   useEffect(() => {
     load();
-    // 2s auto-refresh so a change made by another signed-in staff member
-    // shows up here without needing to tap the manual Refresh button.
-    const id = setInterval(load, 2000);
+    // Auto-refresh so another staff member's change shows up without a manual
+    // Refresh tap. Keep the interval at 6s, not lower: /trips/:id/dashboard is
+    // the app's most expensive aggregate read, MobileLayout polls the SAME
+    // endpoint alongside this (doubling the cost), and this page doesn't use
+    // useVisiblePolling so it runs flat-out even backgrounded.
+    const id = setInterval(load, 6000);
     return () => clearInterval(id);
     // Re-runs on tripId change (admin switches trip) so the very next tick
-    // fetches the NEW trip immediately instead of waiting up to 2s.
+    // fetches the NEW trip immediately instead of waiting for the interval.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tripId]);
 
@@ -179,7 +156,16 @@ export default function MobileHomePage() {
     setLoading(true);
     setError(null);
     try {
-      setData(await apiGet(`/trips/${tripId || TRIP_ID_FALLBACK}/dashboard`));
+      // MUST re-read getMobileTripId() FRESH on every poll tick — never cache
+      // it in state at mount (AI Log 248). MobileLayout's trip-scope
+      // auto-correct (checkTripScope) writes the corrected id straight to
+      // localStorage and this page gets no notification; the re-sync effect
+      // above is admin-only, so a staff account would otherwise keep fetching
+      // whatever was cached at mount. Also write it back into state so
+      // everything else on this page reading `tripId` stays correct.
+      const liveTripId = getMobileTripId() || TRIP_ID_FALLBACK;
+      if (liveTripId !== tripId) setTripId(liveTripId);
+      setData(await apiGet(`/trips/${liveTripId}/dashboard`));
     } catch (e) {
       setError(e.message || "Could not reach the backend.");
     } finally {
@@ -191,8 +177,13 @@ export default function MobileHomePage() {
   const trip = data?.trip;
   const k = data?.kpis;
   const staffName = getUser()?.name || getUser()?.staffId || t("Staff");
-  const goToAttendance = (status, coachId) =>
+  const goToAttendance = (status, coachId) => {
+    // Remember the coach so the QR / Face / Manual scanners open on it too —
+    // they used to auto-pick "first coach with people" independently, so Home →
+    // Coach 2 → QR left you scanning into Coach 1 (AI Log 259).
+    if (coachId) setMobileCoachId(coachId);
     navigate(`/mobile/operations?status=${status}` + (coachId ? `&coach=${coachId}` : ""));
+  };
 
   return (
     <div className="m-fade-in">
@@ -201,14 +192,8 @@ export default function MobileHomePage() {
         <div style={{ minWidth: 0 }}>
           <div className="muted" style={{ fontSize: 13 }}>{t(greeting())}</div>
           <h1 className="m-page-title">{staffName}</h1>
-          {/* The "Online · synced" badge that used to sit here is gone
-              (2026-07-29 — "hide all the unnecessary sync part, cause already
-              have on top of the mobile top bar"). Worth noting it was worse
-              than just redundant: it was a STATIC string with no logic behind
-              it at all — not wired to `navigator.onLine` or anything else — so
-              it would have kept claiming "Online · synced" even while
-              genuinely offline. MobileLayout's topbar chip is the real,
-              actually-wired connectivity indicator. */}
+          {/* Don't re-add an "Online · synced" badge here — MobileLayout's
+              topbar chip is the real, wired connectivity indicator. */}
           {k && !restrictToHomeOnly && (
             <div style={{ marginTop: 6 }}>
               <span className="muted" style={{ fontSize: 12.5 }}>{t("Total delegates")}: {k.total}</span>
@@ -337,12 +322,25 @@ export default function MobileHomePage() {
             </div>
             <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
           </button>
-          {/* "Report an issue" and "Exception inbox" tiles REMOVED 2026-07-30
-              ("remove these 2 button ya") — Exceptions is now its own segment
-              inside the Ops tab (see MobileOpsPage.jsx's Delegates | Exceptions
-              | Trips switch), so these were duplicate entry points into the
-              same feature. /mobile/issues and /mobile/exceptions still exist
-              as routes for anyone with an old link. */}
+          {/* Exceptions. History: TWO tiles ("Report an issue" + "Exception
+              inbox") were removed 2026-07-30 ("remove these 2 button ya") as
+              duplicate entry points once Exceptions became a segment in the Ops
+              tab. Re-added 2026-08-04 by request — deliberately as ONE tile, not
+              two, since the duplication was the original objection. Scoping is
+              automatic: MobileExceptionsPage reads getMobileTripId() for both
+              its list and the tripId it hands LogExceptionModal, so a ticket
+              logged here is always filed against the trip on screen.
+              Gated on viewMobileIssues to match the /mobile/exceptions route. */}
+          {perms.viewMobileIssues && (
+            <button className="m-tile" onClick={() => setLogOpen(true)}>
+              <span className="m-tile-ic"><AlertTriangle size={18} /></span>
+              <div className="m-tile-body">
+                <div className="m-tile-title">{t("Log exception")}</div>
+                <div className="m-tile-sub">{t("Report an on-site issue for this trip")}</div>
+              </div>
+              <ChevronRight size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -392,13 +390,21 @@ export default function MobileHomePage() {
               // same "still needs to board" figure the desktop Coach status
               // card already uses — "Arrived" now requires that to be 0 too.
               const toBoard = Math.max(0, (c.total || 0) - (c.boarded || 0));
-              const label = missing && late
+              // A coach with NOBODY assigned is empty, not "Arrived" — green
+              // there claims a headcount that never happened. Grey "Empty",
+              // matching what the desktop Trips board already shows for this
+              // (2026-08-04). Checked FIRST: with total=0 every other count is
+              // also 0, so it would otherwise fall through to "Arrived".
+              const empty = (c.total || 0) === 0;
+              const label = empty ? t("Empty")
+                : missing && late
                 ? `${missing} ${t("missing")} · ${late} ${t("late")}`
                 : missing ? `${missing} ${t("missing")}`
                 : late ? `${late} ${t("late")}`
                 : toBoard ? `${toBoard} ${t("to board")}`
                 : t("Arrived");
-              const tone = missing > 0 ? "missing" : late > 0 ? "late" : toBoard ? "assigned" : "present";
+              const tone = empty ? "unassigned"
+                : missing > 0 ? "missing" : late > 0 ? "late" : toBoard ? "assigned" : "present";
               return (
                 <button
                   key={c.id}
@@ -421,6 +427,34 @@ export default function MobileHomePage() {
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Log exception — same modal the Ops tab and desktop inbox use, so the
+          ticket shape/validation stays in one place. tripId is read fresh at
+          open time (not from this page's `tripId` state) so it's filed against
+          whatever trip the app is actually scoped to. */}
+      {logOpen && (
+        <LogExceptionModal
+          tripId={getMobileTripId() || TRIP_ID_FALLBACK}
+          onClose={() => setLogOpen(false)}
+          onCreated={(_tk, wasCritical) => {
+            setLogOpen(false);
+            setLogToast(wasCritical ? t("Critical alert pushed to all staff devices") : t("Exception logged"));
+            setTimeout(() => setLogToast(""), 2800);
+            load(); // a new MISSING ticket can change the headcount shown above
+          }}
+        />
+      )}
+
+      {logToast && (
+        <div style={{
+          position: "fixed", left: "50%", transform: "translateX(-50%)",
+          bottom: "calc(104px + env(safe-area-inset-bottom, 0px))", zIndex: 80,
+          background: "var(--ink)", color: "var(--surface)", padding: "10px 16px",
+          borderRadius: 999, fontSize: 13, fontWeight: 500, maxWidth: "90vw", textAlign: "center",
+        }}>
+          {logToast}
         </div>
       )}
     </div>

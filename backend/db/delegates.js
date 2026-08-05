@@ -8,11 +8,10 @@
  * ============================================================================= */
 /**
  * Delegate CRUD, photo management, late-cutoff auto-transition, and the
- * field-level rollback that reverts a single History Log entry. Split out
- * of the old monolithic data.js (2026-07-21).
+ * field-level rollback that reverts one History Log entry.
  *
- * Depends on db/history.js's logActivity() (one-directional: this file
- * imports FROM history.js, history.js imports nothing from here — no cycle).
+ * Import direction is one-way: this file imports history.js, never the
+ * reverse. Keep it that way — no cycle.
  */
 
 import { all, get, run } from "./connection.js";
@@ -33,13 +32,9 @@ function initialsOf(name) {
 function rowToDelegate(row) {
   return {
     ...row, vip: !!row.vip, cancelled: !!row.cancelled, locked: !!row.locked,
-    // Derived from the escalations LEFT JOIN in listDelegates() below — a
-    // delegate is "escalated" for as long as they have an open/acknowledged
-    // escalation, mirroring the `cancelled` flag's shape (2026-07-25, "make
-    // escalated a status under missing, similar to cancel status") but NOT
-    // stored on this row — it's read live off the escalations table, so
-    // acknowledging/resolving an escalation there is the only source of
-    // truth (no separate flag here to keep in sync).
+    // Derived live from the escalations LEFT JOIN, deliberately NOT a stored
+    // column — the escalations table stays the single source of truth, so
+    // there's no flag here to keep in sync.
     escalated: !!row.escalationId,
   };
 }
@@ -47,19 +42,15 @@ function rowToDelegate(row) {
 const VALID_STATUSES = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
 
 function normalize(input, id) {
-  // "PRESENT" is the pre-5-status value that QR/face-scan/manual check-in
-  // routes still write directly (not yet migrated — see AI Log). Treat it as
-  // a legacy alias for ARRIVED so those rows/writes keep working instead of
-  // silently falling back to UNASSIGNED.
+  // "PRESENT" is the legacy pre-5-status value that QR/face/manual check-in
+  // routes still write. Alias it to ARRIVED or those writes silently fall
+  // back to UNASSIGNED.
   const raw = input.status === "PRESENT" ? "ARRIVED" : input.status;
   let status = VALID_STATUSES.includes(raw) ? raw : "UNASSIGNED";
   const cancelled = !!input.cancelled;
-  // Cancelling a delegate (Assigned but won't make it after all, usually
-  // found out day-of — 2026-07-24) always forces them back to UNASSIGNED
-  // and frees their coach seat, regardless of whatever status/coachId was
-  // also in the same patch — enforced here, server-side, so the frontend
-  // can't accidentally leave a delegate ARRIVED/LATE/MISSING AND cancelled
-  // at the same time.
+  // Cancelling always forces UNASSIGNED and frees the coach seat, whatever
+  // else was in the same patch. Enforced server-side so the frontend can't
+  // leave someone both ARRIVED and cancelled.
   if (cancelled) status = "UNASSIGNED";
   return {
     id,
@@ -79,12 +70,9 @@ async function nextId() {
   return `d-${Number(row?.m || 0) + 1}`;
 }
 
-// LEFT JOIN escalations (2026-07-25) — surfaces each delegate's own currently
-// open/acknowledged escalation (if any) so the Dashboard profile/table can
-// show "Escalated" without a separate round-trip per delegate. The dedupe
-// guard in createEscalation() (db/escalations.js) never lets a delegate have
-// more than one open/acknowledged escalation at once, so this join can never
-// fan out into duplicate rows per delegate.
+// Joins each delegate's open/acknowledged escalation so the Dashboard can show
+// "Escalated" without a per-delegate round-trip. Safe against row fan-out:
+// createEscalation() never allows two open escalations for one delegate.
 const DELEGATES_SELECT = `
   SELECT d.*, e.id AS "escalationId", e.message AS "escalationMessage", e.created_by AS "escalatedBy"
   FROM delegates d
@@ -140,14 +128,13 @@ export async function createDelegate(input, tripUuid = null, actor = null, actor
 }
 
 /**
- * Ownership + lock enforcement (2026-08-03). A "full access" admin (role
- * admin, readOnly false) bypasses both checks entirely — matches the exact
- * "Full access" designation Account control already shows for that same
- * admin/readOnly combination, reused here rather than inventing a new
- * permission concept. A delegate with no recorded creator (legacy row, or
- * created by a route that never passed an actor) has no owner to restrict
- * to, so any staff with manageDelegates can still edit it — this feature
- * only restricts delegates that DO have a known creator.
+ * Ownership + lock enforcement. A "full access" admin (role admin, readOnly
+ * false) bypasses both checks — same combination Account control labels
+ * "Full access", reused rather than inventing a new permission.
+ *
+ * A delegate with NO recorded creator (legacy row) has no owner to restrict
+ * to, so any staff with manageDelegates may edit it. Only delegates with a
+ * known creator are restricted.
  */
 function isFullAccessAdmin(account) {
   return account?.role === "admin" && !account?.readOnly;
@@ -165,29 +152,21 @@ export function canModifyDelegate(delegate, account) {
   return { ok: true };
 }
 
-/** Checked specifically for a `locked` field change — deliberately INDEPENDENT
- *  of the delegate's current locked state (the whole point of "unlock" is to
- *  act on an already-locked delegate), but still gated on being the creator
- *  or a full-access admin. A delegate with no recorded creator can only be
- *  locked/unlocked by a full-access admin — no staff can claim ownership of
- *  a legacy/unowned delegate just by locking it. */
+/** For a `locked` field change. Deliberately INDEPENDENT of the current locked
+ *  state — unlocking must work on an already-locked delegate — but still gated
+ *  on creator-or-full-admin. An unowned delegate is full-admin-only, so staff
+ *  can't claim ownership of a legacy row just by locking it. */
 export function canLockDelegate(delegate, account) {
   if (isFullAccessAdmin(account)) return { ok: true };
   if (delegate.createdByAccountId && delegate.createdByAccountId === account?.id) return { ok: true };
   return { ok: false, code: "NOT_OWNER", message: "Only the delegate's creator, or an admin with full access, can lock or unlock it." };
 }
 
-// Extended profile fields the Dashboard's Edit modal can now set — added
-// alongside the core CRUD fields below rather than through normalize()
-// (which only ever returns the fixed 8-field shape used for validation), so
-// a PATCH carrying these previously landed here, matched nothing in the
-// UPDATE statement, and was silently dropped — the delegate stayed NULL on
-// company/role/industry/etc. forever, even after "saving" from the modal.
-// Same COALESCE-style "only touch what's provided" pattern document.js's own
-// onboarding/confirm UPDATE already uses for these same columns.
-// Frontend field names match the ones document.js's onboarding/confirm route
-// already established for these same columns (e.g. "passportNumber", not
-// "passportNo") — one convention per column across the app.
+// Extended profile fields, handled separately from normalize() (which returns
+// a fixed 8-field validation shape) — without this list a PATCH carrying them
+// matched nothing in the UPDATE and was silently dropped. Frontend names match
+// document.js's onboarding/confirm route ("passportNumber", not "passportNo")
+// so there's one convention per column app-wide.
 const PROFILE_FIELDS = [
   ["company", "company"], ["role", "role"], ["industry", "industry"],
   ["email", "email"], ["phone", "phone"], ["website", "website"],
@@ -262,16 +241,9 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   for (const key of Object.keys(before)) {
     if (String(before[key] ?? "") !== String(after[key] ?? "")) changes[key] = { from: before[key], to: after[key] };
   }
-  // A coach reassignment (Trips board drag-and-drop or "Move to coach") was
-  // always logged here already — logActivity() fires unconditionally below
-  // regardless of which fields changed — but with a generic "<name> updated"
-  // text, so it read the same as any other edit (2026-07-27 — "since right
-  // now i already remove the coach changeable from my page... can you link
-  // if the delegate is moved to another coach in trip page, so in history
-  // log can track that"). Build a specific "moved from X to Y" message when
-  // coachId is the field that changed, same "derive fresh, don't store a
-  // stale snapshot" approach used elsewhere (e.g. HistoryLogPage's own coach
-  // badge) — one small extra query, only when actually needed.
+  // Build a specific "moved from X to Y" message when coachId changed, rather
+  // than the generic "<name> updated". Coach labels are looked up fresh (not
+  // stored) — one extra query, only when a reassignment actually happened.
   let text = `${merged.name} updated`;
   if (patch.locked !== undefined && locked !== !!existing.locked) {
     text = locked ? `${merged.name} locked` : `${merged.name} unlocked`;
@@ -288,22 +260,13 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
       text = `${merged.name} unassigned from ${labelFor(changes.coachId.from)}`;
     }
   }
-  // silent (2026-07-31, "instead of 2 code there, change into one say that
-  // system update the all delegate status for next checkin") — a bulk system
-  // auto-transition (checkpoints.js's resetArrivedBeforeNextCheckpoint() /
-  // applyCheckpointLateCutoff(), both looping this over every affected
-  // delegate) used to log one full History Log entry PER delegate, which
-  // read as a wall of identical noisy rows for what's really one event. Those
-  // callers now log a single consolidated summary entry themselves instead —
-  // this flag just skips the per-delegate one so it isn't logged twice.
+  // `silent` is for bulk system auto-transitions (checkpoints.js), which log
+  // ONE consolidated summary themselves — without it each looped delegate
+  // added its own History row, a wall of noise for a single event.
   if (!silent) await logActivity(text, "reassign", actor, { delegateId: id, changes, tripUuid: existing.trip_id });
-  // Bi-directional exception linking (2026-07-31) — keep the delegate's
-  // auto-generated Exceptions ticket in sync whenever their status actually
-  // changes. Covers every write path that goes through updateDelegate()
-  // (dashboard edits, QR/face scan check-ins, checkpoint auto-transitions,
-  // bulk onboarding) for free; the two raw-SQL check-in routes that
-  // deliberately bypass this function call syncDelegateStatus() themselves —
-  // see routes/exceptions.js.
+  // Keeps the delegate's auto-generated Exceptions ticket in sync. Every write
+  // path through updateDelegate() gets this free; the two raw-SQL check-in
+  // routes that bypass this function call syncDelegateStatus() themselves.
   if (changes.status) await syncDelegateStatus(id, merged.status);
   return {
     ...merged, cancelReason, locked,
@@ -315,19 +278,15 @@ export async function updateDelegate(id, patch, actor = null, { silent = false }
   };
 }
 
-/** Field-level rollback for a single History Log entry — reverts a delegate
- *  to the values it had immediately before that one edit, by feeding the
- *  entry's stored `changes[field].from` back in as a new patch through
- *  updateDelegate() (so the rollback itself is logged as a normal edit too —
- *  it can be rolled back again, no special-casing needed). Add/remove
- *  activity entries have no delegate_id/changes and are never rollbackable
- *  (out of scope for this pass — see AI Log). Known limitation: if only
- *  SOME fields changed in the original edit (e.g. just status, not coachId)
- *  and coachId has since changed independently, reverting just those fields
- *  could theoretically leave an inconsistent combination — accepted for a
- *  field-level (not full-snapshot) rollback design.
- *  Reads activity_log directly (rather than importing from db/history.js)
- *  so this file has no circular dependency on that module. */
+/** Field-level rollback of one History Log entry: replays the entry's stored
+ *  `changes[field].from` as a new patch through updateDelegate(), so the
+ *  rollback is itself logged and can be rolled back again.
+ *
+ *  Add/remove entries have no delegate_id/changes and aren't rollbackable.
+ *  Known limitation (accepted for field-level, not snapshot, rollback): if
+ *  only some fields changed originally and another has since moved
+ *  independently, reverting can leave a combination that never existed.
+ *  Reads activity_log directly to avoid a cycle with db/history.js. */
 export async function rollbackActivity(activityLogId, actor = null) {
   const entry = await get("SELECT * FROM activity_log WHERE id = $1", [activityLogId]);
   if (!entry) return { error: "NOT_FOUND" };
@@ -435,16 +394,10 @@ export async function clearPhotoByPublicId(publicIds) {
 /* ---- Bulk delete (dashboard "Delete all") -------------------------------
  * tripUuid scopes the wipe to just that trip's delegates; null (the base t-1
  * unfiltered view) keeps the original behaviour of clearing every delegate. */
-// Ownership + lock (2026-08-03) — "Delete all" used to be an unconditional
-// wipe, bypassing both checks entirely (found by tracing every writer of the
-// delegates table). Now skips whatever THIS account isn't allowed to delete
-// (locked, or created by someone else) and deletes the rest — a full-access
-// admin still gets the old unconditional-wipe behavior, since
-// canModifyDelegate() bypasses both checks for that account type. `account`
-// has no default that means "unrestricted" — omitting it is the MOST
-// restrictive case (every owned/locked row gets skipped), not the least, so
-// the one real caller (routes/dashboard/delegates.js) always passes
-// `req.account` explicitly rather than relying on a default.
+// Skips rows this account can't delete (locked, or someone else's) and deletes
+// the rest; a full-access admin still wipes everything. NOTE: omitting
+// `account` is the MOST restrictive case, not unrestricted — every owned/locked
+// row gets skipped — so callers must pass `req.account` explicitly.
 export async function deleteAllDelegates(tripUuid = null, actor = null, account = null) {
   const where = tripUuid ? "WHERE trip_id = $1" : "";
   const params = tripUuid ? [tripUuid] : [];

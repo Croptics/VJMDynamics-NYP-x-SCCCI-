@@ -3,13 +3,10 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 /**
- * A tiny fixed-window in-memory rate limiter for the auth routes, to blunt
- * password brute-forcing. No dependency and no shared store — fine for this
- * single-instance app; if this were ever scaled to multiple instances behind
- * a load balancer each would keep its own count, so a real deployment would
- * move this to a shared store (Redis) or a library like express-rate-limit.
- * Keyed by client IP; a successful login clears that IP's counter so normal
- * use is unaffected.
+ * Tiny fixed-window in-memory rate limiter for the auth routes, to blunt
+ * password brute-forcing. Keyed by client IP. WARNING: no shared store, so
+ * behind a load balancer each instance counts separately — a real deployment
+ * needs Redis or express-rate-limit.
  */
 export function rateLimit({ windowMs, max, message }) {
   const hits = new Map(); // ip -> { count, resetAt }
@@ -35,8 +32,8 @@ export function rateLimit({ windowMs, max, message }) {
     rec.count += 1;
     next();
   };
-  // Let a route clear an IP's counter on success (so a legit user who just
-  // signed in isn't penalised for their earlier typos).
+  // Let a route clear an IP's counter on success, so a legit user isn't
+  // penalised for their earlier typos.
   mw.clear = (req) => hits.delete(req.ip || req.socket?.remoteAddress || "unknown");
   return mw;
 }

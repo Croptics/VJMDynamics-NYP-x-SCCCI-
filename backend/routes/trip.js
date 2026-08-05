@@ -220,9 +220,15 @@ const COACH_ARRIVALS = ["not_arrived", "en_route", "arrived"];
     // already had into the new table, so this migration doesn't silently
     // un-scope every existing captain-restricted Staff account the moment it
     // ships. ON CONFLICT DO NOTHING makes it safe to run on every boot.
+    // Skips coaches whose account_id points at a since-deleted account: that
+    // row violates the FK and threw, and because every migration in this
+    // function shares ONE try/catch, everything below it silently stopped
+    // running for the rest of that boot (AI Log 254).
     await run(`
       INSERT INTO coach_captains (coach_id, account_id)
-      SELECT id, account_id FROM coaches WHERE account_id IS NOT NULL
+      SELECT id, account_id FROM coaches
+       WHERE account_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM accounts a WHERE a.id = coaches.account_id)
       ON CONFLICT DO NOTHING
     `);
     // Persisted before/after audit for trip-management events (coach /
@@ -261,6 +267,11 @@ const COACH_ARRIVALS = ["not_arrived", "en_route", "arrived"];
       at                TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
     await run(`CREATE INDEX IF NOT EXISTS attendance_log_item_at ON attendance_log (itinerary_item_id, at DESC)`);
+    // NOTE: the countryFrom/countryTo 'null'-string cleanup deliberately does
+    // NOT live here — those columns are created in db/schema.js, and this IIFE
+    // has no ordering guarantee against it, so on a fresh DB the UPDATE ran
+    // before the column existed and threw. It now sits next to the ALTERs that
+    // create them (AI Log 260).
   } catch (e) {
     console.error("trip.js ensureOpsSchema (non-fatal):", e.message);
   }
@@ -428,8 +439,18 @@ router.get("/api/assignable-accounts", readAccess, wrap(async (_req, res) => {
 router.get("/api/my-captain-coaches", readAccess, wrap(async (req, res) => {
   const accountId = req.account?.id;
   if (!accountId) return res.json({ coaches: [] });
+  // tripStatus (2026-08-04 — "i assign staff4 to this trip but on mobile it
+  // show beijing instead?") — lets a caller disambiguate when this account
+  // captains coaches across MORE than one trip at once. That's only possible
+  // for a leftover/stale assignment on a Planning or Completed trip sitting
+  // alongside a genuinely active one — the PATCH /coaches/:id single-active-
+  // trip guardrail (findCaptainTripConflicts, 2026-08-02) already refuses to
+  // let one account captain two DIFFERENT "In progress" trips at the same
+  // time. So "In progress" is always unambiguous among this account's own
+  // coaches; MobileLayout.jsx's trip-scope auto-correct uses it to break the
+  // tie instead of giving up on multiple tripIds.
   const coaches = await all(
-    `SELECT c.id AS "coachId", c.label AS "coachLabel", c.trip_id AS "tripId", t.name AS "tripName"
+    `SELECT c.id AS "coachId", c.label AS "coachLabel", c.trip_id AS "tripId", t.name AS "tripName", t.status AS "tripStatus"
        FROM coaches c
        JOIN trips t ON t.uuid_id = c.trip_id
        JOIN coach_captains cc ON cc.coach_id = c.id AND cc.account_id = $1
@@ -622,8 +643,13 @@ router.post("/api/trips", writeAccess, wrap(async (req, res) => {
   const day = Math.min(total, Math.max(1, Number(dayOf) || 1));
   const sd = startDate ? String(startDate).trim() || null : null;
   const dt = departureTime ? String(departureTime).trim() : null;
-  const cf = countryFrom !== undefined ? (String(countryFrom).trim() || null) : null;
-  const ct = countryTo !== undefined ? (String(countryTo).trim() || null) : null;
+  // countryFrom/countryTo == null (2026-08-04, "Manila Innovation Summit
+  // (null)") catches BOTH undefined and an explicit JS null the same way —
+  // `String(null)` is the literal text "null", not an empty string, so the
+  // old `!== undefined` guard let a caller-sent null slip through to
+  // String() and store that 4-character word as the actual column value.
+  const cf = countryFrom == null ? null : (String(countryFrom).trim() || null);
+  const ct = countryTo == null ? null : (String(countryTo).trim() || null);
   let trip = await get(
     `INSERT INTO trips (id, uuid_id, name, "dateRange", "dayOf", "totalDays", status, "lead", "startDate", "departureTime", "countryFrom", "countryTo")
      VALUES (gen_random_uuid()::text, gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, COALESCE($8, '10:00'), COALESCE($9, 'Singapore'), $10)
@@ -692,8 +718,13 @@ router.patch("/api/trips/:tripId", writeAccess, withTripUuid, wrap(async (req, r
     if (dt && !HHMM_RE.test(dt)) return res.status(400).json({ error: "BAD_DEPARTURE_TIME", message: "Departure time must be HH:MM." });
     sets.push(`"departureTime" = $${i++}`); params.push(dt);
   }
-  if (b.countryFrom !== undefined) { sets.push(`"countryFrom" = $${i++}`); params.push(String(b.countryFrom).trim() || null); }
-  if (b.countryTo !== undefined) { sets.push(`"countryTo" = $${i++}`); params.push(String(b.countryTo).trim() || null); }
+  // Field PRESENCE in the request body still decides whether to touch the
+  // column at all (omitted = leave as-is); it's just the VALUE conversion
+  // that needs to treat an explicit null as "clear it", not stringify it
+  // into the literal word "null" (2026-08-04, same bug as POST /api/trips
+  // above — `String(null)` is not an empty string).
+  if (b.countryFrom !== undefined) { sets.push(`"countryFrom" = $${i++}`); params.push(b.countryFrom == null ? null : (String(b.countryFrom).trim() || null)); }
+  if (b.countryTo !== undefined) { sets.push(`"countryTo" = $${i++}`); params.push(b.countryTo == null ? null : (String(b.countryTo).trim() || null)); }
   // Hand-typing a specific "Current day" is a deliberate override — flip
   // dayOfIsManual on so the next auto-sync tick doesn't immediately stomp it.
   // "resetDayOfAuto: true" is the opposite action ("Use automatic day" in

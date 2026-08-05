@@ -2,31 +2,25 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Account control's shared permission-checkbox UI
  *
- *  Extracted from AccountControlPage.jsx (2026-08-02 modularization pass) —
- *  used by both the account modal and the "Manage roles" template editor
- *  (RoleTemplatesModal.jsx), so the two checkbox UIs can never drift apart.
+ *  Extracted from AccountControlPage.jsx — shared by the account modal and the
+ *  "Manage roles" template editor (RoleTemplatesModal.jsx) so the two checkbox
+ *  UIs can't drift apart.
  * ============================================================================= */
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { PERMISSIONS } from "../../../lib/permissions.js";
 import { S } from "../../../lib/accountcontrol/accountControlStyles.js";
 
-// The three labelled, collapsible sections the modal's checkboxes are
-// grouped into — order matches how an admin thinks about it: what can this
-// account DO, then what can it SEE on desktop, then what can it SEE on
-// mobile. `selectAll: true` adds a "Select all / Deselect all" toggle to
-// that section's header — only the two view groups get one (the request
-// that added this was specifically "select all for desktop and mobile");
-// Feature actions is short enough, and typically NOT all-or-nothing per
-// account, to not need one.
+// Collapsible sections, ordered how an admin thinks: what the account can DO,
+// then what it can SEE on desktop, then on mobile. `selectAll` is deliberately
+// only on the two view groups — Feature actions is rarely all-or-nothing.
 const PERM_GROUPS = [
   { key: "action", title: "Feature actions", desc: "What this account can create, edit or delete" },
   { key: "desktopView", title: "Desktop web views", desc: "Which pages this account can see on the desktop dashboard", selectAll: true },
   { key: "mobileView", title: "Mobile views", desc: "Which tabs this account can see in the mobile app", selectAll: true },
 ];
 
-// Renders one permission checkbox, then recurses into its children indented
-// underneath — supports any nesting depth (currently 2 levels are used:
-// dashboard -> Delegate -> History logs), not just direct parent/child.
+// One permission checkbox, recursing into children. Arbitrary nesting depth,
+// not just parent/child (dashboard -> Delegate -> History logs uses 2 levels).
 export function PermRow({ perm, perms, onToggle, childrenOf, t }) {
   const kids = childrenOf(perm.key);
   return (
@@ -54,16 +48,13 @@ export function PermRow({ perm, perms, onToggle, childrenOf, t }) {
   );
 }
 
-/** Shared permission-checkbox groups renderer — used by both the account
- *  modal and the "Manage roles" template editor, so the two don't drift
- *  into two slightly-different checkbox UIs (2026-07-24 extraction). */
+/** Shared permission-checkbox groups renderer (see file header). */
 export function PermissionCheckboxGroups({ perms, onToggle, collapsedGroups, onToggleCollapsed, onSelectAllInGroup, t }) {
   return (
     <>
       {PERM_GROUPS.map((g) => {
-        // adminOnly permissions (e.g. manageAccounts) never render as a
-        // toggle here — only a real Admin should ever grant/revoke
-        // everyone else's access (see permissions.js's adminOnly doc).
+        // adminOnly perms (e.g. manageAccounts) must never render a toggle —
+        // only a real Admin grants/revokes access (see permissions.js).
         const allPerms = PERMISSIONS.filter((p) => p.group === g.key && !p.adminOnly);
         if (allPerms.length === 0) return null;
         const topLevel = allPerms.filter((p) => !p.parent || !allPerms.some((pp) => pp.key === p.parent));

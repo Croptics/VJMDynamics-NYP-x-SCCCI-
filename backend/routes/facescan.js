@@ -31,6 +31,7 @@ import { Router } from "express";
 // JQ's server.js split moved auth into lib/, so this branch's original path no
 // longer resolves and the whole router would fail to load.
 import { requireAuth, requireKioskOrPermission, accountFromReq } from "../lib/auth.js";
+import { accountTripIds } from "../lib/tripAccess.js";
 import {
   listDelegates,
   getDelegateById,
@@ -384,7 +385,20 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
   // Anything with no enrolled match is genuinely "not recognised" — this is
   // what fixes the old behaviour where ANY face got assigned to a random
   // missing delegate. Delegates enroll their sample via POST /api/enroll.
-  const all = await listDelegates();
+  //
+  // Per-trip authorisation (2026-08-05, continuing (262)). This used to score
+  // against the WHOLE roster regardless of trip — deliberately, per the
+  // comment above, to reject an unknown face rather than a wrong-trip one. But
+  // that also meant a staff account working Trip A could match, and check in,
+  // a delegate who only exists on Trip B. Filtering the POOL (not a post-match
+  // check) is intentional: an out-of-scope delegate now reads as "not
+  // recognised", identical to a genuine stranger — not a distinguishable
+  // "found but forbidden" response that would confirm they exist elsewhere.
+  // A kiosk-token caller (req.account = { kiosk: true }, no role/id) falls
+  // through accountTripIds() to an empty Set and is denied everything —
+  // fails closed if that path is ever revived. See lib/tripAccess.js.
+  const myTripIds = await accountTripIds(req.account);
+  const all = (await listDelegates()).filter((d) => !myTripIds || myTripIds.has(d.trip_id));
   const bios = await bioMap();
   const method = token.toLowerCase().startsWith("voice:") ? "VOICE" : "FACE";
   const scanVec = method === "FACE" ? parseFaceVector(token) : parseVoiceVector(token);

@@ -29,7 +29,7 @@
 // 2026-07-30 — the old path still redirects here, preserving the query.)
 
 import { useEffect, useState, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useOutletContext } from "react-router-dom";
 import { Users, Bus, AlertTriangle, RefreshCw } from "lucide-react";
 import { apiGet } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
@@ -49,6 +49,8 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
   // A ?status= deep link is always about the roster, so honour it over the
   // route's own default view.
   const [view, setView] = useState(() => (searchParams.get("status") ? "delegates" : defaultView));
+  // Open-critical count for the Exceptions segment badge, from MobileLayout.
+  const { criticalOpen = 0 } = useOutletContext() || {};
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const busy = useRef(false);
@@ -120,18 +122,43 @@ export default function MobileOpsPage({ defaultView = "delegates" }) {
           { key: "trips", label: "Trips", Icon: Bus },
         ].map(({ key, label, Icon }) => {
           const active = view === key;
+          // Delegates badges the MISSING count (already in this page's own KPI
+          // fetch); Exceptions badges open CRITICALs (from MobileLayout via
+          // Outlet context, which tracks it live off the SSE stream) — neither
+          // costs an extra request.
+          const badge = key === "delegates" ? (k?.missing || 0)
+            : key === "exceptions" ? criticalOpen
+            : 0;
+          // Only a critical exception also gets a red OUTLINE. Missing delegates
+          // are the normal working state mid-muster, so outlining that too would
+          // make the alert styling meaningless — the count alone is enough there.
+          const outline = key === "exceptions" && criticalOpen > 0 && !active;
           return (
             <button
               key={key}
               onClick={() => setView(key)}
+              title={key === "exceptions" && criticalOpen > 0 ? t("Critical exception open") : undefined}
               style={{
+                position: "relative",
                 flex: 1, padding: "10px 0", borderRadius: 999, fontWeight: 700, fontSize: 13,
-                border: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                border: `1px solid ${outline ? "var(--scc-red)" : "var(--line)"}`,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                 background: active ? "var(--scc-red-tint)" : "var(--surface)",
                 color: active ? "var(--scc-red)" : "var(--ink-2)",
               }}
             >
               <Icon size={15} /> {t(label)}
+              {badge > 0 && (
+                <span style={{
+                  position: "absolute", top: -5, right: -4,
+                  minWidth: 16, height: 16, padding: "0 4px", borderRadius: 999,
+                  background: "var(--scc-red)", color: "#fff",
+                  fontSize: 10, fontWeight: 800, lineHeight: "16px", textAlign: "center",
+                  border: "2px solid var(--surface)", boxSizing: "content-box",
+                }}>
+                  {badge > 99 ? "99+" : badge}
+                </span>
+              )}
             </button>
           );
         })}

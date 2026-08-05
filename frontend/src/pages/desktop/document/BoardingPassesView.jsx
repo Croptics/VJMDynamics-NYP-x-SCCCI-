@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail } from "lucide-react";
 import { getBadges, getTrips, linkPhysicalBadge, emailPass } from "../../../lib/document/claudeParse.js";
+import { getUser } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
 
 /**
@@ -275,9 +276,13 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const [copied, setCopied] = useState(false);
   const [printOne, setPrintOne] = useState(null);
 
-  // ---- Trip switcher (view/print another trip's passes without leaving
-  // this screen) — local to this view, doesn't touch the parent's own trip
-  // selection used by the document-parsing tab.
+  // ---- Trip switcher — ADMIN ONLY. Staff are locked to the trip they're
+  // assigned to (the `tripId` prop, which follows the Dashboard's own
+  // already-staff-scoped switcher); letting them pick from /all-trips exposed
+  // every other trip's roster and boarding passes. NOTE: this is a UI
+  // restriction only — GET /api/onboarding/badges is requireAuth() with no
+  // per-trip check, so it is NOT real enforcement (AI Log 255).
+  const isAdmin = getUser()?.role === "admin";
   const [trips, setTrips] = useState([]);
   const [selectedTrip, setSelectedTrip] = useState(tripId || "t-1");
   useEffect(() => { getTrips().then(setTrips).catch(() => {}); }, []);
@@ -415,14 +420,31 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           </p>
         </div>
         <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <select className="select" style={{ width: 160, maxWidth: "40vw", textOverflow: "ellipsis" }} value={selectedTrip}
-            onChange={(e) => setSelectedTrip(e.target.value)}>
-            {trips.map((trip) => (
-              <option key={trip.id} value={trip.id}>
-                {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
-              </option>
-            ))}
-          </select>
+          {isAdmin ? (
+            <select className="select" style={{ width: 160, maxWidth: "40vw", textOverflow: "ellipsis" }} value={selectedTrip}
+              onChange={(e) => setSelectedTrip(e.target.value)}>
+              {/* `trips` comes from /all-trips, which only ever returns real
+                  uuids — so the legacy "t-1" base-trip alias (what the Dashboard
+                  switcher persists for Beijing) matches no option and would
+                  render the select blank even though the data below loaded fine.
+                  This keeps a matching option so the label never goes empty. */}
+              {!trips.some((tr) => tr.id === selectedTrip) && (
+                <option value={selectedTrip}>{t("Current trip")}</option>
+              )}
+              {trips.map((trip) => (
+                <option key={trip.id} value={trip.id}>
+                  {trip.name}{trip.dateRange ? ` · ${trip.dateRange}` : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            // Staff: read-only label, no way to reach another trip.
+            currentTrip?.name && (
+              <span className="badge badge-neutral" style={{ padding: "5px 10px", fontSize: 12.5 }}>
+                {currentTrip.name}
+              </span>
+            )
+          )}
           <button className="btn btn-ghost" onClick={() => load()}><RefreshCw size={15} /> {t("Refresh")}</button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
             <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}

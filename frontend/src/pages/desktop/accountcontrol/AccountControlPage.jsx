@@ -7,7 +7,7 @@
  *  README/INTEGRATION_NOTES.md for what's yours vs. what's off-limits.
  * ============================================================================= */
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
-import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, Eye, EyeOff } from "lucide-react";
+import { UserPlus, Pencil, Trash2, X, ShieldCheck, AlertTriangle, Search, Eye, EyeOff, Check } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getUser, updateSession } from "../../../lib/api.js";
 import { PERMISSIONS, DEFAULT_PERMISSIONS } from "../../../lib/permissions.js";
 import { useLang } from "../../../lib/i18n.jsx";
@@ -911,6 +911,32 @@ export default function AccountControlPage() {
                     </td>
                     <td>
                       <div className="row" style={{ gap: 6 }}>
+                        {/* Undo a rejection (2026-08-04 — "if i rejected this
+                            account. is there a way for me to reapprove...?").
+                            A rejected row was a dead end in the UI: the only
+                            Approve button lives in the "Pending approval"
+                            card, which lists status='pending' ONLY, so a
+                            rejection (often just a misclick) could only be
+                            resolved by hard-deleting the account. The backend
+                            already supported this — approveAccount() has no
+                            pending-only guard, it flips ANY id to 'approved' —
+                            so this is purely the missing UI path. Deliberately
+                            NOT auto-deleting rejected rows instead: keeping
+                            the row is what blocks that person from simply
+                            re-registering the same username/email straight
+                            back into the pending queue (see registerAccount()'s
+                            USERNAME_TAKEN/EMAIL_TAKEN checks). */}
+                        {a.status === "rejected" && (
+                          <button
+                            onClick={() => approvePending(a.id)}
+                            disabled={pendingBusyId === a.id}
+                            aria-label={`${t("Re-approve")} ${a.username}`}
+                            title={t("Re-approve — let this account sign in again")}
+                            style={{ ...S.iconBtn, color: "var(--st-present)" }}
+                          >
+                            <Check size={16} />
+                          </button>
+                        )}
                         <button onClick={() => openEdit(a)} aria-label={`${t("Edit")} ${a.username}`} style={S.iconBtn}>
                           <Pencil size={16} />
                         </button>

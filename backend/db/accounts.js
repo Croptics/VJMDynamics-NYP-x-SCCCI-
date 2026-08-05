@@ -7,24 +7,19 @@
  *  README/INTEGRATION_NOTES.md for what's yours vs. what's off-limits.
  * ============================================================================= */
 /**
- * Accounts + permissions + password hashing. Split out of the old
- * monolithic data.js (2026-07-21). Exactly two roles: "admin" and "staff" —
- * role is an independent, explicitly set field (the Account control role
- * picker), NOT derived from whichever permission checkboxes happen to be
- * ticked (that used to also imply a third "main" tier whenever manageAccounts
- * was on). Passwords are stored as bcrypt hashes.
+ * Accounts + permissions + password hashing. Exactly two roles: "admin" and
+ * "staff" — role is an independent, explicitly set field (the Account control
+ * role picker), NOT derived from which permission checkboxes are ticked.
+ * Passwords are stored as bcrypt hashes.
  *
- * Admin BYPASSES every permission check — accountPermissions() below returns
- * every key as true for an admin account regardless of what's actually
- * stored, so requirePermission() (auth.js) and every getPermissions().xyz
- * check on the frontend automatically unlock for admins with no per-call
- * special-casing needed. Staff are governed by the stored checkboxes, which
- * default to just "manage delegates" (i.e. the Delegate tab) — the usual
- * staff-facing surface — until an admin grants more on Account control.
+ * SECURITY: admin BYPASSES every permission check — accountPermissions()
+ * returns every key true for an admin regardless of what's stored, so
+ * requirePermission() (auth.js) and frontend getPermissions().xyz checks
+ * unlock for admins with no per-call special-casing. Staff are governed by
+ * their stored checkboxes, defaulting to just manageDelegates.
  *
- * defaultPermsForRole() is exported (unlike in the old data.js) so
- * db/schema.js's seed() can use it without duplicating the role-default
- * logic — the only new public surface this split introduced.
+ * defaultPermsForRole() is exported so db/schema.js's seed() can reuse the
+ * role-default logic instead of duplicating it.
  */
 
 import bcrypt from "bcryptjs";
@@ -49,12 +44,10 @@ export function passwordProblem(pw) {
 }
 
 /* ---- Password hashing (bcrypt) -------------------------------------------
- * Passwords are stored as bcrypt hashes. Older rows created before hashing
- * was added may still hold a plaintext password — verifyPassword() detects
- * that (a bcrypt hash always looks like "$2a$10$...") and falls back to a
- * plain comparison, then the login route upgrades the row via
- * upgradePasswordIfNeeded() so it's hashed from then on. Nobody has to run a
- * manual migration.
+ * Legacy rows predating hashing may still hold plaintext — verifyPassword()
+ * detects that (a bcrypt hash looks like "$2a$10$...") and falls back to a
+ * plain compare, then the login route calls upgradePasswordIfNeeded() to
+ * hash it in place. Avoids needing a manual migration.
  * ------------------------------------------------------------------------- */
 function isBcryptHash(s) {
   return typeof s === "string" && /^\$2[aby]?\$\d{2}\$/.test(s);
@@ -126,11 +119,10 @@ function accountPublic(row) {
   return { ...rest, role: cleanRole(row.role), permissions: accountPermissions(row), status: row.status || "approved" };
 }
 
-/* ---- Email (2026-07-24, self-service registration) -----------------------
- * Plain text, not hashed — see accountPublic() above; only the password
- * field ever gets bcrypt'd. A simple, deliberately permissive RFC-5322-ish
- * check (not a full spec parser) — good enough to reject obvious garbage
- * ("asdf") without rejecting a real address over some pedantic edge case. */
+/* ---- Email ---------------------------------------------------------------
+ * Stored plain text, not hashed — only the password field is ever bcrypt'd.
+ * Deliberately permissive check: rejects obvious garbage without failing a
+ * real address on a pedantic RFC edge case. */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function emailProblem(email) {
   const s = String(email || "").trim();
@@ -145,34 +137,30 @@ export async function getAccountByEmail(email) {
 }
 
 /**
- * Start a fresh login session for an account: bump its token_version and
- * return the new value. Any token minted with the previous version stops
- * validating (see accountFromReq in auth.js), so an older browser is logged
- * out the next time it polls. Called from the login route only.
+ * Bump token_version and return the new value. Any token minted with the
+ * previous version stops validating (see accountFromReq in auth.js), so an
+ * older browser is logged out on its next poll. Login route only.
  */
 export async function startNewSession(id) {
   const row = await get(`UPDATE accounts SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version`, [id]);
   return row?.token_version ?? 0;
 }
 
-/** Stamp "seen right now" on an account — called from GET /api/auth/session,
- *  which every signed-in client already polls every 15s. Powers the Staff
- *  Operations "active now" list; fire-and-forget from the caller's side (a
- *  failed stamp shouldn't fail the session check itself). */
+/** Stamp "seen right now" — called from GET /api/auth/session (polled every
+ *  15s). Powers the Staff Operations "active now" list. Call fire-and-forget:
+ *  a failed stamp must not fail the session check itself. */
 export async function touchLastSeen(id) {
   await run(`UPDATE accounts SET last_seen_at = now() WHERE id = $1`, [id]);
 }
 
-/** Clears "seen right now" on explicit logout, so the Staff Operations
- *  "active now" list drops the account immediately instead of waiting up to
- *  45s for last_seen_at to age out. Called from POST /api/auth/logout. */
+/** Clears last_seen_at on explicit logout so "active now" drops the account
+ *  immediately instead of waiting ~45s to age out. POST /api/auth/logout. */
 export async function clearLastSeen(id) {
   await run(`UPDATE accounts SET last_seen_at = NULL WHERE id = $1`, [id]);
 }
 
-/** Accounts considered "active now" — seen within the last `withinSeconds`.
- *  Same accountPublic() shape as listAccounts(), so the frontend can reuse
- *  the existing role/permission-chip rendering. */
+/** Accounts seen within the last `withinSeconds`. Same accountPublic() shape
+ *  as listAccounts() so the frontend reuses its role/permission-chip render. */
 export async function listActiveAccounts(withinSeconds = 45) {
   const rows = await all(
     `SELECT * FROM accounts WHERE last_seen_at IS NOT NULL AND last_seen_at > now() - ($1 || ' seconds')::interval ORDER BY last_seen_at DESC`,
@@ -182,10 +170,8 @@ export async function listActiveAccounts(withinSeconds = 45) {
 }
 
 async function nextAccountId() {
-  // Only consider rows shaped like "u-<number>" — the seeded "__kiosk__"
-  // backing account uses the non-numeric id "u-kiosk" (see db/schema.js's
-  // seed()), which used to blow up this query's CAST(... AS INTEGER) for
-  // every account creation once that row existed.
+  // Must filter to "u-<number>" rows: the seeded "__kiosk__" account uses the
+  // non-numeric id "u-kiosk" (db/schema.js seed()), which breaks the CAST.
   const row = await get(`SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS INTEGER)), 0) AS m FROM accounts WHERE id ~ '^u-[0-9]+$'`);
   return `u-${Number(row?.m || 0) + 1}`;
 }
@@ -196,10 +182,8 @@ export async function getAccountByUsername(username) {
 }
 
 export async function listAccounts() {
-  // Hide the internal __kiosk__ backing account (see db/schema.js's seed())
-  // — it's plumbing for passwordless check-ins, not a manageable staff
-  // account, so it should never show up in Account control or the
-  // staff-count tiles.
+  // Hide the internal __kiosk__ account (db/schema.js seed()) — plumbing for
+  // passwordless check-ins, must never appear in Account control or staff tiles.
   return (await all("SELECT * FROM accounts WHERE username <> '__kiosk__' ORDER BY id")).map(accountPublic);
 }
 
@@ -209,11 +193,9 @@ export async function createAccount(input) {
   const email = String(input.email || "").trim();
   const phone = String(input.phone || "").trim();
   const name = String(input.name || "").trim() || username;
-  // Role is now an independent, explicit field (the Account control role
-  // picker) — NOT derived from whichever permission checkboxes are ticked.
-  // An Admin's checkboxes are moot (accountPermissions() bypasses them all),
-  // so store the admin-default set for a clean "Access" display; a Staff
-  // account keeps whatever was actually submitted.
+  // An admin's checkboxes are moot (accountPermissions() bypasses them all),
+  // so store the admin-default set for a clean "Access" display; staff keep
+  // whatever was submitted.
   const role = cleanRole(input.role);
   const readOnly = role === "admin" && !!input.readOnly;
   const perms = role === "admin" ? defaultPermsForRole("admin", readOnly) : cleanPerms(input.permissions);
@@ -222,18 +204,16 @@ export async function createAccount(input) {
   if (!password) return { error: "PASSWORD_REQUIRED" };
   const pwProblem = passwordProblem(password);
   if (pwProblem) return { error: "WEAK_PASSWORD", message: pwProblem };
-  // Required going forward for every NEW account (admin-created here, or
-  // self-registered via registerAccount() below) — existing pre-2026-07-24
-  // accounts are untouched and keep working with no email on file.
+  // Required for every NEW account (here and registerAccount()) — legacy
+  // accounts with no email on file are untouched and keep working.
   const emailErr = emailProblem(email);
   if (emailErr) return { error: "EMAIL_REQUIRED", message: emailErr };
   if (await getAccountByUsername(username)) return { error: "USERNAME_TAKEN" };
   if (await getAccountByEmail(email)) return { error: "EMAIL_TAKEN" };
 
   const id = await nextAccountId();
-  // status defaults to 'approved' (see schema.js) — an admin creating an
-  // account directly on Account control IS the approval, unlike a public
-  // self-registration (see registerAccount()), which starts 'pending'.
+  // status defaults to 'approved' (schema.js) — an admin creating an account
+  // IS the approval, unlike registerAccount(), which starts 'pending'.
   await run(`INSERT INTO accounts (id, username, name, email, phone, password, role, permissions, "readOnly", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [
     id, username, name, email, phone || null, await hashPassword(password), role, JSON.stringify(perms), readOnly, new Date().toISOString(),
   ]);
@@ -241,14 +221,11 @@ export async function createAccount(input) {
 }
 
 /**
- * Public self-service sign-up (2026-07-24) — "new staff who haven't created
- * an account yet" fill in email + username + password themselves. Always
- * role="staff" (self-registration can never mint an admin — that stays an
- * admin-only action on Account control) and always starts status="pending":
- * the account exists in the DB but CANNOT log in (see the status check in
- * routes/auth.js's login route) until an admin approves it there. Reuses
- * the exact same validation/hashing/uniqueness rules as createAccount()
- * above — the only real differences are the fixed role and pending status.
+ * Public self-service sign-up. SECURITY: always role="staff" (registration
+ * can never mint an admin) and always status="pending" — the row exists but
+ * CANNOT log in (status check in routes/auth.js's login route) until an admin
+ * approves. Otherwise identical validation/hashing/uniqueness to
+ * createAccount().
  */
 export async function registerAccount(input) {
   const username = String(input.username || "").trim();
@@ -287,10 +264,10 @@ export async function approveAccount(id) {
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
 
-/** Rejecting keeps the row (for an audit trail of who applied and was
- *  turned down) rather than deleting it — a rejected account can never log
- *  in (see routes/auth.js), and an admin can still hard-delete it via the
- *  existing DELETE /api/accounts/:id if they want it gone entirely. */
+/** Rejecting RETAINS the row rather than deleting it: audit trail of who was
+ *  turned down, and deletion would free the username/email for the rejected
+ *  applicant to re-register. A rejected account can never log in (see
+ *  routes/auth.js); DELETE /api/accounts/:id still hard-deletes if wanted. */
 export async function rejectAccount(id) {
   const existing = await get("SELECT id FROM accounts WHERE id = $1", [id]);
   if (!existing) return { error: "NOT_FOUND" };
@@ -298,12 +275,9 @@ export async function rejectAccount(id) {
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
 
-/** Bulk approve/reject every currently-pending account in one query, for the
- *  Pending approval card's "Approve all"/"Reject all" buttons (2026-07-24) —
- *  a single UPDATE rather than looping the single-account version N times,
- *  since a bulk action can cover dozens of rows at once. Returns how many
- *  rows were actually flipped, so the UI can show a real count even if the
- *  pending list changed underneath (e.g. another admin acted first). */
+/** Bulk approve/reject in one UPDATE (Pending approval card's "Approve all"/
+ *  "Reject all"). Returns rows actually flipped, so the UI shows a real count
+ *  even if the pending list changed underneath (another admin acted first). */
 export async function approveAllPending() {
   const rows = await all("UPDATE accounts SET status = 'approved' WHERE status = 'pending' RETURNING id");
   return { count: rows.length };
@@ -333,10 +307,8 @@ export async function updateAccount(id, patch) {
     password = await hashPassword(String(patch.password));
   }
 
-  // Email is only validated/changed if explicitly included in the patch —
-  // NOT force-required here, so a pre-2026-07-24 account with no email on
-  // file can still be edited (e.g. changing its role) without also being
-  // made to add one right that moment.
+  // Only validated/changed if explicitly in the patch — NOT force-required,
+  // so a legacy account with no email can still be edited (e.g. role change).
   let email = existing.email;
   if (patch.email !== undefined) {
     const nextEmail = String(patch.email).trim();
@@ -371,17 +343,12 @@ export async function updateAccount(id, patch) {
 }
 
 /**
- * Self-service "edit my own profile" (2026-07-24, Settings page) — DELIBERATELY
- * separate from updateAccount() above, not a thinner wrapper around it: this
- * one is reachable by ANY signed-in account (requireAuth only, no
- * manageAccounts permission — see routes/auth.js's PATCH /api/auth/me), so it
- * must NEVER be able to touch role or permissions, unlike the admin-only
- * updateAccount(). Name/username/email are optional per-field like
- * updateAccount(); changing the password additionally requires the CURRENT
- * password to verify identity — a real security check the admin-side
- * updateAccount() and the no-questions-asked resetPassword() below don't
- * have, since here the caller is already a live, signed-in session that
- * could simply be hijacked by someone at an unlocked device otherwise.
+ * Self-service "edit my own profile" (Settings page). SECURITY: deliberately
+ * NOT a wrapper around updateAccount() — this is reachable by ANY signed-in
+ * account (requireAuth only, no manageAccounts — see PATCH /api/auth/me), so
+ * it must NEVER touch role or permissions. A password change here requires
+ * the CURRENT password, since the caller could be someone at an unlocked
+ * device on a live session.
  */
 export async function updateOwnAccount(id, patch) {
   const existing = await get("SELECT * FROM accounts WHERE id = $1", [id]);
@@ -424,10 +391,9 @@ export async function updateOwnAccount(id, patch) {
   return { account: accountPublic(await get("SELECT * FROM accounts WHERE id = $1", [id])) };
 }
 
-/** Own-profile photo (Settings page) — mirrors setDelegatePhoto()/
- *  clearDelegatePhoto() in db/delegates.js exactly, just on the accounts
- *  table. Returns the previous photoPublicId (or null) so the caller can
- *  clean up the old Cloudinary asset on replace/remove. */
+/** Own-profile photo — mirrors setDelegatePhoto()/clearDelegatePhoto() in
+ *  db/delegates.js on the accounts table. Returns the previous photoPublicId
+ *  so the caller can clean up the old Cloudinary asset. */
 export async function setAccountPhoto(id, url, publicId) {
   const existing = await get('SELECT "photoPublicId" FROM accounts WHERE id = $1', [id]);
   if (!existing) return null;
@@ -442,12 +408,11 @@ export async function clearAccountPhoto(id) {
 }
 
 /**
- * "Forgot password" self-service reset — username + new password, no
- * identity verification (no old password, no email/OTP). Intentionally
- * simple for this project's small trusted-team context; NOT safe as-is for
- * a real public deployment, where anyone who knows a username could take
- * over that account. Bumps token_version so any existing session for that
- * account is invalidated by the reset (same pattern as a fresh login).
+ * "Forgot password" reset — username + new password, NO identity
+ * verification (no old password, no email/OTP). WARNING: only acceptable for
+ * this project's small trusted-team context; NOT safe for a public
+ * deployment, where knowing a username is enough to take over the account.
+ * Bumps token_version so existing sessions are invalidated.
  */
 export async function resetPassword(username, newPassword) {
   const pwProblem = passwordProblem(newPassword);
@@ -477,15 +442,12 @@ export async function deleteAccount(id) {
   return { deleted: true };
 }
 
-/* ---- Role templates (2026-07-24) -----------------------------------------
- * Admin-managed named permission presets — Account control's "Apply
- * template" quick-fill + "Access role" filter. Deliberately just a
- * convenience preset, never a stored tag on an account: matchRoleTemplate()
- * below always compares an account's CURRENT stored permissions fresh
- * against whatever templates exist right now, so editing/deleting a
- * template can never retroactively change what an existing account can do —
- * it only changes what shows up as a quick-fill option / which "bucket" that
- * account's permissions currently fall into.
+/* ---- Role templates ------------------------------------------------------
+ * Admin-managed named permission presets (Account control's "Apply template"
+ * quick-fill + "Access role" filter). Never a stored tag on an account:
+ * matchRoleTemplate() compares CURRENT stored permissions against current
+ * templates, so editing/deleting a template can never retroactively change
+ * what an existing account can do — only which bucket it displays in.
  * -------------------------------------------------------------------------- */
 function roleTemplatePublic(row) {
   if (!row) return null;
@@ -536,11 +498,9 @@ export async function deleteRoleTemplate(id) {
   return { deleted: true };
 }
 
-/** Which template (if any) a STAFF account's CURRENT permissions exactly
- *  match — powers Account control's "Access role" filter/badge. Returns null
- *  ("Custom") if none match. Only meaningful for role="staff" — an admin
- *  account bypasses permissions entirely, a separate concept from these
- *  staff-only templates (callers should skip admin accounts themselves). */
+/** Which template a STAFF account's current permissions match — Account
+ *  control's "Access role" filter/badge. null means "Custom". Only meaningful
+ *  for role="staff" (admins bypass permissions); callers skip admins. */
 export function matchRoleTemplate(permissions, templates) {
   for (const tpl of templates) {
     if (Object.entries(tpl.permissions).every(([k, v]) => !!permissions?.[k] === v)) return tpl.id;

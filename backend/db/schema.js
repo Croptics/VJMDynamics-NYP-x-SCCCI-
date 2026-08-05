@@ -7,17 +7,14 @@
  *  README/INTEGRATION_NOTES.md for what's yours vs. what's off-limits.
  * ============================================================================= */
 /**
- * Schema creation + seed data — split out of the old monolithic data.js
- * (2026-07-21). The database schema and seed data (first admin account,
- * trip, coaches) are created automatically on first run — nobody sets those
- * up by hand. Depends on db/accounts.js (hashPassword, defaultPermsForRole)
- * and db/constants.js (TRIP, COACHES) — one-directional, neither depends
- * back on this file.
+ * Schema creation + seed data (first admin account, trip, coaches) — runs
+ * automatically on first run, nobody sets it up by hand. Depends on
+ * db/accounts.js (hashPassword, defaultPermsForRole) and db/constants.js
+ * (TRIP, COACHES); one-directional, neither depends back on this file.
  *
- * Postgres syntax notes vs. MySQL: VARCHAR sizes are optional but kept for
- * clarity, TINYINT(1) -> BOOLEAN, and reserved words `lead`/`localTime` still
- * need double-quoting (Postgres lower-cases unquoted identifiers, and our
- * columns are camelCase, so every mixed-case column name is quoted).
+ * Postgres: every mixed-case column name must be double-quoted (unquoted
+ * identifiers get lower-cased and our columns are camelCase); `lead` and
+ * `localTime` are also reserved words.
  */
 
 import { all, get, run } from "./connection.js";
@@ -38,73 +35,50 @@ export async function createSchema() {
     id VARCHAR(64) PRIMARY KEY, name VARCHAR(255), initials VARCHAR(16), "coachId" VARCHAR(64),
     status VARCHAR(32), vip BOOLEAN, "lastSeen" VARCHAR(255)
   )`);
-  // When each delegate was first added (upload/creation time) — powers the
-  // "Uploaded" column + "recently added" sort on the Dashboard. Additive: a
-  // NOT NULL DEFAULT now() means existing rows get the migration time and new
-  // rows default to their insert time (createDelegate doesn't set it).
+  // Powers the Dashboard's "Uploaded" column + "recently added" sort. NOT NULL
+  // DEFAULT now() so existing rows get the migration time and new rows their
+  // insert time (createDelegate doesn't set it).
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()`);
-  // "Cancelled" — a delegate who was Assigned but can't make it after all,
-  // usually found out day-of (2026-07-24). Deliberately NOT a 6th value on
-  // the status enum (UNASSIGNED/ASSIGNED/ARRIVED/LATE/MISSING is already
-  // duplicated across ~5 files — badges, KPIs, coach capacity, exports,
-  // Late-cutoff — adding a 6th status would mean touching all of them and
-  // risks anything that assumes exactly 5). Instead a plain boolean layered
-  // on top: cancelling a delegate forces status back to UNASSIGNED and
-  // clears their coachId (see updateDelegate() in db/delegates.js), freeing
-  // their seat, while this flag keeps them distinguishable in the UI from a
-  // delegate who's simply pending assignment.
+  // A delegate who was Assigned but can't make it after all. Deliberately NOT
+  // a 6th status enum value — UNASSIGNED/ASSIGNED/ARRIVED/LATE/MISSING is
+  // duplicated across ~5 files (badges, KPIs, coach capacity, exports,
+  // Late-cutoff) and code assumes exactly 5. Cancelling instead forces status
+  // back to UNASSIGNED and clears coachId (updateDelegate() in
+  // db/delegates.js) to free the seat, with this flag distinguishing them in
+  // the UI from a delegate merely pending assignment.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT false`);
-  // Free-text "what happened" reason captured at the moment of cancelling —
-  // requested so a staff member (often on mobile, in the field) can record
-  // WHY someone dropped out, not just that they did. Cleared automatically
-  // whenever cancelled flips back to false (same "only meaningful while the
-  // flag is on" pattern as lastSeen/lastLocation clearing once a delegate is
-  // no longer Missing) so it can't linger as stale context for a totally
-  // different later cancellation.
+  // Why they dropped out, captured at cancel time. Cleared whenever cancelled
+  // flips back to false (same pattern as lastSeen/lastLocation clearing when a
+  // delegate is no longer Missing) so it can't linger as stale context for a
+  // later, unrelated cancellation.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS cancel_reason TEXT`);
-  // Profile photo — set only via POST /api/delegates/:id/photo (uploads
-  // through Cloudinary, see uploadDelegatePhoto in server.js), never via the
-  // plain PATCH /api/delegates/:id JSON route, so a client can't just PATCH
-  // in an arbitrary external URL and bypass the upload validation entirely.
-  // photoPublicId is Cloudinary's asset id, kept so the old image can be
-  // destroyed on Cloudinary when replaced or removed (otherwise it's an
-  // orphaned asset forever).
+  // Profile photo — set ONLY via POST /api/delegates/:id/photo (Cloudinary
+  // upload, see uploadDelegatePhoto in server.js), never via the plain PATCH
+  // JSON route, so a client can't PATCH in an arbitrary external URL and skip
+  // upload validation. photoPublicId is the Cloudinary asset id, needed to
+  // destroy the old image on replace/remove or it's orphaned forever.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
-  // Last known location — a free-text place/address (e.g. "Novotel Beijing,
-  // Lobby" or a full street address), staff-entered, separate from
-  // "lastSeen" (which is a time/note, not a lookup-able place). Rendered as
-  // an embedded Google Map (Maps Embed API — a static <iframe>, no live
-  // tracking) wherever a delegate's location matters, especially the
-  // missing-delegates list. Not geocoded/validated server-side; the Embed
-  // API's `q=` param accepts free text and looks it up itself.
+  // Free-text place/address, staff-entered — distinct from "lastSeen" (a
+  // time/note, not lookup-able). Rendered via the Google Maps Embed API
+  // (static <iframe>, no live tracking). Not geocoded server-side; the Embed
+  // API's `q=` accepts free text and resolves it itself.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "lastLocation" VARCHAR(255)`);
-  // Who added this delegate — the account's display name at creation time
-  // (a snapshot, not a live FK to accounts, so it stays correct even if that
-  // account is later renamed or deleted). Powers the Dashboard's "Created By"
-  // column. NULL for rows created before this column existed, or by a route
-  // that doesn't pass an actor (e.g. teammate check-in modules importing a
-  // roster directly) — those show "—" in the UI rather than a guessed name.
+  // Display name snapshot at creation, not a live FK, so it stays correct if
+  // that account is later renamed or deleted. NULL for pre-column rows or
+  // routes that pass no actor (e.g. teammate check-in modules importing a
+  // roster) — those render "—" rather than a guessed name.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdBy" VARCHAR(255)`);
-  // Ownership + lock (2026-08-03 — "stuff can only add update del their own
-  // creation... unless have full permission" + "option for staff to lock
-  // things they created"). Deliberately a SEPARATE column from "createdBy"
-  // above: that one stores a DISPLAY NAME (via actorOf(), name-or-username,
-  // not stable if the account is later renamed) purely for the UI's "Added
-  // by X" text — this one stores the actual accounts.id for real ownership
-  // enforcement, which needs a stable identity, not a display string. No FK
-  // constraint, matching "createdBy"'s own plain-VARCHAR precedent just
-  // above (also: the accounts table isn't created until just below this
-  // line, so a FK here would fail on a fresh database anyway). NULL for
-  // every row created before this column existed — treated as "no specific
-  // owner recorded", so legacy delegates stay editable by any staff with
-  // manageDelegates rather than retroactively locking everyone out of data
-  // that predates this feature.
+  // Real ownership enforcement (AI Log). SEPARATE from "createdBy" above on
+  // purpose: that holds an unstable DISPLAY NAME for UI text, this holds the
+  // accounts.id, which enforcement needs. No FK — matches "createdBy"'s
+  // precedent, and the accounts table isn't created until below this line so a
+  // FK would fail on a fresh database. NULL = "no owner recorded", so legacy
+  // delegates stay editable by any staff with manageDelegates instead of
+  // retroactively locking everyone out.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS "createdByAccountId" VARCHAR(64)`);
-  // Locking blocks EVERYONE from editing, including the creator themselves,
-  // until explicitly unlocked (2026-08-03, confirmed: "blocks everyone
-  // including the creator") — a deliberate "finalize" step, not just a
-  // shield against other staff.
+  // Locking blocks EVERYONE including the creator until explicitly unlocked —
+  // a deliberate "finalize" step, not just a shield against other staff.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS locked BOOLEAN NOT NULL DEFAULT false`);
   await run(`CREATE TABLE IF NOT EXISTS accounts (
     id VARCHAR(64) PRIMARY KEY, username VARCHAR(191) UNIQUE, name VARCHAR(255),
@@ -115,74 +89,58 @@ export async function createSchema() {
   // browser invalidates the token held by any older one (which then gets
   // logged out by the session poll in the frontend Layout).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0`);
-  // Stamped on every GET /api/auth/session call — every signed-in client
-  // already polls that endpoint every 15s for the force-logout guard, so this
-  // piggybacks on existing traffic instead of adding new polling. Powers the
-  // Staff Operations dashboard's "active now" list (accounts seen in the last
-  // ~45s, comfortably wider than the 15s poll interval).
+  // Stamped on every GET /api/auth/session call — clients already poll that
+  // every 15s for the force-logout guard, so this piggybacks on existing
+  // traffic instead of adding new polling. Powers Staff Operations' "active
+  // now" list (seen in the last ~45s, comfortably wider than the poll).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ`);
-  // Self-service registration (2026-07-24) — `email` (nullable, since every
-  // existing account predates this feature and none of them have one on
-  // file; enforced as REQUIRED only at the application layer for NEW
-  // accounts going forward — both self-registered and admin-created).
-  // Stored as plain text, same tier as username — it's an identity/contact
-  // field, not a secret, so it must stay human-readable for the approval
-  // screen; only passwords ever get hashed.
+  // Nullable because every pre-existing account predates self-service
+  // registration; REQUIRED only at the application layer for new accounts.
+  // Plain text like username — an identity field, not a secret, and it must
+  // stay readable on the approval screen. Only passwords are ever hashed.
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts (email) WHERE email IS NOT NULL`);
-  // "pending" (awaiting admin review) / "approved" / "rejected". Existing
-  // rows backfill to "approved" via this DEFAULT the moment the column is
-  // added, so nobody who could already log in gets locked out by this
-  // feature landing. Only a fresh self-registration ever starts "pending" —
-  // accounts an admin creates directly on Account control are approved
-  // immediately (an admin creating the account IS the approval).
+  // "pending" / "approved" / "rejected". DEFAULT backfills existing rows to
+  // "approved" so nobody who could already log in gets locked out. Only a
+  // fresh self-registration starts "pending" — an admin creating an account on
+  // Account control IS the approval.
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'approved'`);
-  // Own-profile picture (2026-07-24, Settings page self-service editing) —
-  // same photoUrl/photoPublicId pattern as delegates.js, but a SEPARATE
-  // Cloudinary folder ("mustergo/accounts", see lib/cloudinary.js call
-  // sites in routes/auth.js) so an account's own avatar never mixes with
-  // delegate photos in the Settings → Image storage media manager, which
-  // is hardcoded to the delegates folder only.
+  // Own-profile picture — same photoUrl/photoPublicId pattern as delegates,
+  // but a SEPARATE Cloudinary folder ("mustergo/accounts", see lib/cloudinary.js
+  // calls in routes/auth.js) so avatars never mix with delegate photos in the
+  // Settings → Image storage media manager, which is hardcoded to the
+  // delegates folder only.
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoUrl" TEXT`);
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "photoPublicId" TEXT`);
 
-  // Contact number (2026-07-25) — nullable, same tier as email (a plain
-  // contact field, not a secret). Added so escalations can eventually reach
-  // an admin/staff by SMS/WhatsApp (routes/dashboard/escalations.js, lib/notify.js —
-  // currently email-only; the Twilio SMS/WhatsApp path is stubbed until a
-  // real paid account is set up) — without a phone number on file for any
-  // account, that path has nowhere to send to no matter how it's wired up.
+  // Nullable contact field, same tier as email. For escalations reaching staff
+  // by SMS/WhatsApp (routes/dashboard/escalations.js, lib/notify.js — currently
+  // email-only, Twilio path stubbed until a paid account exists).
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone VARCHAR(32)`);
 
-  // Read-only Admin (2026-07-30) — an Admin account can be flagged so it
-  // keeps full VIEW access everywhere (every desktopView/mobileView
-  // permission stays true, same as a regular admin) but loses every
-  // write/action permission (manageDelegates, manageAccounts, etc. all
-  // false) — see accountPermissions() in db/accounts.js. Meaningless for a
-  // "staff" role account (staff never bypass their stored checkboxes in the
-  // first place), so it's only ever surfaced on Account control when the
-  // Role picker is set to Admin.
+  // Read-only Admin: keeps every desktopView/mobileView permission but loses
+  // every write permission (manageDelegates, manageAccounts, …) — see
+  // accountPermissions() in db/accounts.js. Meaningless for "staff" accounts
+  // (they never bypass their stored checkboxes), so Account control only
+  // surfaces it when Role is Admin.
   await run(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "readOnly" BOOLEAN NOT NULL DEFAULT false`);
 
-  // Named, admin-managed access-role templates (2026-07-24) — Account
-  // control's "Apply template" quick-fill + "Access role" filter used to be
-  // 2 templates hardcoded in the frontend; now real, persisted rows any
-  // admin can create/edit/delete, so the role list isn't a code change.
-  // Deliberately just a convenience PRESET, not a stored tag on the account
-  // itself — an account's real, enforced permissions live only in
-  // accounts.permissions; matching against a template is always computed
-  // fresh (see matchRoleTemplate() in db/accounts.js), so deleting or editing
-  // a template can never silently change what an existing account can do.
+  // Admin-managed access-role templates backing Account control's "Apply
+  // template" quick-fill and "Access role" filter (was 2 hardcoded frontend
+  // templates). Deliberately a convenience PRESET only, never a stored tag on
+  // the account: enforced permissions live solely in accounts.permissions and
+  // template matching is computed fresh (matchRoleTemplate() in
+  // db/accounts.js), so editing/deleting a template can never silently change
+  // what an existing account can do.
   await run(`CREATE TABLE IF NOT EXISTS role_templates (
     id VARCHAR(64) PRIMARY KEY, label VARCHAR(191) NOT NULL, permissions TEXT NOT NULL, "createdAt" VARCHAR(64)
   )`);
 
   /* ---- Desmond "TransitFlow" schema (Trip Booking & Coach Management) ----
-   * Folded in from what originally shipped as database/003_*.sql + 004_*.sql.
-   * ALL ADDITIVE: new tables + `ADD COLUMN IF NOT EXISTS` on the base tables
-   * above — it never changes/drops anything the base app relies on (trips.id,
-   * coaches.id, delegates.id all stay VARCHAR text like "t-1"/"c1"), and every
-   * statement is idempotent so it re-runs harmlessly on each startup.
+   * MUST STAY ALL-ADDITIVE: new tables + `ADD COLUMN IF NOT EXISTS` only. It
+   * never changes/drops anything the base app relies on (trips.id, coaches.id,
+   * delegates.id stay VARCHAR text like "t-1"/"c1"), and every statement is
+   * idempotent so it re-runs harmlessly on each startup.
    * --------------------------------------------------------------------- */
   await run(`CREATE EXTENSION IF NOT EXISTS pgcrypto`); // for gen_random_uuid()
 
@@ -190,66 +148,58 @@ export async function createSchema() {
   // table/column below references this uuid_id instead, so they're real UUIDs.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS uuid_id UUID UNIQUE DEFAULT gen_random_uuid()`);
   await run(`UPDATE trips SET uuid_id = gen_random_uuid() WHERE uuid_id IS NULL`);
-  // Per-trip Late-status cutoff ("HH:MM", 24-hour, server-local) — was a
-  // single hardcoded 10:00 global constant in applyLateCutoff() (db/delegates
-  // .js); admins can now set this per trip (trip.js's PATCH /api/trips/:id/
-  // late-cutoff). DEFAULT '10:00' both for brand-new trips AND backfills
-  // every existing trip row to the same value this used to be hardcoded to,
-  // so nothing's behavior silently changes for a trip nobody has touched.
+  // Per-trip Late-status cutoff ("HH:MM", 24h, server-local), read by
+  // applyLateCutoff() in db/delegates.js; set via PATCH
+  // /api/trips/:id/late-cutoff. DEFAULT '10:00' matches the value this was
+  // previously hardcoded to, so untouched trips don't change behaviour.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "lateCutoffTime" VARCHAR(8) DEFAULT '10:00'`);
 
-  // Per-trip checkpoint reset window (minutes before the next itinerary stop
-  // that an ARRIVED delegate gets reset to ASSIGNED so they can be re-scanned
-  // — see resetArrivedBeforeNextCheckpoint() in routes/dashboard/checkpoints.js).
-  // Started hardcoded at 30; DEFAULT 5 here so it's short enough to actually
-  // test without a long wait, adjustable per trip via PATCH
-  // /api/trips/:id/checkpoint-reset-window.
+  // Minutes before the next itinerary stop that an ARRIVED delegate resets to
+  // ASSIGNED for re-scanning — see resetArrivedBeforeNextCheckpoint() in
+  // routes/dashboard/checkpoints.js. DEFAULT 5 (not the original 30) so it's
+  // testable without a long wait.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "checkpointResetMinutes" INT DEFAULT 5`);
 
-  // Per-trip itinerary buffer (minimum minutes required between two stops on
-  // the same day when adding/editing an itinerary item — see
-  // EditItineraryModal's handleSave() in TripCoachPage.jsx). DECOUPLED from
-  // checkpointResetMinutes above (2026-07-23) — they used to share one value,
-  // but the user wanted them independently adjustable (tightening the reset
-  // window for testing shouldn't force the itinerary gap to shrink too).
+  // Minimum minutes required between two same-day itinerary stops — see
+  // EditItineraryModal's handleSave() in TripCoachPage.jsx. Deliberately
+  // DECOUPLED from checkpointResetMinutes above (they once shared one value):
+  // shrinking the reset window for testing must not shrink the itinerary gap.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "itineraryBufferMinutes" INT DEFAULT 30`);
 
-  // Real trip start date (plain "YYYY-MM-DD" text, not a Postgres DATE column
-  // — pg's default DATE parser returns a JS Date object at UTC midnight,
-  // which shifts a day depending on the reader's timezone; a plain string
-  // sidesteps that entirely, and every arithmetic use casts it to ::date
-  // inline). Lets "dayOf" be computed from the real calendar date instead of
-  // staying wherever it was last set — see syncTripDayOf() in db/dashboard.js
-  // and its 60s scheduler tick in server.js. "dayOfIsManual" opts a trip OUT
-  // of that auto-sync (set whenever staff hand-edit "Current day" in Edit
-  // trip) so a deliberate override (e.g. a delayed departure) isn't silently
-  // overwritten by the next tick; cleared via "Use automatic day" to resume
-  // auto-sync (see PATCH /api/trips/:tripId's resetDayOfAuto).
+  // Plain "YYYY-MM-DD" text, NOT a Postgres DATE: pg's DATE parser returns a JS
+  // Date at UTC midnight, which shifts a day by reader timezone. Every
+  // arithmetic use casts to ::date inline. Lets "dayOf" be computed from the
+  // real calendar date — see syncTripDayOf() in db/dashboard.js and its 60s
+  // tick in server.js. "dayOfIsManual" opts a trip OUT of that auto-sync (set
+  // when staff hand-edit "Current day") so a deliberate override isn't
+  // overwritten by the next tick; cleared by PATCH /api/trips/:tripId's
+  // resetDayOfAuto ("Use automatic day").
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "startDate" VARCHAR(10)`);
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "dayOfIsManual" BOOLEAN DEFAULT false`);
 
-  // Real departure time-of-day on the trip's LAST day (2026-07-30 — "Departure
-  // in" was a hardcoded seed string that never changed; this is what a genuine
-  // live countdown needs to count down TO). Same plain-string-not-DATE
-  // reasoning as startDate above: "HH:MM" text, cast to time inline wherever
-  // it's combined with a date. computeDepartureAt() in db/dashboard.js turns
-  // startDate + totalDays + this into one absolute timestamp for the frontend
-  // to tick a countdown against — see the "Departure in" chips on Dashboard/
-  // MobileHomePage/MobileLayout.
+  // Departure time-of-day on the trip's LAST day — what the live "Departure in"
+  // countdown counts down TO. Same plain-string-not-DATE reasoning as startDate;
+  // "HH:MM" cast to time inline. computeDepartureAt() in db/dashboard.js
+  // combines startDate + totalDays + this into one absolute timestamp for the
+  // chips on Dashboard/MobileHomePage/MobileLayout.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "departureTime" VARCHAR(8) DEFAULT '10:00'`);
 
-  // Origin/destination country (2026-07-30 — "add the country from and to" /
-  // "can you say departure back to [country] in [X] hour"). The "Departure
-  // in" chip previously had no way to say WHERE the delegation is departing
-  // BACK TO without hardcoding an assumption (SCCCI trips are Singapore-based,
-  // but hardcoding that string here would silently be wrong the day a trip
-  // isn't). "countryFrom" is what the "Departure back to X" chips read;
-  // "countryTo" isn't consumed by any chip yet but is captured alongside it
-  // since the same form field pair is how staff would naturally think about
-  // it, and it costs nothing to have for later use (itinerary/document
-  // features, an eventual "flying to" chip, etc).
+  // "countryFrom" is what the "Departure back to X" chips read — per-trip
+  // rather than hardcoded, since assuming Singapore would be silently wrong the
+  // day a trip isn't. "countryTo" is captured by the same form pair but not yet
+  // consumed anywhere.
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "countryFrom" VARCHAR(80) DEFAULT 'Singapore'`);
   await run(`ALTER TABLE trips ADD COLUMN IF NOT EXISTS "countryTo" VARCHAR(80)`);
+  // Repairs rows holding the literal TEXT 'null': POST/PATCH /api/trips used to
+  // run String(countryTo) on an explicit JS null, and String(null) is the
+  // 4-character word "null", not an empty string — so `|| null` never caught it
+  // and the trip switcher rendered "Manila Innovation Summit (null)". The write
+  // side is fixed; this repairs already-stored values. Idempotent, so it's safe
+  // on every boot. MUST stay adjacent to the ALTERs above — it originally lived
+  // in trip.js's ensureOpsSchema, which has no ordering guarantee against this
+  // file and therefore threw "column countryTo does not exist" on a fresh DB.
+  await run(`UPDATE trips SET "countryTo" = NULL WHERE "countryTo" = 'null'`);
+  await run(`UPDATE trips SET "countryFrom" = NULL WHERE "countryFrom" = 'null'`);
 
   // users: a lightweight staff directory for coach assignment ONLY (a "guide"
   // per coach). Separate from `accounts` — these rows never sign in anywhere.
@@ -272,10 +222,9 @@ export async function createSchema() {
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS notes               TEXT`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS company             VARCHAR(255)`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS accessibility_notes TEXT`);
-  // Room allocation (2026-07-26) — hotel name + room number, editable from
-  // the delegate profile/Edit modal and the dedicated Room Management tab;
-  // pre-fillable from Vance's document parser (routes/document.js) when a
-  // parsed itinerary/rooming list includes them.
+  // Room allocation — editable from the delegate Edit modal and the Room
+  // Management tab; pre-fillable from Vance's document parser
+  // (routes/document.js) when a parsed rooming list includes them.
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS hotel_name          VARCHAR(255)`);
   await run(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS room_number         VARCHAR(32)`);
 
@@ -294,64 +243,43 @@ export async function createSchema() {
   await run(`CREATE INDEX IF NOT EXISTS idx_delegates_trip ON delegates(trip_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_itinerary_trip ON itinerary_items(trip_id, day_number, sort_order)`);
 
-  // History tracker: the Dashboard's activity feed. Previously an in-memory
-  // array capped at 8 entries — wiped on every backend restart. Now a real
-  // table so past activity survives restarts and accumulates indefinitely.
+  // History tracker: the Dashboard's activity feed. A real table (not the old
+  // in-memory 8-entry array) so activity survives restarts and accumulates.
   await run(`CREATE TABLE IF NOT EXISTS activity_log (
     id VARCHAR(64) PRIMARY KEY, text TEXT NOT NULL, kind VARCHAR(32),
     "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
-  // actor = the account name that performed the action, so the History
-  // tracker can show WHO made each change instead of a generic "you".
-  // Nullable: rows created before this column (and any write that doesn't
-  // pass an actor) fall back to "you" in rowToActivity() (db/history.js).
+  // Who performed the action. Nullable — pre-column rows and writes with no
+  // actor fall back to "you" in rowToActivity() (db/history.js).
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS actor TEXT`);
-  // Field-level rollback support: delegate_id ties an entry back to the row
-  // it changed; changes is {field: {from, to}} for whatever actually
-  // differed in that one update (see updateDelegate()'s diff in
-  // db/delegates.js). Only ever set on delegate-edit entries — add/remove
-  // entries stay non-rollbackable (out of scope for this pass; see AI Log).
+  // Field-level rollback support: delegate_id ties an entry to the row it
+  // changed; changes is {field:{from,to}} for whatever differed in that update
+  // (see updateDelegate()'s diff in db/delegates.js). Only set on delegate-edit
+  // entries — add/remove entries stay non-rollbackable.
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS delegate_id VARCHAR(64)`);
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS changes JSONB`);
   await run(`CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log("createdAt" DESC)`);
-  // trip_id: the History tracker was completely global — every trip's
-  // add/edit/remove activity mixed into one feed, which became unreadable
-  // once more than one trip had real activity happening (2026-07-24). NULL
-  // for older rows and any write with no known trip (kept visible under
-  // "All trips" rather than silently dropped).
+  // Scopes the once-global feed per trip. NULL for older rows and writes with no
+  // known trip — kept visible under "All trips" rather than silently dropped.
   await run(`ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS trip_id UUID`);
   await run(`CREATE INDEX IF NOT EXISTS idx_activity_trip ON activity_log(trip_id, "createdAt" DESC)`);
 
-  /* ---- Multi-checkpoint attendance (JQ, 2026-07-22/23) --------------------
-   * A delegate's single `delegates.status` column stays the authoritative
-   * "current live status" used everywhere else in the app (Dashboard KPIs,
-   * Trips board, mobile) — completely untouched by this. checkpoint_checkins
-   * is a PARALLEL, additive history log: one independent record per delegate
-   * per checkpoint, so a delegate can be ARRIVED at 10am and MISSING at 4pm
-   * without either overwriting the other or the global status.
+  /* ---- Multi-checkpoint attendance (JQ) ----------------------------------
+   * `delegates.status` remains the authoritative live status used everywhere
+   * else (Dashboard KPIs, Trips board, mobile) and is untouched by this.
+   * checkpoint_checkins is a PARALLEL history log: one record per delegate per
+   * checkpoint, so ARRIVED at 10am and MISSING at 4pm coexist without either
+   * overwriting the other or the global status.
    *
-   * 2026-07-23 revision: originally this had its OWN `trip_days`/
-   * `checkpoints` tables (admin manually creates "Day 1 · Bus Boarding"
-   * entries, disconnected from anything else). Replaced that with reading
-   * Desmond's EXISTING `itinerary_items` table instead (day_number,
-   * start_time, title, status, delay_minutes — already exactly "a scheduled
-   * checkpoint on a given day", already maintained by the real Trip board) —
-   * so the scanner's Checkpoint Selector shows the SAME itinerary a staff
-   * member already sees on /trips ("Forbidden City tour, 12:45, Delayed
-   * +20m"), not a disconnected parallel list. This needed no changes to
-   * Desmond's schema/routes/pages — itinerary_items is read directly here,
-   * same read-only-shared-table pattern Vimal's facescan.js already uses for
-   * the `delegates` table. The old trip_days/checkpoints tables are dropped
-   * (created only hours earlier this session, zero real dependents).
-   * See backend/routes/dashboard/checkpoints.js for the endpoints.
+   * Checkpoints are read from Desmond's EXISTING itinerary_items table rather
+   * than a parallel list of our own, so the scanner's Checkpoint Selector shows
+   * the same itinerary staff already see on /trips. Read-only shared table —
+   * same pattern Vimal's facescan.js uses for `delegates`; needs no changes to
+   * Desmond's schema/routes/pages. Endpoints: routes/dashboard/checkpoints.js.
    *
-   * The one-time migration below is GUARDED — it only drops the old table
-   * shape if checkpoint_checkins still has the old `checkpoint_id` column
-   * (meaning it's still on the pre-migration schema). Once migrated, this
-   * whole block is a no-op on every future boot — it must NEVER
-   * unconditionally DROP a table that createSchema() re-runs on every
-   * server start, or real check-in data would be destroyed on every
-   * restart, not just once.
+   * WARNING: the migration below MUST stay guarded on the old `checkpoint_id`
+   * column. createSchema() re-runs on every server start, so an unconditional
+   * DROP would destroy real check-in data on every restart, not just once.
    * ------------------------------------------------------------------- */
   const stillOldShape = await get(
     `SELECT 1 FROM information_schema.columns
@@ -379,13 +307,11 @@ export async function createSchema() {
   await run(`CREATE INDEX IF NOT EXISTS idx_checkin_item ON checkpoint_checkins(itinerary_item_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_checkin_delegate ON checkpoint_checkins(delegate_id, created_at DESC)`);
 
-  /* ---- Emergency escalations (2026-07-24) ---------------------------------
-   * A DELIBERATE, staff-clicked "alert the office" action — never automatic
-   * (per the user: only escalate when staff decides to click). One row per
-   * escalation; `status` moves open -> acknowledged -> resolved. Every
-   * signed-in account polls for open ones (see routes/dashboard/escalations.js) so
-   * office/admin staff see an unmissable banner regardless of which page
-   * they're on. */
+  /* ---- Emergency escalations ----------------------------------------------
+   * A DELIBERATE, staff-clicked "alert the office" action — must never be
+   * automatic. `status` moves open -> acknowledged -> resolved. Every signed-in
+   * account polls for open ones (routes/dashboard/escalations.js) so the banner
+   * is unmissable regardless of page. */
   await run(`CREATE TABLE IF NOT EXISTS escalations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     trip_id UUID REFERENCES trips(uuid_id) ON DELETE SET NULL,
@@ -401,15 +327,12 @@ export async function createSchema() {
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status, created_at DESC)`);
 
-  // Trip Announcements (2026-07-25) — admin-posted critical updates, scoped
-  // per trip, visible to every signed-in Staff/Admin viewing that trip (own
-  // "viewAnnouncements" desktopView permission, defaults true — see
-  // permissions.js; only POSTING is admin-only, enforced in
-  // routes/announcements.js). Own dedicated page (2026-07-26) rather than a
-  // Dashboard widget — "make it a separate page... follow the trip ongoing
-  // itinerary" — so an announcement can optionally tag the itinerary stop
-  // it's about (itinerary_item_id, nullable — a general/trip-wide notice
-  // just leaves it null).
+  // Trip Announcements — admin-posted critical updates, scoped per trip,
+  // visible to any signed-in Staff/Admin viewing it ("viewAnnouncements"
+  // desktopView permission, defaults true — see permissions.js). Only POSTING
+  // is admin-only, enforced in routes/announcements.js. An announcement can
+  // optionally tag the itinerary stop it's about (itinerary_item_id, nullable —
+  // a trip-wide notice leaves it null).
   await run(`CREATE TABLE IF NOT EXISTS announcements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     trip_id UUID REFERENCES trips(uuid_id) ON DELETE CASCADE,
@@ -419,36 +342,28 @@ export async function createSchema() {
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_announcements_trip ON announcements(trip_id, created_at DESC)`);
-  // Optional image (2026-07-26 — "can give option to add image so can see
-  // the next location etc.") — same Cloudinary photoUrl/photoPublicId
-  // pattern as accounts/delegates, own "mustergo/announcements" folder (see
-  // routes/announcements.js) so deleting one never touches account/delegate
-  // photos.
+  // LEGACY single image — same Cloudinary pattern as accounts/delegates, own
+  // "mustergo/announcements" folder (routes/announcements.js) so deleting one
+  // never touches account/delegate photos. Superseded by `images` below but
+  // still rendered for old rows.
   await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS "imageUrl" TEXT`);
   await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS "imagePublicId" TEXT`);
-  // Optional itinerary-stop tag (2026-07-26 bugfix: this was originally
-  // inside the CREATE TABLE above, which no-ops once the table already
-  // exists — moved to its own ALTER, same as imageUrl/imagePublicId, so it
-  // actually lands on a database that already had this table from before
-  // this column existed).
+  // These stay as their own ALTERs, not inside the CREATE TABLE above — the
+  // CREATE no-ops once the table exists, so a column added there never lands on
+  // an existing database.
   await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS itinerary_item_id UUID REFERENCES itinerary_items(id) ON DELETE SET NULL`);
-  // Multiple images per announcement (2026-07-27) — the ORIGINAL "imageUrl"/
-  // "imagePublicId" columns above only ever held one photo; new posts store
-  // every photo here instead (array of {url, publicId}), while old rows keep
+  // New posts store every photo here as [{url, publicId}]; old rows keep
   // rendering via the legacy single column (see db/announcements.js's doc).
   await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS images JSONB NOT NULL DEFAULT '[]'::jsonb`);
-  // Videos per announcement (2026-07-27 — "give me... video upload also")
-  // — same {url, publicId} array shape as images, uploaded via
-  // lib/cloudinary.js's uploadVideo/destroyVideo (already added for the User
-  // Guide walkthrough video, reused here for the same resource_type:"video"
-  // Cloudinary handling).
+  // Same {url, publicId} array shape as images, uploaded via lib/cloudinary.js's
+  // uploadVideo/destroyVideo (shared with the User Guide walkthrough video —
+  // same resource_type:"video" handling).
   await run(`ALTER TABLE announcements ADD COLUMN IF NOT EXISTS videos JSONB NOT NULL DEFAULT '[]'::jsonb`);
 
-  // Single-row table backing the User Guide's "Walkthrough video" placeholder
-  // (2026-07-26) — global, not per-trip, so a fixed id=1 row is simplest.
-  // Admin uploads once from the Getting Started tab; every account sees the
-  // same video. Cloudinary asset lives in the "mustergo/guide" folder (see
-  // lib/cloudinary.js's GUIDE_VIDEO_FOLDER).
+  // Backs the User Guide's "Walkthrough video" — global, not per-trip, so a
+  // fixed id=1 row is simplest. Admin uploads once from Getting Started; every
+  // account sees the same video. Cloudinary folder "mustergo/guide" (see
+  // GUIDE_VIDEO_FOLDER in lib/cloudinary.js).
   await run(`CREATE TABLE IF NOT EXISTS guide_video (
     id SMALLINT PRIMARY KEY DEFAULT 1,
     url TEXT,
@@ -460,42 +375,35 @@ export async function createSchema() {
 }
 
 export async function seed() {
-  // First "admin" account (once) — was seeded as role "main" before the RBAC
-  // simplification to exactly Admin/Staff; see the migration right below this
-  // for existing shared-DB rows still holding the retired "main" value.
+  // First "admin" account (once).
   if (!(await get("SELECT id FROM accounts LIMIT 1"))) {
     const perms = defaultPermsForRole("admin");
     await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
       "u-1", "staff_194", "Staff 194", await hashPassword("password123!"), "admin", JSON.stringify(perms), new Date().toISOString(),
     ]);
   }
-  // Migration: the team's shared Neon DB has real accounts already seeded
-  // with the retired "main" role from before RBAC was simplified to exactly
-  // Admin/Staff. Runs on every startup (idempotent — a no-op once none are
-  // left) so every deploy picks it up without a manual DB fix.
+  // Retires the pre-RBAC-simplification "main" role still present on real rows
+  // in the team's shared Neon DB. Idempotent, runs every startup so deploys
+  // pick it up without a manual DB fix.
   await run(`UPDATE accounts SET role = 'admin' WHERE role = 'main'`);
-  // Passwordless-kiosk backing account. The entrance scanner (KioskScannerPage
-  // .jsx) mints a scoped {kiosk:true} token (auth.js signKioskToken) that grants
-  // ONLY the two camera check-in endpoints; requireKioskOrAuth() maps those
-  // requests to THIS row so writes that FK onto accounts.id (check_in_logs
-  // .checked_in_by) still resolve. It has an unguessable random password and is
-  // never meant to be logged into via the password flow. Role "staff" (its
-  // stored permissions are moot — requireKioskOrAuth never checks them, and no
-  // password login can reach it).
+  // Passwordless-kiosk backing account. KioskScannerPage.jsx mints a scoped
+  // {kiosk:true} token (signKioskToken in auth.js) granting ONLY the two camera
+  // check-in endpoints; requireKioskOrAuth() maps those requests to THIS row so
+  // writes that FK onto accounts.id (check_in_logs.checked_in_by) resolve.
+  // Password is unguessable random and must stay that way — this row is never
+  // meant to be reachable via the password login flow. Its stored permissions
+  // are moot (requireKioskOrAuth never checks them).
   if (!(await get("SELECT id FROM accounts WHERE username = $1", ["__kiosk__"]))) {
     const throwaway = `kiosk-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     await run(`INSERT INTO accounts (id, username, name, password, role, permissions, "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
       "u-kiosk", "__kiosk__", "Entrance Kiosk", await hashPassword(throwaway), "staff", JSON.stringify(defaultPermsForRole("staff")), new Date().toISOString(),
     ]);
   }
-  // Default role templates — the 2 starting points every deployment gets;
-  // admins can rename/edit/delete these or add more from Account control's
-  // "Manage roles" screen afterward, same as any other row here. Each row is
-  // its own idempotent "insert if this SPECIFIC id is missing" (not one
-  // "insert both if the table is empty" gate) — the latter raced with
-  // `node --watch` restarting mid-seed while these lines were being edited,
-  // leaving only the first of the two ever inserted before the "any row
-  // exists" check started skipping both on every later boot.
+  // Default role templates — starting points; admins can rename/edit/delete
+  // them from Account control's "Manage roles". Each row is gated on its OWN id
+  // being missing, NOT on "the table is empty": that variant raced with
+  // `node --watch` restarting mid-seed, leaving only the first row inserted and
+  // then skipped forever after.
   const DEFAULT_ROLE_TEMPLATES = [
     {
       id: "onsite", label: "Onsite Headcount Staff",
@@ -504,7 +412,7 @@ export async function seed() {
         manageDocuments: false, exportData: false, manageTrips: false, manageExceptions: false,
         viewDashboard: true, viewDelegates: true, viewTrips: true, viewChatbot: true, viewHistory: true,
         viewDocuments: false, viewExceptions: false,
-        viewMobileHome: true, viewMobileScannerQr: true, viewMobileScannerFace: true, viewMobileScannerManual: true,
+        viewMobileHome: true, viewMobileScannerFace: true,
         viewMobileIssues: true, viewMobileAttendance: true, viewMobileTrips: true, viewMobileChatbot: true,
       },
     },
@@ -535,14 +443,14 @@ export async function seed() {
     }
   }
 
-  // Desmond "TransitFlow" seed + backfill (folded from database/003_*.sql).
+  // Desmond "TransitFlow" seed + backfill.
   await seedTransitFlow();
 }
 
-/* Seed the staff directory and attach existing coaches/delegates to the
- * Beijing trip so nothing "disappears" once the trip board filters by trip_id.
- * Everything here is idempotent (ON CONFLICT / WHERE ... IS NULL), so it runs
- * safely on every startup — it only ever fills gaps, never overwrites edits. */
+/* Seed the staff directory and attach existing coaches/delegates to the Beijing
+ * trip so nothing "disappears" once the trip board filters by trip_id.
+ * Everything here must stay idempotent (ON CONFLICT / WHERE ... IS NULL) — it
+ * runs on every startup and may only fill gaps, never overwrite edits. */
 async function seedTransitFlow() {
   // 1. Staff directory (6 people) — assignment targets only, not login accounts.
   await run(`

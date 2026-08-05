@@ -15,12 +15,10 @@ const UNASSIGNED_KEY = "__unassigned";
 /**
  * Export configuration modal — opened from the Dashboard's "Export" button.
  *
- * Lets a coordinator choose EXACTLY what the Excel workbook contains (status,
- * coach, VIP, and which columns) before downloading, plus a natural-language
- * box that asks the backend's AI layer to translate a plain request into those
- * same structured filters (which then populate the checkboxes below, fully
- * editable — the AI never produces the file directly). Download streams a
- * polished multi-sheet workbook from POST /api/trips/:id/export.
+ * Picks what the workbook contains (status, coach, VIP, columns) before
+ * downloading from POST /api/trips/:id/export. The natural-language box only
+ * translates a request into those same structured filters and populates the
+ * checkboxes — the AI never produces the file itself.
  */
 export default function ExportModal({ tripId, onClose, onExported }) {
   const { t, lang } = useLang();
@@ -32,24 +30,15 @@ export default function ExportModal({ tripId, onClose, onExported }) {
   const [vipOnly, setVipOnly] = useState(false);
   const [columns, setColumns] = useState([]);
   const [includeAiSummary, setIncludeAiSummary] = useState(false);
-  // Defaults ON (2026-07-25 — "the whole purpose of this export is [seeing]
-  // the time of delegate status... at end of event, [or] in middle of
-  // event") — the per-checkpoint record is the actual meaningful audit trail
-  // once a trip ends, unlike the Delegates sheet's status column, which is
-  // only ever a snapshot of a value the reset/late-cutoff schedulers keep
-  // changing. Still toggleable off for someone who genuinely just wants the
-  // lightweight live snapshot.
+  // Defaults ON: the per-checkpoint record is the real audit trail once a trip
+  // ends. The Delegates sheet's status column is only a snapshot of a value the
+  // reset/late-cutoff schedulers keep changing.
   const [includeCheckpoints, setIncludeCheckpoints] = useState(true);
-  // The workbook's own language — an independent, explicit per-export choice
-  // (defaults to the app's current UI language, but overridable), since a
-  // staff member might work in English but need to hand a Chinese-language
-  // report to someone else, or vice versa.
+  // Workbook language is a per-export choice, not the UI language — staff may
+  // work in English but hand off a Chinese report. Defaults to UI lang only.
   const [exportLang, setExportLang] = useState(lang);
-  // Which Analytics charts to embed as images. Sourced from the live registry
-  // in lib/chartCapture.js, so this list is exactly what's rendered right now
-  // on the Analytics tab (nothing else can be captured — see the Charts
-  // Section below). Defaults to none ticked: a chart-heavy workbook is a
-  // deliberate choice, not something to surprise someone with.
+  // Charts to embed as images, from lib/chartCapture.js's live registry — only
+  // what's rendered on Analytics right now can be captured. Defaults to none.
   const availableCharts = useSyncExternalStore(subscribeCharts, listCharts);
   const [selectedCharts, setSelectedCharts] = useState([]);
 
@@ -61,9 +50,8 @@ export default function ExportModal({ tripId, onClose, onExported }) {
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
-  // Only dismiss if the WHOLE click gesture started on the backdrop, not
-  // wherever the mouse was released after a drag-select that began in the
-  // AI prompt field (native "click" fires on the mouseup target).
+  // Native "click" fires on the mouseup target, so without this a drag-select
+  // started in the AI prompt field would dismiss the modal.
   const downOnBackdrop = useRef(false);
 
   useEffect(() => {
@@ -109,9 +97,8 @@ export default function ExportModal({ tripId, onClose, onExported }) {
     setBusy(true);
     setErr(null);
     try {
-      // Captured here, at download time, rather than when the boxes were
-      // ticked — the charts are live, so this picks up whatever the numbers
-      // are NOW rather than whenever the modal happened to be opened.
+      // Captured at download time, not at tick time — charts are live, so this
+      // reflects current numbers, not the numbers when the modal opened.
       const charts = selectedCharts.length ? await captureCharts(selectedCharts) : [];
       const res = await fetch(`${API_BASE}/trips/${tripId}/export`, {
         method: "POST",
@@ -136,10 +123,8 @@ export default function ExportModal({ tripId, onClose, onExported }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      // Confirmation toast (2026-07-31 — "add this pop up when I try to
-      // export my excel") — same idea as Jayden's "Exported N tickets" toast
-      // on the Exceptions inbox; downloading a workbook used to just close
-      // this modal with no feedback that anything happened.
+      // Confirmation toast — matches Jayden's "Exported N tickets" toast on the
+      // Exceptions inbox; without it the modal just closes silently.
       onExported?.();
       onClose();
     } catch (e) {
@@ -209,13 +194,10 @@ export default function ExportModal({ tripId, onClose, onExported }) {
                 {aiBusy ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />} {aiBusy ? `${t("Apply")} ${aiElapsed}s` : t("Apply")}
               </button>
             </div>
-            {/* "What you can ask" guidance while idle, elapsed-time readout
-                while busy — never both (2026-07-24, same treatment as the
-                Analytics chart-assist box). This only ever produces a
-                status/coach/VIP filter — it can't filter by company,
-                industry, or any date/time — so that's spelled out up front
-                rather than letting a request for something it can't do
-                silently produce a wrong or empty filter. */}
+            {/* Guidance while idle, elapsed time while busy — never both (same
+                as the Analytics chart-assist box). The limits are spelled out
+                because this only produces status/coach/VIP filters; asking for
+                company/industry/date would silently yield a wrong filter. */}
             {aiBusy ? (
               <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
                 {t("usually 5–20s, longer if using local AI")}
@@ -266,14 +248,11 @@ export default function ExportModal({ tripId, onClose, onExported }) {
               label={t("Include per-checkpoint history")} hint={t("A separate sheet: every stop each delegate was arrived/late/missing at, not just their current status.")} />
           </div>
 
-          {/* Chart images (2026-07-29) — replaces the per-chart CSV buttons
-              that used to sit on each Analytics card. Charts go in as PICTURES
-              on their own sheet, which is what makes them usable in a report
-              or a slide; a CSV of the same numbers needed rebuilding by hand.
-              Only charts currently rendered on the Analytics tab can be
-              captured (there's no <svg> to read otherwise), so the list is
-              driven by what's actually on screen and says so when it's
-              empty — rather than offering charts that would export blank. */}
+          {/* Charts go in as PICTURES on their own sheet, so they're usable in
+              a report or slide (the old per-chart CSVs needed rebuilding by
+              hand). Only charts currently rendered on Analytics can be captured
+              — no <svg> to read otherwise — so the list is driven by what's on
+              screen, and says so when empty rather than exporting blanks. */}
           <Section
             title={t("Charts")}
             hint={availableCharts.length ? `${selectedCharts.length}/${availableCharts.length} ${t("selected")}` : undefined}

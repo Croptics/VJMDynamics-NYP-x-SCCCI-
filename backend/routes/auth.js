@@ -18,7 +18,9 @@ import { Router } from "express";
 import multer from "multer";
 import { wrap } from "../lib/wrap.js";
 import { rateLimit } from "../lib/rateLimit.js";
-import { makeToken, accountFromReq, requireAuth, signKioskToken } from "../lib/auth.js";
+// signKioskToken is deliberately NOT imported any more — see the note where the
+// public kiosk-token endpoint used to be, further down.
+import { makeToken, accountFromReq, requireAuth } from "../lib/auth.js";
 import { isConfigured as photoStorageConfigured, uploadImage, destroyImage } from "../lib/cloudinary.js";
 import {
   getAccountByUsername,
@@ -246,16 +248,28 @@ router.delete("/api/auth/me/photo", requireAuth(), wrap(async (req, res) => {
 }));
 
 /**
- * POST /api/auth/kiosk — mint a passwordless, scoped KIOSK token for the
- * entrance scanner. Public BY DESIGN (the passwordless kiosk fetches it with
- * no credentials); the token grants nothing beyond the two camera check-in
- * endpoints that opt into requireKioskOrAuth()/requireKioskOrPermission() —
- * see ../auth.js and KioskScannerPage.jsx. Cheap + stateless, so no rate
- * limiter needed (it authorises no reads and only the same check-ins a
- * normal scan would).
+ * REMOVED 2026-08-05: POST /api/auth/kiosk used to mint a passwordless kiosk
+ * token to ANY caller — no credentials, no rate limit, 8h validity.
+ *
+ * The original note said it was safe because the token "only" reached the two
+ * camera check-in endpoints. That reasoning didn't hold: one of those,
+ * POST /api/checkpoints/:id/checkins, takes a RAW `{ delegateId, status }`
+ * body — no scanned badge required — and delegate ids are sequential (`d-1`,
+ * `d-2`, … see nextId() in db/delegates.js). So anyone who could reach the
+ * server could mint a token and mark any delegate ARRIVED/MISSING/LATE at any
+ * checkpoint, with no admin involvement. For an attendance system whose whole
+ * value is a trustworthy headcount, that's an integrity hole, not a shortcut.
+ *
+ * The scanner now runs on a NORMAL staff session (KioskScannerPage.jsx), so it
+ * is scoped to that account's own trip/coach and every check-in is attributable.
+ * Convenience is preserved by the existing passkey flow below — face/fingerprint
+ * sign-in after the first password login.
+ *
+ * signKioskToken()/requireKioskOrAuth()/requireKioskOrPermission() are left in
+ * lib/auth.js on purpose: the two require* helpers still authorise ordinary
+ * signed-in accounts by permission, which is how those routes work now. Nothing
+ * can issue a kiosk token any more. Do NOT re-add this endpoint without a
+ * server-side pairing step (an admin-generated, short-lived code) — see AI Log 261.
  */
-router.post("/api/auth/kiosk", (_req, res) => {
-  res.json({ token: signKioskToken() });
-});
 
 export default router;

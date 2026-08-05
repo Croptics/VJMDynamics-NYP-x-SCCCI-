@@ -44,6 +44,7 @@ import {
 // exception"), instead of the fixed base TRIP_ID this inbox used to always
 // read regardless of which trip Home had selected.
 import { getMobileTripId } from "../../../lib/mobileTrip.js";
+import { useVisiblePolling } from "../../../lib/useVisiblePolling.js";
 // Offline-capable READ (2026-07-31) — the Exceptions inbox is one of the
 // pages flagged as most important ("the manual, attendance, exception,
 // trip"): load() below used to just error out on any failure, including a
@@ -163,6 +164,7 @@ export default function MobileExceptionsPage() {
   }, []);
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError("");
     const tripId = getMobileTripId();
     try {
@@ -180,7 +182,21 @@ export default function MobileExceptionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { setLoading(true); load(); }, [load]);
+  // 2026-08-04 ("home, ops, exception page still show beijing") — this used
+  // to be `useEffect(() => { setLoading(true); load(); }, [load])`. `load`
+  // is a `useCallback` with an EMPTY dep array, so its reference never
+  // changes for the component's whole lifetime — meaning that effect fired
+  // EXACTLY ONCE, at mount, and never again. `getMobileTripId()` is read
+  // fresh INSIDE `load()` every time it's actually called, so the mechanism
+  // itself was fine — the bug was that nothing ever called it again after
+  // mount except a live SSE event or a user action (see the two other
+  // `load()` call sites below). If MobileLayout's trip-scope auto-correct
+  // (checkTripScope) landed AFTER this page's one-and-only fetch, and no
+  // SSE event or action happened to fire in between, this list was stuck on
+  // whatever trip was cached at that first mount for the rest of the
+  // session. `useVisiblePolling` gives it the same periodic self-heal every
+  // other trip-scoped mobile page already has (Attendance, Ops, Announcements).
+  useVisiblePolling(load, 15000, [load]);
 
   useEffect(() => {
     const off = subscribeStream((event) => {

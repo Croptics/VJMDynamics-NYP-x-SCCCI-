@@ -2,26 +2,19 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Emergency escalations
  *
- *  Outbound notification channels for escalations (routes/dashboard/escalations.js).
- *  Three tiers, per the user's request:
- *   1. In-app banner (frontend, polls GET /api/escalations/open) — always on.
- *   2. Tab-flash/chime (frontend) — always on, no config needed.
- *   3. Real out-of-app channels, here:
- *      - Email: LIVE, via nodemailer + any SMTP provider (Gmail app password,
- *        SendGrid SMTP relay, AWS SES SMTP, etc. — all speak the same
- *        protocol, so no per-provider code needed). Configure SMTP_HOST/
- *        SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM in backend/.env.
- *      - SMS / WhatsApp: STUBBED, not wired to a real provider — these cost
- *        money per message (Twilio et al.), so nothing fires until you
- *        explicitly decide to pay for it and fill in the env vars below.
- *        The Twilio call is written and ready to uncomment; until then it
- *        only logs what WOULD have been sent, so you can see this working
- *        end-to-end (including in the escalation's own audit trail) with
- *        zero cost, and flip it on later by installing `twilio` and setting
- *        TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER (SMS) or
- *        TWILIO_WHATSAPP_FROM (WhatsApp, needs Twilio's WhatsApp sender
- *        approved first) + ESCALATION_SMS_TO / ESCALATION_WHATSAPP_TO
- *        (comma-separated phone numbers in E.164 format, e.g. +6591234567).
+ *  Out-of-app notification channels for escalations, used by
+ *  routes/dashboard/escalations.js. (The in-app banner and tab-flash/chime are
+ *  frontend-side and always on.)
+ *   - Email: LIVE, via nodemailer + any SMTP provider (Gmail app password,
+ *     SendGrid, AWS SES — all speak SMTP, so no per-provider code). Set
+ *     SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM in backend/.env.
+ *   - SMS / WhatsApp: STUBBED because Twilio charges per message. The calls are
+ *     written and ready to uncomment; until then they only log what WOULD have
+ *     been sent, so the flow is testable end-to-end at zero cost. To enable:
+ *     `npm install twilio` and set TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN plus
+ *     TWILIO_FROM_NUMBER (SMS) or TWILIO_WHATSAPP_FROM (needs Twilio's WhatsApp
+ *     sender approved first), and ESCALATION_SMS_TO / ESCALATION_WHATSAPP_TO
+ *     (comma-separated E.164 numbers, e.g. +6591234567).
  * ============================================================================= */
 import nodemailer from "nodemailer";
 
@@ -43,11 +36,10 @@ export function emailConfigured() {
   return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 }
 
-/** Builds the HTML body for an escalation email (2026-07-25) — richer than
- *  the plain-text version so office staff have full context WITHOUT opening
- *  the app: delegate phone as a tap-to-call link, last known location as a
- *  Google Maps link. Both are optional (a message-only escalation, or a
- *  delegate with no phone/location on file, just omits those lines). */
+/** HTML body for an escalation email — richer than the plain-text version so
+ *  office staff have full context WITHOUT opening the app: phone as tap-to-call,
+ *  last known location as a Google Maps link. Both optional (a message-only
+ *  escalation, or no phone/location on file, just omits those lines). */
 export function buildEscalationHtml({ actor, message, delegateName, phone, lastLocation, tripName }) {
   const rows = [];
   if (delegateName) rows.push(`<p style="margin:0 0 8px"><strong>Delegate:</strong> ${escapeHtml(delegateName)}</p>`);
@@ -110,8 +102,7 @@ export async function sendEscalationSms(body) {
     return { sent: 0, configured: false };
   }
 
-  // Uncomment once `npm install twilio` and the TWILIO_* env vars above are
-  // set. Left commented (not deleted) so the exact shape is ready to go —
+  // Uncomment once `npm install twilio` and the TWILIO_* env vars are set —
   // this is the ENTIRE integration, nothing else needs to change.
   //
   // const twilio = (await import("twilio")).default;
@@ -144,9 +135,8 @@ export async function sendEscalationWhatsApp(body) {
     return { sent: 0, configured: false };
   }
 
-  // Same Twilio client as SMS above, just a `whatsapp:` prefixed from/to pair
-  // — Twilio's WhatsApp sender needs to be approved/set up first, separate
-  // from a plain SMS number. Uncomment once that's done:
+  // Same Twilio client as SMS above, just `whatsapp:`-prefixed from/to. Needs
+  // Twilio's WhatsApp sender approved first, separate from a plain SMS number.
   //
   // const twilio = (await import("twilio")).default;
   // const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);

@@ -6,22 +6,16 @@ import { useEffect, useRef } from "react";
 import { apiGet, getUser, getPermissions, updateSession } from "./api.js";
 import { translate } from "./i18n.jsx";
 
-// How often (ms) to re-check whether the session is still valid — e.g. an
-// admin edited/deleted this account, or (the reason this now runs on mobile
-// too) someone logged into this same account elsewhere, which invalidates
-// this token server-side via token_version. Also re-checks immediately
-// whenever the tab regains focus, so switching back catches it sooner.
+// How often (ms) to re-check session validity: an admin edited/deleted this
+// account, or someone logged into it elsewhere (which bumps token_version
+// server-side). Also re-checks on tab focus so switching back catches it sooner.
 const SESSION_CHECK_INTERVAL_MS = 15000;
 
 /**
- * Polls GET /api/auth/session and force-logs-out on a 401 (token no longer
- * valid — renamed/deleted account, or someone else logged into this account
- * elsewhere) or a permissions/username change. Shared by the desktop Layout
- * and MobileLayout so a session ends everywhere it's actually invalidated,
- * not just wherever happens to notice on its own — previously only the
- * desktop shell ran this check, so a mobile session logged in elsewhere
- * would keep looking "active" (just failing every API call) instead of
- * being cleanly logged out.
+ * Polls GET /api/auth/session and force-logs-out on a 401 or on a
+ * permissions/username change. Shared by the desktop Layout AND MobileLayout —
+ * mobile must run it too, or a mobile session invalidated elsewhere keeps
+ * looking "active" while every API call silently fails.
  */
 export function useSessionGuard(onLogout) {
   const checkingRef = useRef(false);
@@ -41,31 +35,20 @@ export function useSessionGuard(onLogout) {
           forceLogout("Your account access was updated. Please sign in again.");
           return;
         }
-        // Keep the stored user object's display-only fields (email, photo,
-        // name) in sync with the backend (2026-07-24) — previously these
-        // only ever got written by the Settings page's own self-edit save,
-        // so an account's email could be set on the backend (e.g. via
-        // registration) yet never actually show up anywhere in the UI until
-        // the user happened to open Settings and hit Save once.
-        // role added to this sync (2026-07-30 — "change the jq part to
-        // either admin or staff"): a session cached from before login
-        // started storing `role` had none at all, so the Sidebar's role
-        // label fell back to showing the raw Staff ID, which read as a bug.
-        // Syncing it here means that self-corrects on the next 15s poll or
-        // tab focus, without needing a fresh login.
-        // id added (2026-08-03, delegate ownership/lock feature) — same
-        // self-correcting sync as role above: a session cached from before
-        // login started returning `id` had none at all, which would make
-        // every "did I create this?" check silently fail for an
-        // already-logged-in account until they next logged out and back in.
+        // Sync display-only fields from the backend. Without this they'd only
+        // ever be written by the Settings page's self-edit save, so a value set
+        // server-side (e.g. email at registration) would never surface.
+        // `role` and `id` are here for the same reason: a session cached from
+        // before login started returning them has none, which broke the
+        // Sidebar's role label and every delegate "did I create this?" check.
+        // Syncing self-corrects on the next poll or focus, no re-login needed.
         if (fresh.email !== before.email || fresh.photoUrl !== before.photoUrl || fresh.name !== before.name || fresh.role !== before.role || fresh.readOnly !== before.readOnly || fresh.id !== before.id) {
           updateSession({ user: { email: fresh.email, photoUrl: fresh.photoUrl, name: fresh.name, role: fresh.role, readOnly: fresh.readOnly, id: fresh.id } });
         }
       } catch (e) {
-        // 401 means the token no longer resolves to any account — it was
-        // renamed/deleted, or a newer login elsewhere invalidated it. Any
-        // other error (e.g. the backend being briefly unreachable) is
-        // ignored; we just try again next tick.
+        // 401 = token resolves to no account (renamed/deleted, or a newer login
+        // elsewhere). Any other error (backend briefly unreachable) is ignored
+        // deliberately — retry next tick rather than log the user out.
         if (e.status === 401) {
           forceLogout("Your account is no longer valid. Please sign in again.");
         }

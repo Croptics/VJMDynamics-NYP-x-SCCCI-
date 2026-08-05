@@ -7,11 +7,10 @@
  *  README/INTEGRATION_NOTES.md for what's yours vs. what's off-limits.
  * ============================================================================= */
 /**
- * Derived read views (trip lookup, trip-id resolution, the Dashboard's
- * combined summary, the missing-delegates list). Split out of the old
- * monolithic data.js (2026-07-21). Depends on db/delegates.js (listDelegates)
- * and db/history.js (getActivity) — one-directional, neither of those
- * depends back on this file.
+ * Derived read views (trip lookup, trip-id resolution, the Dashboard's combined
+ * summary, the missing-delegates list). Depends on db/delegates.js
+ * (listDelegates) and db/history.js (getActivity) — keep that one-directional;
+ * neither of those may depend back on this file.
  */
 
 import { all, get, run } from "./connection.js";
@@ -19,20 +18,15 @@ import { TRIP } from "./constants.js";
 import { listDelegates } from "./delegates.js";
 import { getActivity } from "./history.js";
 
-// "departureAt" is computed here, not stored — it's the one absolute instant
-// (departure day = the trip's LAST day) that "startDate" + "totalDays" +
-// "departureTime" imply together, so nothing has to re-derive it (or risk
-// disagreeing with the DB) every time it's read. NULL whenever any of the
-// three inputs is missing, which the frontend treats as "no live countdown
-// available yet" and falls back to the legacy static "departsIn" string.
-// Same Asia/Singapore anchor as syncTripDayOf() below, for the same reason:
-// every delegation is Singapore-organised. The cast chain matters — adding
-// "departureTime"::time to a bare ::date gives a naive `timestamp`; THEN
-// applying `AT TIME ZONE` on that naive value is what correctly interprets
-// it as Singapore wall-clock time and converts it to a real instant (the
-// reverse of syncTripDayOf's `NOW() AT TIME ZONE` below, which converts an
-// instant TO naive local time — same operator, opposite direction depending
-// on which side of it is timezone-aware).
+// "departureAt" is computed, not stored — the absolute instant implied by
+// "startDate" + "totalDays" + "departureTime" (departure day = the trip's LAST
+// day), so nothing re-derives it and risks disagreeing with the DB. NULL if any
+// input is missing; the frontend reads that as "no live countdown" and falls
+// back to the legacy static "departsIn" string. Asia/Singapore anchor as in
+// syncTripDayOf() below. The cast chain matters: date + ::time yields a NAIVE
+// timestamp, and `AT TIME ZONE` on a naive value interprets it as Singapore
+// wall-clock and converts TO an instant — the opposite direction from
+// syncTripDayOf's `NOW() AT TIME ZONE`, same operator.
 const DEPARTURE_AT_SQL = `(("startDate"::date + ("totalDays" - 1) * INTERVAL '1 day' + "departureTime"::time) AT TIME ZONE 'Asia/Singapore') AS "departureAt"`;
 
 export async function getTrip(tripUuid = null) {
@@ -43,20 +37,14 @@ export async function getTrip(tripUuid = null) {
   return (await get(`SELECT *, ${DEPARTURE_AT_SQL} FROM trips LIMIT 1`)) || TRIP;
 }
 
-/** Recomputes "dayOf" from the real calendar date for every trip that has a
- *  "startDate" set and hasn't been manually overridden (see schema.js's
- *  comment on both columns). Called on the same 60s tick as the checkpoint
- *  scheduler (server.js) so "Day X of Y" stays correct across midnight
- *  without anyone editing it by hand — and also called once immediately
- *  after a trip's startDate changes or its override is cleared (see
- *  routes/trip.js), so the UI doesn't have to wait for the next tick.
- *  Pass a tripUuid to scope to one trip; omit to sync every trip.
+/** Recomputes "dayOf" from the calendar date for every trip with a "startDate"
+ *  and no manual override (see schema.js's comment on both columns). Runs on
+ *  the same 60s tick as the checkpoint scheduler (server.js), plus immediately
+ *  after a startDate change or override clear (routes/trip.js) so the UI
+ *  doesn't wait a tick. Pass a tripUuid to scope; omit to sync every trip.
  *
- *  Uses Asia/Singapore, NOT the database session's default timezone (Neon
- *  defaults to UTC) — every delegation is Singapore-organised and travelling
- *  within China, both UTC+8. Rolling this over at CURRENT_DATE (UTC
- *  midnight) would have flipped the day 8 hours late, at 8am local time, not
- *  actual local midnight. */
+ *  Must use Asia/Singapore, NOT the session timezone (Neon defaults to UTC).
+ *  CURRENT_DATE would roll the day over at UTC midnight = 8am local. */
 export async function syncTripDayOf(tripUuid = null) {
   await run(
     `UPDATE trips
@@ -68,22 +56,14 @@ export async function syncTripDayOf(tripUuid = null) {
 }
 
 /** Resolve a dashboard :id param to the trip uuid to scope every read/write by.
- *  "t-1" (the base Beijing trip) now resolves to the REAL Beijing trip uuid,
- *  not null.
  *
- *  WHY (this fixed two linked bugs): "t-1" used to mean "null = show every
- *  delegate/coach across ALL trips". That was fine while only Beijing had data,
- *  but once other trips got their own coaches/delegates it meant (a) the base
- *  dashboard's Coach status listed coaches that belong to OTHER trips (looked
- *  like stray "placeholder" coaches), and (b) a delegate added on the base
- *  dashboard was created with trip_id = NULL, so it showed on the dashboard
- *  (null = everything) but NEVER on Desmond's Trips board (which filters by the
- *  trip uuid) — e.g. "desmond" was missing there. Scoping "t-1" to the real
- *  Beijing uuid makes the base dashboard and the Trips board the exact same
- *  dataset, so they stay in sync. The startup backfill in seedTransitFlow()
- *  (db/schema.js) already attaches any legacy NULL-trip rows to Beijing, so
- *  nothing vanishes. Falls back to null only if the Beijing trip somehow has
- *  no uuid yet. */
+ *  RULE: "t-1" (the base Beijing trip) MUST resolve to the real Beijing trip
+ *  uuid, never null. When it meant null ("all trips"), the base dashboard
+ *  listed other trips' coaches, and delegates added there got trip_id = NULL so
+ *  they appeared on the dashboard but never on the Trips board (which filters
+ *  by uuid). Scoping to the real uuid keeps both views on one dataset.
+ *  seedTransitFlow() (db/schema.js) backfills legacy NULL-trip rows to Beijing.
+ *  Falls back to null only if the Beijing trip somehow has no uuid. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function resolveTripUuid(tripId) {
@@ -92,12 +72,10 @@ export async function resolveTripUuid(tripId) {
     const t = await get("SELECT uuid_id FROM trips WHERE id = 't-1'");
     return t?.uuid_id || null;
   }
-  // A malformed/garbage tripId (not "t-1" and not a real uuid) used to throw
-  // ("invalid input syntax for type uuid") instead of just not matching, since
-  // Postgres validates the $1 parameter's shape against the uuid_id column's
-  // type before it even gets to compare values. Callers that pass through a
-  // client-supplied id (e.g. a stale/tampered URL param) need this to resolve
-  // to null like any other non-match, not 500.
+  // Shape-check before querying: Postgres validates $1 against uuid_id's type
+  // before comparing values, so a garbage tripId throws ("invalid input syntax
+  // for type uuid") rather than not matching. Client-supplied ids (stale or
+  // tampered URL params) must resolve to null like any other non-match, not 500.
   if (!UUID_RE.test(tripId)) return null;
   const t = await get("SELECT uuid_id FROM trips WHERE uuid_id = $1", [tripId]);
   return t?.uuid_id || null;
@@ -110,33 +88,21 @@ export async function resolveTripUuid(tripId) {
 // undercount every delegate checked in after the ARRIVED migration.
 const isBoarded = (x) => x.status === "PRESENT" || x.status === "ARRIVED";
 
-/** Staff-scoped visibility (2026-07-27 — "for staff permission is to see
- *  their assigned coach delegate... limited ui access for staff base on the
- *  trip coach assigned"). Built on the EXISTING "Coach captain" field
- *  (coaches.account_id — added by Desmond's Trips board for TransitFlow's
- *  Switch-staff modal) which was previously just stored/displayed with no
- *  actual enforcement anywhere — this is the first place it's actually
- *  enforced. A Staff account only sees delegates/coaches for coaches THEY
- *  personally captain. A coach with no captain assigned is hidden from
- *  Staff entirely (2026-07-27 revision — "if a bus is not assign to any
- *  staff, should be hidden for staff account"; the original plan treated an
- *  uncaptained coach as "open to everyone", but that let a scoped Staff
- *  account still see every not-yet-assigned coach). Admin bypasses
- *  entirely, same as every other permission check in this app.
+/** Staff-scoped visibility: a Staff account sees only delegates/coaches for
+ *  coaches THEY captain. Enforcement point for the "Coach captain" assignment
+ *  (previously stored/displayed but never enforced). A coach with no captain is
+ *  hidden from Staff entirely — treating uncaptained coaches as "open to
+ *  everyone" let a scoped Staff account see every unassigned coach. Admin
+ *  bypasses, like every other permission check here.
  *
- *  Returns null for "no restriction" — either the account is an Admin, or a
- *  Staff account that doesn't captain ANY coach on this trip (falls back to
- *  today's unrestricted behaviour rather than silently locking out every
- *  existing staff account the moment this ships — an admin opts a specific
- *  account IN by assigning them a coach, rather than everyone being opted
- *  out by default). Otherwise returns a Set of ONLY the coach ids this
- *  account captains. */
+ *  Returns null = NO restriction: either Admin, or a Staff account captaining no
+ *  coach on this trip. That fallback is deliberate — an admin opts an account IN
+ *  by assigning a coach, rather than every existing staff account being locked
+ *  out the moment this ships. Otherwise returns a Set of captained coach ids. */
 export async function getVisibleCoachIds(tripUuid, account) {
   if (!account || account.role === "admin") return null;
-  // Multi-captain support (2026-07-31) — a coach can now have up to 3
-  // captains (coach_captains), not just the one coaches.account_id used to
-  // hold, so visibility is now membership in that join table rather than a
-  // single equality check.
+  // A coach can have up to 3 captains, so visibility is membership in the
+  // coach_captains join table, not equality on the legacy coaches.account_id.
   const mineRows = tripUuid
     ? await all(`SELECT cc.coach_id AS id FROM coach_captains cc JOIN coaches c ON c.id = cc.coach_id WHERE c.trip_id = $1 AND cc.account_id = $2`, [tripUuid, account.id])
     : await all(`SELECT coach_id AS id FROM coach_captains WHERE account_id = $1`, [account.id]);
@@ -158,18 +124,14 @@ export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
   const late = d.filter((x) => x.status === "LATE").length;
   const unassigned = d.filter((x) => x.status === "UNASSIGNED").length;
   const assigned = d.filter((x) => x.status === "ASSIGNED").length;
-  // Surfaced as its own KPI (2026-07-31 — mobile Ops "Live headcount" card:
-  // "add the cancelled status") — a cancelled delegate is forced to
-  // UNASSIGNED (see normalize(), db/delegates.js) so it was previously only
-  // visible buried inside that count, with no way to tell "nobody's assigned
-  // them yet" apart from "they're not coming".
+  // Its own KPI because a cancelled delegate is forced to UNASSIGNED (see
+  // normalize(), db/delegates.js) — without this you can't tell "not assigned
+  // yet" apart from "not coming".
   const cancelled = d.filter((x) => x.cancelled).length;
-  // Delegates actually on a coach's roster right now — everyone EXCEPT
-  // Unassigned (2026-07-24). Unassigned covers two cases that can never
-  // meaningfully be "missing": a delegate who hasn't been given a coach yet,
-  // and a Cancelled delegate (forced to Unassigned — see normalize() in
-  // db/delegates.js). Counting either in the "Missing right now: X of N"
-  // denominator made N overstate who's actually being tracked on this trip.
+  // Everyone on a coach roster = all EXCEPT Unassigned. Unassigned covers two
+  // cases that can never be "missing" (no coach yet, or Cancelled — forced to
+  // Unassigned in normalize(), db/delegates.js), so counting them in the
+  // "Missing right now: X of N" denominator overstated N.
   const trackable = present + missing + late + assigned;
 
   let coachRows = tripUuid

@@ -8,10 +8,10 @@
  * ============================================================================= */
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Send, Plus, Bot, Search, Trash2, Copy, Check, Pin, RefreshCw, Download, Star, X, History, AlertTriangle } from "lucide-react";
-import { apiGet, apiPost, apiPatch, apiDelete, getToken } from "../../lib/api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getToken, getUser } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getTrips } from "../../lib/document/claudeParse.js";
-import { getActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
+import { getActiveTripId, resolveActiveTripId, ACTIVE_TRIP_EVENT } from "../../lib/activeTrip.js";
 import { formatClock as hhmm } from "../../lib/musterchat/chatTime.js";
 import TripPulse from "../TripPulse.jsx";
 
@@ -170,10 +170,17 @@ export default function AssistantConversation({ compact = false }) {
   // with whatever Dashboard currently shows rather than always Beijing. Once
   // you deliberately switch here, that manual choice is what's remembered on
   // your next visit — it doesn't keep re-syncing to Dashboard afterwards.
-  const [tripId, setTripId] = useState(() => {
-    if (compact) return getActiveTripId();
-    try { return localStorage.getItem(TRIP_KEY) || getActiveTripId(); } catch { return getActiveTripId(); }
-  });
+  // Staff have no switcher (see the header below), so they must ALWAYS mirror
+  // the Dashboard's trip — which is itself already staff-scoped. Without this
+  // they'd inherit the manually-persisted TRIP_KEY, or get pushed to Beijing /
+  // list[0] by the correction effect below, and be stuck on another trip with
+  // no UI to escape it. Only admins get the remembered manual choice.
+  // Always starts on the Dashboard's trip. It used to prefer its own remembered
+  // TRIP_KEY, so you could open MusterChat while the Dashboard showed Manila and
+  // get answers about Beijing — confusing, and easy to miss. A manual switch
+  // (admins only) still applies until the Dashboard next changes.
+  const isAdminUser = getUser()?.role === "admin";
+  const [tripId, setTripId] = useState(() => getActiveTripId());
   const messagesRef = useRef(null);
   const taRef = useRef(null);
 
@@ -186,19 +193,25 @@ export default function AssistantConversation({ compact = false }) {
       // whichever trip happens to sort first (not necessarily Beijing). Match
       // the seed trip by name instead, same identity this codebase already
       // hardcodes everywhere else (buildSnapshot's own "t-1" default).
+      // Resolves the Dashboard's legacy "t-1" alias to a real uuid so the
+      // <select> has a matching option. resolveActiveTripId() only substitutes
+      // for that alias — a staff member already on a real trip is left alone
+      // (an unconditional "not in list -> Beijing" fallback used to drag them
+      // onto a trip they aren't on and, with no switcher, can't leave).
       if (list.length && !list.some((tr) => tr.id === tripId)) {
-        const seed = list.find((tr) => (tr.name || "").toLowerCase().includes("beijing"));
-        setTripId(seed?.id || list[0].id);
+        setTripId(resolveActiveTripId(getActiveTripId(), list));
       }
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Follow Dashboard's trip switcher live while the bubble stays mounted
-  // (it never unmounts across routes — see ChatBubble.jsx). The custom event
-  // fires immediately on a same-tab switch; `storage` covers another tab.
+  // Follows the Dashboard's switcher live, for EVERY mode and role — the
+  // compact bubble (never unmounts across routes), the full page, staff and
+  // admins alike. The custom event fires on a same-tab switch; `storage`
+  // covers another tab. An admin's manual switch below survives until the
+  // Dashboard actually changes trip, which can't happen while this page is the
+  // mounted route.
   useEffect(() => {
-    if (!compact) return;
     const sync = () => setTripId(getActiveTripId());
     window.addEventListener(ACTIVE_TRIP_EVENT, sync);
     window.addEventListener("storage", sync);
@@ -206,11 +219,13 @@ export default function AssistantConversation({ compact = false }) {
       window.removeEventListener(ACTIVE_TRIP_EVENT, sync);
       window.removeEventListener("storage", sync);
     };
-  }, [compact]);
+  }, []);
 
   function switchTrip(id) {
     if (id === tripId) return;
     setTripId(id);
+    // Session-scoped only: the initial trip now always comes from the Dashboard
+    // (see the useState above), so this is no longer read back on next visit.
     try { localStorage.setItem(TRIP_KEY, id); } catch { /* ignore */ }
     // The tripId-keyed effect below reloads that trip's own chat list and
     // opens its most recent session (or starts fresh if it has none) — so a
@@ -392,7 +407,13 @@ export default function AssistantConversation({ compact = false }) {
             (2026-07-31, "hide the trip text") shows no label for it at all;
             the compact header is too narrow for one without crowding/
             overlapping the "MusterChat" status line above it. */}
-        {compact ? null : (
+        {/* ADMIN ONLY (2026-08-04): staff are locked to their assigned trip.
+            The assistant answers with live attendance/roster/exception data, so
+            an open switcher let a staff account read every other trip's
+            operational data. Staff keep the assistant, scoped to their own
+            trip. UI restriction only — the /assistant/* endpoints don't check
+            trip access server-side (AI Log 255). */}
+        {compact || !isAdminUser ? null : (
           trips.length > 1 && (
             <select
               value={tripId}

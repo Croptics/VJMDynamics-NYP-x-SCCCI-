@@ -1,12 +1,9 @@
 /* =============================================================================
  *  PART OF:   MusterGo — Emergency escalations
  *
- *  Shared "Escalate to office" modal (2026-07-31 — "for escalate add the
- *  pop-up to select who to escalate to... can follow this ya"). Extracted
- *  from DashboardPage.jsx's own inline version (same copy, same recipient
- *  picker, same request shape) so the Exceptions inbox's ticket-level
- *  Escalate button opens the real thing instead of firing an alert silently
- *  with no way to pick who gets it or say what's happening.
+ *  Shared "Escalate to office" modal, extracted from DashboardPage.jsx's
+ *  inline version so the Exceptions inbox's Escalate button uses the same copy,
+ *  recipient picker and request shape. Keep the two in sync.
  * ============================================================================= */
 import { useEffect, useRef, useState } from "react";
 import { Siren, X } from "lucide-react";

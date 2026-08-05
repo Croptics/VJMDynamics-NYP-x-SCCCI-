@@ -2,8 +2,8 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — User Guide's inline flowchart primitives
  *
- *  Extracted from UserGuidePage.jsx (2026-08-02 modularization pass) — shared
- *  by GettingStartedTab/DashboardTab/TripsTab/ScannerTab/AccountsTab.
+ *  Extracted from UserGuidePage.jsx — shared by GettingStartedTab/DashboardTab/
+ *  TripsTab/ScannerTab/AccountsTab.
  * ============================================================================= */
 import { ArrowRight } from "lucide-react";
 
@@ -18,10 +18,9 @@ export function FlowPill({ tone, label }) {
   );
 }
 
-/* ---- Flowchart primitives (2026-07-26) ------------------------------------
- * Small, reusable building blocks for the two "real" flowcharts on the
- * Checkpoints & Escalations tab — a horizontal step + labelled arrow, wraps
- * to a vertical stack on narrow widths so nothing gets clipped. */
+/* ---- Flowchart primitives -------------------------------------------------
+ * Building blocks for the flowcharts on the Checkpoints & Escalations tab.
+ * Wraps to a vertical stack on narrow widths so nothing gets clipped. */
 export function FlowRow({ children, style }) {
   return (
     <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap", ...style }}>

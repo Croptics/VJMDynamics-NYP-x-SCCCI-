@@ -2,7 +2,7 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — Account control shared inline-style constants
  *
- *  Extracted from AccountControlPage.jsx (2026-08-02 modularization pass).
+ *  Extracted from AccountControlPage.jsx.
  * ============================================================================= */
 export const S = {
   iconBtn: { background: "none", border: "none", color: "var(--ink-3)", display: "flex", padding: 4, borderRadius: 6 },

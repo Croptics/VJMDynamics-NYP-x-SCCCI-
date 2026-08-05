@@ -1,15 +1,11 @@
 /* =============================================================================
- *  Attendance-history seed  —  Desmond (TransitFlow), 2026-07-24.  Re-runnable.
+ *  Attendance-history seed  —  Desmond (TransitFlow).  Re-runnable.
  *
- *  Populates per-event attendance + a realistic before/after change trail for
- *  the Beijing trip's COMPLETED days (Day 1 & Day 2), so the board's
- *  "Attendance & history" view has data to show for each event, per coach.
- *
- *  For every delegate on a coach, at each Day-1/Day-2 stop, it records a small
- *  history (e.g. Not recorded -> Missing -> Present) and leaves a final status,
- *  written to BOTH JQ's checkpoint_checkins (the live per-stop status the
- *  Dashboard/Timeline read) and this feature's attendance_log (the change log).
- *  Actor is the coach's captain login when set (e.g. Staff_1), else "Staff".
+ *  Populates per-event attendance + a before/after change trail for the Beijing
+ *  trip's COMPLETED days (1 & 2), so the board's "Attendance & history" view has
+ *  data per event, per coach. Writes to BOTH JQ's checkpoint_checkins (the live
+ *  per-stop status the Dashboard/Timeline read) and attendance_log (the change
+ *  log). Actor is the coach's captain login when set, else "Staff".
  *
  *  Idempotent: clears prior rows for those stops first. Run:
  *      cd backend && node scripts/seed-attendance-history.js
@@ -84,19 +80,16 @@ async function main() {
   const now = Date.now();
   let checkins = 0, logs = 0;
   for (const item of items) {
-    // Backdate this event relative to NOW (not the trip's fictional Aug dates):
-    // Day 1 ≈ 2 days ago, Day 2 ≈ 1 day ago, offset by the stop's time-of-day.
-    // This keeps all seeded history in the past, so a live edit (now) correctly
-    // shows as the NEWEST entry rather than being buried under future-dated rows.
+    // Backdate relative to NOW, not the trip's fictional dates — all seeded
+    // history must sit in the past or a live edit gets buried under it instead
+    // of showing as the newest entry.
     const [h, m] = item.startTime.split(":").map(Number);
     const daysAgo = Math.max(0, 3 - item.dayNumber);
     const eventBase = now - daysAgo * 86400000 - (24 * 60 - (h * 60 + m)) * 60000;
     for (const d of delegates) {
       const r = hash01(d.id + item.id);
       const actor = d.captain || "Staff";
-      // Build a small before/after chain, ending in a final status.
-      // ~78% present (Missing->Present), ~10% late (Missing->Late->Present),
-      // ~12% never turned up (Missing).
+      // ~78% present, ~10% late, ~12% never turned up.
       let chain;
       if (r < 0.12) chain = ["MISSING"];
       else if (r < 0.22) chain = ["MISSING", "LATE", "ARRIVED"];

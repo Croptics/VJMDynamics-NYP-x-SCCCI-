@@ -5,9 +5,10 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, Trash2, ChevronLeft, ChevronDown, AlertTriangle, UserPlus, Pencil, CalendarDays, RotateCcw, Search, Siren } from "lucide-react";
-import { apiGet, apiPost, apiDelete, getPermissions } from "../../../lib/api.js";
+import { apiGet, apiPost, apiDelete, getPermissions, getUser } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
 import { useVisiblePolling } from "../../../lib/useVisiblePolling.js";
+import { getActiveTripId } from "../../../lib/activeTrip.js";
 
 // Human-readable labels for the field-level diff shown under a rollback-
 // eligible entry — matches the patch-shape keys updateDelegate() (backend)
@@ -59,11 +60,17 @@ export default function HistoryLogPage() {
   const [hlTripFilter, setHlTripFilter] = useState("ALL");
   const [hlCoachFilter, setHlCoachFilter] = useState("ALL");
 
+  // Staff see only their OWN trip's activity. This page used to fetch
+  // /activity with no scope at all, so "View full log" showed every trip's
+  // history to anyone — which also made the Dashboard card's admin-only "All
+  // trips" toggle pointless, since one click round the side exposed the same
+  // data. Admins keep the unscoped view.
+  const isAdmin = getUser()?.role === "admin";
   const load = useCallback(async () => {
     if (loadingRef.current) return;
     loadingRef.current = true;
     try {
-      const res = await apiGet("/activity?limit=1000");
+      const res = await apiGet(`/activity?limit=1000${isAdmin ? "" : `&tripId=${encodeURIComponent(getActiveTripId())}`}`);
       setHistory(res.activity || []);
       setError(null);
     } catch (e) {
@@ -72,7 +79,7 @@ export default function HistoryLogPage() {
       setLoaded(true);
       loadingRef.current = false;
     }
-  }, []);
+  }, [isAdmin]);
 
   // 2s is aggressive for a full 1000-row activity dump, so pausing while the
   // tab is hidden matters more here than almost anywhere (2026-07-29) — see

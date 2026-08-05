@@ -6,6 +6,7 @@ import QuickChat from "./QuickChat.jsx";
 // ChatBubble.jsx (desktop) already does — mobile never had this at all
 // (2026-08-03 — "need mobile chat to be able to video/face call").
 import VideoCallOverlay from "./VideoCallOverlay.jsx";
+import callManager from "../../lib/musterchat/callManager.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { getToken } from "../../lib/api.js";
 import { pollUpdates } from "../../lib/musterchat/messagesApi.js";
@@ -59,6 +60,17 @@ export default function MobileChatBubble({ restrictToHomeOnly = false }) {
   });
   const [dragPos, setDragPos] = useState(null);
   const dragRef = useRef(null);
+
+  // Start the global incoming-call / signaling poll (2026-08-04 — "when i
+  // call. on mobile should be able to pick it up" / "when i cut the call.
+  // the other side should cut it"). ChatBubble.jsx (desktop) already does
+  // this; this mobile copy never did, so a mobile device never polled
+  // /calls/poll at all — not just missed incoming rings, but every in-call
+  // signal (answer, hangup, ice) too, since they all arrive through this
+  // same loop. `<VideoCallOverlay/>` below was rendering correctly, it just
+  // never had anything to react to. Idempotent — safe alongside desktop's
+  // own call if a device somehow renders both.
+  useEffect(() => { callManager.startGlobalPoll(); }, []);
 
   // Poll unread team messages for the Messages-tab badge.
   useEffect(() => {

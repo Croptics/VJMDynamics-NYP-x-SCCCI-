@@ -6,29 +6,23 @@
  *  instead — see README/INTEGRATION_NOTES.md at the project root.
  * ============================================================================= */
 /**
- * Customizable Excel export — POST /api/trips/:id/export
- *
- * Upgrades the old one-click flat-sheet dump into a configurable, polished
- * MULTI-SHEET workbook, modelled on the "Headcount Planning" reference: a
- * Summary dashboard sheet (key metrics + per-coach breakdown + optional AI
- * notes) plus a Delegates detail sheet with only the columns/rows the user
- * asked for.
+ * Customizable multi-sheet Excel export: a Summary dashboard sheet (metrics +
+ * per-coach breakdown + optional AI notes) plus a Delegates detail sheet with
+ * only the columns/rows requested.
  *
  * Three surfaces:
  *   POST /api/trips/:id/export            → build + stream the .xlsx (filtered)
  *   GET  /api/trips/:id/export            → same, unfiltered (back-compat)
  *   POST /api/trips/:id/export/ai-filter  → natural-language → structured filter
  *
- * The AI layer is deliberately BOUNDED and TRANSPARENT: it only ever turns a
- * plain-language request ("VIPs still missing from coaches 5-8") into the same
- * structured filter object the checkboxes produce, which the UI then shows and
- * lets the user edit — the model never sees or writes delegate data directly,
- * and an unreachable model degrades gracefully (the checkboxes still work, and
- * an unavailable AI summary is simply omitted rather than failing the export).
+ * The AI layer is deliberately BOUNDED: it only turns plain language into the
+ * same structured filter object the checkboxes produce, which the UI then shows
+ * and lets the user edit. The model never sees or writes delegate data, and an
+ * unreachable model must degrade gracefully — checkboxes still work, and a
+ * missing AI summary is omitted rather than failing the export.
  *
- * Mirrors insights.js's provider strategy: local Ollama first (free, nothing
- * leaves the machine), Anthropic API fallback, and a clear "not configured"
- * signal if neither is available — none of which can crash startup.
+ * Mirrors insights.js's provider strategy (local Ollama first, then Anthropic,
+ * then a clear "not configured"), none of which can crash startup.
  */
 
 import { Router } from "express";
@@ -41,23 +35,17 @@ const router = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 /* ---- shared vocabulary --------------------------------------------------- */
-// ARRIVED is the current value; PRESENT is the legacy literal (aliased). Every
-// status comparison here normalizes PRESENT→ARRIVED so filters/counts are
-// consistent regardless of which check-in route wrote the row.
+// PRESENT is the legacy alias for ARRIVED. Every status comparison here must
+// normalize it, or counts differ by which check-in route wrote the row.
 const normStatus = (s) => (s === "PRESENT" ? "ARRIVED" : s);
 const STATUS_ORDER = ["UNASSIGNED", "ASSIGNED", "ARRIVED", "LATE", "MISSING"];
 const UNASSIGNED_KEY = "__unassigned";
 
 /* ---- export-content translation (English / Simplified Chinese) -----------
- * The export is generated entirely server-side, so it can't reuse the
- * frontend's i18n.jsx (different runtime/bundle) — this is a small, self-
- * contained dictionary just for the strings that actually appear IN the
- * generated workbook (sheet names, headers, status labels), independent of
- * whatever language the requesting UI happens to be in. `lang` is an
- * explicit per-export choice (see ExportModal.jsx's language selector), not
- * implicitly tied to the staff member's own UI language — a coordinator
- * might work in English but need to hand a Chinese-language report to
- * someone else, or vice versa. */
+ * Generated server-side, so it can't reuse the frontend's i18n.jsx. Covers only
+ * strings that appear IN the workbook. `lang` is an explicit per-export choice
+ * (ExportModal.jsx), NOT the staff member's UI language — a coordinator may
+ * work in English but hand off a Chinese report. */
 const T = {
   en: {
     sheetSummary: "Summary", sheetDelegates: "Delegates", sheetCheckpoints: "Checkpoint history", sheetCharts: "Charts",
@@ -108,14 +96,10 @@ const T = {
 };
 const tt = (lang) => T[lang === "zh" ? "zh" : "en"];
 
-// Every column the detail sheet can render; `get` pulls the display value off
-// a delegate (ctx carries {coachName, tt} — tt is the active language's
-// translation object, so the Status column and VIP marker render in whatever
-// language was requested). Selectable individually so a coordinator can
-// export just the contact columns for a phone-round, or everything for a
-// full record. The English `label` here is only the /export/options
-// metadata default (and the fallback key lookup) — the actual header text
-// rendered into the sheet comes from tt(lang).columns[key] in buildWorkbook.
+// Every column the detail sheet can render. `get` pulls the display value;
+// ctx carries {coachName, tt} so Status/VIP render in the requested language.
+// The English `label` is ONLY /export/options metadata and the fallback key —
+// the real header text comes from tt(lang).columns[key] in buildWorkbook.
 const ALL_COLUMNS = [
   { key: "name", label: "Name", width: 22, get: (d) => d.name },
   { key: "coach", label: "Coach", width: 20, get: (d, ctx) => ctx.coachName(d.coachId) },
@@ -128,12 +112,9 @@ const ALL_COLUMNS = [
   { key: "phone", label: "Phone", width: 16, get: (d) => d.phone || "" },
   { key: "nationality", label: "Nationality", width: 14, get: (d) => d.nationality || "" },
   { key: "passportNumber", label: "Passport", width: 16, get: (d) => d.passportNumber || "" },
-  // Strips a redundant leading "Last seen · " (2026-07-25 — free-text field,
-  // staff sometimes type the label itself into the value, e.g. "Last seen ·
-  // 16:53") — the column header already says "Last seen", so the cell
-  // shouldn't repeat it. Only strips an EXACT case-insensitive match of that
-  // phrase, so any other free text (a real place name, "Reset · 14:02", etc.)
-  // is untouched.
+  // Free-text field: staff sometimes type the label into the value, so strip a
+  // redundant leading "Last seen · ". Matches only that exact phrase, leaving
+  // other text ("Reset · 14:02", a place name) untouched.
   { key: "lastSeen", label: "Last seen", width: 22, get: (d) => (d.lastSeen || "").replace(/^last seen\s*[·:-]?\s*/i, "") },
   { key: "lastLocation", label: "Last location", width: 24, get: (d) => d.lastLocation || "" },
   { key: "createdAt", label: "Uploaded", width: 18, get: (d) => fmtDate(d.createdAt) },
@@ -154,9 +135,8 @@ function fmtDate(v) {
 }
 
 /* ---- filtering ----------------------------------------------------------- */
-// A missing/empty array in a dimension means "no constraint on that dimension"
-// (i.e. all) — so an empty filter object exports everything, matching the old
-// unfiltered behaviour.
+// An empty/missing array means "no constraint on that dimension", so an empty
+// filter object exports everything (matching the old unfiltered behaviour).
 function makeCoachName(coaches, lang) {
   const fallback = tt(lang).unassignedGroup;
   return (id) => {
@@ -189,15 +169,11 @@ function describeFilters(filters, coaches, lang) {
   return parts.length ? parts.join("  ·  ") : L.filterNone;
 }
 
-/* ---- checkpoint history (2026-07-25) --------------------------------------
- * The multi-checkpoint attendance feature (routes/checkpoints.js) has never
- * had an export path — all that per-stop ARRIVED/LATE/MISSING history was
- * only ever viewable in-app via DelegateTimeline.jsx, one delegate at a time.
- * This pulls EVERY checkin for the whole trip in one query (not a per-
- * delegate loop) so an "Include per-checkpoint history" export stays a
- * single fast query regardless of roster size. Optional/opt-in — omitted
- * unless explicitly requested, so the default export stays exactly as fast
- * as before. */
+/* ---- checkpoint history ---------------------------------------------------
+ * The export path for routes/checkpoints.js data, previously only viewable one
+ * delegate at a time in DelegateTimeline.jsx. Pulls EVERY checkin for the trip
+ * in ONE query (not a per-delegate loop) so this stays fast at any roster size.
+ * Opt-in, so the default export is unaffected. */
 async function loadCheckpointHistory(tripUuid) {
   return all(
     `SELECT cc.delegate_id AS "delegateId", cc.status, cc.method, cc.scanned_by AS "scannedBy",
@@ -242,8 +218,8 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
   genRow.getCell(1).font = { size: 9, italic: true, color: { argb: "FF6B7280" } };
   sum.addRow([]);
 
-  // KEY METRICS band — counts over the FILTERED set, so the summary always
-  // agrees with the Delegates sheet beside it.
+  // Counts over the FILTERED set, so the summary agrees with the Delegates
+  // sheet beside it.
   const counts = { total: delegates.length, ARRIVED: 0, MISSING: 0, LATE: 0, ASSIGNED: 0, UNASSIGNED: 0 };
   for (const d of delegates) counts[normStatus(d.status)] = (counts[normStatus(d.status)] || 0) + 1;
 
@@ -296,9 +272,8 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
     });
   }
 
-  // Optional AI notes — best-effort; omitted entirely if unavailable. May
-  // contain \n line breaks (the numbered-bullet format, matching AI
-  // Insights) — wrapText renders each \n as its own visible line in Excel.
+  // Best-effort; omitted if unavailable. May contain \n bullets — wrapText is
+  // what makes Excel render each one as its own visible line.
   if (aiSummary) {
     sum.addRow([]);
     const aiHead = sum.addRow([L.aiSummary]);
@@ -324,19 +299,17 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
   });
   ws.views = [{ state: "frozen", ySplit: 1 }];
 
-  // Sorted by status severity (Missing first) then name, so the sheet opens on
-  // what needs attention.
+  // Status severity first (Missing at top), so the sheet opens on what needs
+  // attention.
   const sorted = [...delegates].sort((a, b) => {
     const sa = STATUS_ORDER.indexOf(normStatus(a.status));
     const sb = STATUS_ORDER.indexOf(normStatus(b.status));
     if (sb !== sa) return sb - sa; // higher index (MISSING) first
     return (a.name || "").localeCompare(b.name || "");
   });
-  // Colors only the Status cell itself (2026-07-25 — "very messy when a lot
-  // of status", was filling the ENTIRE row, so a sheet where most delegates
-  // share one status turned into one solid-color block with nothing to
-  // visually separate one row from the next). Light zebra banding on top —
-  // independent of status — keeps rows scannable even when Status is
+  // Color ONLY the Status cell, not the whole row — filling rows turned a
+  // single-status sheet into one solid block with no row separation. Zebra
+  // banding is independent of status, so rows stay scannable when Status is
   // monochrome for pages at a time.
   const statusIdx = cols.findIndex((c) => c.key === "status");
   const vipIdx = cols.findIndex((c) => c.key === "vip");
@@ -361,17 +334,14 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
   /* ===== Sheet 3 — Checkpoint history (optional, opt-in) ===== */
   if (checkpointHistory) {
     const cp = wb.addWorksheet(L.sheetCheckpoints);
-    // Scoped to the SAME filtered delegate set as the Delegates sheet, so a
-    // coordinator filtering to e.g. one coach sees only that coach's
-    // checkpoint history too, not the whole trip's.
+    // Same filtered delegate set as the Delegates sheet — filtering to one
+    // coach must not leak the whole trip's checkpoint history.
     const delegateById = new Map(delegates.map((d) => [d.id, d]));
     const rows = checkpointHistory.filter((r) => delegateById.has(r.delegateId));
 
-    // Leaner 5-column layout (2026-07-25 — "very messy when a lot of
-    // status") — Day/Checkpoint/Scheduled time used to repeat IDENTICALLY on
-    // every single row (hundreds of rows sharing one value), so they're
-    // pulled out into one merged banner row per group instead, same idea as
-    // a pivot-table's row grouping.
+    // Day/Checkpoint/Scheduled time would repeat identically on hundreds of
+    // rows, so they're hoisted into one merged banner row per group instead —
+    // like a pivot table's row grouping.
     const cpHeader = cp.addRow([
       L.checkpointColumns.name, L.checkpointColumns.coach, L.checkpointColumns.status,
       L.checkpointColumns.scannedBy, L.checkpointColumns.updatedAt,
@@ -384,10 +354,9 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
     });
     cp.views = [{ state: "frozen", ySplit: 1 }];
 
-    // Group by (day, checkpoint, scheduledTime), preserving the chronological
-    // order the query already returned rows in (day_number, sort_order,
-    // start_time) — a plain object walk keeps first-seen order in JS, so no
-    // separate sort needed for the groups themselves.
+    // Groups rely on the query's existing chronological order (day_number,
+    // sort_order, start_time): object key order is first-seen in JS, so the
+    // groups need no separate sort.
     const groups = [];
     const groupIndex = new Map();
     for (const r of rows) {
@@ -407,8 +376,7 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
       bannerRow.getCell(1).alignment = { vertical: "middle" };
       bannerRow.height = 20;
 
-      // Severity-first within each group (Missing at the top), same
-      // convention as the Delegates sheet.
+      // Severity-first, same convention as the Delegates sheet.
       const groupSorted = [...group.rows].sort((a, b) => {
         const sa = STATUS_ORDER.indexOf(normStatus(a.status));
         const sb = STATUS_ORDER.indexOf(normStatus(b.status));
@@ -442,15 +410,11 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
   /* ===== Sheet 4 — Charts (optional, opt-in) =====
      PNGs of the live Analytics charts, composed client-side (title + chart +
      legend on one canvas — see frontend/src/lib/chartCapture.js) and embedded
-     here as real pictures. Added 2026-07-29, replacing per-chart CSV
-     downloads: the point of this export is "for report or presentation", and
-     a column of numbers made whoever received it rebuild the chart by hand.
+     as real pictures, since this export is meant for a report or deck.
 
-     Images are placed on a gridless sheet, stacked vertically with a row gap
-     between them, sized from the dimensions the client measured so nothing is
-     squashed. `addImage`'s extents are in pixels via `ext`, which is
-     independent of row/column sizing — so the pictures can't be distorted by
-     someone later resizing a column. */
+     Sized from the client's measurements. Extents go through `ext` (pixels),
+     which is independent of row/column sizing — so a later column resize can't
+     distort the pictures. */
   if (Array.isArray(chartImages) && chartImages.length) {
     const cs = wb.addWorksheet(L.sheetCharts, { views: [{ showGridLines: false }] });
     cs.getColumn(1).width = 4;
@@ -461,7 +425,7 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
         tl: { col: 1, row: topRow - 1 },
         ext: { width: shot.width, height: shot.height },
       });
-      // ~20px per default row, plus 2 rows of breathing space between charts.
+      // ~20px per default row, plus 2 rows of gap between charts.
       topRow += Math.ceil(shot.height / 20) + 2;
     }
   }
@@ -470,20 +434,14 @@ function buildWorkbook({ trip, delegates, coaches, filters, columns, aiSummary, 
 }
 
 /* ---- AI: natural language → structured filter, and export summary notes -- */
-// `json` forces Ollama's structured-output mode — needed for the ai-filter
-// endpoint (which must return a parseable {statuses,coachIds,vipOnly}
-// object), but must NOT be set for the freeform prose summary: with no JSON
-// schema to fill and nothing else to say, a model forced into JSON mode with
-// a prose prompt just emits an empty "{}" — which is exactly what showed up
-// in the Summary sheet instead of an actual written recap.
-// `numPredict` caps how many tokens Ollama is allowed to generate — local
-// CPU inference time scales roughly linearly with output length, so a call
-// that only ever needs a ~40-character JSON object (the ai-filter endpoint)
-// was previously left uncapped and could keep generating (and the caller
-// kept waiting) far past the point the actual answer was already complete.
-// (2026-07-24 — "can you improve the loading time on it?") `keep_alive`
-// keeps the model resident in memory between calls so a request made a few
-// minutes after the last one doesn't pay a full cold-load penalty again.
+// `json` forces Ollama's structured-output mode. Required for ai-filter (must
+// return a parseable {statuses,coachIds,vipOnly}) but must NOT be set for the
+// prose summary — a prose prompt in JSON mode just emits "{}", which is what
+// landed in the Summary sheet instead of a recap.
+// `numPredict` caps generated tokens: local CPU inference scales with output
+// length, and uncapped calls kept generating long after the answer was done.
+// `keep_alive` keeps the model resident so a call minutes later skips the
+// cold-load penalty.
 async function tryOllama(prompt, { json = false, numPredict } = {}) {
   const base = process.env.OLLAMA_HOST || "http://localhost:11434";
   const model = process.env.OLLAMA_MODEL || "llama3.2";
@@ -521,8 +479,8 @@ async function callAnthropic(prompt, maxTokens = 400) {
   return (response.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
-// Pull the first {...} JSON object out of a model reply (handles chatty models
-// that wrap JSON in prose despite instructions).
+// First {...} object in a model reply — chatty models wrap JSON in prose
+// despite instructions.
 function extractJson(text) {
   if (!text) return null;
   const start = text.indexOf("{");
@@ -572,11 +530,9 @@ function sanitizeFilter(raw, coaches) {
 }
 
 /* ---- routes -------------------------------------------------------------- */
-// `account` (2026-07-27 — coach-scoped Staff visibility, see
-// getVisibleCoachIds' doc in db/dashboard.js) restricts an export to only
-// the delegates/coaches that account can actually see on the Dashboard —
-// otherwise a scoped Staff account could export the whole trip's roster via
-// this route even though the UI itself only shows them their own coach.
+// `account` restricts the export to the coaches that account can see on the
+// Dashboard (getVisibleCoachIds in db/dashboard.js). Without it, a coach-scoped
+// Staff account could export the whole trip's roster through this route.
 async function loadTripData(idParam, account = null) {
   const tripUuid = await resolveTripUuid(idParam);
   const visibleCoachIds = await getVisibleCoachIds(tripUuid, account);
@@ -585,10 +541,8 @@ async function loadTripData(idParam, account = null) {
   return { tripUuid, trip, delegates, coaches: dash.coaches || [] };
 }
 
-// Section labels for the AI summary's fixed 3-point structure — same
-// Overall/Missing/Advice shape (and same exact zh translations) as
-// insights.js's "Generate Insights" panel on the Dashboard, per the request
-// to make the export's AI note follow that same format.
+// Fixed 3-point structure for the AI summary — must match insights.js's
+// Overall/Missing/Advice shape and its zh translations exactly.
 const SECTION_LABELS = {
   en: { overall: "Overall", missing: "Missing", advice: "Advice" },
   zh: { overall: "总体情况", missing: "缺席情况", advice: "建议" },
@@ -619,8 +573,8 @@ Write EXACTLY 3 numbered points, one per line, in this fixed structure:
 Each point must start with its real number (1, 2, or 3), a period, a space, the exact label text given above, then a colon — for example the first point must literally begin "1. ${labels.overall}: " (substitute the real digit and label for points 2 and 3 the same way; never write the letter N or the word "Label" — those are not real output). Follow the label with one or two direct sentences containing specific numbers/names — no vague language. No markdown, no headers, no intro/closing sentence — just the 3 numbered points. ${languageInstruction}`;
 }
 
-// Optional AI summary of the filtered export — reuses the insights provider
-// strategy, but never fails the export: any error/absence just omits the notes.
+// Reuses the insights provider strategy but must NEVER fail the export — any
+// error just omits the notes.
 async function maybeAiSummary(trip, filtered, coaches, filters, lang) {
   try {
     const prompt = buildSummaryPrompt(trip, filtered, coaches, filters, lang);
@@ -644,10 +598,8 @@ async function handleExport(req, res, filters, options) {
 
   const wb = buildWorkbook({ trip, delegates: filtered, coaches, filters, columns: options.columns, aiSummary, checkpointHistory, chartImages: options.chartImages, lang });
 
-  // Filename stays plain-ASCII/English regardless of content language — a
-  // Chinese filename can still round-trip through Content-Disposition fine
-  // in modern browsers, but keeping it ASCII avoids any edge case with older
-  // clients/OSes and matches how the workbook is referenced in support chat.
+  // Filename stays plain ASCII regardless of content language — avoids
+  // Content-Disposition edge cases on older clients/OSes.
   const slug = (trip?.name || "trip").replace(/\s+/g, "_").toLowerCase();
   const fileName = `attendance_${slug}${trip ? `_day${trip.dayOf}` : ""}.xlsx`;
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -668,26 +620,22 @@ router.post("/api/trips/:id/export", requirePermission("exportData"), wrap(async
     columns: Array.isArray(body.columns) ? body.columns.filter((k) => ALL_COLUMNS.some((c) => c.key === k)) : null,
     includeAiSummary: !!body.includeAiSummary,
     includeCheckpoints: !!body.includeCheckpoints,
-    // Independent, explicit per-export choice (ExportModal's language
-    // selector) — NOT implicitly tied to the requesting staff member's own
-    // UI language, since they might need to hand a report in the other
-    // language to someone else.
+    // Explicit per-export choice, NOT the requester's UI language.
     lang: body.lang === "zh" ? "zh" : "en",
     chartImages: sanitizeChartImages(body.charts),
   };
   await handleExport(req, res, filters, options);
 }));
 
-/* Chart PNGs arrive as client-rendered data: URLs (see the Charts sheet in
- * buildWorkbook). They're the only client-supplied *binary* this API accepts,
- * so they're validated tightly rather than trusted:
- *   - must be a `data:image/png;base64,` URL — no other type, no remote URL
- *     (a remote one would make the server fetch an attacker-chosen address)
+/* Chart PNGs are the ONLY client-supplied binary this API accepts, so they are
+ * validated, not trusted. Keep all of these checks:
+ *   - must be a `data:image/png;base64,` URL — a remote URL would make the
+ *     server fetch an attacker-chosen address
  *   - base64 must decode cleanly and be non-trivial
- *   - hard caps on count and per-image size, so a crafted request can't use
- *     the export endpoint as a memory-exhaustion lever
- * Anything failing a check is DROPPED, not rejected: a malformed chart should
- * cost you that one picture, not the whole workbook you were waiting for. */
+ *   - hard caps on count and per-image size, or this endpoint becomes a
+ *     memory-exhaustion lever
+ * Failures are DROPPED, not rejected — a malformed chart should cost one
+ * picture, not the whole workbook. */
 const CHART_PREFIX = "data:image/png;base64,";
 const MAX_CHARTS = 12;              // more than the panel can even render
 const MAX_CHART_BYTES = 4_000_000;  // ~4MB decoded; a real chart PNG is ~20-80KB
@@ -702,8 +650,8 @@ function sanitizeChartImages(input) {
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) continue;
     const bytes = Math.floor((base64.length * 3) / 4);
     if (bytes < 64 || bytes > MAX_CHART_BYTES) continue;
-    // Clamp the client's measurements too — they only control layout here, but
-    // an absurd value would produce a corrupt/unopenable sheet.
+    // Clamp the client's measurements — an absurd value produces a corrupt,
+    // unopenable sheet.
     const width = Math.min(Math.max(Number(item.width) || 640, 120), 2000);
     const height = Math.min(Math.max(Number(item.height) || 360, 80), 2000);
     out.push({ base64, width, height });
@@ -716,8 +664,7 @@ router.get("/api/trips/:id/export", requirePermission("exportData"), wrap(async 
   await handleExport(req, res, { statuses: [], coachIds: [], vipOnly: false }, { columns: null, includeAiSummary: false });
 }));
 
-// Metadata for the export config modal — the columns it can offer and the
-// coaches it can filter by (names resolved server-side).
+// Metadata for the export config modal (coach names resolved server-side).
 router.get("/api/trips/:id/export/options", requireAuth(), wrap(async (req, res) => {
   const { coaches } = await loadTripData(req.params.id, req.account);
   res.json({
@@ -728,8 +675,8 @@ router.get("/api/trips/:id/export/options", requireAuth(), wrap(async (req, res)
   });
 }));
 
-// Natural-language → structured filter. Returns the same shape the checkboxes
-// produce so the UI can show + let the user edit it before exporting.
+// Natural language → the same filter shape the checkboxes produce, so the UI
+// can show and edit it before exporting.
 router.post("/api/trips/:id/export/ai-filter", requirePermission("exportData"), wrap(async (req, res) => {
   const request = (req.body?.prompt || "").toString().trim();
   if (!request) return res.status(400).json({ error: "NO_PROMPT", message: "Describe what to export." });

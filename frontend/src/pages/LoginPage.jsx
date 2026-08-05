@@ -8,53 +8,31 @@
  * ============================================================================= */
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { ClipboardCheck, Eye, EyeOff, ScanLine, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
+import { ClipboardCheck, Eye, EyeOff, AlertCircle, Languages, X, CheckCircle2, Moon, Sun } from "lucide-react";
 import { apiPost, setToken, setUser } from "../lib/api.js";
 import { useLang } from "../lib/i18n.jsx";
 import { useTheme } from "../lib/theme.jsx";
 import { usePasskeySignIn, biometricLabel } from "../components/PasskeySignIn.jsx";
 
-// One-time cleanup: earlier builds stored the plaintext password in
-// localStorage under these two keys, across two iterations of a since-removed
-// "Remember password" feature. Purged unconditionally for any returning
-// visitor (removeItem is a no-op once the key's gone) before the CURRENT
-// "Remember password" (see REMEMBER_KEY below) has a chance to write its own
-// — the two are unrelated, this just clears whatever a prior build left
-// behind under the old names.
+// One-time cleanup of plaintext passwords two earlier builds left under these
+// keys. Unrelated to the current REMEMBER_KEY below; must run before it writes.
 try {
   localStorage.removeItem("mg_remember");
   localStorage.removeItem("mg_remember_v2");
 } catch { /* ignore */ }
 
-// "Remember password" (2026-07-21): stores { staffId, password } in
-// localStorage in plain JSON so the form can prefill itself on a later
-// visit. This is a DELIBERATE, requested trade-off, not an oversight — the
-// project had previously and intentionally avoided this exact pattern (see
-// the cleanup above), because Chrome's own native "Save password?" prompt
-// never reliably fires for this SPA (confirmed via diagnostic logging:
-// navigator.credentials.store() resolves without error, isSecureContext is
-// true, PasswordCredential exists, yet nothing is actually persisted to
-// Chrome's own password manager). Given the browser-native path is a dead
-// end in practice, this trades a small amount of security (the password
-// sits in this browser's local storage, readable by anyone with access to
-// the device/browser profile — not sent anywhere, but not OS-keychain-
-// encrypted like a real password manager either) for a login flow that
-// reliably prefills every time. Unticking "Remember password" on a
-// subsequent login clears it immediately.
+// "Remember password" stores { staffId, password } as plain JSON in
+// localStorage — a DELIBERATE, requested trade-off, not an oversight. Chrome's
+// native "Save password?" prompt never reliably fires for this SPA
+// (credentials.store() resolves but nothing persists), so the browser-native
+// path is a dead end. Cost: the password is readable by anyone with the browser
+// profile, not OS-keychain-encrypted.
 //
-// ENVIRONMENT-GATED (2026-07-21): `import.meta.env.DEV` is Vite's own
-// dev-vs-production flag — true only under `vite dev` (a local `npm run
-// dev`), false in whatever `vite build` produces, regardless of which host
-// that build ends up deployed to. That's the right switch here: this
-// trade-off is acceptable for local dev on a trusted team's own machines,
-// but must NOT be reachable once this app is built and put on the public
-// internet. When REMEMBER_ENABLED is false these three functions are
-// no-ops — there is no code path in a production build that reads or
-// writes a plaintext password. The "Remember password" checkbox itself
-// stays visible either way, since it also controls the harmless, separate
-// "keep me signed in" behavior (session token in localStorage vs.
-// sessionStorage, via setToken(token, keep) below) — only the
-// plaintext-password half of the feature is disabled in production.
+// MUST STAY DEV-GATED. `import.meta.env.DEV` is true only under `vite dev`, so
+// a production build has NO code path that reads or writes a plaintext
+// password. Do not remove the gate. The checkbox stays visible either way
+// because it also drives the harmless "keep me signed in" half (localStorage
+// vs sessionStorage, via setToken(token, keep)).
 const REMEMBER_ENABLED = import.meta.env.DEV;
 const REMEMBER_KEY = "mg_remembered_login";
 function loadRemembered() {
@@ -75,19 +53,13 @@ function clearRemembered() {
 
 /**
  * Screen 1 — Login / Authentication (shared across team; Vance leads).
- * Split layout: SCCCI-Red brand panel + sign-in form.
  *
- * Login validates against the backend (POST /api/auth/login) using accounts
- * managed on the Account control page. "Remember password" (see the
- * REMEMBER_KEY note above) both keeps the session token in localStorage
- * (survives closing the browser, via setToken(token, keep) below) AND
- * prefills the Staff ID/password fields on a later visit.
+ * Validates against POST /api/auth/login using Account-control-managed
+ * accounts. "Remember password" (see REMEMBER_KEY above) both keeps the token
+ * in localStorage and prefills the fields.
  *
- * Which UI you land in (desktop or mobile) is no longer chosen here — there's
- * a single "Sign in" button. App.jsx's handleSignIn figures out desktop vs.
- * mobile automatically from the account's own permissions (mobile-only perms
- * -> mobile UI, desktop-only -> desktop UI, a single allowed page -> straight
- * to that page, both -> current viewport width decides).
+ * Desktop vs. mobile is NOT chosen here — App.jsx's handleSignIn derives it
+ * from the account's permissions, falling back to viewport width.
  */
 export default function LoginPage({ onSignIn }) {
   const navigate = useNavigate();
@@ -102,22 +74,14 @@ export default function LoginPage({ onSignIn }) {
   const [submitting, setSubmitting] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
 
-  // Biometric sign-in (Vimal — components/PasskeySignIn.jsx), merged into
-  // this single "Sign in" button (2026-07-30, "merge these 2 buttons
-  // together... only do the biometric sign-in [if set up], if not then
-  // follow the normal login"): submit() below tries passkey.attempt() FIRST
-  // whenever this device has one set up, and silently falls through to the
-  // normal Staff ID + password flow otherwise.
+  // Biometric sign-in (Vimal — components/PasskeySignIn.jsx), merged into the
+  // single "Sign in" button: submit() tries passkey.attempt() first when this
+  // device has one, then silently falls through to Staff ID + password.
   const passkey = usePasskeySignIn({ staffId, keep, onSignedIn: () => onSignIn?.() });
 
-  // REMOVED auto-attempt-on-page-load (2026-07-31 — "when i logout it will
-  // auto try to sign me in... should be when i click then it activate"). This
-  // used to fire the OS biometric prompt automatically the instant a passkey
-  // was known to exist for the typed/remembered Staff ID, with no click at
-  // all — including right after logging out, since that redirect back to
-  // /login is a fresh mount just like a real page load. Now passkey.attempt()
-  // only ever runs from inside submit() below, i.e. only when the user
-  // actually presses "Sign in".
+  // Do NOT re-add auto-attempt-on-mount: it fired the OS biometric prompt with
+  // no click, including right after logout (that redirect is a fresh mount).
+  // passkey.attempt() must only run from submit().
 
   async function submit() {
     setError("");
@@ -125,7 +89,7 @@ export default function LoginPage({ onSignIn }) {
     try {
       if (passkey.available && passkey.registered) {
         const signedInViaPasskey = await passkey.attempt();
-        if (signedInViaPasskey) return; // token/user already saved, onSignIn already fired
+        if (signedInViaPasskey) return; // onSignedIn already fired
         // else: fall through to the normal password flow below
       }
 
@@ -141,16 +105,14 @@ export default function LoginPage({ onSignIn }) {
       if (token) {
         setToken(token, keep); // keep = "Remember password" checkbox — localStorage vs sessionStorage only
         setUser({ staffId: username || staffId.trim(), username: username || staffId.trim(), name, role, readOnly, permissions }, keep);
-        // See REMEMBER_KEY note at the top of this file for why this stores
-        // the actual password (a deliberate, requested trade-off) rather
-        // than relying on the browser's own save-password prompt.
+        // Stores the actual password — see the REMEMBER_KEY note up top.
         if (keep) saveRemembered(staffId.trim(), password);
         else clearRemembered();
       }
-      onSignIn?.(); // success -> enter the app; App.jsx picks desktop/mobile automatically
+      onSignIn?.(); // success -> enter the app
     } catch (e) {
-      // e.status comes from lib/api.js's toError; message-text matching broke
-      // once the backend started sending real messages instead of bare codes.
+      // Branch on e.status (from lib/api.js's toError), never message text —
+      // the backend sends real messages now, not bare codes.
       if (e?.status === 401) {
         setError("Incorrect Staff ID or password.");
       } else if (e?.status === 429) {
@@ -200,11 +162,9 @@ export default function LoginPage({ onSignIn }) {
           <p style={S.brandFoot}>{t("A Singapore Chinese Chamber of Commerce & Industry initiative")}</p>
         </div>
 
-        {/* Form panel — a real <form> with autoComplete hints so the browser's
-            own "save password?" prompt fires on submit (it never does for
-            bare onClick-handled inputs with no name/autoComplete, which is
-            what this used to be). preventDefault + submit() keeps our
-            existing token-based "keep me signed in" logic unchanged. */}
+        {/* A real <form> with name/autoComplete hints, or the browser's own
+            "save password?" prompt never fires. preventDefault + submit() keeps
+            the token-based "keep me signed in" logic unchanged. */}
         <form
           className="login-panel"
           style={S.form}
@@ -254,8 +214,8 @@ export default function LoginPage({ onSignIn }) {
           {/* Inline error */}
           {error && (
             <div style={S.error} role="alert">
-              {/* error state holds the English string; t() maps it so it re-renders
-                  in the right language even if the user toggles after the error shows */}
+              {/* error holds English; t() re-renders it if the user toggles
+                  language after the error appears */}
               <AlertCircle size={16} /> {t(error)}
             </div>
           )}
@@ -278,44 +238,19 @@ export default function LoginPage({ onSignIn }) {
             {passkey.busy ? t("Waiting for your device…") : submitting ? t("Signing in…") : t("Sign in")}
           </button>
 
-          {/* Merged biometric sign-in (2026-07-30) — no separate button
-              anymore. submit() above tries Face ID / Touch ID / fingerprint /
-              Windows Hello FIRST whenever this device has one set up
-              (usePasskeySignIn(), Vimal's components/PasskeySignIn.jsx), and
-              silently falls back to this same button's normal Staff ID +
-              password flow otherwise. Only ever runs from a click on this
-              button (2026-07-31 — the old auto-fire-on-page-load was removed;
-              it was popping the OS prompt right after logging out too, with
-              no click at all). */}
+          {/* No separate biometric button — submit() above handles it. */}
           {passkey.available && passkey.registered && (
             <p className="muted" style={{ fontSize: 12, textAlign: "center", marginTop: 10 }}>
               {t("Uses")} {biometricLabel()} {t("on this device if you've set it up.")}
             </p>
           )}
 
-          {/* Quick Scanner Access — DELIBERATELY passwordless, per the
-              user's explicit request ("Allow any user to open and load the
-              scanner interface... without entering a password"). Plain
-              client-side navigation to /kiosk-scan, NOT submit() — it never
-              touches the Staff ID/password fields or the login API at all.
-              Safe because the destination itself is a hard-locked sandbox
-              (KioskScannerPage.jsx: no nav chrome, no route out except
-              "Back to Login", and its own short-lived kiosk token grants
-              ONLY the two camera check-in endpoints server-side — see
-              auth.js's requireKioskOrAuth). This button does not set
-              `submitting` and isn't disabled by it, since it bypasses the
-              login flow entirely. */}
-          <button type="button" className="btn btn-dark btn-block" style={{ marginTop: 10 }} onClick={() => navigate("/kiosk-scan")}>
-            <ScanLine size={18} /> {t("Quick Scanner Access")}
-          </button>
-
           <p className="muted" style={{ fontSize: 11, textAlign: "center", marginTop: 16 }}>
             {t("By signing in, you accept the SCCCI data handling policy.")}
           </p>
 
-          {/* Self-service registration (2026-07-24) — new accounts start
-              "pending" and need an admin's approval before they can sign
-              in, see RegisterPage.jsx / Account control. */}
+          {/* Self-service registration — new accounts start "pending" and need
+              admin approval before sign-in (RegisterPage.jsx). */}
           <p className="muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
             {t("New staff?")}{" "}
             <button
@@ -343,14 +278,10 @@ export default function LoginPage({ onSignIn }) {
 }
 
 /**
- * "Forgot password" self-service reset — Username, New Password, Confirm
- * New Password. Note: unlike everything else in this app, this route is
- * intentionally reachable WITHOUT being signed in (that's the point of a
- * forgot-password flow) and does not verify identity beyond the username
- * existing — no old password, no email/OTP. That's a real gap for a public
- * deployment (anyone who knows a username could take over that account);
- * it's accepted here for this project's small trusted-team context. See the
- * matching comment on resetPassword() in backend/data.js.
+ * Self-service password reset. WARNING: reachable without being signed in and
+ * verifies nothing beyond the username existing — no old password, no OTP. So
+ * anyone knowing a username can take over that account; accepted only for this
+ * project's small trusted-team context. See resetPassword() in backend/data.js.
  */
 function ForgotPasswordModal({ onClose }) {
   const { t } = useLang();
@@ -360,9 +291,8 @@ function ForgotPasswordModal({ onClose }) {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
-  // Only dismiss if the WHOLE click gesture started on the backdrop itself,
-  // not wherever the mouse was released after dragging to select text in a
-  // password field.
+  // Only dismiss if the gesture STARTED on the backdrop — otherwise a
+  // drag-select inside a password field closes the modal.
   const downOnBackdrop = useRef(false);
 
   async function handleSubmit() {

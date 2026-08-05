@@ -6,13 +6,11 @@
  *  instead — see README/INTEGRATION_NOTES.md at the project root.
  * ============================================================================= */
 /**
- * Lets an Admin upload one walkthrough video (2026-07-26) that replaces the
- * "coming soon" placeholder on the User Guide's Getting Started tab for
- * EVERY account — same manageAccounts gate as Announcements' post/delete,
- * reading is open to any signed-in account. Own "mustergo/guide" Cloudinary
- * folder (see lib/cloudinary.js), same memory-storage multer pattern as
- * announcement images, just resource_type: "video" and a much larger size
- * cap (a short screen recording easily runs tens of MB).
+ * One Admin-uploaded walkthrough video, replacing the "coming soon" placeholder
+ * on the User Guide's Getting Started tab for EVERY account. Writes gated on
+ * manageAccounts, reads open to any signed-in account. Own "mustergo/guide"
+ * Cloudinary folder (lib/cloudinary.js); same memory-storage multer pattern as
+ * announcement images, but resource_type "video" and a far larger size cap.
  */
 import { Router } from "express";
 import multer from "multer";

@@ -275,8 +275,38 @@
   .exc-card .exc-actions { margin-top: 12px; }
   .exc-card .exc-btn-sm { flex: 1; text-align: center; }
 
-  .exc-overlay { align-items: flex-end; padding: 0; }
-  .exc-modal { max-width: 100%; border-radius: var(--r-lg) var(--r-lg) 0 0; max-height: 94vh; }
+  .exc-overlay {
+    align-items: flex-end;
+    padding: 0;
+    /* dvh tracks the VISIBLE viewport. With `inset: 0` alone the overlay sizes
+       to the LAYOUT viewport, which on a phone is taller than what you can see
+       while the browser's URL bar is showing — and since the sheet is
+       bottom-anchored, its top (title + close button) got pushed off-screen and
+       the modal became impossible to exit (AI Log 257). vh line is the
+       fallback for browsers without dvh. */
+    height: 100vh;
+    height: 100dvh;
+  }
+  .exc-modal {
+    max-width: 100%;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    /* 94vh -> 85dvh: leaves the header clear of the app topbar even on a short
+       phone screen, and small enough that the sheet is obviously dismissable. */
+    max-height: 85vh;
+    max-height: 85dvh;
+  }
+  /* Belt-and-braces: even if the body scrolls, the ✕ stays reachable. */
+  .exc-modal__head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface);
+  }
+  /* Clear the floating mobile tab bar + iOS home indicator so the submit
+     button can't sit underneath them. */
+  .exc-modal__body {
+    padding-bottom: calc(22px + 84px + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

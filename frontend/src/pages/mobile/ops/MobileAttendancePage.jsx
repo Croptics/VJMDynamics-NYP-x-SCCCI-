@@ -33,50 +33,28 @@ import CachedDataBadge from "../../../components/localstorage/CachedDataBadge.js
 // event is tracking who's arrived/late/missing, not doing the assignment
 // itself, so unassigned delegates don't belong on this list or its filters.
 const FILTERS = ["ALL", "ASSIGNED", "ARRIVED", "LATE", "MISSING", "CANCELLED"];
-// "CANCELLED" is a special case among these (2026-07-30 — "i think can add
-// the cancelled one, to see their reason etc"): it isn't a real `status`
-// value at all — a cancelled delegate is forced to UNASSIGNED with a
-// `cancelled` flag + `cancelReason` (see changeStatus() below), which is
-// exactly why UNASSIGNED delegates are excluded from every other filter here
-// (see the comment above STATUS_OPTIONS) — a cancelled person was invisible
-// on mobile entirely, with no way to see WHY they cancelled short of going to
-// desktop. This filter checks `d.cancelled` directly instead of
-// effectiveStatus(d), the one place on this page that looks past the
-// UNASSIGNED exclusion on purpose.
-// The "Update status" sheet offers only these two (2026-07-28 — "can remove the
-// assigned, arrived, late for dropdown when update status, it too much stuff").
-// The FILTERS row above deliberately still shows all five, so staff can still
-// VIEW who's assigned/arrived/late — this only trims what they can hand-SET.
+// CANCELLED isn't a real `status` — a cancelled delegate is forced to
+// UNASSIGNED with a `cancelled` flag + reason. This filter therefore checks
+// `d.cancelled` directly, the one place here that looks past the UNASSIGNED
+// exclusion on purpose.
 //
-//  - MISSING is the real field judgement this sheet exists for (and it captures
-//    a last-known location as a second step, see StatusSheet below).
-//  - ASSIGNED is kept purely as the UNDO for it: "I marked the wrong person
-//    missing." Without it there was no way back — tapping an already-active
-//    status is a no-op, so a mis-tap could only be fixed from desktop.
-//    changeStatus() clears lastLocation/lastSeen for any non-MISSING status, so
-//    undoing also wipes the stale location, which is what you want.
-//
-// Removed and why they shouldn't come back:
-//  - LATE is computed by the backend, not chosen by a human — the 60s scheduler
-//    in server.js flips ASSIGNED→LATE past each itinerary stop's cutoff
-//    (applyCheckpointLateCutoff), so a hand-set value is transient and gets
-//    overwritten on the next tick.
-//  - ARRIVED belongs to the real check-in paths (a scan, or the scanner's Manual
-//    tab), which write a `check_in_logs` row — who checked them in, when, by
-//    what method. Flipping status straight to ARRIVED here would mark someone
-//    present with NO audit trail, so the head-count and the log would disagree.
+// The "Update status" sheet offers only MISSING + ASSIGNED (the FILTERS row
+// still shows all five — this limits what can be hand-SET, not viewed):
+//  - MISSING is the field judgement this sheet exists for.
+//  - ASSIGNED is its UNDO ("wrong person marked missing"); re-tapping an
+//    active status is a no-op, so without it a mis-tap needed desktop.
+// Don't re-add LATE or ARRIVED: LATE is scheduler-computed (server.js) and a
+// hand-set value gets overwritten next tick; ARRIVED belongs to the real
+// check-in paths that write a `check_in_logs` audit row, so setting it here
+// would mark someone present with no trail and desync the head-count.
 const STATUS_BADGE_CLASS = {
   PRESENT: "badge-arrived", ARRIVED: "badge-arrived", ASSIGNED: "badge-assigned",
   LATE: "badge-late", MISSING: "badge-missing", UNASSIGNED: "badge-unassigned",
 };
-// Row sort order — the roster is sorted by urgency before name, so the people
-// who need chasing surface at the top instead of wherever the alphabet puts
-// them. See the `visible` memo for the reasoning.
+// Sorted by urgency before name so people needing chasing surface at the top.
 const STATUS_ORDER = { MISSING: 0, LATE: 1, ASSIGNED: 2, ARRIVED: 3, UNASSIGNED: 4 };
-// The coloured stripe down the left edge of each row card. Status is already
-// spelled out in a badge lower down the card, but a colour you can scan without
-// reading is what makes a 40-person roster usable on a phone — you can find
-// every red row at a glance while scrolling.
+// Left-edge stripe colour — scannable without reading, which is what makes a
+// 40-person roster usable while scrolling on a phone.
 const STATUS_ACCENT = {
   MISSING: "var(--st-missing)", LATE: "var(--st-late)",
   ARRIVED: "var(--st-present)", PRESENT: "var(--st-present)",
@@ -85,26 +63,15 @@ const STATUS_ACCENT = {
 
 /**
  * Mobile Attendance sheet — the full delegate roster (GET /api/trips/:id/
- * delegates), searchable/filterable. Takes over the tab slot freed up by
- * folding Missing into Home: this is the "look up any one person, or fix
- * their status" view, where Home is "what's the overall picture right now".
+ * delegates), searchable/filterable. The "look up one person / fix their
+ * status" view; Home is the overall picture.
  *
- * The initial status filter can come in via ?status=MISSING (the Home page's
- * KPI tiles and Coach status card both link here that way) so tapping
- * "20 missing" lands you straight on the filtered list instead of the
- * unfiltered roster.
+ * Accepts ?status=MISSING (Home's KPI tiles and Coach status card link here
+ * that way) so tapping "20 missing" lands on the filtered list.
  *
- * Row layout mirrors the "card row between" pattern already used by
- * QRCheckInPage.jsx's Manual check-in and "Me" tabs — avatar + name/subtitle
- * on the left, a clear action button on the right — instead of the old
- * cramped inline <select>. Status is changed via a bottom-sheet picker
- * (StatusSheet below) triggered by an explicit "Update status" button, same
- * spirit as Manual check-in's obvious "Mark present" button per row. Every
- * MISSING or LATE delegate also gets a one-tap call button (delegates.phone
- * already exists, added by Vance's onboarding parser) — if no number is on
- * file yet it prompts for one first (saved back onto the delegate) rather
- * than just hiding the button, since most delegates don't have a phone
- * populated.
+ * Status changes go through the StatusSheet bottom sheet, not an inline
+ * <select>. MISSING/LATE rows get a one-tap call button; with no phone on file
+ * it prompts for one and saves it back rather than hiding the button.
  */
 export default function MobileAttendancePage() {
   const { t } = useLang();
@@ -128,14 +95,9 @@ export default function MobileAttendancePage() {
   // ?coach=<id> — set when the Home page's Coach status card links to one
   // specific coach's missing list instead of everyone's.
   const [coachFilter, setCoachFilter] = useState(() => searchParams.get("coach") || null);
-  // "Load more" paging (2026-07-30 — "imagine there are 100 delegates, it
-  // will be very long page, pls advise and adjust it"): a trip that size
-  // rendered every single row at once with no pagination at all. Mobile
-  // convention is tap-to-reveal-more rather than desktop's page-number
-  // pagination (AccountControlPage.jsx), so this renders only the first
-  // PAGE_SIZE of `visible` and grows by PAGE_SIZE per tap; it resets back to
-  // one page below whenever the filter/search/coach narrows the list, so a
-  // fresh filter never opens already scrolled deep into a stale page.
+  // Tap-to-reveal-more paging (mobile convention, vs desktop's page numbers):
+  // renders PAGE_SIZE of `visible`, +PAGE_SIZE per tap. Resets on
+  // filter/search/coach change so a new filter never opens mid-page.
   const PAGE_SIZE = 20;
   const [shownCount, setShownCount] = useState(PAGE_SIZE);
   useEffect(() => { setShownCount(PAGE_SIZE); }, [filter, query, coachFilter]);
@@ -186,13 +148,9 @@ export default function MobileAttendancePage() {
   const savingIdRef = useRef(null);
   useEffect(() => { savingIdRef.current = savingId; }, [savingId]);
 
-  // Auto-refresh so a status change made by another signed-in staff member
-  // shows up here without anyone tapping Refresh. Was 2s, slowed to 8s
-  // (2026-07-24, Neon egress reduction), and since 2026-07-29 it also pauses
-  // entirely while the tab/app is backgrounded — see useVisiblePolling. That
-  // matters most here of anywhere: this is the page staff leave open on a
-  // phone all day, where a backgrounded tab was still polling every 8s on
-  // mobile data. Catches up the instant they switch back.
+  // Auto-refresh so another staff member's change appears without a Refresh
+  // tap. useVisiblePolling pauses while backgrounded — this is the page staff
+  // leave open on a phone all day, so that matters most here.
   useVisiblePolling(load, 8000);
 
   async function load() {
@@ -209,18 +167,11 @@ export default function MobileAttendancePage() {
       const dash = dashRes.data;
       setCacheStale(delegatesRes.stale || dashRes.stale);
       setCacheAt(delegatesRes.stale ? delegatesRes.at : dashRes.at);
-      // Re-checked here, not just at the top of load() (2026-07-30 — "weird
-      // when i mark as cancelled, but then it reset it"): the entry guard
-      // above only stops a NEW poll from starting while a save is underway —
-      // it does nothing for a poll that was ALREADY in flight the instant a
-      // save started. That poll's request predates the save, so the response
-      // landing here still reflects the pre-save data; applying it would
-      // silently overwrite the fresh optimistic update (cancelled, a status
-      // change, a location edit) with stale server data moments after it was
-      // set — exactly what looked like the app "resetting" the cancellation.
-      // Bailing out here and letting the NEXT poll tick (which starts only
-      // after the save's own finally clears savingIdRef) pick up the real
-      // post-save state instead.
+      // MUST re-check here, not only at the top of load(): the entry guard
+      // can't stop a poll ALREADY in flight when a save started. That
+      // response predates the save, so applying it would overwrite the fresh
+      // optimistic update with stale data — it looked like the app "resetting"
+      // a cancellation. Bail and let the next tick fetch post-save state.
       if (savingIdRef.current) return;
       // Overlay any still-unsynced offline changes on top of the server's copy,
       // so a reload with no signal doesn't appear to throw away the staff

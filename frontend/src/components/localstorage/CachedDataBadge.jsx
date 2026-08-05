@@ -3,10 +3,9 @@
  *  PART OF:   MusterGo base — offline read cache
  * ============================================================================= */
 /**
- * "Cached · Xm ago" banner — the visible half of lib/cachedFetch.js's fallback
- * (2026-07-31). Every page using cachedFetch() must show this whenever `stale`
- * is true, so cached data can never be mistaken for a live view — see that
- * file's header for why that matters in a live-headcount app.
+ * "Cached · Xm ago" banner — the visible half of lib/cachedFetch.js's fallback.
+ * Every page using cachedFetch() must render this when `stale` is true, so
+ * cached data can never be mistaken for a live view (see that file's header).
  */
 import { AlertTriangle } from "lucide-react";
 import { useLang } from "../../lib/i18n.jsx";

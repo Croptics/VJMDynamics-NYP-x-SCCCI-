@@ -672,6 +672,15 @@ New (2026-07-23, `manageDelegates`-gated): a "Checkpoint reset window" card — 
 
 ### `MobileScannerPage.jsx`
 
+> **File deleted 2026-08-05** ("remove the quick scanner and the kiosk") — the
+> QR/Face/Manual scanner let a scan check someone in with no admin approval
+> step, which the user decided was a bigger problem than worth hardening
+> further (see `INTEGRATION_NOTES.md`'s 2026-08-05 entry). `/mobile/scan/face`,
+> `/mobile/scan/qr`, `/mobile/scan/manual` and their bottom-tab entries are
+> gone from `App.jsx`/`MobileLayout.jsx`; `viewMobileScannerQr` and
+> `viewMobileScannerManual` are gone from `permissions.js`. Kept below as the
+> historical record of what the page did.
+
 /mobile/scanner **REMOVED 2026-07-29** — replaced by the three locked standalone routes `/mobile/scan/face`, `/mobile/scan/qr`, `/mobile/scan/manual` (Vimal made each scanner mode its own screen; a single toggling page meant a scanner-only account could wander between modes). `MOBILE_FALLBACK_ORDER` now points at `/mobile/scan/qr`. Everything below is kept as the historical record of what that page did and why, since the three replacements inherited its camera/scoping behaviour. Originally: the mobile port of the desktop /scanner (UnifiedScannerPage.jsx), single-column with a portrait 3:4 viewport. Same three real check-in modes (Face /QR /Manual) writing to the same endpoints; shares the face vectorizer/validator/tone with the desktop page via lib/faceScan.js (one copy, not three) and mounts Jayden's QRScannerPanel/ManualTracking Panel unmodified. Face camera requests the environment (rear) camera — a handheld phone points its back at the delegate (desktop uses the user-facing webcam). Auth-only route (NOT view-gated — any staff/admin can scan, matching the original ungated check-in philosophy). Reached from WITHIN the logged-in mobile app (not linked from the bottom-tab nav — kept at 4 tabs to preserve the nav-consistency fix, see the mobile.css .mobile-shell note). NOT the Login page's "Quick Scanner Access" target (that changed 2026-07-21 to the passwordless KioskScannerPage.jsx below — this route still needs a real login). Verified live at 375×812: real Manual check-in + Undo worked through it, zero console errors.
 
 **Manual mode rebuilt 2026-07-30 (Vimal)** — `ManualTrackingPanel.jsx` is no
@@ -689,6 +698,14 @@ branch on `scanMode === "manual"`. See `INTEGRATION_NOTES.md`'s "mobile manual
 check-in rebuild" section for the full merge writeup.
 
 ### `KioskScannerPage.jsx`
+
+> **File deleted 2026-08-05**, same request/reasoning as `MobileScannerPage.jsx`
+> above. `/kiosk-scan` is gone from `App.jsx`, and the Login page's "Scanner
+> only" button/link is gone from `LoginPage.jsx`. By the time it was removed
+> it had already been changed (2026-08-05, earlier the same day) to require a
+> real signed-in session rather than the original passwordless kiosk token
+> described below — that hardening is now moot. Kept below as the historical
+> record of what the page did.
 
 /kiosk-scan NEW (2026-07-21) — the PASSWORDLESS entrance-kiosk scanner (Face + QR only, no Manual — that stays a staff-only override behind a real login). Registered in App.jsx OUTSIDE both Layout and MobileLayout, and outside the `authed`-gated Routes tree entirely (the one route present in BOTH the logged-out and logged-in <Routes>), so it renders with ZERO nav chrome — no sidebar, no tab bar. The only way out is its own "Back to Login" button, which stops the camera stream and navigates to /login. On mount it POSTs /api/auth/kiosk (no credentials) and holds the returned token in a useRef — deliberately NEVER localStorage/sessionStorage and never touches lib/api.js's getToken(), so visiting this route can't affect or leak into a real logged-in session on the same device. Reuses lib/faceScan.js for the face vectorizer/validator/tone; QR-decodes with jsqr directly in a small self-contained loop (mirrors QRScannerPanel.jsx's pattern rather than importing it, since this page's camera/token/network plumbing is all its own — it can't use the shared lib/api.js fetch wrapper, which assumes a real session token). Reached from the Login page's "Quick Scanner Access" button — a PLAIN client-side navigate(), no form validation, no API call. Security model: the page itself needs no auth, but the token it mints is narrowly scoped server-side (see server.js's POST /api/auth/kiosk entry above) to grant ONLY the two camera check-in endpoints — so it's reachable with no password, yet can't read or touch anything else in the app.
 

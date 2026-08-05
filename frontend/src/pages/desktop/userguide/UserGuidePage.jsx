@@ -3,14 +3,13 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 import { useState } from "react";
-import { Compass, LayoutGrid, Bus, ScanFace, ShieldCheck } from "lucide-react";
+import { Compass, LayoutGrid, Bus, ShieldCheck } from "lucide-react";
 import { useLang } from "../../../lib/i18n.jsx";
 // Modularization pass (2026-08-02) — the rest of this page's own tabs/pieces
 // already live right here, as siblings.
 import { GettingStartedTab } from "./GettingStartedTab.jsx";
 import { DashboardTab } from "./DashboardTab.jsx";
 import { TripsTab } from "./TripsTab.jsx";
-import { ScannerTab } from "./ScannerTab.jsx";
 import { AccountsTab } from "./AccountsTab.jsx";
 
 /**
@@ -28,18 +27,18 @@ import { AccountsTab } from "./AccountsTab.jsx";
 
 // Top-level tabs now mirror the REAL sidebar nav (2026-07-26 — "put tab like
 // dashboard, trip, scanner etc.") instead of an ad-hoc feature grouping, so
-// the guide's structure actually matches the app you're looking at. Kept at
-// exactly 5. Escalations/Announcements/Rooms all live UNDER Dashboard (as
-// its own sub-tab bar) since that's genuinely where they surface from in the
-// app — the banner/Alerts modal/Room Management tab are all Dashboard
-// features, Announcements is one click from the same nav group. Checkpoints
-// moved under Trips instead, since a checkpoint IS an itinerary stop —
-// Desmond's Trips board owns the itinerary they're built on.
+// the guide's structure actually matches the app you're looking at.
+// Escalations/Announcements/Rooms all live UNDER Dashboard (as its own
+// sub-tab bar) since that's genuinely where they surface from in the app —
+// the banner/Alerts modal/Room Management tab are all Dashboard features,
+// Announcements is one click from the same nav group. Checkpoints moved
+// under Trips instead, since a checkpoint IS an itinerary stop — Desmond's
+// Trips board owns the itinerary they're built on. The "Scanner & kiosk" tab
+// was removed 2026-08-05 along with the quick scanner and kiosk it documented.
 const TABS = [
   { key: "start", label: "Getting started", icon: Compass },
   { key: "dashboard", label: "Dashboard", icon: LayoutGrid },
   { key: "trips", label: "Trips & Checkpoints", icon: Bus },
-  { key: "scanner", label: "Scanner & kiosk", icon: ScanFace },
   { key: "accounts", label: "Account & permissions", icon: ShieldCheck },
 ];
 
@@ -74,7 +73,6 @@ export default function UserGuidePage() {
       {tab === "start" && <GettingStartedTab t={t} />}
       {tab === "dashboard" && <DashboardTab t={t} />}
       {tab === "trips" && <TripsTab t={t} />}
-      {tab === "scanner" && <ScannerTab t={t} />}
       {tab === "accounts" && <AccountsTab t={t} />}
     </div>
   );

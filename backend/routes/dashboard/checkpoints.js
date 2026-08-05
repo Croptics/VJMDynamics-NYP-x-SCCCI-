@@ -6,38 +6,28 @@
  *  instead — see OWNSHIP.md at the project root.
  * ============================================================================= */
 /**
- * Multi-checkpoint attendance tracking (2026-07-22, revised 2026-07-23).
+ * Multi-checkpoint attendance tracking — an ADDITIVE layer on top of the single
+ * global `delegates.status` (which the Dashboard, Trips board and mobile read and
+ * this file leaves alone). Each delegate gets an independent status record per
+ * itinerary stop, so ARRIVED at the 10am stop and MISSING at the 4pm one can both
+ * hold without overwriting each other or the global status.
  *
- * A trip already has a single global `delegates.status` (used everywhere
- * else in the app — Dashboard, Trips board, mobile — completely untouched by
- * this file). This adds a SEPARATE, additive layer on top: a delegate gets
- * an INDEPENDENT status record per scheduled itinerary stop, so "ARRIVED at
- * the 10am Arrival" and "MISSING at the 4pm Assembly" can both be true for
- * the same delegate without either overwriting the other or the global
- * status.
+ * A "checkpoint" IS one of Desmond's `itinerary_items` rows — read-only, no schema
+ * changes on his side (same borrow pattern as Vimal's facescan.js against
+ * `delegates`). Don't reintroduce the old parallel trip_days/checkpoints tables;
+ * they were a disconnected duplicate of the itinerary.
  *
- * A "checkpoint" here IS one of Desmond's `itinerary_items` rows — his Trip
- * board already has exactly what's needed (day_number, start_time, title,
- * status: scheduled/delayed/moved/cancelled, delay_minutes), already
- * maintained by the real Trip page. This file used to keep its OWN parallel
- * trip_days/checkpoints tables (an admin manually typed "Day 1 · Bus
- * Boarding"); that was a disconnected duplicate of data that already
- * existed, so it was dropped in favor of reading itinerary_items directly —
- * needed ZERO changes to Desmond's schema/routes/pages, since this reads the
- * shared table read-only, the same pattern Vimal's facescan.js already uses for
- * the `delegates` table.
- *
- * Deliberately NOT wired into the existing scan endpoints (facescan.js's
- * /api/attendance/scan, document.js's /api/onboarding/checkin, exceptions.js's
- * /api/checkins/manual) — those stay exactly as they are and keep updating
- * the global delegates.status like always. The checkpoint-aware scanner UI
- * calls POST /api/checkpoints/:id/checkins as a SECOND, separate write right
- * after a normal scan succeeds, only when a checkpoint is actively selected.
+ * Deliberately NOT wired into the existing scan endpoints (facescan.js
+ * /api/attendance/scan, document.js /api/onboarding/checkin, exceptions.js
+ * /api/checkins/manual) — those keep updating only the global status. The
+ * checkpoint-aware scanner UI calls POST /api/checkpoints/:id/checkins as a
+ * SECOND write after a normal scan, only when a checkpoint is selected.
  */
 import { Router } from "express";
 import { wrap } from "../../lib/wrap.js";
 import { actorOf } from "../../lib/actor.js";
 import { requireAuth, requireKioskOrAuth, requireKioskOrPermission } from "../../lib/auth.js";
+import { guardTrip } from "../../lib/tripAccess.js";
 import { all, get, run } from "../../db/connection.js";
 import { getTrip, resolveTripUuid, getVisibleCoachIds } from "../../db/dashboard.js";
 import { updateDelegate } from "../../db/delegates.js";
@@ -46,28 +36,19 @@ import { logActivity } from "../../db/history.js";
 const router = Router();
 
 /**
- * Tags each checkpoint with a wall-clock-derived `timeState`
- * ("past" | "current" | "upcoming") and picks exactly one "current" —
- * neither Desmond's itinerary (`completed` is a MANUAL staff toggle, never
- * time-derived) nor this file originally had any real-time awareness at
- * all, so two items scheduled for 10am and noon both just read "scheduled"
- * at 3pm, with nothing indicating which stop actually matters right now.
+ * Tags each checkpoint with a clock-derived `timeState` ("past" | "current" |
+ * "upcoming") and picks exactly one "current". Desmond's itinerary has no
+ * time-awareness of its own (`completed` there is a MANUAL staff toggle).
  *
- * Only items on the trip's CURRENT active day (item.dayNumber === trip.dayOf)
- * are time-compared against the clock — a trip's day 2 stops are "upcoming"
- * and day 1's are "past" regardless of clock time, since dayOf is what the
- * rest of the app already treats as "which day is live right now" (e.g. the
- * Dashboard's "Day 3 of 5").
+ * Only stops on the trip's active day (dayNumber === trip.dayOf) are compared
+ * against the clock — earlier days are "past", later ones "upcoming", regardless
+ * of wall time, because dayOf is what the rest of the app treats as "the live day".
  *
- * Within the active day, "current" is the FIRST stop that hasn't started yet
- * or started at/before now (grace window removed 2026-07-23 per request —
- * it made "late" too forgiving for managing a real group). A checkpoint
- * flips from "current" to "past" (and auto-LATE, see applyCheckpointLateCutoff
- * below) the instant the clock passes its scheduled time. Every stop
- * chronologically before the chosen one is "past"; every stop after it is
- * "upcoming". If every stop has already started (the whole day's running
- * late), the LAST stop is chosen anyway, so there's always something to
- * focus on rather than nothing.
+ * Within the active day "current" is the first stop not yet started; it flips to
+ * "past" (and auto-LATE, see applyCheckpointLateCutoff) the instant the clock
+ * passes its scheduled time. The grace window is intentionally 0 — a window made
+ * "late" too forgiving for managing a real group. If every stop has started, the
+ * LAST one is chosen so there is always something focused.
  */
 const CHECKPOINT_GRACE_MINUTES = 0;
 
@@ -116,18 +97,13 @@ async function findCurrentCheckpoint(tripUuid) {
 }
 
 /**
- * Keeps the checkpoint-scoped view honest when a delegate's GLOBAL status is
- * set by hand (e.g. the Dashboard's Edit delegate form, routes/delegates.js's
- * PATCH /api/delegates/:id) rather than through a scan. Without this, an
- * earlier auto-inserted LATE row (or a stale scan) for the CURRENT checkpoint
- * would keep showing even after staff explicitly corrected the delegate to
- * MISSING/ARRIVED/LATE — the checkpoint stats widget and the Delegate
- * Timeline would silently disagree with what staff just declared.
- * Deliberately scoped to ONLY the checkpoint that's "current" right now —
- * a manual status edit has no way of knowing which PAST stop the correction
- * is about, so it doesn't touch history, only the live snapshot.
- * Never throws — a missing itinerary/current-checkpoint is a silent no-op,
- * since the manual status edit itself must never be blocked by this.
+ * Keeps the checkpoint-scoped view honest when a delegate's GLOBAL status is set
+ * by hand (Dashboard Edit delegate form → routes/delegates.js PATCH
+ * /api/delegates/:id) rather than by a scan; otherwise a stale/auto-LATE row for
+ * the current checkpoint would contradict what staff just declared.
+ * Scoped to the CURRENT checkpoint only — a manual edit can't know which PAST stop
+ * a correction refers to, so history is never touched. Never throws: a missing
+ * itinerary is a silent no-op, because the status update must not be blocked.
  */
 export async function syncCurrentCheckpointStatus(delegateId, tripUuid, status, actor = "Manual") {
   const CHECKPOINT_STATUSES = ["ARRIVED", "MISSING", "LATE"];
@@ -146,34 +122,23 @@ export async function syncCurrentCheckpointStatus(delegateId, tripUuid, status, 
 }
 
 /**
- * Auto-transition: within trips."checkpointResetMinutes" (default 5,
- * per-trip, adjustable via PATCH /api/trips/:id/checkpoint-reset-window)
- * before ANY checkpoint starts — including the very first stop of the day
- * (2026-07-25, simplified: "whatever event upcoming, when I set the time to
- * 5 min, it should change the status of late/arrived back to assigned" —
- * dropped the earlier "skip the first stop" special case, since a staff
- * member can just as easily fat-finger a delegate to ARRIVED/LATE before the
- * day's very first checkpoint too) — any delegate still globally
- * ARRIVED/LATE/PRESENT gets reset back to ASSIGNED, so staff can freshly
- * scan them in again for the upcoming stop, and the Dashboard's
- * Arrived/Missing counts reflect "checked in for what's happening now," not
- * a stale/mistaken status from earlier.
+ * Auto-transition: within trips."checkpointResetMinutes" (default 5, per-trip, set
+ * via PATCH /api/trips/:id/checkpoint-reset-window) before ANY checkpoint starts —
+ * including the day's first stop, deliberately not special-cased — any delegate
+ * still globally ARRIVED/LATE/PRESENT is reset to ASSIGNED so staff can rescan
+ * them for the upcoming stop and the Dashboard counts mean "checked in for now".
  *
- * Per-checkpoint tracking (checkpoint_checkins) already keeps each stop's
- * OWN independent record — this only touches the GLOBAL delegates.status
- * that the Dashboard/Trips board/mobile actually read. Goes through
- * updateDelegate() so each reset is a real, rollback-eligible History Log
- * entry, same as applyLateCutoff() above.
+ * Only touches the GLOBAL delegates.status; per-stop records in
+ * checkpoint_checkins stay intact. Goes through updateDelegate() so each reset is
+ * a rollback-eligible History Log entry.
  *
- * Safety rail against a reset-loop: a delegate who has ALREADY been scanned
- * in at the UPCOMING checkpoint specifically (they arrived early) is never
- * reset — only delegates with no check-in yet for that stop are, so an
- * early arrival can't get bounced back to ASSIGNED on the next minute's run.
+ * Safety rail against a reset-loop: a delegate already scanned in at the UPCOMING
+ * checkpoint (arrived early) is never reset, so they can't be bounced back to
+ * ASSIGNED on the next tick.
  *
- * Matches the legacy 'PRESENT' literal too (pre-5-status migration — see
- * normalize() in db/delegates.js and isBoarded() in db/dashboard.js, which
- * already treat it as an ARRIVED alias everywhere else) so old rows that
- * still carry that exact value aren't silently skipped by this reset.
+ * Matches the legacy 'PRESENT' literal too — normalize() in db/delegates.js and
+ * isBoarded() in db/dashboard.js treat it as an ARRIVED alias, so old rows
+ * carrying it must not be skipped here.
  */
 export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -199,17 +164,11 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
          AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
       [item.tripId, item.id]
     );
-    // One consolidated History Log entry per checkpoint (2026-07-31, "instead
-    // of 2 code there, change into one say that system update the all
-    // delegate status for next checkin") — this used to log once PER
-    // delegate via updateDelegate()'s own default logging, which read as a
-    // wall of identical "X: Y → Assigned" rows for what's really one system
-    // event. silent:true skips that per-row entry.
-    //
-    // `affected` (2026-07-31, "give me option to view detail by dropdown ...
-    // to see which delegate") — the consolidated entry used to name only the
-    // COUNT; this records exactly which delegates so the frontend can render
-    // an expandable list instead of a bare "reset 3 delegates".
+    // One consolidated History Log entry per checkpoint instead of one per
+    // delegate (a wall of identical rows for what is really one system event) —
+    // silent:true suppresses updateDelegate()'s own per-row logging. `affected`
+    // names the individual delegates so the frontend can render an expandable
+    // list rather than a bare count.
     let resetCount = 0;
     const affected = [];
     for (const d of candidates) {
@@ -228,21 +187,16 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
 }
 
 /**
- * Auto-transition: for every itinerary stop whose grace window (its
- * scheduled time + CHECKPOINT_GRACE_MINUTES) has fully elapsed — on its
- * trip's ACTUAL current day only — any delegate assigned to a coach who
- * still has no checkpoint_checkins row for that stop gets one auto-inserted
- * as LATE. Mirrors JQ's own applyLateCutoff() (db/delegates.js) — same
- * "auto-flip to Late past a cutoff" idea, same run-every-minute scheduling
- * (see server.js), just scoped to each individual itinerary checkpoint
- * instead of one single trip-wide cutoff time. This is what "merges" Trip
- * Settings' cutoff concept into the itinerary: instead of ONE fixed cutoff
- * per trip, every scheduled stop is its own cutoff.
+ * Auto-transition: for every stop on its trip's current day whose grace window
+ * (scheduled time + CHECKPOINT_GRACE_MINUTES) has elapsed, any coach-assigned
+ * delegate with no checkpoint_checkins row for that stop gets one as LATE.
+ * Mirrors applyLateCutoff() (db/delegates.js) and runs every minute (see
+ * server.js), but every scheduled stop is its own cutoff instead of one
+ * trip-wide cutoff time.
  *
- * ON CONFLICT DO NOTHING is the safety rail — a delegate who already has ANY
- * record for this checkpoint (a real scan, or an earlier auto-LATE) is never
- * touched again, so this can run every minute forever with no risk of
- * clobbering a genuine ARRIVED/MISSING scan that came in after the cutoff.
+ * ON CONFLICT DO NOTHING is the safety rail — a delegate with ANY record for this
+ * checkpoint is never touched again, so running every minute can't clobber a
+ * genuine ARRIVED/MISSING scan that landed after the cutoff.
  */
 export async function applyCheckpointLateCutoff(now = new Date()) {
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -260,8 +214,7 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
 
     const delegates = await all(`SELECT id, name, status FROM delegates WHERE trip_id = $1 AND "coachId" IS NOT NULL`, [item.tripId]);
     // One consolidated History Log entry per checkpoint, same reasoning as
-    // resetArrivedBeforeNextCheckpoint() above (2026-07-31) — was one entry
-    // PER delegate via updateDelegate()'s default logging.
+    // resetArrivedBeforeNextCheckpoint() above.
     let lateCount = 0;
     const affected = [];
     for (const d of delegates) {
@@ -273,32 +226,17 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
         [item.id, d.id]
       );
       if (inserted) updated++;
-      // BUG FIX (2026-07-24): this used to only write the per-checkpoint
-      // check-in row above — it never touched the delegate's own GLOBAL
-      // status, which is what the Dashboard/All-delegates table/KPIs
-      // actually read. A delegate could be genuinely past a stop's cutoff
-      // with no scan and still show "Assigned" everywhere except the
-      // checkpoint-detail views. Only promotes ASSIGNED -> LATE (never
-      // clobbers ARRIVED/MISSING/UNASSIGNED/an-already-LATE delegate) — same
-      // "only touch what this transition actually means" rule
-      // resetArrivedBeforeNextCheckpoint() above already follows. Goes
-      // through updateDelegate() so it's a real, rollback-eligible History
-      // Log entry, same as every other auto-transition here.
+      // Also sync the delegate's GLOBAL status, which is what the Dashboard /
+      // All-delegates table / KPIs read — the per-checkpoint row alone left a
+      // past-cutoff delegate showing "Assigned" everywhere else. Only promotes
+      // ASSIGNED -> LATE, never clobbering ARRIVED/MISSING/UNASSIGNED/already-LATE.
+      // Via updateDelegate() so it's a rollback-eligible History Log entry.
       //
-      // Gated on `inserted` (2026-07-25 — re-added after finding a live
-      // conflict): this loop re-examines EVERY already-passed stop of the
-      // day, every single tick, forever. Without the `inserted` gate, a
-      // delegate legitimately reset back to ASSIGNED by
-      // resetArrivedBeforeNextCheckpoint() (so they can be freshly scanned
-      // for the NEXT stop) got immediately bounced straight back to LATE on
-      // the very next tick — judged all over again against an OLD stop that
-      // already has its checkin row, defeating the whole reset-for-rescan
-      // feature the moment more than one stop in the day has elapsed.
-      // Gating on `inserted` means a stop's late-cutoff only ever fires
-      // ONCE per delegate (when its checkin row is first created) — exactly
-      // the "never touched again" safety rail the ON CONFLICT DO NOTHING
-      // comment above already promises, instead of re-litigating a
-      // long-past, already-resolved stop on every tick.
+      // DON'T drop the `inserted` gate: this loop re-examines every already-passed
+      // stop on every tick. Ungated, a delegate reset to ASSIGNED by
+      // resetArrivedBeforeNextCheckpoint() gets bounced straight back to LATE on
+      // the next tick by an OLD stop that already has its row, killing the
+      // reset-for-rescan feature. Gated, a stop's cutoff fires once per delegate.
       if (inserted && d.status === "ASSIGNED") {
         await updateDelegate(d.id, { status: "LATE" }, "System", { silent: true })
           .then((result) => { if (result) { lateCount++; affected.push({ id: d.id, name: d.name }); } })
@@ -317,15 +255,10 @@ export async function applyCheckpointLateCutoff(now = new Date()) {
 }
 
 /**
- * GET /api/trips/:id/checkpoint-stats (2026-07-24) — arrived/missing/late
- * counts for EVERY scheduled itinerary stop on this trip, in one query —
- * powers the Analytics tab's per-itinerary attendance chart (replaced the
- * old "delegates onboarded over time" line chart, which only ever showed
- * upload volume, not attendance). One row per stop, in schedule order;
- * cancelled stops excluded (nothing to scan there). Counts come from
- * checkpoint_checkins, the same per-stop records the scanner pages and
- * applyCheckpointLateCutoff() above already read/write — this endpoint adds
- * no new tracking, just aggregates what's already there.
+ * GET /api/trips/:id/checkpoint-stats — arrived/missing/late counts per scheduled
+ * stop in one query; powers the Analytics tab's per-itinerary attendance chart.
+ * Schedule order, cancelled stops excluded (nothing to scan). Pure aggregation
+ * over checkpoint_checkins — no new tracking.
  */
 router.get("/api/trips/:id/checkpoint-stats", requireAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
@@ -358,16 +291,12 @@ router.get("/api/trips/:id/checkpoint-stats", requireAuth(), wrap(async (req, re
 }));
 
 /**
- * GET /api/trips/:id/checkpoints — every scheduled itinerary stop for this
- * trip, grouped by day, in the SAME shape the old trip_days/checkpoints
- * tables returned (id/label/scheduledTime/dayNumber) so the 3 scanner pages
- * needed no changes — just now backed by the real itinerary, plus a
- * `timeState` per stop (see withTimeState() above) so the UI can auto-focus
- * on whatever's actually relevant right now. Cancelled stops are excluded
- * (scanning attendance for a cancelled stop doesn't make sense); delayed
- * stops are included with their delay so the Selector can show it.
- * Reachable by the passwordless kiosk too (requireKioskOrAuth) — itinerary
- * titles/times aren't sensitive delegate data.
+ * GET /api/trips/:id/checkpoints — scheduled stops grouped by day, in the shape
+ * the 3 scanner pages already expect (id/label/scheduledTime/dayNumber), plus a
+ * `timeState` per stop (see withTimeState above) so the UI can auto-focus what's
+ * relevant now. Cancelled stops excluded; delayed ones included with their delay
+ * so the Selector can show it. Reachable by the passwordless kiosk
+ * (requireKioskOrAuth) — itinerary titles/times aren't sensitive delegate data.
  */
 router.get("/api/trips/:id/checkpoints", requireKioskOrAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
@@ -397,10 +326,9 @@ router.get("/api/trips/:id/checkpoints", requireKioskOrAuth(), wrap(async (req, 
 }));
 
 /**
- * PATCH /api/trips/:id/checkpoint-reset-window — set how many minutes before
- * each stop an ARRIVED delegate gets reset to ASSIGNED (see
- * resetArrivedBeforeNextCheckpoint above). Exists so the 5-min testing value
- * can be dialed up/down (e.g. back to 30 for real trips) from the Dashboard
+ * PATCH /api/trips/:id/checkpoint-reset-window — minutes before each stop that an
+ * ARRIVED delegate gets reset to ASSIGNED (see resetArrivedBeforeNextCheckpoint).
+ * Tunable from the Dashboard so the 5-min testing value can go back up (e.g. 30)
  * without a code change. Body: { minutes } — 1 to 120.
  */
 router.patch("/api/trips/:id/checkpoint-reset-window", requireAuth(), wrap(async (req, res) => {
@@ -415,13 +343,11 @@ router.patch("/api/trips/:id/checkpoint-reset-window", requireAuth(), wrap(async
 }));
 
 /**
- * PATCH /api/trips/:id/itinerary-buffer — set the minimum minutes required
- * between two itinerary stops on the same day (enforced client-side in
- * EditItineraryModal's handleSave(), TripCoachPage.jsx). Deliberately its OWN
- * setting, separate from checkpoint-reset-window above (2026-07-23) — they
- * used to share one value, but tightening the reset window for testing
- * shouldn't force the itinerary gap to shrink too. Body: { minutes } — 0 to 120
- * (0 = no minimum gap required).
+ * PATCH /api/trips/:id/itinerary-buffer — minimum minutes between two stops on the
+ * same day (enforced client-side in EditItineraryModal's handleSave,
+ * TripCoachPage.jsx). Deliberately separate from checkpoint-reset-window above:
+ * tightening the reset window for testing must not shrink the itinerary gap.
+ * Body: { minutes } — 0 to 120 (0 = no minimum).
  */
 router.patch("/api/trips/:id/itinerary-buffer", requireAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
@@ -435,22 +361,24 @@ router.patch("/api/trips/:id/itinerary-buffer", requireAuth(), wrap(async (req, 
 }));
 
 /**
- * POST /api/checkpoints/:id/checkins — record (or update, if this delegate
- * was already scanned at this checkpoint) one delegate's status at this
- * itinerary stop. Upsert on (itinerary_item_id, delegate_id) — a re-scan
- * updates the existing record rather than creating a duplicate.
+ * POST /api/checkpoints/:id/checkins — one delegate's status at this stop. Upsert
+ * on (itinerary_item_id, delegate_id) so a re-scan updates rather than duplicates.
  * Body: { delegateId, status, method? }
  *
- * requireKioskOrPermission: a signed-in account needs manageDelegates, OR
- * the passwordless kiosk token — same pattern as facescan.js's /attendance/scan
- * and document.js's /onboarding/checkin, so the entrance kiosk can also record
- * a checkpoint-scoped check-in. This is the ONLY checkpoint route the kiosk
- * token can reach besides the list above — reading full check-in lists
- * stays off-limits to a passwordless device.
+ * requireKioskOrPermission: signed-in accounts need manageDelegates, or the
+ * passwordless kiosk token (same pattern as facescan.js /attendance/scan and
+ * document.js /onboarding/checkin). Together with the list route above this is the
+ * ONLY checkpoint route the kiosk can reach — reading check-in lists must stay off
+ * limits to a passwordless device.
  */
 router.post("/api/checkpoints/:id/checkins", requireKioskOrPermission("manageDelegates"), wrap(async (req, res) => {
-  const item = await get(`SELECT id FROM itinerary_items WHERE id = $1`, [req.params.id]);
+  const item = await get(`SELECT id, trip_id FROM itinerary_items WHERE id = $1`, [req.params.id]);
   if (!item) return res.status(404).json({ error: "CHECKPOINT_NOT_FOUND" });
+  // Per-trip authorisation (2026-08-05). This body is a raw { delegateId,
+  // status } with no scanned badge, so without this an account assigned to one
+  // trip could mark delegates present on ANOTHER trip's checkpoint just by
+  // passing its id. See lib/tripAccess.js and AI Log 262.
+  if (!(await guardTrip(req, res, item.trip_id))) return;
 
   const { delegateId, status, method } = req.body || {};
   if (!delegateId) return res.status(400).json({ error: "DELEGATE_REQUIRED" });
@@ -483,11 +411,9 @@ router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res)
   const item = await get(`SELECT id, trip_id AS "tripId" FROM itinerary_items WHERE id = $1`, [req.params.id]);
   if (!item) return res.status(404).json({ error: "CHECKPOINT_NOT_FOUND" });
 
-  // Coach-scoped Staff visibility (2026-07-27 security audit finding —
-  // this route returned every delegate at a checkpoint regardless of coach,
-  // bypassing the same restriction dashboard.js/delegates.js already
-  // enforce via getVisibleCoachIds()). See db/dashboard.js's doc for the
-  // full "captain your own coach" semantics.
+  // Coach-scoped Staff visibility — this route once returned every delegate at a
+  // checkpoint regardless of coach. See db/dashboard.js for the "captain your own
+  // coach" semantics dashboard.js/delegates.js also enforce.
   const visibleCoachIds = await getVisibleCoachIds(item.tripId, req.account);
 
   const rows = await all(
@@ -511,22 +437,13 @@ router.get("/api/checkpoints/:id/checkins", requireAuth(), wrap(async (req, res)
 }));
 
 /**
- * GET /api/trips/:id/checkpoint-matrix (2026-07-28) — the WHOLE attendance grid
- * for a trip in one round trip: every scheduled stop, every delegate, and each
- * delegate's status at each stop.
- *
- * Why this exists: the Dashboard's Checkpoint history tab used to be a list you
- * expanded one delegate at a time, lazy-loading
- * `/api/delegates/:id/checkpoint-timeline` per person ("instead of seeing one by
- * one" — 2026-07-28). Showing everyone at once that way would be one request per
- * delegate; this is a single query instead, so the card grid scales to a real
- * roster.
- *
- * Adds no new tracking — it reads the same `checkpoint_checkins` rows the
- * scanner writes and `checkpoint-stats` already aggregates. Coach-scoped for
- * Staff exactly like every other delegate-reading route (see getVisibleCoachIds
- * in db/dashboard.js); `coachId` is used for that filter and for the card's
- * subtitle, so unlike the per-checkpoint route above it stays in the response.
+ * GET /api/trips/:id/checkpoint-matrix — the whole attendance grid (every stop ×
+ * every delegate) in one round trip, so the Checkpoint history tab can show
+ * everyone at once instead of lazy-loading /api/delegates/:id/checkpoint-timeline
+ * per person. Adds no new tracking; reads the same checkpoint_checkins rows.
+ * Coach-scoped for Staff (getVisibleCoachIds, db/dashboard.js); unlike the
+ * per-checkpoint route above, `coachId` stays in the response — the card subtitle
+ * needs it.
  */
 router.get("/api/trips/:id/checkpoint-matrix", requireAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
@@ -541,9 +458,8 @@ router.get("/api/trips/:id/checkpoint-matrix", requireAuth(), wrap(async (req, r
     [tripUuid]
   );
 
-  // One row per delegate/stop pair that has a record. Delegates with no records
-  // at all still need to appear (as a fully-blank row), so the roster is read
-  // separately rather than inner-joined away.
+  // Roster is read separately, not inner-joined: delegates with no records at all
+  // must still appear as a fully-blank row.
   const roster = await all(
     `SELECT d.id, d.name, d."coachId", d.vip, d.status,
             c.name AS "coachName", c.city AS "coachCity"
@@ -605,24 +521,17 @@ router.get("/api/delegates/:id/checkpoint-timeline", requireAuth(), wrap(async (
   const delegate = await get(`SELECT id, name, trip_id AS "tripId", "coachId" FROM delegates WHERE id = $1`, [req.params.id]);
   if (!delegate) return res.status(404).json({ error: "DELEGATE_NOT_FOUND" });
 
-  // Coach-scoped Staff visibility (2026-07-27 security audit finding — this
-  // route returned ANY delegate's full checkpoint history given their id,
-  // with no ownership check at all, letting a coach-scoped Staff account
-  // enumerate/guess ids to pull another captain's delegate's timeline).
+  // Coach-scoped Staff visibility — without this check any id returned that
+  // delegate's full history, so a coach-scoped Staff account could enumerate ids to
+  // read another captain's delegates.
   const visibleCoachIds = await getVisibleCoachIds(delegate.tripId, req.account);
   if (visibleCoachIds && !visibleCoachIds.has(delegate.coachId)) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only view delegates on your own coach." });
   }
 
-  // BUG FIX (2026-07-31 — "currently on this delegate show day 3 and 4 even
-  // though this trip only have 2 day"): this join matched purely on
-  // itinerary_item_id with no check that the item actually belongs to the
-  // SAME trip as the delegate. A delegate who was ever moved between trips
-  // (or whose earlier trip's itinerary has since shrunk/been replaced) kept
-  // showing checkpoint rows tied to a DIFFERENT trip's itinerary_items —
-  // e.g. a 5-day trip's "Day 4 · Hotel breakfast" bleeding into a delegate
-  // now on a 2-day trip. Scoping the join to delegate.tripId keeps this
-  // strictly to the delegate's own trip's stops.
+  // The join MUST stay scoped to delegate.tripId. Matching on itinerary_item_id
+  // alone let a delegate moved between trips show stops from a DIFFERENT trip's
+  // itinerary (e.g. a 5-day trip's "Day 4" appearing on a 2-day trip).
   const timeline = await all(
     `SELECT cc.id, cc.status, cc.method, cc.scanned_by AS "scannedBy",
             cc.created_at AS "createdAt", cc.updated_at AS "updatedAt",

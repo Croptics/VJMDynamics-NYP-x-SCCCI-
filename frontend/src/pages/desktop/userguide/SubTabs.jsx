@@ -2,7 +2,7 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — User Guide's shared sub-tab switcher
  *
- *  Extracted from UserGuidePage.jsx (2026-08-02 modularization pass).
+ *  Extracted from UserGuidePage.jsx.
  * ============================================================================= */
 
 export function SubTabs({ items, active, onChange, t }) {

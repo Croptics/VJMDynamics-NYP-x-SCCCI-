@@ -54,6 +54,7 @@ import { recordEvent } from "./trip.js";
 import { logActivity } from "../db/history.js";
 import { actorOf } from "../lib/actor.js";
 import { requireAuth, requirePermission, requireKioskOrPermission } from "../lib/auth.js";
+import { guardTrip } from "../lib/tripAccess.js";
 // Boarding-pass email (Feature 4c, merged from Vance's post-v2 branch,
 // 2026-07-31) — already a project dependency (JQ's lib/notify.js uses the
 // same SMTP_HOST/SMTP_USER/SMTP_PASS pattern for escalation emails); kept as
@@ -940,6 +941,15 @@ router.get("/api/onboarding/badges", requireAuth(), wrap(async (req, res) => {
   await ensureReady();
   const tripId = req.query.tripId;
   const tripUuid = await resolveTripUuid(tripId);
+  // Per-trip authorisation (2026-08-05). This returns `qr_code` /
+  // `external_badge_code`, which ARE the check-in credentials — so an
+  // unscoped read let any signed-in staff account pull another trip's badge
+  // tokens and then check those delegates in. Escalation, not just a leak.
+  // Note this also closes the no-tripId path, which returned EVERY trip's
+  // delegates: guardTrip() fails closed on a null trip, so a non-admin must
+  // name a trip they're actually on. Admins are unrestricted as before.
+  // See lib/tripAccess.js and AI Log 262.
+  if (req.account?.role !== "admin" && !(await guardTrip(req, res, tripUuid))) return;
   await backfillQrCodes(tripUuid);
   // email/website/external_badge_code added 2026-07-31 (merged from Vance's
   // post-v2 branch) — power the "Email pass" button and the physical-pass
@@ -1147,6 +1157,20 @@ router.post("/api/onboarding/checkin", requireKioskOrPermission("manageScanner")
   if (!d.rows.length) return res.status(404).json({ error: "UNKNOWN_CODE", message: "That badge isn't recognised." });
   const del = d.rows[0];
   const tripId = del.trip_str || requestedTripId;
+
+  // Per-trip authorisation (2026-08-05, continuing (262)). This already
+  // resolved the delegate's REAL trip above (rather than trusting the
+  // client-supplied tripId) so a mistyped/mismatched id couldn't misfile a
+  // check-in — but nothing stopped a staff account working Trip A from
+  // scanning a valid badge that happens to belong to a Trip B delegate.
+  // Resolved the SAME way `tripId` above is (falls back to "t-1" for a
+  // base-pool delegate with no trip_id), so this doesn't invent a second
+  // convention for what "this delegate's trip" means. Named distinctly from
+  // the `onboardTripUuid` declared further down this same handler (for the
+  // audit log) — that one re-resolves the identical value; left it alone
+  // rather than restructure an unrelated block for this fix.
+  const authTripUuid = await resolveTripUuid(tripId);
+  if (!(await guardTrip(req, res, authTripUuid))) return;
 
   // Cross-coach guard: a scanner scoped to one coach (coachOverride, from the
   // scan panel's own coach picker) must NOT be able to silently reassign a

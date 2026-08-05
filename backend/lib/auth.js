@@ -3,13 +3,12 @@
  *  PART OF:   MusterGo base — Admin Dashboard, Auth, Accounts & Permissions
  * ============================================================================= */
 /**
- * Signed session tokens + auth middleware, shared by server.js and any
- * teammate route files (e.g. routes/dashboard/insights.js) that need to require a
- * signed-in caller.
+ * Signed session tokens + auth middleware, shared by server.js and teammate
+ * route files (e.g. routes/dashboard/insights.js) needing a signed-in caller.
  *
  * Tokens are JWTs signed with JWT_SECRET (set it in backend/.env for
- * production — see .env.example). Without it, a random-looking but fixed
- * dev default is used so local dev still works, with a console warning.
+ * production — see .env.example). Without it a FIXED dev default is used so
+ * local dev still works; that default is insecure, hence the console warning.
  */
 
 import jwt from "jsonwebtoken";
@@ -33,12 +32,11 @@ export function makeToken(username, tokenVersion = 0) {
  * Issue a scoped, PASSWORDLESS kiosk token for the entrance scanner.
  *
  * It carries `{ kiosk: true }` and NO username on purpose: accountFromReq()
- * below resolves callers by username, so a kiosk token returns null there and
- * is therefore REJECTED by requireAuth()/requirePermission() — i.e. it grants
- * nothing anywhere in the app EXCEPT the two camera check-in endpoints that
- * explicitly opt in via requireKioskOrAuth(). Short-lived (8h ≈ one event
- * shift). See the passwordless kiosk scanner (KioskScannerPage.jsx) and the
- * public POST /api/auth/kiosk mint endpoint (server.js).
+ * resolves callers by username, so a kiosk token returns null there and is
+ * therefore REJECTED by requireAuth()/requirePermission() — it grants nothing
+ * anywhere EXCEPT endpoints that explicitly opt in via requireKioskOrAuth().
+ * Short-lived (8h ≈ one event shift). See KioskScannerPage.jsx and the public
+ * POST /api/auth/kiosk mint endpoint (server.js).
  */
 export function signKioskToken() {
   return jwt.sign({ kiosk: true }, JWT_SECRET, { expiresIn: "8h" });
@@ -93,14 +91,12 @@ export function requireAuth() {
 /**
  * Gate for the passwordless kiosk's camera check-in endpoints (POST
  * /attendance/scan, POST /onboarding/checkin) and its checkpoint-list read
- * (GET /trips/:id/checkpoints — checkpoint labels/times aren't sensitive
- * delegate data, so the kiosk can populate its Checkpoint Selector). Accepts
- * either a normal signed-in account OR a valid kiosk token — and for a
- * kiosk token, maps the caller to the dedicated `__kiosk__` account (seeded
- * in data.js) so DB writes that foreign-key onto accounts.id (e.g.
- * check_in_logs.checked_in_by) still work. The kiosk token stays powerless
- * everywhere else — checkpoint stats/admin CRUD stay on requireAuth/
- * requirePermission (see checkpoints.js).
+ * (GET /trips/:id/checkpoints — labels/times aren't sensitive delegate data).
+ * Accepts a signed-in account OR a valid kiosk token; a kiosk token maps to
+ * the dedicated `__kiosk__` account (seeded in data.js) so writes that
+ * foreign-key onto accounts.id (e.g. check_in_logs.checked_in_by) still work.
+ * The kiosk token stays powerless everywhere else — checkpoint stats/admin
+ * CRUD stay on requireAuth/requirePermission (see checkpoints.js).
  */
 export function requireKioskOrAuth() {
   return wrap(async (req, res, next) => {
@@ -129,13 +125,11 @@ export function requirePermission(perm) {
 
 /**
  * Gate for the READ side of Account control (GET routes only). Passes for
- * anyone with "manageAccounts", OR a read-only Admin — a read-only Admin's
- * whole point is full visibility with zero write capability (see
- * accountPermissions() in db/accounts.js, which zeroes "manageAccounts" for
- * them same as every other action-group key), so a plain requirePermission()
- * check would lock them out of even VIEWING this page. The mutating routes
- * (POST/PATCH/DELETE below) stay on requirePermission("manageAccounts"),
- * which a read-only Admin still correctly fails.
+ * "manageAccounts" OR a read-only Admin: accountPermissions() in
+ * db/accounts.js zeroes "manageAccounts" for read-only admins along with every
+ * other action key, so a plain requirePermission() would lock them out of even
+ * VIEWING the page they're meant to have full visibility of. Mutating routes
+ * stay on requirePermission("manageAccounts"), which they correctly fail.
  */
 export function requireAccountsView() {
   return wrap(async (req, res, next) => {
@@ -152,11 +146,9 @@ export function requireAccountsView() {
 
 /**
  * Like requireKioskOrAuth(), but the SIGNED-IN-SESSION path additionally
- * requires `perm` (the passwordless kiosk token path is unaffected either
- * way — it never carried per-permission checks and still doesn't; the kiosk
- * exists specifically so a device with no login can still scan). Used on
- * the two camera check-in endpoints now that scanning is gated on
- * "manageScanner" for a real session.
+ * requires `perm`. The kiosk-token path deliberately carries no per-permission
+ * check — the kiosk exists so a device with no login can still scan. Used on
+ * the camera check-in endpoints, gated on "manageScanner" for a real session.
  */
 export function requireKioskOrPermission(perm) {
   return wrap(async (req, res, next) => {

@@ -2,7 +2,7 @@
  *  OWNED BY:  InsightMetrics (JQ)
  *  PART OF:   MusterGo base — User Guide's walkthrough-video upload card
  *
- *  Extracted from UserGuidePage.jsx (2026-08-02 modularization pass).
+ *  Extracted from UserGuidePage.jsx.
  * ============================================================================= */
 import { useState, useEffect } from "react";
 import { PlayCircle, Upload, Trash2 } from "lucide-react";
@@ -10,11 +10,9 @@ import { apiGet, apiDelete, getPermissions, getToken } from "../../../lib/api.js
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
-/** Getting Started's walkthrough video slot (2026-07-26). Global, not
- *  per-account — GET /api/guide-video returns whatever an Admin last
- *  uploaded (or null while it's still the "coming soon" placeholder). Only
- *  an Admin (manageAccounts) sees the upload/replace/remove controls; a
- *  Staff account just sees the player once one exists. */
+/** Getting Started's walkthrough video slot. Global, not per-account — GET
+ *  /api/guide-video returns whatever an Admin last uploaded (null = "coming
+ *  soon" placeholder). Only manageAccounts sees upload/replace/remove. */
 export function GuideVideoCard({ t }) {
   const isAdmin = !!getPermissions().manageAccounts;
   const [video, setVideo] = useState(undefined); // undefined = loading, null = none set

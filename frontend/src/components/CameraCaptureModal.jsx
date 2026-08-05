@@ -6,24 +6,17 @@ import { useEffect, useRef, useState } from "react";
 import { Camera, X, RefreshCw, Check } from "lucide-react";
 
 /**
- * Take a profile photo with the webcam (2026-07-29 — "allow me to take image
- * using camera also"). The Settings avatar could only ever be a file upload,
- * which is a poor fit for the actual situation: staff are AT the event, on a
- * laptop with a camera, and don't have a headshot saved anywhere.
+ * Take a profile photo with the webcam — staff are at the event on a laptop and
+ * have no headshot saved to upload.
  *
- * Deliberately hands back a plain `File`, so it drops into the EXISTING photo
- * pipeline untouched — SettingsPage feeds it to the same `PhotoCropModal` a
- * file upload goes through, and the crop result posts to the same endpoint.
- * Nothing about upload, cropping or storage needed to change.
+ * Hands back a plain `File` so it drops into the EXISTING photo pipeline
+ * untouched: SettingsPage feeds it to the same PhotoCropModal and endpoint a
+ * picked file goes through. Two-step (preview → review) because a webcam frame
+ * is easy to get wrong and retaking must be cheap.
  *
- * Two-step (preview → review) rather than capture-and-commit: a webcam frame is
- * easy to get wrong (mid-blink, bad framing), and re-taking has to be cheaper
- * than uploading a replacement afterwards.
- *
- * NOT reusing lib/faceScan.js's captureFrame(): that's built for biometrics —
- * it centres on a face-crop box and downscales to 180px for vectorising. A
- * profile photo wants the full frame at full resolution and no face detection,
- * since a delegate's avatar is a picture, not a template to match against.
+ * Deliberately NOT lib/faceScan.js's captureFrame(): that's for biometrics and
+ * centres on a face-crop box downscaled to 180px. An avatar wants the full
+ * frame at full resolution with no face detection.
  */
 export default function CameraCaptureModal({ onCapture, onCancel, t }) {
   const videoRef = useRef(null);
@@ -38,9 +31,8 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
     let cancelled = false;
     async function start() {
       try {
-        // `user` = the front/self-facing camera, which is what you want for a
-        // photo OF the person at the keyboard (the scanner pages ask for
-        // `environment` instead, since they're pointed AT a delegate).
+        // `user` = self-facing, for a photo OF the person at the keyboard. The
+        // scanner pages want `environment` — they point AT a delegate.
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
@@ -53,9 +45,8 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
         }
         setReady(true);
       } catch (e) {
-        // Name the actual cause: "denied" and "no camera attached" need
-        // completely different responses from the user, and a generic
-        // "camera error" leaves them guessing which one they're facing.
+        // Name the cause — "denied" and "no camera attached" need completely
+        // different responses from the user.
         const name = e?.name || "";
         setError(
           name === "NotAllowedError" || name === "SecurityError"
@@ -69,9 +60,8 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
       }
     }
     start();
-    // Releasing the stream on unmount is not optional — a live MediaStream that
-    // outlives this modal leaves the camera light on, which reads as the app
-    // spying on you.
+    // Releasing the stream is not optional: a MediaStream outliving this modal
+    // leaves the camera light on, which reads as the app spying on you.
     return () => {
       cancelled = true;
       streamRef.current?.getTracks().forEach((tr) => tr.stop());
@@ -84,16 +74,14 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
     const video = videoRef.current;
     if (!video || !video.videoWidth) return;
     const canvas = document.createElement("canvas");
-    // Square, centre-cropped to the short edge — the avatar renders in a
-    // circle everywhere, so cropping here means the preview you approve is
-    // the shape you actually get.
+    // Square, centre-cropped to the short edge — avatars render as circles, so
+    // cropping here makes the approved preview the shape you actually get.
     const size = Math.min(video.videoWidth, video.videoHeight);
     canvas.width = size;
     canvas.height = size;
     const ctx = canvas.getContext("2d");
-    // Un-mirror before drawing. The live preview is mirrored (below) because an
-    // un-mirrored self-view feels wrong to look at, but saving it mirrored would
-    // flip any text on a lanyard or badge in the shot.
+    // Un-mirror before drawing. The preview is mirrored (self-views feel wrong
+    // otherwise), but saving it mirrored flips text on a lanyard or badge.
     ctx.translate(size, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(
@@ -109,8 +97,8 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
     setSaving(true);
     try {
       const blob = await (await fetch(shot)).blob();
-      // A File (not a bare Blob) so it behaves identically to a picked file
-      // downstream — PhotoCropModal and the upload both read `.name`/`.type`.
+      // A File, not a bare Blob — PhotoCropModal and the upload read
+      // `.name`/`.type`.
       onCapture(new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" }));
     } catch {
       setError(t("Could not save that photo. Please try again."));
@@ -147,8 +135,7 @@ export default function CameraCaptureModal({ onCapture, onCancel, t }) {
                     ref={videoRef}
                     playsInline
                     muted
-                    // `scaleX(-1)` — mirrored preview only; see take() for why
-                    // the saved frame is flipped back.
+                    // Mirrored preview only; take() flips the saved frame back.
                     style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }}
                   />
                 )}

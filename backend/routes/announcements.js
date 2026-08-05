@@ -43,6 +43,7 @@ import {
   deleteAnnouncement,
 } from "../db/announcements.js";
 import { get } from "../db/connection.js";
+import { getTrip } from "../db/dashboard.js";
 import { resolveTripUuid } from "../data.js";
 import {
   isConfigured as mediaStorageConfigured,
@@ -117,7 +118,11 @@ async function uploadAllVideos(files) {
 
 router.get("/api/trips/:id/announcements", requireAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
-  res.json({ announcements: await listAnnouncements(tripUuid) });
+  // dayOf (2026-08-04) — lets the mobile page pick a "current/upcoming
+  // itinerary stop" hero announcement instead of just the newest-posted one,
+  // without a second round-trip to the dashboard endpoint just for this.
+  const trip = await getTrip(tripUuid);
+  res.json({ announcements: await listAnnouncements(tripUuid), dayOf: trip?.dayOf ?? null });
 }));
 
 router.post("/api/trips/:id/announcements", requirePermission("manageAnnouncements"), handleUpload, wrap(async (req, res) => {

@@ -33,12 +33,9 @@ export async function clearGuideVideo() {
   return existing?.publicId || null;
 }
 
-/** Settings → Image storage media manager (2026-07-27) — a delete/purge done
- *  from THAT screen removes the Cloudinary asset directly, bypassing
- *  DELETE /api/guide-video entirely, so this clears the row if it was
- *  pointing at one of the just-deleted publicIds. Returns whether it cleared
- *  anything (caller doesn't need to separately destroy the asset — it's
- *  already gone by the time this runs). */
+/** Settings → Image storage media manager deletes Cloudinary assets directly,
+ *  bypassing DELETE /api/guide-video, so this clears the row if it pointed at
+ *  one of them. Asset is already gone — caller must NOT destroy it again. */
 export async function clearGuideVideoIfMatches(publicIds) {
   const idSet = new Set(publicIds || []);
   const existing = await getGuideVideo();

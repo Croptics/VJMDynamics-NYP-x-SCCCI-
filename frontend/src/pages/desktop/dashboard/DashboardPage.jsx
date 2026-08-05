@@ -44,19 +44,16 @@ import {
   Unlock,
 } from "lucide-react";
 import { apiGet, apiPost, apiPatch, apiDelete, getPermissions, getUser } from "../../../lib/api.js";
-// Offline-capable READ (2026-07-31) — the Dashboard/All-delegates table is
-// one of the pages flagged as most important ("the manual, attendance,
-// exception, trip"): load() below used to just error out the whole page on
-// any failure, including a dead signal. See lib/cachedFetch.js.
+// Offline-capable READ (lib/cachedFetch.js) — load() otherwise errored out the
+// whole page on any failure, including a dead signal.
 import { cachedFetch } from "../../../lib/localstorage/cachedFetch.js";
 import CachedDataBadge from "../../../components/localstorage/CachedDataBadge.jsx";
 import { getCurrentLocationString, geolocationErrorMessage } from "../../../lib/dashboard/geolocation.js";
 import { useVisiblePolling } from "../../../lib/useVisiblePolling.js";
-// getActiveTripId/setActiveTripId aliased to this file's original local names
-// (2026-08-02 audit — was a byte-for-byte duplicate: same storage key
-// "mg_dashboard_trip", same fallback "t-1", same dispatchEvent) so every
-// existing call site below is untouched.
+// Aliased to this file's original local names; these were a duplicate of
+// lib/activeTrip.js.
 import { getActiveTripId as loadSelectedTripId, setActiveTripId as saveSelectedTripId } from "../../../lib/activeTrip.js";
+import { scopedTripIds } from "../../../lib/tripScope.js";
 import { effectiveStatus } from "../../../lib/dashboard/delegateStatus.js";
 import StatusBadge from "../../../components/StatusBadge.jsx";
 import AnalyticsPanel from "../../../components/dashboard/AnalyticsPanel.jsx";
@@ -66,9 +63,7 @@ import DelegateTimeline from "../../../components/delegate/DelegateTimeline.jsx"
 import ExportModal from "../../../components/dashboard/ExportModal.jsx";
 import PhotoCropModal from "../../../components/PhotoCropModal.jsx";
 import { useLang } from "../../../lib/i18n.jsx";
-// Modularization pass (2026-08-02) — DashboardPage.jsx was a single
-// 3,022-line component; everything below used to be defined inline in this
-// file. See pages/desktop/dashboard/ for the extracted pieces.
+// Extracted pieces live in pages/desktop/dashboard/ — this was one component.
 import { S } from "../../../lib/dashboard/dashboardStyles.js";
 import { coachDisplayName, fmt12h, fmtDepartsIn, liveDepartsIn, fmtUploadDate, staffOpsTimeAgo, coachBarSegments } from "../../../lib/dashboard/dashboardHelpers.js";
 import { HistoryEntryRow, LiveSyncBadge, TripSwitcher, Kpi, RosterCard, CoachBar, ProfileField, NowClock } from "./DashboardWidgets.jsx";
@@ -77,42 +72,24 @@ import { CheckpointHistoryTab } from "./CheckpointHistoryTab.jsx";
 
 /**
  * Screen 2 — Admin Dashboard & Analytics (Jun Qi).
- *
  * Use Case 5 — Real-Time "Missing Person" Identification & Analytics.
  *
- * CRUD build: the delegate list starts empty. Create / edit / delete delegates
- * from the "All delegates" card and every read view above it (KPI tiles, coach
- * bars, live activity, reverse-headcount missing list) recomputes live.
+ * Delegate CRUD lives on the "All delegates" card; every read view above it
+ * (KPI tiles, coach bars, live activity, reverse headcount) recomputes live.
  *
- * Endpoints:
- *   GET    /api/trips/:id/dashboard    → KPIs + coach status + activity
- *   GET    /api/trips/:id/missing      → reverse-headcount list
- *   GET    /api/trips/:id/delegates    → all delegates (read)
- *   POST   /api/trips/:id/delegates    → create
- *   PATCH  /api/delegates/:id          → update
- *   DELETE /api/delegates/:id          → delete
- *   GET    /api/trips/:id/export       → Excel download
+ * Endpoints: GET/POST /api/trips/:id/delegates, PATCH/DELETE /api/delegates/:id,
+ * plus GET /api/trips/:id/{dashboard,missing,export}.
  */
 
 const TRIP_ID = "t-1";
-// Persists the trip switcher's choice across navigating away and back —
-// DashboardPage fully unmounts on route change (it's not kept alive), so a
-// plain useState(TRIP_ID) silently reset to Beijing every time you left the
-// page and returned. localStorage survives the unmount; falls back to
-// TRIP_ID if nothing's stored yet, or storage is unavailable.
-//
-// loadSelectedTripId/saveSelectedTripId (2026-08-02 audit) are no longer
-// defined here — they were a byte-for-byte duplicate of lib/activeTrip.js's
-// getActiveTripId/setActiveTripId (same storage key, same fallback, same
-// dispatchEvent), aliased on import above instead of reimplemented.
+// The trip choice MUST persist in storage: this page fully unmounts on route
+// change, so a plain useState(TRIP_ID) reset to Beijing every time you left and
+// came back. Implemented in lib/activeTrip.js, aliased on import above.
 
 const EMPTY_FORM = {
-  // status defaults to UNASSIGNED, not ARRIVED (2026-07-27 — "remove the
-  // assigned to coach, cause that my teammate feature") — coach assignment
-  // now happens on the Trips board (Desmond's drag-and-drop), not this
-  // Dashboard modal; a NEW delegate created here starts Unassigned so it
-  // never hits the backend's "coach required unless Unassigned" rule with
-  // no coach picker left to satisfy it.
+  // status MUST default to UNASSIGNED, not ARRIVED: coach assignment happens on
+  // the Trips board, so this modal has no coach picker and any other default
+  // would trip the backend's "coach required unless Unassigned" rule.
   name: "", coachId: "", status: "UNASSIGNED", vip: false, cancelled: false, cancelReason: "", lastSeen: "", lastLocation: "",
   company: "", role: "", industry: "", email: "", phone: "", website: "",
   passportNumber: "", nationality: "", passportExpiry: "", accessibilityNotes: "", notes: "",
@@ -121,22 +98,15 @@ const EMPTY_FORM = {
 
 export default function DashboardPage() {
   const perms = getPermissions();
-  // Two-role RBAC (simplified 2026-07-27 — "staff can view delegate +
-  // checkpoint, admin views all, regardless of account control"): Staff sees
-  // only the Delegate and Checkpoint history tabs; Room Management, Analytics
-  // and Staff operations are admin-only, keyed off manageAccounts (which only
-  // admins ever carry — see permissions.js's adminOnly doc). The old
-  // per-account viewAnalytics toggle was removed from permissions.js the same
-  // day, so Analytics is back to role-based, not grantable.
+  // Two-role RBAC: Staff sees only Delegate + Checkpoint history; Room
+  // Management, Analytics and Staff operations are admin-only, keyed off
+  // manageAccounts (only admins carry it — see permissions.js's adminOnly doc).
+  // Analytics is role-based, not grantable — there is no viewAnalytics toggle.
   const isAdmin = !!perms.manageAccounts;
-  // Delegate ownership + lock (2026-08-03) — client-side mirror of the
-  // backend's canModifyDelegate()/canLockDelegate() (db/delegates.js), so
-  // Edit/Delete/Lock render correctly disabled up front instead of every
-  // blocked click round-tripping to a 403. `isAdmin` above already means
-  // "full access" specifically (manageAccounts is zeroed for a read-only
-  // admin too — see the comment on isAdmin), matching the backend's own
-  // "full access admin" bypass exactly, so it's reused as-is here rather
-  // than re-deriving a second concept of "admin."
+  // Client-side mirror of the backend's canModifyDelegate()/canLockDelegate()
+  // (db/delegates.js) so blocked buttons render disabled rather than 403ing —
+  // keep the two in sync. Reuse `isAdmin`, which already means "full access"
+  // (manageAccounts is zeroed for a read-only admin), matching the backend.
   const me = getUser() || {};
   const canModifyDelegate = (d) => {
     if (isAdmin) return true;
@@ -150,52 +120,28 @@ export default function DashboardPage() {
   const { t, lang } = useLang();
   const navigate = useNavigate();
   const location = useLocation();
-  // Arrived via EscalationBanner's "View" jump (2026-07-25 — "if I'm on a
-  // different trip I don't know which trip to [go to]") — ?tripId= picks the
-  // right trip below (overriding whatever was last persisted), and
-  // ?escalationDelegate= is consumed once that trip's roster loads (see the
-  // effect near the delegates state) to auto-open that delegate's profile.
-  // Read once for the FIRST render only (a fresh page load already lands with
-  // the right query string) — the reactive case (clicking "View" while
-  // already ON /dashboard, so this component never remounts) is handled by
-  // the separate `location.search`-watching effect further down; without
-  // that second effect, a `useState(() => ...)` initializer like this one
-  // never re-fires on a same-route navigation (2026-07-25 bugfix — "I click
-  // View but it doesn't show, only works after I refresh").
+  // EscalationBanner's "View" jump: ?tripId= overrides the persisted trip, and
+  // ?escalationDelegate= auto-opens that profile once the roster loads. This
+  // initializer fires on FIRST mount only — the same-route click case needs the
+  // `location.search`-watching effect further down. Both are required.
   const initialEscalationParams = new URLSearchParams(location.search);
   const [pendingEscalationDelegateId, setPendingEscalationDelegateId] = useState(
     () => initialEscalationParams.get("escalationDelegate")
   );
-  // Shared by every modal overlay below (only one is ever open at a time) —
-  // only dismiss if the WHOLE click gesture started on the backdrop itself,
-  // not wherever the mouse was released after a drag-select that began in a
-  // field inside the modal.
+  // Shared by every modal overlay below. Dismiss only if the gesture STARTED on
+  // the backdrop, or a drag-select inside a field closes the modal.
   const downOnBackdrop = useRef(false);
 
-  // The page is tall (KPIs, coach status, history, the full delegate table),
-  // and browsers restore the previous scroll position on SPA route re-entry
-  // by default — landing back on Dashboard scrolled to the bottom instead of
-  // showing a fresh top-of-page view. Reset once on mount only (not on every
-  // 2s poll re-render, which doesn't remount this component).
+  // Browsers restore scroll on SPA route re-entry and this page is tall enough
+  // to land you at the bottom. Mount-only; poll re-renders don't remount.
   useEffect(() => {
     window.scrollTo(0, 0);
   }, []);
 
-  // Lands on the tab this account actually works in; every content block is
-  // independently gated, so an account with no visible tab renders nothing
-  // rather than erroring — the same "no visible tabs" edge case App.jsx's
-  // route fallbacks already accept.
-  // Restructured 2026-07-28 ("move the all delegate to another tab called
-  // delegate management, rename the delegate tab to overview, move the
-  // checkpoint history / room management under the new delegate tab, so
-  // overview for admin, delegate tab is for staff"):
-  //   overview  — the at-a-glance read: KPI tiles, coach status, history
-  //               tracker. Admin's landing view.
-  //   delegates — the working area, with its own sub-tabs (All delegates /
-  //               Checkpoint history / Room Management). Staff's landing view.
-  //   analytics / staffops — unchanged, admin-only.
-  // Each feature KEPT its original permission gate, so nothing became more or
-  // less visible than before — only where it lives changed.
+  // Lands on the tab this account works in. Every content block is gated
+  // independently, so an account with no visible tab renders nothing rather
+  // than erroring (the edge case App.jsx's route fallbacks also accept).
+  //   overview (admin) / delegates + sub-tabs (staff) / analytics, staffops.
   const [tab, setTab] = useState(() => {
     if (!isAdmin && (perms.viewDelegates || perms.viewHistory)) return "delegates";
     if (perms.viewDashboard) return "overview";
@@ -215,30 +161,19 @@ export default function DashboardPage() {
   const [error, setError] = useState(null);
   const [cacheStale, setCacheStale] = useState(false);
   const [cacheAt, setCacheAt] = useState(null);
-  // Live wall clock for the header chip (2026-07-29) — moved into its own
-  // <NowClock /> leaf component (2026-08-02 optimization pass, see
-  // DashboardWidgets.jsx) so its 15s tick no longer re-renders this entire
-  // page. `hour12: true` forced explicitly (2026-07-30 — "fix to 12 hr
-  // format") rather than left to the viewer's locale — see NowClock itself.
-  // Countdown to the next auto-refresh tick (2026-07-27 — "update this will
-  // see how long it refresh") — the poll itself is a fixed 10s interval (see
-  // the comment on that useEffect below); this is purely a visual "time
-  // until next sync" next to the Live badge. 8 -> 10 (2026-07-30 — "can you
-  // put sync to 10 sec").
+  // The wall clock is its own <NowClock /> leaf (DashboardWidgets.jsx) so its
+  // 15s tick doesn't re-render this page — don't inline it back. This countdown
+  // is only the visual "time until next sync"; the real interval is below.
   const REFRESH_SECONDS = 10;
 
-  // Trip switcher — the whole dashboard re-points to the selected trip.
-  // "t-1" = the default Beijing trip (unfiltered); anything else is a trip uuid.
+  // "t-1" = the default Beijing trip (unfiltered); anything else is a uuid.
   const [selectedTripId, setSelectedTripId] = useState(() => initialEscalationParams.get("tripId") || loadSelectedTripId());
   const [trips, setTrips] = useState([]);            // all trips (for the dropdown)
   const [mainTrip, setMainTrip] = useState(null);    // { uuid, name } of the base trip
   const [currentCheckpoint, setCurrentCheckpoint] = useState(null); // the itinerary stop that's "current" right now, or null
   const [nextCheckpoint, setNextCheckpoint] = useState(null); // whatever stop immediately follows it, or null (2026-07-25)
-  // Every stop on TODAY's day, for the "Now:" chip's click-to-expand popover
-  // (2026-07-30 — "the now:...8:00am is like telling me it's happening now
-  // which is not" — "current" here means "the active leg of the schedule",
-  // not literally this second; letting staff open the whole day at a glance
-  // resolves that ambiguity better than any one-line label would).
+  // Today's stops, for the "Now:" chip's popover. "current" means the active
+  // LEG of the schedule, not literally this second.
   const [todayCheckpoints, setTodayCheckpoints] = useState([]);
   const [showTodayItinerary, setShowTodayItinerary] = useState(false);
 
@@ -247,73 +182,51 @@ export default function DashboardPage() {
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [coachFilter, setCoachFilter] = useState("ALL"); // ALL | <coachId> — "Unassigned" lives on statusFilter only now
   const [sortMode, setSortMode] = useState("name"); // name | recent | status | coach
-  // Pagination (2026-07-24 — replaced a "Show all" toggle that dumped every
-  // matching delegate into the DOM at once; unusable once a trip had 100+).
+  // Pagination — "Show all" dumped every match into the DOM, dying past ~100.
   const [delegatePage, setDelegatePage] = useState(0);
   const [delegatePageSize, setDelegatePageSize] = useState(10);
   const [showAllCoaches, setShowAllCoaches] = useState(false);
 
-  // Batch selection for "All delegates" — replaces the old blanket "Delete
-  // all" button with per-row checkboxes + a "Delete selected" action.
+  // Per-row checkboxes + "Delete selected", replacing a blanket "Delete all".
   const [selectedDelegateIds, setSelectedDelegateIds] = useState(new Set());
   const [deletingSelectedDelegates, setDeletingSelectedDelegates] = useState(false);
   const [history, setHistory] = useState([]);
 
-  // "Staff operations" tab — admin-only (manageAccounts), lives on this same
-  // page rather than a separate route so admins don't have to leave the
-  // Dashboard to see who's currently signed in.
+  // "Staff operations" — admin-only (manageAccounts), a tab not a route.
   const [staffOps, setStaffOps] = useState(null); // { totalStaff, activeCount, active }
   const [staffOpsError, setStaffOpsError] = useState(null);
-  // Search/filter for the Active sessions list — with 40+ people signed in
-  // at once (a real SCCCI event) the plain unbroken list read as messy
-  // (2026-07-24). Options are derived from whatever's actually in the
-  // response, same "no separate lookup" approach used by other filters here.
+  // A real SCCCI event has 40+ concurrent sessions. Options derive from the
+  // response — no separate lookup, same as the other filters.
   const [staffOpsSearch, setStaffOpsSearch] = useState("");
   const [staffOpsRoleFilter, setStaffOpsRoleFilter] = useState("ALL"); // ALL | admin | staff
 
-  // Reverse headcount — opened on demand from a button on the "Coach status"
-  // card, not a persistent tab (was one; the user liked the content but not
-  // that UX, so it moved to an on-demand modal instead).
+  // Reverse headcount — an on-demand modal, deliberately not a tab.
   const [headcountOpen, setHeadcountOpen] = useState(false);
-  // Search/filter/sort for the Reverse headcount modal — with a large
-  // roster, each coach's "still missing" list can run long enough to need
-  // narrowing down instead of scanning the whole thing (2026-07-24).
+  // A large roster makes each coach's "still missing" list too long to scan.
   const [hcSearch, setHcSearch] = useState("");
   const [hcFilter, setHcFilter] = useState("all"); // all | missing | late | vip
   const [hcSort, setHcSort] = useState("name"); // name | status
-  // Which coach cards are expanded (showing their missing-delegate list) —
-  // with 20 coaches, showing every list open at once is exactly the "messy"
-  // problem reported; collapse-by-default once there are more than a
-  // handful, click a card's header to reveal just that one.
+  // Collapse-by-default past a handful — 20 open lists is unreadable.
   const [expandedCoaches, setExpandedCoaches] = useState(new Set());
   const toggleCoachExpanded = (id) => setExpandedCoaches((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  // History tracker scope — "trip" (default) shows only the currently
-  // selected trip's own activity; "all" is the old global mixed feed
-  // (2026-07-24 — multiple trips' add/edit/remove events were piling into
-  // one unreadable list together).
+  // "trip" (default) scopes activity to the selected trip; "all" is the global
+  // feed, which mixed several trips into one unreadable list.
   const [historyScope, setHistoryScope] = useState("trip");
-  // Default the compact History tracker card to TODAY's entries only
-  // (2026-07-27 — "the history tracker section should display only today
-  // stuff, then click to view more like ytd, 2 days before etc") — a click
-  // reveals everything else already loaded (yesterday and earlier); the
-  // full History Log page (`/history`) still has real per-day grouping and
-  // filters for anything beyond what's already fetched here.
+  // Defaults to TODAY; a click reveals the rest of what's loaded. Real per-day
+  // grouping lives on /history.
   const [historyShowAll, setHistoryShowAll] = useState(false);
   useEffect(() => { setHistoryShowAll(false); }, [selectedTripId, historyScope]);
   const [exportOpen, setExportOpen] = useState(false);
-  // Confirmation toast after a successful Excel export (2026-07-31 — "add
-  // this pop up when I try to export my excel" — same "Exported N tickets"
-  // pattern Jayden's Exceptions inbox already shows, so downloading a
-  // workbook doesn't just silently close the modal with no feedback).
+  // Export toast, matching Jayden's "Exported N tickets" on Exceptions.
   const [toast, setToast] = useState("");
   function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2800); }
   const delegateTableRef = useRef(null);
-  // Set by showDelegatesFiltered() when a KPI drill-down needs to scroll to the
-  // roster table AFTER the tab switch has mounted it (2026-07-28).
+  // Set by showDelegatesFiltered() when a KPI drill-down must scroll to the
+  // roster table AFTER the tab switch has mounted it.
   const pendingTableScroll = useRef(false);
   useEffect(() => {
     if (!pendingTableScroll.current) return;
@@ -334,9 +247,8 @@ export default function DashboardPage() {
   const [editingPhotoUrl, setEditingPhotoUrl] = useState(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoErr, setPhotoErr] = useState("");
-  // "Use my current location" for the Missing lastLocation field (2026-07-24)
-  // — see lib/geolocation.js for what this actually reads (the STAFF
-  // device's own GPS, not the delegate's).
+  // "Use my current location" reads the STAFF device's GPS, not the
+  // delegate's — see lib/geolocation.js.
   const [locating, setLocating] = useState(false);
   const [locateError, setLocateError] = useState(null);
   async function useMyLocation() {
@@ -352,51 +264,35 @@ export default function DashboardPage() {
     }
   }
   const [mapDelegate, setMapDelegate] = useState(null); // delegate whose location map is open, or null (Reverse headcount's quick popup)
-  // Delegate profile view — combines what used to be 3 separate popups
-  // (edit modal's read-only fields, checkpoint timeline modal, location map
-  // modal) into one scrollable panel opened by clicking a delegate row in
-  // the main table (2026-07-24). Editing still opens the existing Create/
-  // Edit modal via the profile's own "Edit" button.
+  // One scrollable panel replacing 3 popups. Editing still hands off to the
+  // Create/Edit modal.
   const [profileDelegate, setProfileDelegate] = useState(null);
-  // Gate for actually OPENING the profile (2026-07-25, new
-  // viewDelegateDetails permission) — every "open" call site below goes
-  // through this instead of setProfileDelegate directly, so the gate lives
-  // in one place rather than being repeated (and possibly missed) at each
-  // of the several places a row/name can be clicked to open it.
+  // viewDelegateDetails gate. EVERY open call site must go through this, not
+  // setProfileDelegate directly — several places can open a profile and the
+  // check would get missed.
   function openProfile(d) {
     if (perms.viewDelegateDetails) setProfileDelegate(d);
   }
-  // Full-size photo lightbox — the profile panel's thumbnail is too small to
-  // make out a face clearly; click it to view full-size (2026-07-24).
+  // Full-size photo lightbox — the profile thumbnail is too small for a face.
   const [enlargedPhoto, setEnlargedPhoto] = useState(null);
   // { delegate, reason } while the "Mark as cancelled" reason prompt is
   // open, else null — see toggleCancelled()/confirmCancel() below.
   const [cancelPrompt, setCancelPrompt] = useState(null);
-  // Alerts moved out of the page flow entirely into a small icon-button +
-  // modal beside Export (2026-07-24 feedback, second round — the collapsed
-  // inline card still took a permanent row at the top of every visit; "move
-  // the alert to a small icon button beside the export").
+  // An icon-button + modal beside Export; even a collapsed inline card took a
+  // permanent row on every visit.
   const [alertsOpen, setAlertsOpen] = useState(false);
-  // "Emergency" section inside this same Alerts modal (2026-07-25) —
-  // acknowledging an escalation used to make it vanish entirely, which
-  // doesn't scale once there are many open at once (e.g. 50 delegates
-  // escalated at busy period). Open OR acknowledged (not yet resolved)
-  // escalations stay listed here so staff can work through them at their
-  // own pace instead of the top banner being the only place to see them.
+  // Open OR acknowledged (not yet resolved) stay listed, so acknowledging
+  // doesn't make one vanish — that doesn't scale at 50 open at once.
   const [activeEscalations, setActiveEscalations] = useState([]);
   const [escalationBusyId, setEscalationBusyId] = useState(null);
-  // Search + cap-at-5 for the Emergency section (2026-07-26 — "50 mock
-  // escalations... abit hard to navigate") — Missing/Late/Cancelled below it
-  // already cap at 5 with a "View all"/"Show more", Emergency was the one
-  // section that dumped every row into one small scrollbox unfiltered.
-  // Emergency has no equivalent delegate-status filter to route to (it's not
-  // a delegate field), so "show more" expands in place instead of navigating.
+  // Search + cap-at-5, as with Missing/Late/Cancelled. Emergency isn't a
+  // delegate field, so there's no filter to route to — "show more" expands
+  // in place.
   const [escalationQuery, setEscalationQuery] = useState("");
   const [showAllEscalations, setShowAllEscalations] = useState(false);
-  // NOTE: the effect that fetches /escalations/active lives further down,
-  // right after `currentTripUuid` is declared — it depends on that value,
-  // which isn't available yet at this point in the component (2026-07-25,
-  // fixing a "Cannot access 'currentTripUuid' before initialization" crash).
+  // NOTE: the /escalations/active fetch effect MUST stay further down, after
+  // `currentTripUuid` is declared, or it crashes on "Cannot access
+  // 'currentTripUuid' before initialization".
   async function acknowledgeEscalationRow(id) {
     setEscalationBusyId(id);
     try {
@@ -406,10 +302,8 @@ export default function DashboardPage() {
     finally { setEscalationBusyId(null); }
   }
   async function resolveEscalationRow(id, delegateName) {
-    // Resolve auto-sets the delegate to Arrived (2026-07-27 — "should notify
-    // the user if click resolve will go to arrived, make sure to click once
-    // found the delegate") — a confirm so this can't happen by an accidental
-    // click, since it's a real status change, not just clearing the alert.
+    // Resolve also flips the delegate to Arrived, so it needs a confirm — it's
+    // a real status change, not just clearing the alert.
     const msg = lang === "zh"
       ? `解决此紧急情况会将${delegateName ? `"${delegateName}"` : "该代表"}的状态设为"已抵达"。请确认已经找到本人后再点击。`
       : `Resolving this will set ${delegateName ? `"${delegateName}"` : "this delegate"}'s status to Arrived. Only confirm once you've actually found them.`;
@@ -418,41 +312,32 @@ export default function DashboardPage() {
     try {
       await apiPost(`/escalations/${id}/resolve`, {});
       setActiveEscalations((prev) => prev.filter((e) => e.id !== id));
-      // Resolving flips the delegate's global status to ARRIVED server-side
-      // (see db/escalations.js's resolveEscalation) — without this refresh,
-      // `delegates`/`missing` stayed stale until the next 8s poll, so the
-      // Alerts modal's Missing section kept showing them even though they'd
-      // just been un-escalated (2026-07-27 — "if i click resolve, it should
-      // not display in missing section"). Since missingNotEscalated only
-      // hides a delegate WHILE they're in activeEscalations, removing them
-      // from that list above would otherwise make them reappear in Missing
-      // with stale (pre-resolve) data for one poll cycle.
+      // Refresh is REQUIRED here: resolving flips the delegate to ARRIVED
+      // server-side (db/escalations.js), but missingNotEscalated only hides
+      // someone WHILE they're in activeEscalations — so dropping them from that
+      // list without refetching makes them pop back into Missing with stale
+      // pre-resolve data until the next poll.
       load();
     } catch { /* leave as-is */ }
     finally { setEscalationBusyId(null); }
   }
 
-  // "Escalate to office" (2026-07-24) — a DELIBERATE, staff-clicked action
-  // for when a Missing delegate isn't answering their phone; never automatic.
-  // See EscalationBanner.jsx for how office/admin staff actually get alerted
-  // once this fires (in-app banner + tab-flash/chime + email/SMS/WhatsApp).
+  // "Escalate to office" — staff-clicked, NEVER automatic. EscalationBanner.jsx
+  // has the alerting side (banner + tab-flash/chime + email/SMS/WhatsApp).
   const [escalatingDelegate, setEscalatingDelegate] = useState(null);
   const [escalateMessage, setEscalateMessage] = useState("");
   const [escalateSaving, setEscalateSaving] = useState(false);
   const [escalateErr, setEscalateErr] = useState(null);
-  // Who to alert (2026-07-24, "on frontend I can choose who to alert to") —
-  // fetched fresh each time the modal opens (admin accounts with an email on
-  // file), all pre-checked by default so not touching anything still alerts
-  // everyone, same as before this was pickable.
+  // Admin accounts with an email on file, refetched each open. All pre-checked
+  // so ignoring the picker still alerts everyone.
   const [escalateRecipients, setEscalateRecipients] = useState([]);
   const [escalateSelected, setEscalateSelected] = useState(new Set());
   function openEscalate(d) {
     setEscalatingDelegate(d);
     setEscalateMessage(t("Not answering phone calls"));
     setEscalateErr(null);
-    // tripId passed so the backend can float the trip's own lead to the top
-    // of the list (2026-07-25) — a smarter default, not a hard restriction;
-    // every admin still appears and stays pre-checked.
+    // tripId only floats the trip's lead to the top — not a restriction; every
+    // admin still appears, pre-checked.
     const qs = currentTripUuid ? `?tripId=${encodeURIComponent(currentTripUuid)}` : "";
     apiGet(`/escalations/recipients${qs}`).then((r) => {
       const list = r.recipients || [];
@@ -467,12 +352,9 @@ export default function DashboardPage() {
       return next;
     });
   }
-  // "Escalate all" (2026-07-31 — "add button to Escalate all in dashboard
-  // alert and exception") — fires a real escalation for every currently
-  // Missing, not-yet-escalated delegate shown in this modal's Missing
-  // section, in one click, instead of opening the picker once per person.
-  // Uses a generic message and the server's own default recipients (every
-  // admin) — same fallback the single-delegate modal already uses.
+  // Fires a real escalation for every Missing, not-yet-escalated delegate in
+  // this modal, instead of opening the picker per person. Uses a generic message
+  // and the server's default recipients (every admin).
   const [escalateAllBusy, setEscalateAllBusy] = useState(false);
   async function escalateAllMissing() {
     if (!missingNotEscalated.length) return;
@@ -498,9 +380,8 @@ export default function DashboardPage() {
         message: escalateMessage.trim(),
         recipientEmails: [...escalateSelected],
       });
-      // Dedupe guard (2026-07-25) — this delegate already had an open
-      // escalation, so nothing new was sent; say so rather than implying a
-      // fresh alert just went out.
+      // Already had an open escalation, so nothing was sent — say so rather
+      // than implying a fresh alert went out.
       if (r.alreadyOpen) {
         setEscalateErr(t("This delegate already has an open escalation — no new alert was sent."));
         setEscalateSaving(false);
@@ -514,9 +395,8 @@ export default function DashboardPage() {
     }
   }
 
-  // Guards against overlapping polls (e.g. a slow response still in flight
-  // when the next 2s tick fires) — same pattern as useSessionGuard's
-  // checkingRef, so a late response can't stomp a more recent one.
+  // Guards overlapping polls so a slow response can't stomp a newer one — same
+  // pattern as useSessionGuard's checkingRef.
   const loadingRef = useRef(false);
   const load = useCallback(async () => {
     if (loadingRef.current) return;
@@ -528,38 +408,29 @@ export default function DashboardPage() {
         cachedFetch(`dashboard-dash:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/dashboard`)),
         cachedFetch(`dashboard-missing:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/missing`)),
         cachedFetch(`dashboard-delegates:${selectedTripId}`, () => apiGet(`/trips/${selectedTripId}/delegates`)),
-        // This is the small inline "History tracker" card (360px scroll box on
-        // the dashboard, not the full audit log — that's HistoryLogPage.jsx,
-        // fetched separately at limit=1000 only when you open /history).
-        // Was limit=200 every 8s poll tick; cut to 30 (2026-07-24, Neon
-        // egress reduction) since nobody scrolls through 200 rows in a
-        // 360px box anyway — "View full log" is one click away for that.
+        // Small inline card, not the full audit log (HistoryLogPage.jsx fetches
+        // limit=1000 separately). Keep this limit low — it runs every poll tick
+        // and was a real Neon egress cost at 200.
         apiGet(`/activity?limit=30${historyScope === "trip" ? `&tripId=${selectedTripId}` : ""}`),
         apiGet(`/trips/${selectedTripId}/checkpoints`).catch(() => null), // never blocks the rest of the dashboard
       ]);
       const dash = dashRes.data, miss = missRes.data, dels = delsRes.data;
-      // Offline-capable READ (2026-07-31, "the manual, attendance, exception,
-      // trip" — this page's delegate list is the "attendance" one): see
-      // lib/cachedFetch.js. Only these 3 core calls fall back to a cache —
-      // history/checkpoints are best-effort extras already tolerant of
-      // failure and not worth caching.
+      // Only these 3 core calls fall back to a cache (lib/cachedFetch.js);
+      // history/checkpoints are best-effort extras already failure-tolerant.
       setCacheStale(dashRes.stale || missRes.stale || delsRes.stale);
       setCacheAt(dashRes.stale ? dashRes.at : missRes.stale ? missRes.at : delsRes.at);
       setData(dash);
       setMissing(miss.missing || []);
       setDelegates(dels.delegates || []);
       setHistory(hist.activity || []);
-      // "Which checkpoint matters right now" — you didn't have any way to see
-      // this from the Dashboard before (only the Trip page's day tabs did).
-      // Same "current"/"past"/"upcoming" tagging as the scanner pages.
+      // "Which checkpoint matters right now", using the same
+      // current/past/upcoming tagging as the scanner pages.
       if (checkpoints) {
         const all = (checkpoints.days || []).flatMap((day) => day.checkpoints);
         const currentIdx = all.findIndex((c) => c.timeState === "current");
         setCurrentCheckpoint(currentIdx >= 0 ? all[currentIdx] : null);
-        // Whatever stop immediately follows "current" chronologically — the
-        // list is already ordered by day/sort_order/start_time, so the very
-        // next entry IS the next event (2026-07-25 — "then show the next
-        // trip event" once the current one passes).
+        // The list is already ordered by day/sort_order/start_time, so the
+        // next entry IS the next event.
         setNextCheckpoint(currentIdx >= 0 ? all[currentIdx + 1] || null : null);
         const today = (checkpoints.days || []).find((day) => day.dayNumber === dash.trip?.dayOf);
         setTodayCheckpoints(today?.checkpoints || []);
@@ -568,8 +439,8 @@ export default function DashboardPage() {
         setNextCheckpoint(null);
         setTodayCheckpoints([]);
       }
-      // Remember the base trip's uuid the first time we load it, so the trip
-      // dropdown can list the OTHER trips without duplicating it.
+      // Remember the base trip's uuid so the dropdown can list the others
+      // without duplicating it.
       if (selectedTripId === TRIP_ID && dash.trip?.uuid_id) {
         setMainTrip({ uuid: dash.trip.uuid_id, name: dash.trip.name });
       }
@@ -581,30 +452,19 @@ export default function DashboardPage() {
     }
   }, [selectedTripId, historyScope]);
 
-  // Auto-refresh so a change made by another signed-in staff member (a
-  // status edit, a new upload, a coach reassignment, etc.) shows up here
-  // without anyone having to hit the manual Refresh button. Safe against the
-  // create/edit delegate modal's own form state, which is a separate local
-  // copy seeded once when the modal opens — a background refresh of the
-  // underlying `delegates` list doesn't touch it. Was 2s — slowed to 8s
-  // (2026-07-24) after this poll (5 parallel queries, including a 200-row
-  // activity dump and the full delegate list) was found to be the single
-  // biggest contributor to the Neon project's monthly egress quota with
-  // several tabs left open all day; 10s (2026-07-30, was 8s — "put sync to
-  // 10 sec") is still fast enough to feel live.
-  // 2026-07-29: now also PAUSES entirely while the tab is hidden (and catches
-  // up on re-show) — see useVisiblePolling. The 8s slowdown above only reduced
-  // the tick rate; this stops the ticks nobody is looking at, which is where
-  // most of that egress was actually going. Five calls per tick makes this the
-  // single biggest beneficiary in the app.
+  // Auto-refresh so another staff member's edit shows up without hitting
+  // Refresh. Safe against the create/edit modal's form state, which is a
+  // separate local copy seeded once on open.
+  //
+  // Do NOT shorten this interval: five parallel queries per tick made this the
+  // single biggest contributor to the Neon egress quota with tabs left open all
+  // day. useVisiblePolling also pauses it entirely while the tab is hidden,
+  // which is where most of that egress was going.
   useVisiblePolling(load, 10000, [load]);
 
-  // Reactively re-reads ?tripId=/?escalationDelegate= on every URL change
-  // (2026-07-25 bugfix) — clicking EscalationBanner's "View" while ALREADY on
-  // /dashboard doesn't remount this component, just re-renders it with a new
-  // location; the useState initializers above only ever read the query
-  // string ONCE (at first mount), so a same-route click silently did
-  // nothing until a full page reload force-remounted everything fresh.
+  // Re-reads ?tripId=/?escalationDelegate= on every URL change. Required
+  // because a same-route "View" click re-renders without remounting, so the
+  // useState initializers above (first mount only) never see the new query.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const tripId = params.get("tripId");
@@ -612,12 +472,9 @@ export default function DashboardPage() {
     const openAlerts = params.get("openAlerts");
     if (tripId) setSelectedTripId(tripId);
     if (delegateId) setPendingEscalationDelegateId(delegateId);
-    // ?openAlerts= (2026-07-26 — "the view button link to alert page instead,
-    // cause i can only see 1 delegate only") — EscalationBanner's "View" now
-    // opens the FULL Emergency list in the Alerts modal instead of deep-
-    // linking to just the first escalated delegate's profile, since a busy
-    // trip can have several open at once. No roster wait needed (unlike
-    // escalationDelegate above), so strip the param immediately here.
+    // ?openAlerts= opens the FULL Emergency list rather than deep-linking to
+    // one delegate's profile — a busy trip has several open at once. No roster
+    // wait needed (unlike escalationDelegate), so strip the param immediately.
     if (openAlerts) {
       setAlertsOpen(true);
       navigate("/dashboard", { replace: true });
@@ -625,21 +482,14 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
 
-  // Consumes ?escalationDelegate= once this trip's roster has actually
-  // loaded (2026-07-25, EscalationBanner's "View" jump) — opens that
-  // delegate's real profile, persists the trip switch so it sticks after
-  // this, and strips the query params so refreshing/revisiting doesn't
-  // re-trigger it.
+  // Consumes ?escalationDelegate= once the roster has loaded: opens the real
+  // profile, persists the trip switch, and strips the params so a refresh
+  // doesn't re-trigger it.
   //
-  // Gated on `!loading` (2026-07-25 bugfix): navigating here from a
-  // different trip re-renders this SAME component (no unmount), so
-  // `delegates` still held the PREVIOUS trip's roster for one render before
-  // `load()` refetched — this effect ran immediately against that stale
-  // data, never found a match, and gave up (cleared the pending id) before
-  // the new trip's real delegates ever arrived. `load()` sets `loading:true`
-  // synchronously the instant selectedTripId changes (in the effect just
-  // above, which runs first) — so this only ever evaluates once against
-  // data that's actually settled for the current trip.
+  // The `!loading` gate is REQUIRED. Arriving from another trip re-renders
+  // without unmounting, so `delegates` still holds the previous roster for one
+  // render; without the gate this ran against that stale data, found no match,
+  // and cleared the pending id before the real delegates arrived.
   useEffect(() => {
     if (!pendingEscalationDelegateId || loading || delegates.length === 0) return;
     const found = delegates.find((d) => d.id === pendingEscalationDelegateId);
@@ -653,10 +503,8 @@ export default function DashboardPage() {
   }, [delegates, loading, pendingEscalationDelegateId]);
 
   // Trip list for the switcher (Desmond's all-trips), fetched once. If the
-  // persisted selectedTripId (see loadSelectedTripId above) no longer exists
-  // — the trip was deleted since it was last picked — fall back to the
-  // default Beijing view instead of leaving the dashboard stuck fetching a
-  // trip that 404s forever.
+  // persisted trip was deleted since it was picked, fall back to the default —
+  // otherwise the dashboard is stuck refetching a trip that 404s forever.
   useEffect(() => {
     apiGet("/all-trips").then((r) => {
       const list = r.trips || [];
@@ -669,11 +517,43 @@ export default function DashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // "Staff operations" tab data — only polled while that tab is open (no
-  // point hitting the endpoint for admins looking at Delegate/Analytics),
-  // and only for accounts that can actually see the tab. Pulled out of the
-  // effect (rather than defined inline) so the top "Refresh" button can also
-  // call it directly instead of only refreshing dashboard/missing/delegates.
+  // Staff must see only THEIR OWN trip — this dropdown used to show every "In
+  // progress" trip company-wide to any account, the over-broad scoping mobile
+  // already fixed for its own picker.
+  //
+  // `null` = unresolved OR admin (unrestricted); a Set = restrict to those trip
+  // uuids. The "In progress" tie-break is safe because the backend's
+  // single-active-trip guardrail (findCaptainTripConflicts) allows at most one
+  // active captaincy, so a stale Planning/Completed leftover can't win.
+  const [myTripIds, setMyTripIds] = useState(null);
+  useEffect(() => {
+    if (isAdmin) { setMyTripIds(null); return; }
+    // scopedTripIds() is SHARED with MobileLayout.jsx (lib/tripScope.js). Two
+    // duplicates of this tie-break drifted apart and caused "desktop shows
+    // Manila but mobile shows Beijing" — don't fork it again.
+    apiGet("/my-captain-coaches")
+      .then((r) => setMyTripIds(new Set(scopedTripIds(r.coaches))))
+      .catch(() => setMyTripIds(new Set()));
+  }, [isAdmin]);
+
+  // Filtering the dropdown isn't enough — the PERSISTED selection needs
+  // correcting too. `mg_dashboard_trip` is a per-browser-profile key with zero
+  // account awareness, so logging out staff_3 and in as staff_1 in the same
+  // browser inherits the previous account's trip (the desktop mirror of the
+  // mobile bug, AI Log 233/241). Only auto-switch when `myTripIds` resolves to
+  // exactly ONE trip — otherwise leave it alone rather than guessing.
+  useEffect(() => {
+    if (!myTripIds || myTripIds.size !== 1) return;
+    const onlyTripId = [...myTripIds][0];
+    const currentUuid = selectedTripId === TRIP_ID ? mainTrip?.uuid : selectedTripId;
+    if (currentUuid && currentUuid !== onlyTripId) {
+      setSelectedTripId(onlyTripId);
+      saveSelectedTripId(onlyTripId);
+    }
+  }, [myTripIds, mainTrip, selectedTripId]);
+
+  // Only polled while that tab is open, and only for accounts that can see it.
+  // Defined outside the effect so the top "Refresh" button can call it too.
   const loadStaffOps = useCallback(() => {
     if (!perms.manageAccounts) return;
     apiGet("/staff/active-sessions")
@@ -681,30 +561,21 @@ export default function DashboardPage() {
       .catch((e) => setStaffOpsError(e.message || "Could not reach the backend."));
   }, [perms.manageAccounts]);
 
-  // Scoped to only fire while an admin actually has this tab open, so it
-  // doesn't add load for anyone else. Was 2s, slowed to 8s (2026-07-24, Neon
-  // egress reduction) — still shows a login/logout elsewhere within one tick.
-  // The old `if (...) return` guard is now expressed as a 0 interval, which
-  // useVisiblePolling treats as "don't poll and don't fetch" — same behaviour
-  // (no request at all unless an admin is on Staff operations), and it gains
-  // the hidden-tab pause on top.
+  // Fires only while an admin has this tab open. The guard is expressed as a 0
+  // interval, which useVisiblePolling treats as "don't poll and don't fetch" —
+  // same as an early return, but it also gets the hidden-tab pause.
   const staffOpsPollMs = tab === "staffops" && perms.manageAccounts ? 8000 : 0;
   useVisiblePolling(loadStaffOps, staffOpsPollMs, [staffOpsPollMs, loadStaffOps]);
 
-  // Excel export now runs through the ExportModal (opened by the Export
-  // button), which lets the user pick status/coach/VIP/columns + an AI filter
-  // before downloading — see components/ExportModal.jsx.
+  // Excel export runs through components/ExportModal.jsx.
 
-  // KPI tile drill-down → jump to the delegate table filtered to that status
-  // and scroll it into view. Shared by all 4 primary tiles (Missing/Present/
-  // Unassigned/Late) so every one of them behaves the same way.
+  // KPI drill-down → the delegate table, filtered and scrolled into view.
+  // Shared by all 4 primary tiles so they behave identically.
   function showDelegatesFiltered(status) {
-    // The roster table moved under the "Delegate management" tab (2026-07-28),
-    // so a KPI drill-down (the tiles live on Overview) has to switch tab AND
-    // sub-tab first. The table therefore isn't mounted yet when this runs, so
-    // the scroll can't happen here — a single requestAnimationFrame raced the
-    // re-render and silently did nothing. Flag it instead and let the effect
-    // below scroll once the table actually exists.
+    // The tiles are on Overview but the table is under "Delegate management",
+    // so this must switch tab AND sub-tab first — the table isn't mounted yet,
+    // and a requestAnimationFrame here raced the re-render and did nothing.
+    // Flag it and let the effect below scroll once the table exists.
     setTab("delegates");
     setDelegateSubTab("list");
     setStatusFilter(status);
@@ -727,22 +598,20 @@ export default function DashboardPage() {
     setForm({
       name: d.name || "",
       coachId: d.coachId || "",
-      // Legacy rows may still say "PRESENT" (some check-in routes haven't
-      // migrated to writing "ARRIVED" yet) — alias it here so the status
-      // <select> (which only lists the 5 current values) always has a
-      // matching option instead of silently showing blank.
+      // Legacy rows may still say "PRESENT" (not every check-in route writes
+      // "ARRIVED" yet), and the <select> only lists the 5 current values — so
+      // without this alias it silently renders blank.
       status: d.status === "PRESENT" ? "ARRIVED" : (d.status || "UNASSIGNED"),
       vip: !!d.vip,
       cancelled: !!d.cancelled,
-      // GET returns the raw DB column name (snake_case) for this one, same
-      // convention as passport_no/passport_expiry above.
+      // GET returns raw snake_case here, same as passport_no/passport_expiry.
       cancelReason: d.cancel_reason || "",
       lastSeen: d.lastSeen || "",
       lastLocation: d.lastLocation || "",
       company: d.company || "", role: d.role || "", industry: d.industry || "",
       email: d.email || "", phone: d.phone || "", website: d.website || "",
-      // GET returns raw DB column names (snake_case) for these three — the
-      // rest are already single-word/camelCase-compatible either way.
+      // GET returns raw snake_case for these three; the rest are already
+      // camelCase-compatible either way.
       passportNumber: d.passport_no || "", nationality: d.nationality || "", passportExpiry: d.passport_expiry || "",
       accessibilityNotes: d.accessibility_notes || "", notes: d.notes || "",
       hotelName: d.hotel_name || "", roomNumber: d.room_number || "",
@@ -753,10 +622,8 @@ export default function DashboardPage() {
     setModalOpen(true);
   }
 
-  // `file` is either the original File (unused now — always goes through the
-  // crop modal first) or the cropped JPEG Blob it produces; FormData accepts
-  // either. Renamed the param mentally but kept the signature so nothing
-  // else calling this needs to change.
+  // `file` is the cropped JPEG Blob in practice (everything goes through the
+  // crop modal first), but FormData accepts a raw File too.
   async function handlePhotoChange(file) {
     if (!file || !editingId) return;
     setPhotoErr("");
@@ -774,12 +641,9 @@ export default function DashboardPage() {
     }
   }
 
-  // Raw file the user just picked, before cropping — opens the crop modal;
-  // set to null once cropping is confirmed/cancelled (2026-07-24, "let me
-  // resize and choose how my pic gonna be like — common stuff in other
-  // websites"). Kept as the File itself (not yet an object URL) so the crop
-  // modal can create/revoke its own URL and this component doesn't have to
-  // track that lifecycle.
+  // The just-picked file, pre-crop; null once cropping is confirmed/cancelled.
+  // Deliberately the File itself, not an object URL — the crop modal
+  // creates/revokes its own, so this component doesn't own that lifecycle.
   const [cropFile, setCropFile] = useState(null);
 
   async function handleCropSave(blob) {
@@ -804,22 +668,19 @@ export default function DashboardPage() {
 
   async function saveForm() {
     if (!form.name.trim()) return;
-    // Phone is required (2026-07-24) — the Reverse headcount's Call button
-    // is only useful if every delegate actually has one on file.
+    // Phone is required — Reverse headcount's Call button needs one on file.
     if (!form.phone.trim()) {
       setFormErr("Please enter a phone number.");
       return;
     }
-    // A coach is required unless the delegate is explicitly Unassigned —
-    // Cancelled always forces UNASSIGNED server-side regardless of whatever
-    // status is still selected, so skip this check when cancelled is on.
+    // A coach is required unless Unassigned. Cancelled forces UNASSIGNED
+    // server-side whatever the selected status says, so skip the check then.
     if (!form.cancelled && form.status !== "UNASSIGNED" && !form.coachId) {
       setFormErr("Please select a coach, or set status to Unassigned.");
       return;
     }
-    // A last known location is required once a delegate is marked Missing —
-    // it's the whole point of the field (finding them), so it can't be left
-    // blank the way "Last seen" (a free-text note) can.
+    // Location is required once Missing — it's the whole point of the field.
+    // "Last seen" is a free-text note and can stay blank.
     if (form.status === "MISSING" && !form.lastLocation.trim()) {
       setFormErr("Please enter a last known location for a missing delegate.");
       return;
@@ -833,9 +694,8 @@ export default function DashboardPage() {
       vip: form.vip,
       cancelled: form.cancelled,
       cancelReason: form.cancelled ? form.cancelReason.trim() : "",
-      // Last seen / location only ever apply while a delegate is missing —
-      // cleared on save otherwise so switching status away from Missing
-      // doesn't silently carry stale data forward into a later Missing spell.
+      // Cleared unless Missing, or stale values carry forward into a later
+      // Missing spell.
       lastSeen: form.status === "MISSING" ? form.lastSeen.trim() : "",
       lastLocation: form.status === "MISSING" ? form.lastLocation.trim() : "",
       company: form.company.trim(), role: form.role.trim(), industry: form.industry.trim(),
@@ -873,12 +733,10 @@ export default function DashboardPage() {
     }
   }
 
-  // Lock/unlock (2026-08-03 — "create a option for staff to lock things they
-  // have created"). A locked delegate blocks EVERY other field edit
-  // (canModifyDelegate on the backend), including the creator's own — this
-  // toggle is checked against the SEPARATE canLockDelegate rule instead, so
-  // the creator (or a full-access admin) can always reach it regardless of
-  // the current locked state.
+  // A locked delegate blocks EVERY other field edit (backend
+  // canModifyDelegate), including the creator's own — so this toggle is checked
+  // against the SEPARATE canLockDelegate rule, letting the creator or a
+  // full-access admin always unlock.
   async function toggleLock(d) {
     try {
       await apiPatch(`/delegates/${d.id}`, { locked: !d.locked });
@@ -888,15 +746,11 @@ export default function DashboardPage() {
     }
   }
 
-  // Mark/unmark a delegate as Cancelled (2026-07-24) — for an Assigned
-  // delegate who won't make it after all, usually found out day-of. The
-  // backend always forces status back to UNASSIGNED and clears coachId when
-  // cancelled=true (see normalize() in db/delegates.js), freeing their seat.
-  // Cancelling opens `cancelPrompt` (a small reason-textfield modal, see its
-  // render further down) rather than a plain window.confirm — "add a
-  // textfield that let staff put what happen" — since the whole point is
-  // capturing WHY, not just a yes/no. Un-cancelling needs no reason, so it
-  // goes straight to the PATCH.
+  // For an Assigned delegate who won't make it, usually found out day-of. The
+  // backend forces status to UNASSIGNED and clears coachId on cancel
+  // (normalize() in db/delegates.js), freeing the seat. Cancelling opens the
+  // `cancelPrompt` reason modal rather than a window.confirm — capturing WHY is
+  // the point. Un-cancelling needs no reason and PATCHes directly.
   async function toggleCancelled(d) {
     if (!d.cancelled) { setCancelPrompt({ delegate: d, reason: "" }); return; }
     try {
@@ -920,6 +774,47 @@ export default function DashboardPage() {
       setError(e.message || "Could not update this delegate.");
     }
   }
+
+  // Bulk lock/unlock over the current filter. `visibleDelegates` is the full
+  // filtered set (query + status + coach, unpaginated), so this always acts on
+  // exactly what the "N delegates match" count says, with no separate selection
+  // step. Skips delegates already in the target state, or ones this account
+  // can't (un)lock — same "skip what's blocked, do the rest" shape as deleteAll.
+  //
+  // The "nothing to do" case MUST use flash(), not setError(): the error banner
+  // below has a hardcoded "Couldn't reach the backend" heading, so a normal
+  // "nothing left to lock" rendered as a scary, wrong backend-down message.
+  async function bulkSetLocked(locked) {
+    const targets = visibleDelegates.filter((d) => !!d.locked !== locked && canLockDelegate(d));
+    const skipped = visibleDelegates.length - targets.length;
+    if (targets.length === 0) {
+      flash(locked
+        ? (lang === "zh" ? "当前筛选内没有可锁定的代表（可能已全部锁定）。" : "Nothing to lock — everything in this filter is already locked (or not yours).")
+        : (lang === "zh" ? "当前筛选内没有可解锁的代表。" : "Nothing to unlock — everything in this filter is already unlocked (or not yours)."));
+      return;
+    }
+    const verb = locked ? (lang === "zh" ? "锁定" : "Lock") : (lang === "zh" ? "解锁" : "Unlock");
+    const msg = lang === "zh"
+      ? `${verb}当前筛选出的 ${targets.length} 位代表？${skipped > 0 ? `（另有 ${skipped} 位将被跳过）` : ""}`
+      : `${verb} ${targets.length} delegate${targets.length === 1 ? "" : "s"} matching the current filter?${skipped > 0 ? ` (${skipped} skipped)` : ""}`;
+    if (!window.confirm(msg)) return;
+
+    setError(null);
+    const results = await Promise.allSettled(targets.map((d) => apiPatch(`/delegates/${d.id}`, { locked })));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      setError(lang === "zh" ? `${failed} 位代表${verb}失败。` : `${failed} delegate${failed === 1 ? "" : "s"} failed to ${verb.toLowerCase()}.`);
+    } else {
+      flash(
+        lang === "zh"
+          ? `已${verb} ${targets.length} 位代表。${skipped > 0 ? `跳过 ${skipped} 位。` : ""}`
+          : `${locked ? "Locked" : "Unlocked"} ${targets.length} delegate${targets.length === 1 ? "" : "s"}.${skipped > 0 ? ` Skipped ${skipped}.` : ""}`
+      );
+    }
+    await load();
+  }
+  const lockFiltered = () => bulkSetLocked(true);
+  const unlockFiltered = () => bulkSetLocked(false);
 
   function toggleDelegateSelected(id) {
     setSelectedDelegateIds((prev) => {
@@ -957,9 +852,8 @@ export default function DashboardPage() {
     if (!window.confirm(msg)) return;
     try {
       const result = await apiDelete(`/trips/${selectedTripId}/delegates`);
-      // Ownership + lock (2026-08-03) — "Delete all" now skips locked/
-      // not-yours delegates instead of wiping everything unconditionally;
-      // surface that so it doesn't look like a silent partial failure.
+      // "Delete all" skips locked/not-yours delegates — surface that, or it
+      // looks like a silent partial failure.
       if (result?.blocked) {
         setError(
           lang === "zh"
@@ -1007,20 +901,13 @@ export default function DashboardPage() {
     return c ? coachDisplayName(c) : t("Unassigned");
   };
 
-  // Feeds the new Alerts card (2026-07-24) — "if it's missing, it will
-  // mention, late will be brief and show who's late... those who are
-  // cancel status also display". `missing` (state) is already the
-  // trip-scoped Missing list with lastSeen/lastLocation/phone; Late and
-  // Cancelled are derived here from the full delegates list since there's
-  // no separate endpoint for either.
+  // Feeds the Alerts card. `missing` state is already the trip-scoped list with
+  // lastSeen/lastLocation/phone; Late and Cancelled are derived from
+  // `delegates` since neither has its own endpoint.
   const lateDelegates = useMemo(() => delegates.filter((d) => effectiveStatus(d) === "LATE"), [delegates]);
   const cancelledDelegates = useMemo(() => delegates.filter((d) => d.cancelled), [delegates]);
-  // Alerts modal (2026-07-26 — "if i escalated, i think the missing can hide
-  // it, cause showing double stuff can be very confusing") — a delegate
-  // already showing in the Emergency section shouldn't ALSO show in Missing
-  // right below it; the Emergency card already covers them (with
-  // Acknowledge/Resolve), so Missing here only needs whoever ISN'T already
-  // being handled as an emergency.
+  // A delegate in the Emergency section must NOT also appear in Missing right
+  // below it — Emergency already covers them with Acknowledge/Resolve.
   const escalatedDelegateIds = useMemo(() => new Set(activeEscalations.map((e) => e.delegateId).filter(Boolean)), [activeEscalations]);
   const missingNotEscalated = useMemo(() => missing.filter((m) => !escalatedDelegateIds.has(m.id)), [missing, escalatedDelegateIds]);
 
@@ -1028,19 +915,13 @@ export default function DashboardPage() {
   const visibleDelegates = useMemo(() => {
     const query = delegateQuery.trim().toLowerCase();
     let list = delegates.filter((d) => {
-      // "CANCELLED" isn't a real status value (see backend/db/schema.js's
-      // comment) — it's a boolean layered on top of UNASSIGNED, so it's
-      // filtered separately here rather than through effectiveStatus().
+      // "CANCELLED" isn't a real status (see backend/db/schema.js) — it's a
+      // boolean over UNASSIGNED, so it can't go through effectiveStatus().
       if (statusFilter === "CANCELLED") { if (!d.cancelled) return false; }
       else if (statusFilter !== "ALL" && effectiveStatus(d) !== statusFilter) return false;
-      // Coach filter is real-coaches-only now (2026-07-27 — "currently both
-      // filter have unassigned, combine both in one filter") — Status
-      // already has its own "Unassigned" option, and status===UNASSIGNED is
-      // always exactly equivalent to coachId being empty (the backend
-      // requires a coach for every OTHER status), so the two dropdowns were
-      // offering the same filter twice. Picking Status: Unassigned still
-      // shows exactly the same delegates a coach-side "Unassigned" option
-      // used to.
+      // Real coaches only: status===UNASSIGNED is exactly equivalent to an
+      // empty coachId (the backend requires a coach for every other status), so
+      // an "Unassigned" option here would duplicate the Status filter's.
       if (coachFilter !== "ALL" && d.coachId !== coachFilter) return false;
       if (query) {
         const hay = `${d.name || ""} ${d.company || ""}`.toLowerCase();
@@ -1060,17 +941,15 @@ export default function DashboardPage() {
   }, [delegates, delegateQuery, statusFilter, coachFilter, sortMode, coaches]);
 
   /* ---- Trip switcher derived state -------------------------------------- */
-  // The uuid of the trip currently shown (for the "open in Trips board" links).
+  // uuid of the shown trip, for the "open in Trips board" links.
   const currentTripUuid = selectedTripId === TRIP_ID ? (trip?.uuid_id || mainTrip?.uuid) : selectedTripId;
 
-  // Fetches the Alerts modal's "Emergency" list — declared here (not up by
-  // activeEscalations' own useState above) because it depends on
-  // currentTripUuid, which isn't defined until this point in the component.
-  // Scoped to the currently viewed trip (2026-07-25 bugfix) — this used to
-  // fetch EVERY trip's active escalations unfiltered, so a delegate escalated
-  // on a completely different trip showed up here too, and clicking them
-  // opened an incomplete synthetic profile (no status badge) since they were
-  // never in this trip's own `delegates` array.
+  // Must stay here rather than beside activeEscalations' useState — it depends
+  // on currentTripUuid, declared just above.
+  //
+  // Keep it trip-scoped: unfiltered, a delegate escalated on a different trip
+  // appeared here and clicking them opened an incomplete synthetic profile,
+  // since they were never in this trip's `delegates`.
   useEffect(() => {
     if (!alertsOpen) return;
     setEscalationQuery("");
@@ -1081,13 +960,10 @@ export default function DashboardPage() {
     return () => { alive = false; };
   }, [alertsOpen, currentTripUuid]);
 
-  // Dropdown: the base trip (as "t-1", unfiltered) + every other trip by uuid
-  // — restricted to trips actually "In progress" (2026-07-24): a
-  // Planning/Completed trip has nothing live to switch to and view here,
-  // same restriction MobileHomePage.jsx already applies to its own picker.
-  // The currently-selected trip is always kept in the list even if its own
-  // status isn't "In progress", so switching away from it never disappears
-  // the option you're already on mid-selection.
+  // The base trip (as "t-1") plus every other trip by uuid, restricted to "In
+  // progress" — a Planning/Completed trip has nothing live to show, same as
+  // MobileHomePage.jsx's picker. The selected trip is always kept regardless, so
+  // the option you're on can't disappear mid-selection.
   const tripOptions = useMemo(() => {
     const opts = [];
     if (selectedTripId === TRIP_ID || trip?.status === "In progress") {
@@ -1098,19 +974,15 @@ export default function DashboardPage() {
       if (tr.status !== "In progress" && tr.id !== selectedTripId) continue;
       opts.push({ id: tr.id, name: tr.name });
     }
-    /* Second dedup pass, because the uuid check above isn't always able to fire
-     * (2026-07-29 bugfix — the switcher listed "Beijing study mission" TWICE).
-     * `mainTrip` is only ever set while `selectedTripId === TRIP_ID` (see
-     * load()), so when the persisted selection is the base trip's UUID rather
-     * than the "t-1" alias, `mainTrip` is null, the skip never runs, and the
-     * same trip appears as both the alias option AND its own uuid row.
+    /* Second dedup pass: the uuid check above can't fire when the persisted
+     * selection is the base trip's UUID rather than the "t-1" alias, because
+     * `mainTrip` is only set while `selectedTripId === TRIP_ID` — so the same
+     * trip appeared twice, once per identity.
      *
-     * "t-1" is an ALIAS for a real trip row, so a same-named pair here is the
-     * same trip twice, not two trips. Scoped deliberately to pairs INVOLVING
-     * the alias: two genuinely distinct trips are allowed to share a name, and
-     * a blanket name-dedup would silently hide one of them. The kept entry is
-     * whichever matches the current selection, so the <select>'s value always
-     * corresponds to a real option (otherwise it renders blank). */
+     * Scoped ONLY to pairs involving the alias. Two genuinely distinct trips may
+     * share a name, and a blanket name-dedup would silently hide one. Keep
+     * whichever entry matches the current selection, or the <select> value has
+     * no matching option and renders blank. */
     const aliasIdx = opts.findIndex((o) => o.id === TRIP_ID);
     if (aliasIdx >= 0) {
       const aliasName = (opts[aliasIdx].name || "").trim().toLowerCase();
@@ -1122,39 +994,43 @@ export default function DashboardPage() {
         opts.splice(dropIdx, 1);
       }
     }
+    // Restricts to trips this account captains a coach on (see myTripIds), but
+    // never hides the currently selected one — same carve-out as the "In
+    // progress" filter above.
+    if (myTripIds) {
+      return opts.filter((o) => {
+        if (o.id === selectedTripId) return true;
+        const uuid = o.id === TRIP_ID ? mainTrip?.uuid : o.id;
+        return uuid && myTripIds.has(uuid);
+      });
+    }
     return opts;
-  }, [trips, mainTrip, trip, selectedTripId]);
+  }, [trips, mainTrip, trip, selectedTripId, myTripIds]);
 
   const COACH_TOP_N = 4;
   const openCoachBoard = () => { if (currentTripUuid) navigate(`/trips?tripId=${currentTripUuid}`); };
 
   const pageCount = Math.max(1, Math.ceil(visibleDelegates.length / delegatePageSize));
-  // Filters/search/sort changing can leave delegatePage pointing past the
-  // new (shorter) result set — clamp it back into range rather than showing
-  // an empty page.
+  // A narrowing filter can leave delegatePage past the end of the result set;
+  // clamp rather than render an empty page.
   const clampedPage = Math.min(delegatePage, pageCount - 1);
   useEffect(() => { if (clampedPage !== delegatePage) setDelegatePage(clampedPage); }, [clampedPage, delegatePage]);
-  // Jump back to page 1 whenever the result set changes shape, rather than
-  // silently staying on whatever page number happened to be selected before.
+  // Back to page 1 whenever the result set changes shape.
   useEffect(() => { setDelegatePage(0); }, [delegateQuery, statusFilter, coachFilter, sortMode, delegatePageSize]);
 
   const clearDelegateFilters = () => { setDelegateQuery(""); setStatusFilter("ALL"); setCoachFilter("ALL"); };
   const delegateFiltersActive = delegateQuery.trim() !== "" || statusFilter !== "ALL" || coachFilter !== "ALL";
 
-  // The delegate rows actually rendered in the table right now (respects
-  // pagination) — the "select all" checkbox scopes to exactly this set,
-  // matching the same convention as the Trips/Onboarding pages.
+  // Only the rows currently rendered (pagination-aware). "Select all" scopes to
+  // exactly this set, same convention as the Trips/Onboarding pages.
   const rowsShown = visibleDelegates.slice(clampedPage * delegatePageSize, (clampedPage + 1) * delegatePageSize);
-  // Auto-hide Created-by when it's empty across every row on THIS page —
-  // almost always "—" once a trip has real volume. Last-seen column removed
-  // entirely (2026-07-27 — "i think no need last seen section, look a lot
-  // of stuff") — the same info is still visible on the delegate's own
-  // profile panel, just not duplicated as a table column.
+  // Auto-hide Created-by when every row on THIS page is empty — almost always
+  // "—" at real volume. There's deliberately no Last-seen column; that info
+  // lives on the delegate's profile panel instead.
   const showCreatedByCol = rowsShown.some((d) => d.createdBy);
 
-  // Staff operations' Active sessions list — search + role filter, applied
-  // on top of whatever the backend already sorted (most-recently-active
-  // first, see accounts.js's listActiveAccounts).
+  // Search + role filter on top of the backend's sort (most-recently-active
+  // first — see accounts.js's listActiveAccounts).
   const visibleActiveStaff = useMemo(() => {
     if (!staffOps) return [];
     const q = staffOpsSearch.trim().toLowerCase();
@@ -1173,67 +1049,39 @@ export default function DashboardPage() {
     <div className="page">
       {/* ---- Header ------------------------------------------------------- */}
       <div className="row between" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
-        {/* Header restyled 2026-07-29 ("can you improve this uiux, it look
-            outdate"). What was dated about it wasn't the styling so much as the
-            information architecture: FOUR stacked rows — eyebrow, "Dashboard",
-            a run-on metadata sentence, a "Now:" chip, then a whole separate
-            "Viewing trip" row below — pushed the actual content ~200px down the
-            page, and the biggest text on screen said "Dashboard", which is the
-            one thing you already know from the nav.
-            Now: the TRIP is the title (that's the thing that changes and that
-            you care about), its facts are discrete chips instead of a
-            "·"-joined sentence, and the trip switcher is folded into the title
-            row as a compact control rather than owning a row of its own. */}
-        {/* flex "1 1 auto" -> "1 1 0%" (2026-07-30 — "currently the beijing
-            study mission show this, it should look like how the manila
-            innovation summit trip [looks]"). Beijing has a live itinerary stop
-            (the "Now: Hotel breakfast · 08:00" chip); Manila doesn't. With
-            "auto" as the flex-basis, a flex item's PREFERRED width is its
-            unwrapped max-content width — even though the chips row wraps
-            internally, the browser still measured how wide it'd be if nothing
-            wrapped, and that measurement (with the extra "Now:/Next:" chip) was
-            wide enough that the whole row ran out of space, so the Live/
-            Refresh/Bell/Export block got pushed onto a SECOND line entirely.
-            Manila's shorter, chip-free row never triggered that, so the two
-            trips rendered with genuinely different layouts, not just different
-            content. Basis 0% makes this item's width purely proportional
-            (flex-grow/shrink), ignoring its own content's natural width — so it
-            actually uses only the room it's given, its internal chip row wraps
-            within THAT space instead of demanding more, and the actions block
-            (flex-shrink:0 below) stays pinned on the same line as the title
-            for every trip, regardless of how many chips it's showing. */}
+        {/* The TRIP is the title, not "Dashboard" (which the nav already tells
+            you); its facts are discrete chips, and the switcher folds into the
+            title row rather than owning one. The old four stacked rows pushed
+            real content ~200px down the page.
+
+            Keep the flex-basis at 0%, NOT "auto". With "auto" a flex item's
+            preferred width is its unwrapped max-content width, so the browser
+            measured the chips row as if it never wrapped — a trip with the extra
+            "Now:" chip then overflowed and pushed the Live/Refresh/Bell/Export
+            block onto a second line, making two trips lay out differently. 0%
+            makes the width purely proportional, so the chip row wraps within the
+            space it's given. */}
         <div style={{ minWidth: 0, flex: "1 1 0%" }}>
           <div className="page-eyebrow">{t("Dashboard")}</div>
-          {/* The trip name and the switcher are now ONE control (2026-07-29 —
-              "can you kinda merge the drop with the text cause got 2 same
-              text"): the heading previously printed the trip name and the
-              dropdown beside it printed the SAME name again. The <select> is
-              styled as the heading itself and sits inside the <h1>, so the
-              title you read is the thing you click to change — one piece of
-              text, no duplication. A single-trip account still gets plain
-              heading text, since a dropdown with one option is just noise. */}
+          {/* Trip name and switcher are ONE control — the heading and the
+              dropdown beside it used to print the same name twice. The <select>
+              lives inside the <h1>, so the title you read is what you click. A
+              single-trip account gets plain text; a one-option dropdown is
+              noise. */}
           <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            {/* marginTop 0 -> 7 (2026-07-29 — "add more space between dashboard
-                and beijing study mission text"). `.page-title`'s own 4px top
-                margin was overridden to 0 when the switcher moved in here, so
-                the uppercase DASHBOARD eyebrow ended up almost touching the
-                28px title. Bottom stays 0 — the chips below own that gap. */}
+            {/* Top margin is explicit because moving the switcher in here
+                zeroed `.page-title`'s own, leaving the eyebrow touching the
+                title. Bottom stays 0 — the chips below own that gap. */}
             <h1 className="page-title" style={{ margin: "7px 0 0", minWidth: 0, display: "flex", alignItems: "center" }}>
               {tripOptions.length > 1 ? (
-                /* The trip name is rendered as plain TEXT with the chevron
-                   right after it, and the <select> is laid invisibly OVER the
-                   pair (2026-07-29 — "put the dropdown icon next to the text
-                   instead, so whenever i have long name trip it should stick
-                   beside it").
-                   WHY not just style the <select> itself: a <select> sizes to
-                   its WIDEST option, never the selected one — so with "Manila
-                   Innovation Summit" in the list, the control stayed that wide
-                   while displaying the shorter "Beijing study mission", and the
-                   chevron sat stranded a few characters to the right. Sizing
-                   from real text fixes it for any name length, short or long.
-                   The overlaid select keeps the NATIVE dropdown (and its
-                   keyboard handling) and covers the text + chevron, so the
-                   whole title is the click target. */
+                /* The name is plain TEXT with the chevron after it, and the
+                   <select> is laid invisibly OVER the pair.
+
+                   Do NOT just style the <select>: it sizes to its WIDEST option,
+                   never the selected one, so the control stayed as wide as the
+                   longest trip name and stranded the chevron. Sizing from real
+                   text works at any length, and the overlay keeps the native
+                   dropdown and its keyboard handling. */
                 <TripSwitcher
                   trip={trip}
                   tripOptions={tripOptions}
@@ -1251,27 +1099,22 @@ export default function DashboardPage() {
           </div>
 
           {trip ? (
-            /* marginTop 9 -> 14 (2026-07-29 — "add some gap between the day and
-               the title") — the chips sat tight under a 30px heading, reading
-               as part of it rather than as a separate band of facts. */
+            /* Extra top margin so the chips read as a separate band of facts,
+               not part of the heading above them. */
             <div className="row" style={{ gap: 7, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
               <span style={S.metaChip}>
                 <CalendarDays size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
                 {lang === "zh" ? `第 ${trip.dayOf}/${trip.totalDays} 天` : `${t("Day")} ${trip.dayOf} / ${trip.totalDays}`}
               </span>
-              {/* Shows the REAL clock, ticking (2026-07-29 — "what the time
-                  icon for? if it showing actual time, pls fix it accordingly").
-                  It previously rendered `trip.localTime`, which is a HARDCODED
-                  SEED STRING ("14:26" in db/constants.js) written once at seed
-                  time and never updated by anything — so this chip had been
-                  frozen at 14:26 since the database was created, and was
-                  correct for exactly one minute a day by coincidence.
-                  This is the viewer's own device clock. It is NOT necessarily
-                  the destination's local time: `trips` has no timezone column,
-                  so there is nothing to convert against. Labelled plainly as
-                  the time instead of claiming "local", because overstating it
-                  is how the old value misled in the first place. Proper
-                  trip-local time needs a timezone on the trip — see AI Log. */}
+              {/* Never render `trip.localTime` here — it's a hardcoded seed
+                  string in db/constants.js that nothing updates, so this chip
+                  sat frozen at 14:26 for the life of the database.
+
+                  This is the VIEWER's device clock, not the destination's local
+                  time: `trips` has no timezone column to convert against. Label
+                  it plainly as the time, never "local" — overstating it is how
+                  the old value misled. Real trip-local time needs a timezone
+                  column (see AI Log). */}
               <span style={S.metaChip} title={t("Your device's current time — the trip has no timezone set")}>
                 <Clock size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
                 <NowClock />
@@ -1280,18 +1123,13 @@ export default function DashboardPage() {
                 <Users size={12} style={{ flexShrink: 0, color: "var(--ink-3)" }} />
                 {k?.total ?? "—"} <span className="muted">{t("delegates")}</span>
               </span>
-              {/* Which checkpoint matters right now — same "current" tag the
-                  scanner pages auto-focus on, so the Dashboard doesn't leave
-                  you guessing which event is live without switching to /trips.
-                  Clickable (2026-07-30 — "the now:...8:00am is like telling
-                  me it's happening now which is not"): "current" means "the
-                  active leg of today's schedule", not literally this second —
-                  a delegate can be marked at the 8am breakfast checkpoint at
-                  1am if nothing since has superseded it. Rather than word that
-                  distinction into an already-tight chip, tapping it opens
-                  today's full schedule so the actual timing is never in
-                  question. The trailing muted "Next:" line this used to pair
-                  with is gone — the popover already covers that, and better. */}
+              {/* Which checkpoint matters right now, using the same "current"
+                  tag the scanner pages auto-focus on. Clickable because
+                  "current" means the active LEG of today's schedule, not
+                  literally this second — a delegate can be marked at the 8am
+                  breakfast checkpoint at 1am if nothing superseded it. The
+                  popover states the real timing rather than cramming that
+                  caveat into the chip. */}
               {currentCheckpoint && (
                 <span style={{ position: "relative" }}>
                   <button
@@ -1358,12 +1196,9 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* flexShrink:0 (2026-07-30, paired with the flex-basis fix above) —
-            pins this block to a fixed width so it can never be squeezed or
-            wrapped by the title block's own content; it either sits inline on
-            the title's row (the normal case at any trip) or, only at a
-            genuinely too-narrow viewport, wraps as a whole unit — never split
-            mid-cluster. */}
+        {/* flexShrink:0 pairs with the flex-basis fix above: this block can't
+            be squeezed by the title's content, and wraps as a whole unit rather
+            than splitting mid-cluster. */}
         <div className="row" style={{ gap: 10, flexWrap: "wrap", flexShrink: 0 }}>
           {data && <LiveSyncBadge seconds={REFRESH_SECONDS} t={t} dotStyle={S.dot} />}
           <button
@@ -1398,12 +1233,6 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
-
-      {/* The standalone "Viewing trip" row that used to sit here is gone
-          (2026-07-29) — the switcher now lives beside the trip title above,
-          which is where the trip name it changes actually appears. Its old
-          comment claimed a separate row kept its position stable; in practice
-          it just added a whole row of chrome above the tabs. */}
 
       {/* ---- Tabs ----------------------------------------------------------- */}
       <div className="row" style={{ gap: 8, marginTop: 20 }}>
@@ -1520,8 +1349,7 @@ export default function DashboardPage() {
               {t("Who's still missing, per coach — the same view staff see on the Check-in screen.")}
             </p>
 
-            {/* Search / filter / sort — a long "still missing" list per coach
-                gets hard to scan once the roster is large (2026-07-24). */}
+            {/* A long per-coach "still missing" list is hard to scan at scale. */}
             <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
               <div style={{ position: "relative", flex: 1, minWidth: 200 }}>
                 <Search size={15} style={{ position: "absolute", left: 10, top: 10, color: "var(--ink-3)" }} />
@@ -1542,36 +1370,27 @@ export default function DashboardPage() {
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginTop: 16 }}>
             {coaches.map((c) => {
-              // Everyone on this coach NOT yet boarded — matches the Coach
-              // status card's own "N to board" figure (coach.total -
-              // coach.boarded, below). Used to filter on MISSING/LATE only
-              // (2026-07-30 — "it show green arrived which should not show
-              // until every delegate is arrived... it should still show the
-              // assigned delegate not there yet"): a coach with 5 people
-              // simply ASSIGNED but not yet scanned — not late enough to be
-              // flagged LATE, not past checkpoint-reset to be flagged
-              // MISSING — showed 0 "missing" and a green "Arrived" badge,
-              // directly contradicting the "5 to board" already visible one
-              // card over. `effectiveStatus(d)` (not raw `d.status`) is the
-              // correct "still needs to board" check — it already naturally
-              // includes ASSIGNED, LATE, and MISSING together.
-              // 2026-07-30 ("why is it arrived delegate are there?") — this
-              // used to check raw `d.status !== "ARRIVED"` on the (incorrect)
-              // assumption that PRESENT gets normalised to ARRIVED before it
-              // ever reaches this list; it doesn't (that normalisation only
-              // happens inside openEdit()'s form initializer, for a single
-              // delegate at a time) — so anyone whose real stored status was
-              // the legacy "PRESENT" value stayed stuck in "not boarded"
-              // forever despite having genuinely checked in. effectiveStatus()
-              // is the one helper in this file that actually does that
-              // PRESENT->ARRIVED aliasing, and mobile's own status checks
-              // already rely on it — this just brings Reverse headcount in
-              // line with the same rule instead of re-deriving its own.
-              // Search/filter/sort applied on top (all client-side — the list
-              // per coach is small enough not to need a server round-trip).
+              // Everyone on this coach NOT yet boarded, matching the Coach status
+              // card's "N to board" figure. Two rules that must both hold:
+              //
+              // 1. Use effectiveStatus(d), never raw `d.status`. It's the one
+              //    helper here that aliases the legacy PRESENT -> ARRIVED (that
+              //    normalisation otherwise happens only in openEdit()'s form
+              //    initializer, one delegate at a time), so raw status left a
+              //    genuinely checked-in PRESENT delegate stuck in "not boarded"
+              //    forever. Mobile's status checks rely on the same helper.
+              // 2. `stillToBoard` must keep ASSIGNED in it, even though the
+              //    DISPLAYED list below narrows to LATE/MISSING (an ASSIGNED
+              //    delegate just hasn't reached their checkpoint window yet and
+              //    auto-transitions on their own — noise to scan). The
+              //    "is this coach fully arrived" check needs the full set, or a
+              //    coach that's all-ASSIGNED-nobody-late shows 0 and wrongly
+              //    flips back to the green "Arrived" badge.
+              const stillToBoard = delegates.filter((d) => d.coachId === c.id && effectiveStatus(d) !== "ARRIVED");
+              // Client-side — the per-coach list is small enough.
               const search = hcSearch.trim().toLowerCase();
-              const coachMissing = delegates
-                .filter((d) => d.coachId === c.id && effectiveStatus(d) !== "ARRIVED")
+              const coachMissing = stillToBoard
+                .filter((d) => ["LATE", "MISSING"].includes(effectiveStatus(d)))
                 .filter((d) => {
                   if (hcFilter === "missing") return d.status === "MISSING";
                   if (hcFilter === "late") return d.status === "LATE";
@@ -1587,10 +1406,8 @@ export default function DashboardPage() {
                   return a.name.localeCompare(b.name);
                 });
               const segs = coachBarSegments(c, { includeBoarded: false });
-              // Collapsed by default once there are more than a handful of
-              // coaches (2026-07-24) — with e.g. 20 coaches, every list open
-              // at once is exactly the reported "messy" problem. A coach
-              // with nothing missing has nothing to expand anyway.
+              // Collapsed past a handful of coaches — 20 open lists is
+              // unreadable. Nothing missing means nothing to expand.
               const collapsible = coaches.length > 4 && coachMissing.length > 0;
               const expanded = !collapsible || expandedCoaches.has(c.id);
               return (
@@ -1606,25 +1423,20 @@ export default function DashboardPage() {
                       </div>
                     </div>
                     {c.total === 0 ? (
-                      // "Arrived" means the whole bar is green — every
-                      // delegate assigned to this coach has boarded. A coach
-                      // with NO delegates at all yet isn't "arrived", it's
-                      // just empty — those are two different states (bug
-                      // report: 0/40 with nobody assigned was showing green
-                      // "Arrived" as if the coach were fully checked in).
+                      // Empty and fully-boarded are DIFFERENT states: a coach
+                      // with no delegates showed a green "Arrived" badge at 0/40
+                      // as if everyone had checked in.
                       <span className="badge badge-neutral">{t("No delegates yet")}</span>
-                    ) : coachMissing.length === 0 ? (
+                    ) : stillToBoard.length === 0 ? (
                       <span className="badge badge-present">{t("Arrived")}</span>
                     ) : (
-                      // Severity-toned rather than always red (2026-07-30 —
-                      // "i like the mobile blue color, do the same for
-                      // desktop"): a coach that's simply not fully SCANNED
-                      // yet (nobody late or missing, just not-yet-boarded)
-                      // reads as blue/"assigned", the same tone the mobile
-                      // Coach status card already uses for that case —
-                      // red is reserved for when someone's genuinely MISSING.
+                      // Severity-toned, not always red: merely not-fully-scanned
+                      // reads blue/"assigned" (matching mobile's Coach status
+                      // card), and red is reserved for a genuine MISSING. The
+                      // count is `stillToBoard` (ASSIGNED included) so it matches
+                      // the coach's "N to board"; only the list below narrows.
                       <span className={`badge badge-${(c.missing || 0) > 0 ? "missing" : (c.late || 0) > 0 ? "late" : "assigned"}`}>
-                        {coachMissing.length} {t("not boarded")}
+                        {stillToBoard.length} {t("not boarded")}
                       </span>
                     )}
                   </div>
@@ -1634,19 +1446,19 @@ export default function DashboardPage() {
 
                   {c.total === 0 ? (
                     <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("No delegates assigned to this coach yet.")}</div>
-                  ) : coachMissing.length === 0 ? (
+                  ) : stillToBoard.length === 0 ? (
                     <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("Everyone on this coach is accounted for.")}</div>
+                  ) : coachMissing.length === 0 ? (
+                    // Nobody late or missing — just still-assigned people, who
+                    // aren't shown in the list below.
+                    <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{stillToBoard.length} {t("still to board, none late or missing yet.")}</div>
                   ) : !expanded ? (
                     <button className="btn btn-ghost" style={{ marginTop: 14, width: "100%", justifyContent: "center" }} onClick={() => toggleCoachExpanded(c.id)}>
                       {t("Show")} {coachMissing.length} {t("missing/late")}
                     </button>
                   ) : (
-                    // Fixed-height scroll area (2026-07-24) — with a large
-                    // roster, one coach's "still missing" list could run to
-                    // 15+ names, ballooning that card far taller than its
-                    // neighbours and making the whole grid look messy. A
-                    // capped, independently-scrollable list keeps every
-                    // coach card the same height regardless of count.
+                    // Fixed-height scroll area keeps every coach card the same
+                    // height — a 15+ name list otherwise dwarfs its neighbours.
                     <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14, maxHeight: 340, overflowY: "auto", paddingRight: 4 }}>
                       {coachMissing.map((m) => (
                         <div
@@ -1666,8 +1478,8 @@ export default function DashboardPage() {
                                 <span style={{ fontWeight: 500, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
                                 {m.vip && <Crown size={13} color="var(--st-review)" style={{ flexShrink: 0 }} />}
                               </div>
-                              {/* Everyone here is missing or late, so the subtitle is their
-                                  last known location rather than a generic status label. */}
+                              {/* All missing/late here, so the subtitle is last
+                                  known location, not a status label. */}
                               <div className="muted" style={{ fontSize: 12 }}>{m.lastLocation || t("Last known location")}</div>
                             </div>
                           </div>
@@ -1770,8 +1582,7 @@ export default function DashboardPage() {
                   <div className="muted" style={{ fontSize: 13, marginTop: 14 }}>{t("No one is currently active.")}</div>
                 ) : (
                   <>
-                    {/* Search + role filter — 40+ people signed in at once
-                        made this an unbroken wall of names (2026-07-24). */}
+                    {/* 40+ concurrent sessions was an unbroken wall of names. */}
                     <div className="row" style={{ gap: 10, marginTop: 14, flexWrap: "wrap" }}>
                       <div style={{ position: "relative", maxWidth: 240, flex: "1 1 180px" }}>
                         <Search size={15} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)" }} />
@@ -1795,15 +1606,10 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    {/* Fixed-height scroll area, 4-up grid instead of one
-                        name per row (2026-07-24) — a single column left a
-                        lot of empty horizontal space once there were 40+
-                        people signed in at once. auto-fill (not auto-fit) —
-                        auto-fit COLLAPSES unused tracks and lets the real
-                        ones stretch to fill the row, so with just 1 result
-                        that one card stretched across the entire width;
-                        auto-fill keeps the empty tracks in place instead, so
-                        a card never grows past its own column. */}
+                    {/* 4-up grid; one name per row wasted the width at 40+
+                        sessions. MUST be auto-fill, not auto-fit: auto-fit
+                        collapses unused tracks and lets the rest stretch, so a
+                        single result spanned the entire width. */}
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10, marginTop: 16, maxHeight: 420, overflowY: "auto", alignContent: "start", paddingRight: 4 }}>
                       {visibleActiveStaff.length === 0 && (
                         <div className="muted" style={{ fontSize: 13, textAlign: "center", padding: "16px 0", gridColumn: "1 / -1" }}>
@@ -1833,10 +1639,9 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Both tabs share this one fragment because the Add/Edit delegate modal
-          at the bottom of it has to stay mounted for the roster table, and the
-          KPI/coach/history widgets and the table are just two sections of it
-          (2026-07-28 restructure). Each section is gated individually below. */}
+      {/* Both tabs share this fragment because the Add/Edit delegate modal at
+          the bottom must stay mounted for the roster table. Each section is
+          gated individually below. */}
       {(tab === "overview" || tab === "delegates") && (
       <>
 
@@ -1873,32 +1678,23 @@ export default function DashboardPage() {
       {tab === "overview" && perms.viewDashboard && (
       <>
       {/* ---- KPI tiles ------------------------------------------------------
-       * Missing + Late keep the full attention-grabbing tile treatment — they're
-       * the two statuses that need someone to actually DO something. Arrived /
-       * Assigned / Unassigned are calmer "where is everyone" counts, so they're
-       * folded into one compact Roster breakdown card (a proportional bar +
-       * 3 small stats) instead of 3 more full-size tiles — 5 equal-weight
-       * cards in a row was reads as visual noise when only 2 of them are
-       * actually urgent (2026-07-22 redesign, was a flat 5-tile kpi-grid).
+       * Only Missing + Late get full tiles — they're the two statuses needing
+       * action. Arrived/Assigned/Unassigned fold into one compact Roster
+       * breakdown card, because 5 equal-weight tiles read as noise when only 2
+       * are urgent.
        * ---------------------------------------------------------------------- */}
       {k && (
         <div className="kpi-row">
-          {/* "of N" and the ring's denominator use trackable (assigned/
-              arrived/late/missing), not total — an Unassigned delegate
-              (including a Cancelled one, always forced to Unassigned) was
-              never on a coach's roster and can't meaningfully be "missing",
-              so counting them here overstated N (2026-07-24). */}
+          {/* Denominator is `trackable`, NOT total: an Unassigned delegate
+              (including any Cancelled one, which is forced Unassigned) was never
+              on a coach's roster and can't be "missing", so total overstates N. */}
           <Kpi tone="missing" icon={AlertTriangle} label={t("Missing right now")} value={`${k.missing}`}
             suffix={`${t("of")} ${k.trackable ?? k.total}`}
             foot={(() => {
               const live = liveDepartsIn(trip?.departureAt);
               const d = live ?? (trip?.departsIn ? fmtDepartsIn(trip.departsIn) : null);
-              // 2026-07-30 — "can you say departure back to [country] in [x]
-              // hour" / "add the country from and to": names WHERE the
-              // delegation is heading back to (trip.countryFrom — editable
-              // per trip on the Edit Trip form, defaults to Singapore since
-              // that's SCCCI's real usage today) instead of a bare duration
-              // with no destination context.
+              // Names the destination (trip.countryFrom, editable per trip,
+              // defaulting to Singapore) rather than a bare duration.
               return d ? `${t("Departure back to")} ${trip?.countryFrom || "Singapore"} ${t("in")} ${d}` : null;
             })()} big
             ringValue={k.missing} ringTotal={k.trackable ?? k.total}
@@ -1969,8 +1765,13 @@ export default function DashboardPage() {
                 )}
               </div>
             </div>
+            {/* "All trips" is admin-only — it returns activity for every trip,
+                including ones this staff account isn't assigned to. Hidden
+                entirely rather than disabled: with only one reachable scope
+                there's nothing to toggle. Staff stay pinned to "trip", which
+                is the initial state, so no forced reset is needed. */}
             <div className="row" style={{ gap: 2, background: "var(--surface-2)", borderRadius: 999, padding: 2, width: "fit-content", marginBottom: 14 }}>
-              {[["trip", t("This trip")], ["all", t("All trips")]].map(([k, label]) => (
+              {(isAdmin ? [["trip", t("This trip")], ["all", t("All trips")]] : [["trip", t("This trip")]]).map(([k, label]) => (
                 <button key={k} onClick={() => setHistoryScope(k)}
                   style={{
                     fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 999, border: "none", cursor: "pointer",
@@ -2018,8 +1819,7 @@ export default function DashboardPage() {
       </>
       )}
 
-      {/* ---- All delegates (CRUD surface) — now the "list" sub-tab of
-              Delegate management (2026-07-28) ------------------------------- */}
+      {/* ---- All delegates (CRUD surface) — the "list" sub-tab -------------- */}
       {tab === "delegates" && delegateSubTab === "list" && perms.viewDelegates && data && (
         <div ref={delegateTableRef} className="card" style={{ marginTop: 20, overflow: "hidden" }}>
           <div className="row between" style={{ padding: "18px 20px", borderBottom: "1px solid var(--line)" }}>
@@ -2038,6 +1838,14 @@ export default function DashboardPage() {
                   disabled={deletingSelectedDelegates}
                 >
                   <Trash2 size={16} /> {deletingSelectedDelegates ? t("Deleting…") : `${t("Delete selected")} (${selectedDelegateIds.size})`}
+                </button>
+              )}
+              {/* One toggle, not two: flips to "Unlock filtered" once EVERY
+                  delegate in the filter is locked. Same bulkSetLocked either
+                  way — only the direction is derived from what's on screen. */}
+              {perms.manageDelegates && visibleDelegates.length > 0 && (
+                <button className="btn btn-ghost" onClick={visibleDelegates.every((d) => d.locked) ? unlockFiltered : lockFiltered}>
+                  {visibleDelegates.every((d) => d.locked) ? <><Unlock size={16} /> {t("Unlock filtered")}</> : <><Lock size={16} /> {t("Lock filtered")}</>}
                 </button>
               )}
               {perms.manageDelegates && delegates.length > 0 && (
@@ -2071,16 +1879,14 @@ export default function DashboardPage() {
                   <option value="LATE">{t("Late")}</option>
                   <option value="MISSING">{t("Missing")}</option>
                 </optgroup>
-                {/* Not a real status (see schema.js's comment on the
-                    `cancelled` column) — grouped apart so it doesn't read as
-                    a 6th value in the same enum as the 5 above. */}
+                {/* Not a real status (see schema.js's `cancelled` column) —
+                    grouped apart so it doesn't read as a 6th enum value. */}
                 <optgroup label={t("Other")}>
                   <option value="CANCELLED">{t("Cancelled")}</option>
                 </optgroup>
               </select>
-              {/* Coach-assignment filter — matches the mobile Attendance
-                  page's coach filter. Options come from the live coach list
-                  plus an explicit "Unassigned" (delegates with no coach). */}
+              {/* Matches the mobile Attendance page's coach filter: live coach
+                  list plus an explicit "Unassigned". */}
               <select className="select" style={{ maxWidth: 190 }} value={coachFilter} onChange={(e) => setCoachFilter(e.target.value)}>
                 <option value="ALL">{t("All coaches")}</option>
                 <optgroup label={t("Coaches")}>
@@ -2111,9 +1917,8 @@ export default function DashboardPage() {
               {t("No delegates yet. Click")} <strong>{t("Add delegate")}</strong> {t("to create your first record.")}
             </div>
           ) : (
-            // overflowX added (2026-07-24, mobile responsiveness pass) so
-            // this many-column table scrolls horizontally on a narrow
-            // screen instead of clipping/squishing columns.
+            // overflowX so this many-column table scrolls horizontally on a
+            // narrow screen instead of clipping columns.
             <div style={{ maxHeight: 640, overflowY: "auto", overflowX: "auto" }}>
             <table className="table" style={{ minWidth: 720 }}>
               <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--surface)" }}>
@@ -2188,13 +1993,9 @@ export default function DashboardPage() {
                     {showCreatedByCol && <td className="muted">{d.createdBy || "—"}</td>}
                     <td>
                       <div className="row" style={{ gap: 6 }}>
-                        {/* Standalone "View profile" (Eye) button removed
-                            (2026-07-27, advised) — clicking the delegate's
-                            NAME cell already calls the exact same
-                            openProfile(d), so the icon button was a fully
-                            redundant second control for the same action;
-                            Edit has no other entry point in this row, so it
-                            stays. */}
+                        {/* No "View profile" icon: the NAME cell already calls
+                            the same openProfile(d). Edit has no other entry
+                            point in this row, so it stays. */}
                         {perms.manageDelegates && (
                           <>
                             {canModifyDelegate(d) ? (
@@ -2209,11 +2010,9 @@ export default function DashboardPage() {
                                 </button>
                               </>
                             ) : (
-                              // Ownership/lock blocked this account specifically — a
-                              // disabled lock icon explains WHY Edit/Delete are
-                              // missing (2026-08-03) rather than the row just
-                              // silently having fewer buttons than others, which
-                              // would read as a bug.
+                              // A disabled lock icon explains WHY Edit/Delete are
+                              // missing — a row with silently fewer buttons than
+                              // its neighbours reads as a bug.
                               <span
                                 title={d.locked
                                   ? t("This delegate is locked.")
@@ -2293,10 +2092,9 @@ export default function DashboardPage() {
 
             {editingId && (
               <div className="row" style={{ gap: 14, marginBottom: 18 }}>
-                {/* Status-toned across all 5 states via the shared statusTone()
-                    helper (DelegateAvatar.jsx) — was MISSING-vs-everyone-else
-                    binary, so an Unassigned/Assigned/Late delegate's header
-                    all showed the same green as Arrived. */}
+                {/* Toned across all 5 states via the shared statusTone()
+                    (DelegateAvatar.jsx). A MISSING-vs-everyone-else binary made
+                    Unassigned/Assigned/Late all render Arrived's green. */}
                 {editingPhotoUrl ? (
                   <img src={editingPhotoUrl} alt="" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", flexShrink: 0, boxShadow: `0 0 0 2px ${statusTone(form.status).fg}` }} />
                 ) : (
@@ -2347,9 +2145,8 @@ export default function DashboardPage() {
             <select className="select" value={form.status}
               onChange={(e) => {
                 const status = e.target.value;
-                // Cancelled only ever applies to an Unassigned delegate (see
-                // the checkbox below) — moving away from Unassigned clears
-                // it rather than leaving a stale, now-hidden flag set.
+                // Cancelled only applies to an Unassigned delegate, so moving
+                // away must clear it rather than leave a hidden flag set.
                 setForm((f) => ({ ...f, status, cancelled: status === "UNASSIGNED" ? f.cancelled : false }));
               }}>
               <option value="UNASSIGNED">{t("Unassigned")}</option>
@@ -2359,15 +2156,10 @@ export default function DashboardPage() {
               <option value="MISSING">{t("Missing")}</option>
             </select>
 
-            {/* Coach field removed from this modal (2026-07-27 — "remove the
-                assigned to coach, cause that my teammate feature") — coach
-                assignment is Desmond's Trips board (drag-and-drop), not this
-                Dashboard form. An existing delegate's coachId is still
-                preserved untouched via openEdit()/form state above; this
-                modal just no longer offers a control to change it. Setting
-                Status to "Unassigned" still correctly clears it (see the
-                submit payload below), so releasing someone from their coach
-                is still possible here — assigning one just isn't. */}
+            {/* No coach field on purpose: assignment belongs to Desmond's Trips
+                board. An existing coachId is preserved untouched via
+                openEdit()/form state, and Status "Unassigned" still clears it —
+                so you can release someone here, just not assign them. */}
 
             {form.status === "MISSING" && (
               <>
@@ -2408,10 +2200,8 @@ export default function DashboardPage() {
               {t("Mark as VIP")}
             </label>
 
-            {/* Only meaningful once a delegate is already Unassigned — a
-                cancellation IS an unassignment, not a separate action that
-                triggers one, so the checkbox only appears here rather than
-                alongside every status (2026-07-24 feedback). */}
+            {/* Unassigned only: a cancellation IS an unassignment, not a
+                separate action that triggers one. */}
             {editingId && form.status === "UNASSIGNED" && (
               <label style={{ display: "block", marginTop: 10, fontSize: 14, cursor: "pointer" }}>
                 <span className="row" style={{ gap: 8 }}>
@@ -2524,10 +2314,8 @@ export default function DashboardPage() {
       )}
 
       {/* ---- Delegate profile view --------------------------------------
-          Combines what used to be 3 separate popups (edit modal's
-          read-only info, checkpoint timeline modal, location map modal)
-          into one scrollable panel (2026-07-24). Read-only — the "Edit"
-          button switches to the existing Create/Edit modal for changes. */}
+          One scrollable panel replacing 3 separate popups. Read-only — "Edit"
+          hands off to the Create/Edit modal. */}
       {profileDelegate && (
         <div style={S.overlay}
           onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
@@ -2579,10 +2367,8 @@ export default function DashboardPage() {
                 </div>
               </div>
               <div className="row" style={{ gap: 6, flexShrink: 0 }}>
-                {/* Only offered once already Unassigned — cancelling IS an
-                    unassignment, not a separate action that triggers one
-                    (2026-07-24 feedback); an Assigned/Arrived/Late/Missing
-                    delegate needs Edit → Unassigned first. */}
+                {/* Unassigned only — cancelling IS an unassignment. Any other
+                    status needs Edit → Unassigned first. */}
                 {perms.manageDelegates && profileDelegate.status === "UNASSIGNED" && (
                   <button
                     className="btn btn-ghost"
@@ -2592,11 +2378,9 @@ export default function DashboardPage() {
                     {profileDelegate.cancelled ? t("Undo cancellation") : t("Mark as cancelled")}
                   </button>
                 )}
-                {/* Both hidden while already escalated (2026-07-25) — no
-                    point offering to escalate someone again mid-escalation,
-                    and Edit is hidden so this becomes a focused "what's the
-                    emergency, who raised it" view rather than a normal
-                    editable profile until the escalation is resolved. */}
+                {/* Both hidden while escalated: no re-escalating mid-escalation,
+                    and hiding Edit makes this a focused "what's the emergency"
+                    view until it's resolved. */}
                 {perms.manageDelegates && profileDelegate.status === "MISSING" && !profileDelegate.escalated && (
                   <button
                     className="btn btn-ghost"
@@ -2621,12 +2405,9 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Auto-filling columns instead of a hardcoded "1fr 1fr"
-                (2026-07-28 — "desktop detail need better uiux, too much
-                space"). ProfileField renders nothing when a value is empty, so
-                a fixed 2-column grid left big holes and stranded single fields
-                on their own row; this packs 3-4 short fields per row on a wide
-                modal and still collapses to one column when narrow. */}
+            {/* Auto-filling columns, not a hardcoded "1fr 1fr": ProfileField
+                renders nothing for an empty value, so a fixed 2-column grid left
+                holes and stranded single fields on their own row. */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: "12px 18px" }}>
               <ProfileField
                 icon={Phone}
@@ -2651,12 +2432,10 @@ export default function DashboardPage() {
                 )}
               />
               <ProfileField label={t("Coach")} value={coachName(profileDelegate.coachId)} />
-              {/* While escalated, swap the profile/travel-document fields
-                  (Company/Industry/Nationality/Passport) for which TRIP this
-                  is under (2026-07-25) — you can land on this profile from a
-                  different trip's context via the escalation banner's "View"
-                  jump, and those document fields aren't what matters for an
-                  active emergency. */}
+              {/* While escalated, swap the travel-document fields for which TRIP
+                  this is under — you can land here from another trip's context
+                  via the banner's "View" jump, and documents aren't what matters
+                  during an emergency. */}
               {profileDelegate.escalated ? (
                 <ProfileField icon={MapPin} label={t("Trip")} value={trip?.name} />
               ) : (
@@ -2666,10 +2445,9 @@ export default function DashboardPage() {
                   <ProfileField label={t("Nationality")} value={profileDelegate.nationality} />
                   <ProfileField icon={BadgeCheck} label={t("Passport number")} value={profileDelegate.passport_no} mono />
                   <ProfileField label={t("Passport expiry")} value={profileDelegate.passport_expiry} />
-                  {/* Room moved INTO this grid (2026-07-28) — it was a
-                      full-width bordered card of its own for one short value
-                      like "t · Room 2", which ate a whole row for almost no
-                      content. Same escalated-hiding rule as the fields above. */}
+                  {/* Room belongs in this grid, not its own full-width card —
+                      one short value ate a whole row. Same escalated-hiding rule
+                      as the fields above. */}
                   <ProfileField
                     icon={BedDouble}
                     label={t("Room")}
@@ -2692,13 +2470,8 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* Room allocation (2026-07-26) now lives inside the field grid
-                above rather than in its own bordered card — see the
-                ProfileField for it there. */}
-
-            {/* Replaces the Checkpoint timeline while an escalation is active
-                (2026-07-25) — the point of opening this profile right now is
-                the emergency itself, not routine scan history. */}
+            {/* Replaces the Checkpoint timeline while escalated — the emergency
+                is the point of opening this profile, not scan history. */}
             {profileDelegate.escalated && (
               <div style={{
                 marginTop: 18, padding: 14, borderRadius: "var(--r-md)",
@@ -2773,24 +2546,19 @@ export default function DashboardPage() {
       )}
 
       {/* Full-size photo lightbox — a separate, higher-stacked overlay so it
-          layers on top of the profile panel rather than replacing it
-          (2026-07-24). Click anywhere, or X, to close. */}
+          layers over the profile panel rather than replacing it. */}
       {cropFile && (
         <PhotoCropModal file={cropFile} onCancel={() => setCropFile(null)} onSave={handleCropSave} t={t} />
       )}
 
-      {/* "Mark as cancelled" reason prompt — a dedicated textfield instead
-          of a plain window.confirm, since the whole point of cancelling is
-          capturing WHY (2026-07-24). */}
-      {/* ---- Alerts modal (2026-07-24) --------------------------------------
-       * "if it missing, it will mention, late will be brief and show who
-       * late... those who are cancel status also display" — then moved from
-       * an inline collapsed card to this small icon-button + modal beside
-       * Export, so it doesn't take a permanent row on every visit. Missing
-       * gets full detail rows (last-known-location + Call, matching Reverse
-       * Headcount's own treatment); Late/Cancelled are deliberately brief —
-       * just wrapped name chips. Each section caps how many it shows and
-       * links to the full filtered list via showDelegatesFiltered(). */}
+      {/* "Mark as cancelled" reason prompt — a textfield, not a window.confirm,
+          because capturing WHY is the point of cancelling. */}
+      {/* ---- Alerts modal ---------------------------------------------------
+       * An icon-button + modal beside Export rather than an inline card, which
+       * took a permanent row on every visit. Missing gets full detail rows
+       * (last-known-location + Call, matching Reverse Headcount);
+       * Late/Cancelled are deliberately just name chips. Each section caps how
+       * many it shows and links out via showDelegatesFiltered(). */}
       {alertsOpen && (
         <div style={S.overlay}
           onMouseDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }}
@@ -2802,11 +2570,9 @@ export default function DashboardPage() {
                 <h2 style={{ fontSize: 16 }}>{t("Alerts")}</h2>
               </div>
               <div className="row" style={{ gap: 6 }}>
-                {/* 2026-07-31 — "add a button to link to the exception page,
-                    cause the alert is under exception also": Missing/Escalated
-                    delegates shown here now have a matching auto-generated
-                    ticket in the Exceptions inbox (see db/exceptionSync.js) —
-                    this is the shortcut over to the full record. */}
+                {/* Missing/Escalated delegates here also have an auto-generated
+                    ticket in the Exceptions inbox (db/exceptionSync.js); this is
+                    the shortcut to the full record. */}
                 <button
                   className="btn btn-ghost"
                   style={{ fontSize: 12.5, padding: "5px 10px" }}
@@ -2855,12 +2621,10 @@ export default function DashboardPage() {
                         <div style={{ minWidth: 0, cursor: e.delegateId ? "pointer" : "default" }}
                           onClick={() => {
                             if (!e.delegateId) return;
-                            // Look up the REAL delegate record instead of building a
-                            // fake partial one from the escalation row (2026-07-25 bug
-                            // fix) — the synthetic {id,name,phone,lastLocation} object
-                            // was missing status/coachId/vip, so the profile panel
-                            // rendered incomplete (no status badge, no Escalate button,
-                            // "Unassigned" coach) instead of the real full profile.
+                            // Look up the REAL delegate record — a synthetic
+                            // {id,name,phone,lastLocation} from the escalation row
+                            // lacks status/coachId/vip, so the profile rendered
+                            // with no status badge and an "Unassigned" coach.
                             const real = delegates.find((d) => d.id === e.delegateId);
                             setAlertsOpen(false);
                             openProfile(real || { id: e.delegateId, name: e.delegateName, phone: e.delegatePhone, lastLocation: e.delegateLocation });

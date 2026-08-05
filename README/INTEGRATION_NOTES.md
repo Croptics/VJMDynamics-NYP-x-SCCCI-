@@ -3019,3 +3019,322 @@ No behavior changed in any of these — pure relocations, each with its own
 internal imports fixed for the new folder depth. Full mapping (every file
 across the whole codebase, not just the ones this doc touches) is in
 `PROJECT_STRUCTURE.md`'s 2026-08-03 update block and `INTEGRATION_NOTES.md`.
+
+### 2026-08-04 — flag for Vance: mobile calls were never actually receiving signals
+
+JQ found and fixed a gap in Vance's MusterChat call feature: `MobileChatBubble.jsx`
+mounts `<VideoCallOverlay/>` (Vance's) but never called
+`callManager.startGlobalPoll()` — the ONE thing that actually delivers every
+call signal (`invite`, `answer`, `hangup`, `ice`, …), since desktop's
+`ChatBubble.jsx` starts it in a `useEffect` and mobile just never got the same
+line when the mobile call UI was added (2026-08-03). Net effect: a mobile
+device never polled `/calls/poll` at all — no incoming ring, and an outgoing
+call FROM mobile would never learn it was answered or hung up either, since
+that's the same poll loop. User reports: "when i call. on mobile should be
+able to pick it up" / "when i cut the call. the other side should cut it."
+
+**Fix (JQ, `MobileChatBubble.jsx` only — no changes to any of Vance's own
+files):** added the identical `useEffect(() => { callManager.startGlobalPoll(); }, []);`
+that `ChatBubble.jsx` already has. `startGlobalPoll()` is idempotent, so this
+is safe even if a future refactor ends up mounting both chat bubbles on the
+same account.
+
+**For Vance:** if your next branch adds any other mobile-facing entry point
+for calls (e.g. a call button placed directly on a mobile page, bypassing the
+chat bubble), it needs the same `startGlobalPoll()` call somewhere upstream of
+it — it's not automatic just because `<VideoCallOverlay/>` is mounted.
+
+### 2026-08-04 (later) — one-line perf change inside `callManager.js` (Vance's)
+
+Follow-up to the note directly above. Once mobile ALSO started
+`startGlobalPoll()`, the idle poll became the single largest source of HTTP
+traffic in the whole app: `setTimeout(loop, this.status === "idle" ? 1500 : 900)`
+at 1.5s is **40 requests/minute per open client**, and a staff member with a
+phone and a laptop signed in was paying it twice. Measured against a user
+report that "page loading across the application has become significantly
+slower recently."
+
+**Change (one line):** idle interval `1500` → `4000`. The **in-call** interval
+is deliberately untouched at `900ms` — `answer`, `ice` and `hangup` all arrive
+through this same loop and are genuinely latency-sensitive. While IDLE the loop
+is only watching for an incoming `invite`/`ginvite`, so a worst-case 4s delay
+before the ring UI appears is imperceptible against a caller who waits 30s+,
+and it cuts that client to 15 req/min. No change to any signal handling, call
+state machine, or the group-mesh logic.
+
+**Flag to Vance:** if you consider 4s too slow for ring pickup, the better fix
+than reverting is to make the idle interval adaptive (or move signalling to the
+existing SSE stream instead of polling) — please don't just restore 1500ms
+without also addressing the volume, since that number is now load-bearing for
+overall app responsiveness.
+
+### 2026-08-04 — touched `trip.js` (Desmond's) an 8th time: `/my-captain-coaches` gained `tripStatus`
+
+JQ found and fixed a real gap in (233)'s mobile trip-scope auto-correct
+(`MobileLayout.jsx`): it gave up entirely whenever `/my-captain-coaches`
+returned coaches spanning more than one trip, treating that as ambiguous. It
+isn't — your own single-active-trip guardrail on `PATCH /coaches/:id`
+(`findCaptainTripConflicts`) already guarantees one account can never
+captain two DIFFERENT "In progress" trips at once, so among any one
+account's captaincies, "In progress" can only ever match ONE trip; anything
+else mixed in is necessarily a stale leftover from a Planning/Completed trip.
+
+**Change:** `GET /api/my-captain-coaches`'s `SELECT` now also returns
+`t.status AS "tripStatus"` per coach — one new column, nothing else in the
+query or response shape changed. `MobileLayout.jsx` (JQ's/shared) uses it to
+filter to the "In progress" subset before checking for a single trip,
+falling back to the old "every tripId" behaviour only when nothing's
+in-progress yet. **Flag to Desmond**: this is now an 8th spot in `trip.js`
+worth diffing on your next merge — purely additive, no existing caller of
+this endpoint reads or breaks on the new field.
+
+### 2026-08-04 — touched `trip.js` a 9th time: real `countryFrom`/`countryTo` data bug + desktop reused `/my-captain-coaches`
+
+Two more changes to `trip.js`, found while chasing the mobile trip-scope
+report further (user's own screenshot showed the desktop switcher literally
+reading "Manila Innovation Summit (null)"):
+
+1. **Real bug, not cosmetic.** `POST /api/trips` and `PATCH /api/trips/:tripId`
+   both did `countryTo !== undefined ? String(countryTo).trim() || null : null`
+   (same shape for `countryFrom`). The create/edit forms send an explicit JS
+   `null` — not `undefined` — for an empty field, and `String(null)` is the
+   literal 4-character text `"null"`, not an empty string, so `|| null` never
+   caught it: the column ended up permanently storing the word "null". Fixed
+   both call sites to check `== null` before stringifying. Added a one-time
+   idempotent backfill in your `ensureOpsSchema()` IIFE
+   (`UPDATE trips SET "countryTo" = NULL WHERE "countryTo" = 'null'`, same for
+   `countryFrom`) to repair any row that already got stuck with the bad
+   literal, including the Manila trip in the report. Safe to re-run every
+   boot — a no-op once nothing matches.
+2. **Desktop `DashboardPage.jsx` (JQ's) now also calls `/my-captain-coaches`**
+   for non-admin accounts, to scope its own trip switcher to just the trips
+   that account captains a coach on (same "prefer In progress, exclude
+   Completed" logic as mobile's fix above) — previously ANY signed-in
+   account saw every "In progress" trip company-wide in that dropdown. No
+   change to the endpoint itself, just a new caller.
+
+**Flag to Desmond**: this is now a 9th spot in `trip.js` worth diffing —
+the countryFrom/countryTo fix changes what gets WRITTEN for those two
+columns (previously-broken behavior, now correct), everything else is
+additive.
+
+### 2026-08-04 — flag for Jayden: MobileExceptionsPage.jsx's ticket list only ever fetched once
+
+JQ touched `MobileExceptionsPage.jsx` (yours) tracing why the mobile trip-
+scope auto-correct (see the Vance/Vimal notes above) didn't reach every
+page: `load` was a `useCallback` with an empty dep array, called by a
+one-time `useEffect(() => { setLoading(true); load(); }, [load])` — since
+`load`'s reference never changes, that effect fires exactly once, at mount.
+Nothing else refreshed the ticket list except a live SSE event or a user
+action (resolve/delete/escalate) — no periodic backstop at all. `getMobileTripId()`
+IS read fresh every time `load()` actually runs, so this wasn't wrong for
+the trip-scope report specifically, but a page with no periodic refresh
+also means anything else that changes server-side (another staff member
+resolving a ticket, a new exception logged) wouldn't show up here until an
+SSE push happened to fire.
+
+**Change**: replaced the one-time effect with `useVisiblePolling(load, 15000, [load])`
+— the same pattern `MobileAttendancePage.jsx`/`MobileOpsPage.jsx` already
+use — and moved `setLoading(true)` inside `load()` itself so it's self-
+contained regardless of which call site (mount, SSE event, or an action)
+triggers it. Nothing about what `load()` fetches, what it does with the
+response, or the ticket-inbox UI/actions changed — only how often it's
+invoked in the background.
+
+### 2026-08-04 — flag for Vimal: MobileAnnouncementsPage.jsx got a lightbox + hero-pick change
+
+JQ touched `MobileAnnouncementsPage.jsx` (yours, FaceCheck-Pro) to bring it up
+to parity with desktop's Announcements page: click-to-enlarge for images, a
+real full-screen video player instead of always-on inline `controls`, and the
+"Latest" hero card now prefers an itinerary-tagged announcement for the
+current/upcoming stop over just whatever was posted most recently. No other
+file of yours was touched.
+
+One backend change alongside it, in JQ's own `routes/announcements.js`:
+`GET /api/trips/:id/announcements` now also returns a top-level `dayOf` (the
+trip's current itinerary day) so the hero-pick logic above doesn't need a
+second fetch. Purely additive — checked the two other callers of this same
+endpoint (`Layout.jsx`, desktop `AnnouncementsPage.jsx`) and both only ever
+destructure `.announcements`, so the extra field is silently ignored by
+anything that doesn't know about it yet.
+
+### 2026-08-04 — flag for Vance: OnboardingPage.jsx's upload input didn't reset
+
+JQ fixed a one-line bug in `OnboardingPage.jsx` (yours) reported as "have to
+upload 3 time to make it work": the dropzone's `<input type="file">` onChange
+never cleared `e.target.value` after reading the selection. A file input's
+`change` event only fires when its value STRING changes, so re-picking the
+exact same file through the SAME click-to-browse input a second time in a row
+fires no event at all — looks identical to the upload just doing nothing.
+Fixed by setting `e.target.value = ""` right after reading `e.target.files`.
+Nothing else in the file touched — the parse-job polling/backend logic is
+untouched.
+
+### 2026-08-04 — staff trip-scoping across Documents + MusterChat (Vance's files)
+
+A Staff account could reach every other trip's data through the trip pickers on
+your screens. Three of your files changed (AI Log 255):
+
+- **`BoardingPassesView.jsx`** — the trip switcher is now **admin-only**; staff
+  get a read-only trip label. It also now follows the Dashboard's trip, via the
+  `tripId` prop it already accepted (no new prop, no internal logic change).
+- **`OnboardingPage.jsx`** — passes the Dashboard's active trip into
+  `BoardingPassesView` instead of the parsing tab's own `mg_parse_trip`
+  selection (deliberately separate concerns now), and the "Assign to trip" list
+  is filtered to the account's own trip(s) via `/my-captain-coaches`.
+- **`AssistantConversation.jsx`** — trip switcher admin-only. IMPORTANT: this
+  needed more than hiding the `<select>`. On the full page `tripId` came from the
+  separately-persisted `TRIP_KEY`, the correction effect fell back to
+  Beijing/`list[0]`, and the follow-the-Dashboard effect was `compact`-only — so
+  hiding the control alone would have pinned staff to a trip they couldn't
+  leave. Staff now always mirror the Dashboard; admins keep the remembered
+  manual choice exactly as before.
+
+**Flag to Vance — needs a server-side decision, not just UI:** all of the above
+is UI scoping only. `GET /api/onboarding/badges` (yours) is `requireAuth()` with
+no per-trip check, as are `/api/activity` and `/api/assistant/*`. A staff
+account can still fetch another trip's passes/roster by calling those endpoints
+directly. If trip separation is meant to be a real boundary, each route needs to
+resolve the caller's own captaincies and reject a mismatched `tripId`. This
+spans several owners' files, so worth agreeing as a team rather than one of us
+patching it piecemeal.
+
+### 2026-08-04 — touched `trip.js` (Desmond's) a 10th time: ensureOpsSchema FK guard
+
+The `coach_captains` backfill threw on boot (`violates foreign key constraint`)
+because one `coaches.account_id` referenced a deleted account. Since every
+migration in `ensureOpsSchema()` shares ONE `try/catch`, everything below that
+INSERT silently stopped running for the rest of each boot. Added
+`AND EXISTS (SELECT 1 FROM accounts a WHERE a.id = coaches.account_id)` so
+orphans are skipped. Verified against the live DB: old statement throws, new one
+succeeds. No behaviour change — valid captains still backfill. **Flag to
+Desmond:** consider splitting that function's single try/catch per-statement, so
+one failing migration can't mask the rest.
+
+### 2026-08-04 — flag for Vimal: scanner coach picker + Ops segment badges
+
+Two changes in your mobile files (AI Log 257, 258):
+
+**`MobileScannerPage.jsx` — real bug, fixed.** `fetchCoaches()` called
+`apiGet("/attendance/coaches")` with no query string, so the "Checking in to"
+picker listed EVERY trip's coaches — 11 of them, several identically labelled
+"Coach 1", including another trip's C1–C4 while the app was scoped to Bangkok.
+Staff could therefore check a delegate in against a coach on a different trip.
+Your own endpoint already supported `?tripId=` (its doc comment says so, and it
+resolves "t-1"/uuid like the dashboard) — the frontend just never sent it.
+Verified live: unscoped returns 11 coaches, `?tripId=<bangkok>` returns 1.
+
+Also made the `cachedFetch` key trip-specific (`mobile-manual-checkin-coach-list:${TRIP_ID}`)
+— the old global key would have replayed the previous trip's list from cache even
+after the query was scoped. `TRIP_ID` is now in the `useCallback` deps so the
+existing `useEffect(…, [fetchCoaches])` re-fetches when the trip scope
+self-corrects. **If you add any other coach/delegate list to the scanner, scope
+it the same way** — an unscoped list here is a wrong-trip check-in, not just a
+cosmetic glitch.
+
+**`MobileOpsPage.jsx` — segment badges added.** The Delegates segment badges the
+missing count (from that page's existing KPI fetch) and Exceptions badges open
+CRITICAL tickets (passed down from `MobileLayout` via Outlet context, which
+tracks it live off the SSE stream — no extra request from your page). Only the
+critical case also gets a red outline; missing delegates are the normal working
+state mid-muster, so outlining that too would dilute the alert styling. Purely
+additive to the existing switch — no change to `view` handling or what each
+segment renders.
+
+### 2026-08-05 — server-side per-trip authorisation (touches Vance's document.js)
+
+Trip separation used to be UI-only. Any signed-in staff account could read or
+write another trip's data by passing a different `tripId` — the front end hid
+those trips, the API served them. New shared helper `backend/lib/tripAccess.js`
+(JQ's): admins see every trip, everyone else only trips where they captain a
+coach. It fails CLOSED (unlike `getVisibleCoachIds()`, whose `null` means "no
+restriction" and is also returned for an unassigned account — fine for
+filtering, wrong for authorisation).
+
+**Flag to Vance — one guard added in `document.js`:** `GET /api/onboarding/badges`
+now requires a non-admin caller to name a trip they're actually on. This was the
+highest-risk endpoint in the app: it returns `qr_code` and `external_badge_code`,
+which ARE the check-in credentials, so any staff account could pull another
+trip's badge tokens and then use them to check those delegates in. The guard also
+closes the no-`tripId` path, which returned EVERY trip's delegates in one
+response. Admin behaviour is unchanged. One `if` at the top of the handler; the
+query and response shape are untouched.
+
+**Deliberately NOT changed (your call, not mine):** `POST /api/onboarding/checkin`
+and Vimal's `POST /api/attendance/scan` are still unguarded by trip. Both require
+possession of a real badge code / biometric token, and `/onboarding/checkin`
+already files against the delegate's OWN resolved trip rather than the supplied
+`tripId`, so the risk is much lower — and a hard guard would break an admin or a
+second staff member helping at another coach's queue. If the team wants strict
+trip isolation on scans too, `guardTrip()` is ready to drop in.
+
+**Also for everyone:** a staff account with NO coach captaincy now gets 403 on
+`/onboarding/badges`, `/activity` and `POST /checkpoints/:id/checkins`. That's
+intended (it matches what mobile already does by hiding Ops/QR/Face for them),
+but unassigned test accounts will need a coach assigned before those work.
+
+### 2026-08-05 — scan endpoints now trip-guarded (Vimal's facescan.js, Vance's document.js)
+
+Continuing the per-trip authorisation from the entry above: the two scan
+endpoints (261) flagged as a deliberate gap are now closed too.
+
+**`facescan.js` (Vimal) — `POST /api/attendance/scan`:** this endpoint's own
+comment explains it deliberately matches against the WHOLE delegate roster
+regardless of trip, so an unenrolled face reads as "not recognised" rather than
+"wrong trip". Good goal, but it meant a staff account on Trip A could match —
+and check in — a delegate who only exists on Trip B. Fixed by filtering the
+match POOL for non-admins via `accountTripIds()` (`lib/tripAccess.js`), not a
+post-match check: an out-of-scope delegate now reads as "not recognised",
+identical to a stranger, rather than a response that would confirm they exist
+on another trip. Nothing about the matching algorithm, thresholds, or response
+shape changed — only which delegates are eligible to be matched at all.
+Verified independently against the live DB (can't easily fabricate a real
+biometric token for an end-to-end test): Staff_1's matchable pool goes from
+262 delegates to 43 (their own trip only); admin stays unrestricted.
+
+**`document.js` (Vance) — `POST /api/onboarding/checkin`:** already resolved the
+scanned delegate's REAL trip (not the client-supplied `tripId`) for its audit
+log; now also gates on that same resolved trip via `guardTrip()`. Verified live:
+scanning a code from another trip → 403 `TRIP_FORBIDDEN`; own trip → 200; admin
+unrestricted either way.
+
+Both of you: if you add another route that resolves "which trip does this
+request concern", `lib/tripAccess.js`'s `guardTrip()`/`canAccessTrip()`/
+`accountTripIds()` are ready to reuse rather than re-deriving the rule a fourth
+time.
+
+### 2026-08-05 — quick scanner and kiosk removed entirely (request: "remove the quick scanner and the kiosk")
+
+After the per-trip authorisation hardening in the two entries above, the user
+decided to just remove the surfaces rather than keep hardening them. Removed
+from the frontend:
+
+- `pages/KioskScannerPage.jsx` (the passwordless `/kiosk-scan` entrance
+  scanner) — deleted, along with its two routes in `App.jsx` and the "Scanner
+  only" button + `Quick Scanner Access` link text on `LoginPage.jsx`.
+- `pages/mobile/MobileScannerPage.jsx` (the mobile QR/Face/Manual scanner) —
+  deleted, along with the `/mobile/scan/{face,qr,manual}` routes, the QR/Face
+  bottom-tab entries in `MobileLayout.jsx`, and the `viewMobileScannerQr` /
+  `viewMobileScannerManual` permissions (removed from `permissions.js` and
+  `schema.js`'s `onsite` role default).
+- The desktop User Guide's "Scanner & kiosk" tab (`ScannerTab.jsx`) and its
+  `TABS` entry in `UserGuidePage.jsx` — deleted, since it only documented the
+  now-gone surfaces.
+- Dead i18n string keys that existed only for these two pages' UI text.
+
+**`viewMobileScannerFace` was NOT removed** — `/mobile/enrolment` (staff
+managing delegate face/voice enrolment coverage, a separate feature) still
+gates on it, so removing the key would have needed migrating every existing
+account's stored permissions JSON. Its label was relabelled from "Face
+scanner" to "Face/voice enrolment" in `permissions.js` so the Account control
+editor doesn't say something that no longer exists.
+
+**Vimal — `routes/facescan.js` NOT touched.** `POST /api/attendance/scan` (and
+the biometric matching/consent code around it) is now unreachable from the
+frontend — nothing calls it anymore — but the file wasn't edited, since it's
+your feature file and the enroll/consent/headcount/coaches endpoints in the
+same file are still very much alive (EnrollPage, Reverse Headcount, etc.). If
+you want to remove the now-dead `/api/attendance/scan` handler and its
+matching helpers, that's your call to make.
+
+Build (`vite build`) clean, full test suite 166/166 pass after this change.
