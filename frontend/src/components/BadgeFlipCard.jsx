@@ -26,6 +26,38 @@ function domainOf(website) {
   const w = String(website).trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[/?#\s]/)[0];
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(w) ? w : null;
 }
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function loadCorsImage(src) {
+  return new Promise((resolve, reject) => { const im = new Image(); im.crossOrigin = "anonymous"; im.onload = () => resolve(im); im.onerror = reject; im.src = src; });
+}
+/* Company logo in the QR centre — same branded QR as the in-app pass. */
+async function brandedQr(code, company, website, size = 300) {
+  try {
+    const canvas = document.createElement("canvas");
+    await QRCode.toCanvas(canvas, code, { width: size, margin: 1, errorCorrectionLevel: "H", color: { dark: "#111111", light: "#ffffff" } });
+    const ctx = canvas.getContext("2d"); const s = canvas.width, cx = s / 2, cy = s / 2;
+    const bo = brandOf(company); const box = Math.round(s * 0.22), pad = box + Math.round(s * 0.05);
+    ctx.fillStyle = "#ffffff"; roundRect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, Math.round(pad * 0.24)); ctx.fill();
+    const domain = domainOf(website); let drew = false;
+    if (domain) {
+      try {
+        const img = await loadCorsImage(`https://unavatar.io/${domain}?fallback=false`);
+        ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.clip();
+        ctx.fillStyle = "#fff"; ctx.fillRect(cx - box / 2, cy - box / 2, box, box);
+        ctx.drawImage(img, cx - box / 2, cy - box / 2, box, box); ctx.restore(); drew = true;
+      } catch { /* monogram below */ }
+    }
+    if (!drew) {
+      ctx.beginPath(); ctx.arc(cx, cy, box / 2, 0, Math.PI * 2); ctx.fillStyle = bo.color; ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(box * 0.42)}px system-ui,-apple-system,Segoe UI,sans-serif`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(bo.initials, cx, cy + 1);
+    }
+    return canvas.toDataURL("image/png");
+  } catch { return null; }
+}
 
 /** Full-screen overlay showing a delegate's flip badge for `code`. */
 export default function BadgeFlipCard({ code, onClose }) {
@@ -43,10 +75,18 @@ export default function BadgeFlipCard({ code, onClose }) {
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((b) => { if (alive) setBadge(b); })
       .catch(() => { if (alive) setErr(true); });
-    QRCode.toDataURL(code, { width: 320, margin: 1, color: { dark: "#111111", light: "#ffffff" } })
-      .then((u) => { if (alive) setQr(u); }).catch(() => {});
+    // Plain QR immediately (needs only the code), then brand it once we know the company.
+    QRCode.toDataURL(code, { width: 300, margin: 1, errorCorrectionLevel: "H", color: { dark: "#111111", light: "#ffffff" } })
+      .then((u) => { if (alive && !qr) setQr(u); }).catch(() => {});
     return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
+  useEffect(() => {
+    if (!badge) return;
+    let alive = true;
+    brandedQr(code, badge.company, badge.website, 300).then((u) => { if (alive && u) setQr(u); }).catch(() => {});
+    return () => { alive = false; };
+  }, [badge, code]);
 
   const b = brandOf(badge?.company);
   const domain = domainOf(badge?.website);
