@@ -984,10 +984,12 @@ function passInitials(company) {
   return (src || String(company || "?")[0] || "?").toUpperCase();
 }
 
-// A single-face, table-based pass. No CSS flip / <style> block: Gmail strips
-// <style>, which turned the old flip card into two stacked faces with a
-// misleading "hover to flip". The QR is the essential thing, so it leads; the
-// interactive flip + real company logo live on the hosted /badge page (button).
+// Table-based, image-free pass. We deliberately DON'T inline the QR: Gmail's
+// Android app won't render inline cid: images (shows a broken box), and a
+// LAN-hosted image can't be fetched by Gmail's image proxy. So the email is a
+// clean, always-rendering card (code + company chip are pure HTML) whose primary
+// action opens the hosted pass PAGE — where the scannable QR and the flip
+// company badge live. The QR also rides along as a downloadable attachment.
 function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl }) {
   const brand = passBrandColor(company);
   const initials = passInitials(company);
@@ -996,15 +998,16 @@ function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeU
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;border-collapse:separate">
       <tr><td style="background:#e1232a;color:#fff;padding:16px 20px;border-radius:14px 14px 0 0;font-weight:800;font-size:17px;letter-spacing:.3px">MusterGo &middot; Boarding Pass</td></tr>
       <tr><td style="background:#fff;border:1px solid #e6e6ea;border-top:none;border-radius:0 0 14px 14px;padding:22px 20px">
-        <p style="margin:0 0 18px;color:#555;font-size:13.5px;text-align:center;line-height:1.5">Hi ${escHtml(name)}, here's your QR boarding pass for the SCCCI study mission. Show it at muster to board.</p>
+        <p style="margin:0 0 18px;color:#555;font-size:13.5px;text-align:center;line-height:1.5">Hi ${escHtml(name)}, your boarding pass for the SCCCI study mission is ready.</p>
 
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e6e6ea;border-radius:16px;border-collapse:separate;overflow:hidden">
           <tr><td style="background:${brand};height:8px;line-height:8px;font-size:0">&nbsp;</td></tr>
-          <tr><td align="center" style="padding:22px 20px 8px">
-            <img src="cid:passqr" width="204" height="204" alt="Boarding QR ${escHtml(code || "")}" style="display:block;border-radius:10px;border:1px solid #eee"/>
-            <div style="font-family:'Courier New',monospace;font-size:15px;color:#333;margin-top:12px;letter-spacing:1.5px">${escHtml(code || "")}</div>
+          <tr><td align="center" style="padding:26px 20px 10px">
+            <div style="font-weight:800;font-size:11px;letter-spacing:2px;color:${brand}">BOARDING PASS</div>
+            <div style="font-family:'Courier New',monospace;font-weight:700;font-size:30px;color:#111;margin-top:10px;letter-spacing:2px">${escHtml(code || "")}</div>
+            <div style="color:#999;font-size:12px;margin-top:8px">Open your pass for the scannable QR</div>
           </td></tr>
-          <tr><td style="padding:8px 20px 22px">
+          <tr><td style="padding:6px 20px 22px">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
               <td width="48" valign="middle">
                 <table role="presentation" cellpadding="0" cellspacing="0"><tr>
@@ -1021,8 +1024,8 @@ function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeU
           </td></tr>
         </table>
 
-        ${badgeUrl ? `<div style="text-align:center;margin-top:20px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px">View &amp; flip your badge &rarr;</a></div>
-        <p style="margin:10px 0 0;color:#aaa;font-size:11.5px;text-align:center">Tap for your interactive badge with your company logo.</p>` : ""}
+        ${badgeUrl ? `<div style="text-align:center;margin-top:20px"><a href="${escHtml(badgeUrl)}" style="display:inline-block;background:#e1232a;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:14px 28px;border-radius:10px">Open your boarding pass &rarr;</a></div>
+        <p style="margin:12px 0 0;color:#aaa;font-size:11.5px;text-align:center">Your scannable QR &amp; flip company badge are on the pass page. The QR is also attached (boarding-pass.png).</p>` : ""}
         <p style="margin:18px 0 0;color:#bbb;font-size:11px;text-align:center">A Singapore Chinese Chamber of Commerce &amp; Industry initiative.</p>
       </td></tr>
     </table>
@@ -1044,9 +1047,12 @@ router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manag
   const t = passMailer();
   if (!t) return res.status(503).json({ error: "EMAIL_NOT_CONFIGURED", message: "Email (SMTP) isn't configured on the server." });
 
+  // Attach the QR as a normal downloadable file (NOT inline cid) — an inline
+  // image renders as a broken box in Gmail's Android app; as an attachment it
+  // downloads cleanly everywhere, and the pass page is the primary QR surface.
   const attachments = [];
   const m = /^data:image\/(png|jpe?g);base64,(.+)$/.exec(qrDataUrl);
-  if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), cid: "passqr" });
+  if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), contentType: `image/${m[1] === "jpg" ? "jpeg" : m[1]}` });
 
   const coachLabel = del.coach_name ? `${del.coach_name}${del.coach_city ? ` · ${del.coach_city}` : ""}` : "No coach assigned";
   const base = (process.env.FRONTEND_URL || "https://localhost:5173").replace(/\/+$/, "");
@@ -1061,7 +1067,7 @@ router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manag
       from: /</.test(fromAddr) ? fromAddr : `MusterGo · SCCCI <${fromAddr}>`,
       to: del.email,
       subject: `Your MusterGo boarding pass — ${del.name}`,
-      text: `Hi ${del.name},\n\nHere's your QR boarding pass for the SCCCI study mission.\nBoarding code: ${del.qr_code}\n${del.company ? `Company: ${del.company}\n` : ""}${del.role ? `Role: ${del.role}\n` : ""}\nShow the QR (attached / in the HTML view) at muster to board, or open your interactive badge:\n${badgeUrl}\n\n— MusterGo, a Singapore Chinese Chamber of Commerce & Industry initiative`,
+      text: `Hi ${del.name},\n\nYour boarding pass for the SCCCI study mission is ready.\nBoarding code: ${del.qr_code}\n${del.company ? `Company: ${del.company}\n` : ""}${del.role ? `Role: ${del.role}\n` : ""}\nOpen your pass for the scannable QR and your digital company badge:\n${badgeUrl}\n\nThe QR is also attached as boarding-pass.png.\n\n— MusterGo, a Singapore Chinese Chamber of Commerce & Industry initiative`,
       html, attachments,
     });
     res.json({ ok: true, to: del.email });
