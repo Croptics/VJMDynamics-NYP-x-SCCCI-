@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail } from "lucide-react";
+import { RefreshCw, Printer, Star, Search, X, Copy, Check, QrCode, Link2, ScanLine, Keyboard, Mail, Download, FileText, RotateCw } from "lucide-react";
 import { getBadges, getTrips, linkPhysicalBadge, emailPass } from "../../../lib/document/claudeParse.js";
 import { getUser } from "../../../lib/api.js";
 import { useLang } from "../../../lib/i18n.jsx";
@@ -43,7 +43,7 @@ const BRAND_COLORS = ["#1f6feb", "#8250df", "#0f766e", "#b91c1c", "#b45309", "#0
 const STOPWORDS = new Set(["pte", "ltd", "llp", "inc", "co", "corp", "corporation", "the", "and", "services", "service", "group", "holdings", "solutions", "consulting", "international"]);
 function companyBrand(company) {
   const name = (company || "").trim();
-  if (!name) return { initials: "—", bg: "#94a3b8", fg: "#fff" };
+  if (!name) return { initials: "—", bg: "#94a3b8", fg: "#fff", empty: true };
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   const bg = BRAND_COLORS[h % BRAND_COLORS.length];
@@ -122,19 +122,8 @@ async function brandedQrDataUrl(code, company, website, size = 280) {
     const ctx = canvas.getContext("2d");
     const s = canvas.width;
     const b = companyBrand(company);
-    // 2026-07-30 — "still having hard time scanning in the laptop... is the
-    // qr code not good enough?": the covered area (logo + white plate) sat
-    // right at ~27% of the code's width, close to the edge of what "H"-level
-    // error correction nominally allows (~30%) — and jsQR (the actual
-    // scanning library this app uses, on QRScannerPanel.jsx) doesn't realize
-    // that full theoretical margin in practice, especially stacked with a
-    // webcam's own resolution/focus limits. Shrunk for a real safety margin
-    // rather than living right at the edge of tolerance. PRESERVED as-is
-    // when the real-logo feature (2026-07-31, merged from Vance) was added
-    // on top — this sizing is unrelated to whether a monogram or a real
-    // fetched logo gets drawn into the same plate.
-    const box = Math.round(s * 0.15);         // logo diameter
-    const pad = box + Math.round(s * 0.04);   // white plate behind it
+    const box = Math.round(s * 0.22);         // logo diameter
+    const pad = box + Math.round(s * 0.05);   // white plate behind it
     const cx = s / 2, cy = s / 2;
     ctx.fillStyle = "#ffffff";
     roundRect(ctx, cx - pad / 2, cy - pad / 2, pad, pad, Math.round(pad * 0.24));
@@ -268,6 +257,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all"); // all | pending | boarded
   const [open, setOpen] = useState(null);      // delegate shown in the pass modal
+  const [flipped, setFlipped] = useState(false); // pass modal: QR (front) ↔ company badge (back)
   const [linking, setLinking] = useState(null); // delegate whose physical pass is being linked
   const [emailing, setEmailing] = useState(false);
   const [emailMsg, setEmailMsg] = useState(null); // { ok, text } after an email attempt
@@ -275,18 +265,20 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
   const downOnBackdrop = useRef(false);
   const [copied, setCopied] = useState(false);
   const [printOne, setPrintOne] = useState(null);
+  const [selected, setSelected] = useState(() => new Set()); // ids picked for export
 
-  // ---- Trip switcher — ADMIN ONLY. Staff are locked to the trip they're
-  // assigned to (the `tripId` prop, which follows the Dashboard's own
-  // already-staff-scoped switcher); letting them pick from /all-trips exposed
-  // every other trip's roster and boarding passes. NOTE: this is a UI
-  // restriction only — GET /api/onboarding/badges is requireAuth() with no
-  // per-trip check, so it is NOT real enforcement (AI Log 255).
-  const isAdmin = getUser()?.role === "admin";
+  // ---- Trip switcher (view/print another trip's passes without leaving
+  // this screen) — local to this view, doesn't touch the parent's own trip
+  // selection used by the document-parsing tab.
   const [trips, setTrips] = useState([]);
   const [selectedTrip, setSelectedTrip] = useState(tripId || "t-1");
+  // Trip switcher is ADMIN ONLY (INTv2 integration, AI Log 255) — staff are
+  // locked to their trip; GET /api/onboarding/badges is requireAuth() with no
+  // per-trip check, so this is a UI restriction, not real enforcement.
+  const isAdmin = getUser()?.role === "admin";
   useEffect(() => { getTrips().then(setTrips).catch(() => {}); }, []);
   useEffect(() => { setSelectedTrip(tripId || "t-1"); }, [tripId]);
+  useEffect(() => { setFlipped(false); }, [open?.id]); // always open a pass on the QR side
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -343,14 +335,42 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, data.coaches]);
 
-  /* ---- printing --------------------------------------------------------- */
+  /* ---- selection + printing / export ------------------------------------ */
   // "Print all" prints whatever the list is currently showing — so filtering to
   // e.g. "Not boarded" and printing gives just those passes, not the whole trip.
+  // When rows are ticked, print/export narrows to just those (select-all or a
+  // specific individual → one PDF).
   const filtered = search.trim() !== "" || filter !== "all";
-  const printList = printOne ? [printOne] : visible;
+  const selCount = selected.size;
+  const allVisibleSelected = visible.length > 0 && visible.every((d) => selected.has(d.id));
+  const toggleSel = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSelected((s) => {
+    if (visible.length && visible.every((d) => s.has(d.id))) { const n = new Set(s); visible.forEach((d) => n.delete(d.id)); return n; }
+    const n = new Set(s); visible.forEach((d) => n.add(d.id)); return n;
+  });
+  const clearSel = () => setSelected(new Set());
+  // Drop selections that fall out of the visible set (trip/filter change) so the
+  // count never lies about what will export.
+  useEffect(() => {
+    setSelected((s) => { if (!s.size) return s; const vis = new Set(visible.map((d) => d.id)); const n = new Set([...s].filter((id) => vis.has(id))); return n.size === s.size ? s : n; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  const printList = printOne ? [printOne] : (selCount ? visible.filter((d) => selected.has(d.id)) : visible);
+  // Both "Print" and "Save as PDF" go through the browser print sheet — the user
+  // just picks the destination (printer vs "Save as PDF") in the print dialog.
   const doPrint = (one) => {
     setPrintOne(one || null);
     setTimeout(() => { window.print(); setPrintOne(null); }, 80);
+  };
+  // Direct file download of a single delegate's branded QR (PNG) — a real
+  // download, distinct from the print path.
+  const downloadPng = (d) => {
+    const url = qr[d.id];
+    if (!url) return;
+    const a = document.createElement("a");
+    a.href = url; a.download = `boarding-pass-${d.qr_code || d.name}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
   };
 
   const copyCode = (code) => {
@@ -423,11 +443,8 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           {isAdmin ? (
             <select className="select" style={{ width: 160, maxWidth: "40vw", textOverflow: "ellipsis" }} value={selectedTrip}
               onChange={(e) => setSelectedTrip(e.target.value)}>
-              {/* `trips` comes from /all-trips, which only ever returns real
-                  uuids — so the legacy "t-1" base-trip alias (what the Dashboard
-                  switcher persists for Beijing) matches no option and would
-                  render the select blank even though the data below loaded fine.
-                  This keeps a matching option so the label never goes empty. */}
+              {/* Keep a matching option so the legacy "t-1" base-trip alias never
+                  renders the select blank when it's not in the /all-trips list. */}
               {!trips.some((tr) => tr.id === selectedTrip) && (
                 <option value={selectedTrip}>{t("Current trip")}</option>
               )}
@@ -446,10 +463,24 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             )
           )}
           <button className="btn btn-ghost" onClick={() => load()}><RefreshCw size={15} /> {t("Refresh")}</button>
+          <button className="btn btn-ghost" onClick={() => doPrint(null)} disabled={!visible.length} title={t("Opens the print dialog — choose \"Save as PDF\"")}>
+            <FileText size={15} /> {selCount ? `${t("Save PDF")} (${selCount})` : t("Save as PDF")}
+          </button>
           <button className="btn btn-primary" onClick={() => doPrint(null)} disabled={!visible.length}>
-            <Printer size={15} /> {filtered ? `${t("Print filtered")} (${visible.length})` : t("Print all")}
+            <Printer size={15} /> {selCount ? `${t("Print")} (${selCount})` : filtered ? `${t("Print filtered")} (${visible.length})` : `${t("Print all")} (${visible.length})`}
           </button>
         </div>
+      </div>
+
+      {/* Selection bar — pick all or specific delegates, then Print / Save as PDF */}
+      <div className="mg-screen-only row" style={{ gap: 12, alignItems: "center", margin: "0 2px 10px", fontSize: 12.5, flexWrap: "wrap" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontWeight: 600, color: "var(--ink-2)" }}>
+          <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} disabled={!visible.length} />
+          {t("Select all")}{filtered ? ` (${t("shown")})` : ""}
+        </label>
+        {selCount > 0
+          ? <><span className="muted">{selCount} {t("selected")}</span><button className="btn btn-ghost" style={{ fontSize: 12, padding: "3px 10px" }} onClick={clearSel}>{t("Clear")}</button></>
+          : <span className="muted">{t("Tick delegates to export just those, or use the buttons above for all.")}</span>}
       </div>
 
       {/* Search + filter tabs */}
@@ -489,7 +520,10 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
             {g.items.map((d) => {
               const meta = STATUS_META[d.status] || STATUS_META.UNASSIGNED;
               return (
-                <button key={d.id} className="mg-passrow" onClick={() => setOpen(d)}>
+                <div key={d.id} className="mg-passrow-wrap" style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                  <input type="checkbox" checked={selected.has(d.id)} onChange={() => toggleSel(d.id)}
+                    aria-label={`${t("Select")} ${d.name}`} style={{ flexShrink: 0, width: 16, height: 16, cursor: "pointer" }} />
+                <button className="mg-passrow" style={{ marginBottom: 0, flex: 1 }} onClick={() => setOpen(d)}>
                   <span className="avatar" style={{ flexShrink: 0 }}>{initialsOf(d.name)}</span>
                   <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
                     <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
@@ -509,6 +543,7 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                   </span>
                   <QrCode size={16} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
                 </button>
+                </div>
               );
             })}
           </div>
@@ -532,22 +567,44 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
               </div>
               <span role="button" onClick={() => setOpen(null)} style={{ cursor: "pointer", color: "var(--ink-3)", display: "flex" }}><X size={18} /></span>
             </div>
-            {/* Company identity band — the "who they represent" line of the badge */}
-            <div className="row" style={{ gap: 10, alignItems: "center", padding: "12px 18px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)" }}>
-              <CompanyLogo company={open.company} logoUrl={open.logo_url} website={open.website} size={40} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{open.company || t("No company")}</div>
-                {open.industry && <div className="muted" style={{ fontSize: 11.5, marginTop: 1 }}>{open.industry}</div>}
+            {/* Flippable pass — QR (front) ↔ digital company badge (back).
+                Same interaction as the public /badge page: QR first, ↻ top-right. */}
+            <div style={{ padding: "18px 18px 4px", display: "flex", justifyContent: "center" }}>
+              <div className="mgp-flip" onClick={() => setFlipped((f) => !f)} role="button" aria-label={t("Flip badge")}>
+                <div className={"mgp-inner" + (flipped ? " flipped" : "")}>
+                  {/* FRONT — QR */}
+                  <div className="mgp-face" style={{ background: "#fff", border: "1px solid var(--line)" }}>
+                    <button className="mgp-flipbtn" onClick={(e) => { e.stopPropagation(); setFlipped((f) => !f); }} aria-label={t("Flip badge")}><RotateCw size={15} /></button>
+                    <div style={{ height: 32, background: companyBrand(open.company).bg, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 10, letterSpacing: 1 }}>{t("BOARDING PASS")}</div>
+                    <div style={{ padding: "14px 14px 12px", textAlign: "center" }}>
+                      {qr[open.id]
+                        ? <img src={qr[open.id]} alt={`QR ${open.name}`} width={168} height={168} style={{ borderRadius: 10 }} />
+                        : <div style={{ width: 168, height: 168, background: "var(--surface-2)", borderRadius: 10, margin: "0 auto" }} />}
+                      <div className="mono" style={{ marginTop: 8, fontSize: 12.5, fontWeight: 700, letterSpacing: 1 }}>{open.qr_code}</div>
+                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{coachLabel(coachOf(open.coach_id))} · {t((STATUS_META[open.status] || STATUS_META.UNASSIGNED).label)}</div>
+                    </div>
+                  </div>
+                  {/* BACK — digital company badge */}
+                  <div className="mgp-face mgp-back" style={{ background: companyBrand(open.company).bg, color: "#fff" }}>
+                    <button className="mgp-flipbtn" style={{ background: "rgba(255,255,255,.22)", color: "#fff" }} onClick={(e) => { e.stopPropagation(); setFlipped((f) => !f); }} aria-label={t("Flip badge")}><RotateCw size={15} /></button>
+                    <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "16px 16px", textAlign: "center", boxSizing: "border-box" }}>
+                      <div style={{ background: "#fff", borderRadius: 18, padding: 6, boxShadow: "0 4px 14px rgba(0,0,0,.2)" }}>
+                        <CompanyLogo company={open.company} logoUrl={open.logo_url} website={open.website} size={62} radius={13} />
+                      </div>
+                      <div style={{ marginTop: 12, fontWeight: 800, fontSize: 17, display: "flex", alignItems: "center", gap: 6 }}>{open.name}{open.vip && <Star size={13} fill="#ffd76a" color="#ffd76a" />}</div>
+                      <div style={{ opacity: 0.95, fontSize: 12, marginTop: 2 }}>{open.role || t("Delegate")}</div>
+                      <div style={{ width: 38, height: 3, background: "rgba(255,255,255,.5)", borderRadius: 2, margin: "11px 0" }} />
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{open.company || t("No company")}</div>
+                      {open.industry && <div style={{ opacity: 0.85, fontSize: 11, marginTop: 3 }}>{open.industry}</div>}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <div style={{ padding: 18, textAlign: "center" }}>
-              {qr[open.id]
-                ? <img src={qr[open.id]} alt={`QR ${open.name}`} width={200} height={200} style={{ borderRadius: 10 }} />
-                : <div style={{ width: 200, height: 200, background: "var(--surface-2)", borderRadius: 10, margin: "0 auto" }} />}
-              <div className="mono" style={{ marginTop: 10, fontSize: 13, fontWeight: 600 }}>{open.qr_code}</div>
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                {coachLabel(coachOf(open.coach_id))} · {t((STATUS_META[open.status] || STATUS_META.UNASSIGNED).label)}
-              </div>
+            <div className="row" style={{ justifyContent: "center", paddingBottom: 6 }}>
+              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => setFlipped((f) => !f)}>
+                <RotateCw size={13} /> {flipped ? t("Show QR") : t("Show company badge")}
+              </button>
             </div>
             {/* Physical pass (Feature 4b) — link SCCCI's own pass; check-in accepts either code */}
             <div style={{ padding: "12px 18px", borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 10 }}>
@@ -569,10 +626,15 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
                 {emailMsg && <div style={{ fontSize: 12, marginTop: 5, textAlign: "center", color: emailMsg.ok ? "var(--st-present)" : "var(--st-missing)" }}>{emailMsg.text}</div>}
               </div>
             )}
-            <div className="row" style={{ gap: 8, padding: 12, borderTop: "1px solid var(--line)" }}>
-              <button className="btn btn-ghost btn-block" onClick={() => copyCode(open.qr_code)}>
-                {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? t("Copied") : t("Copy code")}
-              </button>
+            <div style={{ padding: 12, borderTop: "1px solid var(--line)", display: "grid", gap: 8 }}>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="btn btn-ghost btn-block" onClick={() => copyCode(open.qr_code)}>
+                  {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? t("Copied") : t("Copy code")}
+                </button>
+                <button className="btn btn-ghost btn-block" onClick={() => downloadPng(open)} disabled={!qr[open.id]}>
+                  <Download size={15} /> {t("Download")}
+                </button>
+              </div>
               <button className="btn btn-primary btn-block" onClick={() => doPrint(open)}>
                 <Printer size={15} /> {t("Print pass")}
               </button>
@@ -585,17 +647,26 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
         <PassLinker delegate={linking} onLink={(code) => doLink(linking.id, code)} onClose={() => setLinking(null)} />
       )}
 
-      {/* Print-only sheet (all passes, or just one when printing a single pass) */}
+      {/* Print/PDF-only sheet — a designed boarding-pass card per delegate.
+          Shows the current print scope (single pass, ticked selection, or the
+          whole filtered list). */}
       <div className="mg-print-sheet">
+        <div className="mg-print-title">
+          MusterGo — {printList.length} {printList.length === 1 ? "boarding pass" : "boarding passes"}
+          {currentTrip ? ` · ${currentTrip.name}` : ""}
+        </div>
         {printList.map((d) => (
           <div key={d.id} className="mg-pass">
-            {qr[d.id] && <img src={qr[d.id]} alt="" width={150} height={150} />}
-            <div className="mg-pass-name">{d.name}</div>
-            {d.role && <div className="mg-pass-sub">{d.role}</div>}
-            <div className="mg-pass-company"><CompanyLogo company={d.company} logoUrl={d.logo_url} website={d.website} size={16} /> <span>{d.company || ""}</span></div>
-            {d.industry && <div className="mg-pass-sub">{d.industry}</div>}
-            <div className="mg-pass-sub">{coachLabel(coachOf(d.coach_id))}</div>
-            <div className="mg-pass-code">{d.qr_code}</div>
+            <div className="mg-pass-band">MusterGo · Boarding Pass</div>
+            <div className="mg-pass-body">
+              {qr[d.id] && <img className="mg-pass-qr" src={qr[d.id]} alt="" width={172} height={172} />}
+              <div className="mg-pass-code">{d.qr_code}</div>
+              <div className="mg-pass-name">{d.name}{d.vip ? " ★" : ""}</div>
+              <div className="mg-pass-sub">{d.role || "Delegate"}{d.company ? ` · ${d.company}` : ""}</div>
+              {d.industry && <div className="mg-pass-sub2">{d.industry}</div>}
+              <div className="mg-pass-sub2">{coachLabel(coachOf(d.coach_id))}</div>
+            </div>
+            <div className="mg-pass-foot">Show this QR at muster to board</div>
           </div>
         ))}
       </div>
@@ -606,18 +677,31 @@ export default function BoardingPassesView({ tripId, onKpiChange }) {
           background:var(--surface);border:1px solid var(--line);border-radius:10px;cursor:pointer;
           transition:box-shadow .15s ease,border-color .15s ease}
         .mg-passrow:hover{box-shadow:0 3px 12px rgba(0,0,0,.07);border-color:var(--ink-3)}
+        .mgp-flip{perspective:1200px;width:272px;height:298px;cursor:pointer}
+        .mgp-inner{position:relative;width:100%;height:100%;transition:transform .6s cubic-bezier(.2,.7,.2,1);transform-style:preserve-3d}
+        .mgp-inner.flipped{transform:rotateY(180deg)}
+        .mgp-face{position:absolute;inset:0;-webkit-backface-visibility:hidden;backface-visibility:hidden;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.14)}
+        .mgp-back{transform:rotateY(180deg)}
+        .mgp-flipbtn{position:absolute;top:8px;right:8px;z-index:2;width:32px;height:32px;border-radius:50%;border:none;cursor:pointer;background:rgba(0,0,0,.06);color:#333;display:flex;align-items:center;justify-content:center}
         .mg-print-sheet{display:none}
-        .mg-pass-company{display:flex;align-items:center;justify-content:center;gap:5px;font-size:11px;font-weight:600;margin-top:5px}
         @media print {
           body * { visibility: hidden !important; }
           .mg-print-sheet, .mg-print-sheet * { visibility: visible !important; }
           .mg-print-sheet{display:grid !important;position:absolute;left:0;top:0;width:100%;
-            grid-template-columns:repeat(3,1fr);gap:10px;
+            grid-template-columns:repeat(2,1fr);gap:14px;padding:10px;
+            font-family:-apple-system,Segoe UI,Arial,sans-serif;
             -webkit-print-color-adjust:exact;print-color-adjust:exact}
-          .mg-pass{break-inside:avoid;border:1px solid #bbb;border-radius:8px;padding:10px;text-align:center}
-          .mg-pass-name{font-weight:700;font-size:13px;margin-top:6px}
-          .mg-pass-sub{font-size:11px;color:#555}
-          .mg-pass-code{font-family:monospace;font-size:11px;margin-top:4px}
+          .mg-print-title{grid-column:1 / -1;font-size:13px;font-weight:800;color:#111;
+            padding-bottom:4px;border-bottom:2px solid #e1232a;margin-bottom:2px}
+          .mg-pass{break-inside:avoid;border:1px solid #ddd;border-radius:12px;overflow:hidden;text-align:center}
+          .mg-pass-band{background:#e1232a;color:#fff;font-weight:800;font-size:11.5px;letter-spacing:.3px;padding:8px 10px}
+          .mg-pass-body{padding:14px 12px 8px}
+          .mg-pass-qr{border-radius:8px}
+          .mg-pass-code{font-family:monospace;font-size:13px;font-weight:700;letter-spacing:1px;margin-top:8px;color:#111}
+          .mg-pass-name{font-weight:800;font-size:15px;margin-top:8px;color:#111}
+          .mg-pass-sub{font-size:11.5px;color:#444;margin-top:3px}
+          .mg-pass-sub2{font-size:10.5px;color:#777;margin-top:2px}
+          .mg-pass-foot{font-size:10px;color:#999;padding:8px 10px;border-top:1px dashed #ddd}
         }
       `}</style>
     </div>
