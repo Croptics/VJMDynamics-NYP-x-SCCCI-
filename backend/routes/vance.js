@@ -985,13 +985,13 @@ function passInitials(company) {
 }
 
 // Table-based email that mirrors the in-app / webpage boarding pass: brand band
-// → company identity band → the branded (logo-centre) QR → code → name. The QR
-// is served from a PUBLIC image URL (quickchart.io/qr), NOT an inline cid image:
-// Gmail (web AND app) won't reliably render cid: inline images (shows a broken
-// box), but it happily proxies a public https image. The URL encodes the same
-// qr_code, high error-correction, with the company logo composited in the centre.
-// The QR still downloads via the attached boarding-pass.png.
-function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl, qrImgUrl }) {
+// → company identity band → code → name. The scannable QR is NOT embedded in the
+// body — it rides along as the boarding-pass.png attachment (which renders/saves
+// everywhere) — because Gmail won't reliably show an image in the body (inline
+// cid breaks; a remote image needs a third party). The body stays pure text/HTML
+// (never a broken box), points at the attachment, and the button opens the
+// hosted flip page with the interactive QR.
+function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeUrl }) {
   const brand = passBrandColor(company);
   const initials = passInitials(company);
   return `
@@ -1014,10 +1014,11 @@ function passEmailHtml({ name, role, company, industry, code, coachLabel, badgeU
               </td>
             </tr></table>
           </td></tr>
-          <tr><td align="center" style="padding:22px 20px 20px">
-            <img src="${escHtml(qrImgUrl)}" width="196" height="196" alt="Boarding QR ${escHtml(code || "")}" style="display:block;margin:0 auto;border-radius:10px;border:1px solid #eee"/>
-            <div style="font-family:'Courier New',monospace;font-weight:700;font-size:16px;color:#111;margin-top:12px;letter-spacing:1.5px">${escHtml(code || "")}</div>
-            <div style="font-weight:800;font-size:16px;color:#1a1a1a;margin-top:8px">${escHtml(name)}</div>
+          <tr><td align="center" style="padding:24px 20px 22px">
+            <div style="font-weight:800;font-size:11px;letter-spacing:2px;color:${brand}">BOARDING CODE</div>
+            <div style="font-family:'Courier New',monospace;font-weight:700;font-size:30px;color:#111;margin-top:10px;letter-spacing:2px">${escHtml(code || "")}</div>
+            <div style="margin-top:16px;padding:11px 14px;background:#fafafb;border:1px solid #eee;border-radius:10px;color:#555;font-size:12.5px;line-height:1.5">&#128206; Your scannable QR is attached as <b>boarding-pass.png</b>.<br/>Show it at muster to board.</div>
+            <div style="font-weight:800;font-size:16px;color:#1a1a1a;margin-top:16px">${escHtml(name)}</div>
             <div style="color:#666;font-size:12.5px;margin-top:1px">${escHtml(role || "Delegate")}${coachLabel ? ` &middot; ${escHtml(coachLabel)}` : ""}</div>
           </td></tr>
         </table>
@@ -1046,29 +1047,18 @@ router.post("/api/onboarding/delegates/:id/email-pass", requirePermission("manag
   if (!t) return res.status(503).json({ error: "EMAIL_NOT_CONFIGURED", message: "Email (SMTP) isn't configured on the server." });
 
   // The delegate's QR travels as a normal downloadable attachment (renders/saves
-  // everywhere). The email BODY shows the QR from a public image URL instead of
-  // an inline cid image, because Gmail (web + app) won't render cid reliably.
+  // everywhere, and is what gets scanned). The email BODY carries no image, so it
+  // can never show a broken box.
   const attachments = [];
   const m = /^data:image\/(png|jpe?g);base64,(.+)$/.exec(qrDataUrl);
   if (m) attachments.push({ filename: "boarding-pass.png", content: Buffer.from(m[2], "base64"), contentType: `image/${m[1] === "jpg" ? "jpeg" : m[1]}` });
-
-  // Public, Gmail-proxyable QR image (quickchart.io) encoding the same qr_code,
-  // high error-correction, with the company logo (unavatar by domain) composited
-  // in the centre — the branded look, but as a link Gmail can actually load.
-  const domain = (() => {
-    const w = String(del.website || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[/?#\s]/)[0];
-    return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(w) ? w : null;
-  })();
-  const qrParams = new URLSearchParams({ text: del.qr_code, size: "250", margin: "2", ecLevel: "H" });
-  if (domain) { qrParams.set("centerImageUrl", `https://unavatar.io/${domain}`); qrParams.set("centerImageSizeRatio", "0.22"); }
-  const qrImgUrl = `https://quickchart.io/qr?${qrParams.toString()}`;
 
   const coachLabel = del.coach_name ? `${del.coach_name}${del.coach_city ? ` · ${del.coach_city}` : ""}` : "No coach assigned";
   const base = (process.env.FRONTEND_URL || "https://localhost:5173").replace(/\/+$/, "");
   const badgeUrl = `${base}/badge/${encodeURIComponent(del.qr_code)}`;
   const html = passEmailHtml({
     name: del.name, role: del.role, company: del.company, industry: del.industry,
-    code: del.qr_code, coachLabel, badgeUrl, qrImgUrl,
+    code: del.qr_code, coachLabel, badgeUrl,
   });
   const fromAddr = process.env.SMTP_FROM || process.env.SMTP_USER;
   try {
