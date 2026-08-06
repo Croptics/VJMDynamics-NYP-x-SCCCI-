@@ -32,11 +32,11 @@ migration or a new backend dependency.**
   email — consistent everywhere.
 - **Download** a pass (PNG), **select-all / individual → Save as PDF**, and a
   redesigned printed/PDF pass card.
-- **Email pass** — sends a branded, table-based email (mirrors the pass) with the
-  QR inline (cid) + as a `boarding-pass.png` attachment, and a button to the
-  public flip page. *Note:* Gmail's **Android app** won't render inline `cid:`
-  images (shows a broken box) — the button + attachment + hosted page cover that;
-  it renders fully in Gmail web / Apple Mail / Outlook.
+- **Email pass** — sends a branded, table-based email (mirrors the pass). The QR
+  in the body is served from a **public image URL** (`quickchart.io/qr`, same
+  code, logo composited in the centre) so **Gmail renders it (web + app)** — an
+  inline `cid:` image does not render reliably in Gmail. The QR also ships as a
+  `boarding-pass.png` attachment, plus a button to the hosted flip page.
 - **Public flip badge page** `/badge/:code` — QR first, ↻ flips to the company-ID
   badge. Renders from the URL code even before the API responds.
 - **Parse UX** — live waiting-time timer; after "Confirm & add" the app
@@ -72,9 +72,11 @@ migration or a new backend dependency.**
   mobile scanner's "View badge").
 
 ## Known limitations (by design, for a local demo)
-- Gmail Android app: inline `cid:` QR shows broken → use the attachment / hosted
-  page. On the cloud (public URL) the hosted QR image would also work via Gmail's
-  proxy.
+- The email QR is fetched from `quickchart.io` (a public QR image service) so
+  Gmail can proxy it — it must be reachable at send/open time. The `qr_code` is a
+  non-sensitive random boarding token (already the shared secret in the badge
+  URL). Swap for a self-hosted `/qr.png` endpoint later if you prefer no third
+  party.
 - Calls are STUN-only unless `VITE_ICE_SERVERS` adds a TURN server.
 - Local parse uses Ollama; cloud needs `ANTHROPIC_API_KEY`.
 
