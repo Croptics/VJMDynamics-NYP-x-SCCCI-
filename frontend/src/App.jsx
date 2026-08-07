@@ -40,6 +40,16 @@ import MobileExceptionsPage from "./pages/mobile/ops/MobileExceptionsPage.jsx";
 import MobileUserGuidePage from "./pages/mobile/me/MobileUserGuidePage.jsx";
 import MobileAnnouncementsPage from "./pages/mobile/home/MobileAnnouncementsPage.jsx";
 import MobileEnrolmentPage from "./pages/mobile/face/MobileEnrolmentPage.jsx";
+// Vimal — the mobile Face/Voice/QR/Manual check-in scanner. Deleted in cbb6534
+// (2026-08-05) together with the passwordless KioskScannerPage; restored
+// 2026-08-07 because it is FaceCheck-Pro's only check-in surface — without it
+// nothing consumed a delegate's enrolment and /api/attendance/scan had no
+// caller at all. The kiosk page stays deleted on purpose: that was the one
+// that let a scan happen with no account, which is the bypass the original
+// removal was aimed at. This page runs inside a normal signed-in staff
+// session, so requireKioskOrPermission("manageScanner") takes its authenticated
+// branch and enforces the permission (see backend/lib/auth.js).
+import MobileScannerPage from "./pages/mobile/MobileScannerPage.jsx";
 // Vimal — public delegate self-enrollment app (face/voice capture)
 import EnrollPage from "./pages/EnrollPage.jsx";
 import BadgePage from "./pages/BadgePage.jsx"; // Vance — public flip-card badge (from emailed pass)
@@ -71,6 +81,11 @@ const DESKTOP_FALLBACK_ORDER = [
 const MOBILE_FALLBACK_ORDER = [
   { path: "/mobile", perm: "viewMobileHome" },
   { path: "/mobile/operations", perm: "viewMobileAttendance" },
+  // Restored with the scanner (2026-08-07). An account whose ONLY granted view
+  // is a scanner tab has to land on one, or firstAllowedRoute walks past it and
+  // dumps them on /mobile/profile as though they had no permissions at all.
+  { path: "/mobile/scan/qr", perm: "viewMobileScannerQr" },
+  { path: "/mobile/scan/face", perm: "viewMobileScannerFace" },
   { path: "/mobile/trips", perm: "viewMobileTrips" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
@@ -327,14 +342,18 @@ export default function App() {
             resolve/override/priority. Shares the viewMobileIssues gate so no
             new permission or per-account reconfiguring is needed. */}
         <Route path="/mobile/exceptions" element={<ViewGate perm="viewMobileIssues" mode="mobile"><MobileExceptionsPage /></ViewGate>} />
-        {/* The quick QR/Face/Manual scanner and the passwordless /kiosk-scan
-            entrance scanner were both removed (2026-08-05, on request — they
-            let a scan bypass admin approval). Enrolment below still uses the
-            viewMobileScannerFace permission key so existing accounts' stored
-            permissions don't need migrating; it just no longer has a sibling
-            scanner route to share the name with.
+        {/* FaceCheck-Pro's check-in surface — one page, three locked modes, so
+            each can be granted independently per account. Restored 2026-08-07
+            after cbb6534 removed it (see the import comment above for why the
+            kiosk page was NOT brought back with it).
 
-            Announcements MUST stay on the same permission as its desktop
+            Each mode is a separate route rather than an in-page toggle so the
+            permission gate is the ROUTER's job: an account granted only QR can
+            never reach the Face tab by tapping around inside the page. */}
+        <Route path="/mobile/scan/face" element={<ViewGate perm="viewMobileScannerFace" mode="mobile"><MobileScannerPage lockMode="face" /></ViewGate>} />
+        <Route path="/mobile/scan/qr" element={<ViewGate perm="viewMobileScannerQr" mode="mobile"><MobileScannerPage lockMode="qr" /></ViewGate>} />
+        <Route path="/mobile/scan/manual" element={<ViewGate perm="viewMobileScannerManual" mode="mobile"><MobileScannerPage lockMode="manual" /></ViewGate>} />
+        {/* Announcements MUST stay on the same permission as its desktop
             counterpart — leaving these ungated (as Vimal's branch did) lets any
             signed-in account read announcements and send enrolment invites. */}
         <Route path="/mobile/announcements" element={<ViewGate perm="viewAnnouncements" mode="mobile"><MobileAnnouncementsPage /></ViewGate>} />

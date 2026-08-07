@@ -55,7 +55,7 @@ import { recordEvent } from "./trip.js";
 // Aliased: several handlers below use a local `all` for the delegate list.
 import { all as dbAll, get as dbGet, run as dbRun } from "../db/connection.js";
 import jwt from "jsonwebtoken";
-import { sendMail, enrolInviteEmail, appBaseUrl, isDryRun, mailConfigured } from "../lib/mailer.js";
+import { sendMail, enrolInviteEmail, appBaseUrl, isDryRun, mailConfigured, appBaseUrlWarning } from "../lib/mailer.js";
 
 const router = Router();
 
@@ -85,6 +85,15 @@ function verifyEnrolToken(token) {
 }
 const enrolLink = (delegateId) => `${appBaseUrl()}/enroll?t=${encodeURIComponent(signEnrolToken(delegateId))}`;
 
+/* Warn at boot if the invite links we're about to build are unreachable for a
+ * real delegate. Only when sending is actually armed — with SMTP unconfigured
+ * the mailer is in dry-run and nothing goes out, so the warning would be
+ * noise. Mirrors the FRONTEND_URL / JWT_SECRET warnings in server.js. */
+if (mailConfigured() && !isDryRun()) {
+  const w = appBaseUrlWarning();
+  if (w) console.warn(`\n  WARNING: enrolment invites are LIVE but ${w}\n  Set PUBLIC_APP_URL in backend/.env to a URL delegates can reach.\n`);
+}
+
 /* ---------------------------------------------------------------------------
  * PERSISTENT biometric enrollment storage.
  *
@@ -100,14 +109,46 @@ const enrolLink = (delegateId) => `${appBaseUrl()}/enroll?t=${encodeURIComponent
 let biometricsReady = null;
 function ensureBiometrics() {
   if (!biometricsReady) {
-    biometricsReady = dbRun(`CREATE TABLE IF NOT EXISTS delegate_biometrics (
-      delegate_id  VARCHAR(64) PRIMARY KEY REFERENCES delegates(id) ON DELETE CASCADE,
-      consent      VARCHAR(16) NOT NULL DEFAULT 'GRANTED',
-      face_vector  JSONB,
-      voice_vector JSONB,
-      voice_hash   BIGINT,
-      updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-    )`).catch((e) => { biometricsReady = null; throw e; });
+    biometricsReady = (async () => {
+      await dbRun(`CREATE TABLE IF NOT EXISTS delegate_biometrics (
+        delegate_id  VARCHAR(64) PRIMARY KEY REFERENCES delegates(id) ON DELETE CASCADE,
+        consent      VARCHAR(16) NOT NULL DEFAULT 'GRANTED',
+        face_vector  JSONB,
+        voice_vector JSONB,
+        voice_hash   BIGINT,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`);
+      // FRESH-DATABASE GUARD (2026-08-07).
+      //
+      // The enrolment-invite flow below is built on delegates.email, but
+      // db/schema.js never creates that column. The only thing that adds it is
+      // document.js's init(), which is LAZY — it runs on the first request to a
+      // /api/documents|onboarding|badge|chat route, not at boot. On a fresh
+      // database that hadn't happened yet, so inviting a delegate died with
+      //   column "email" of relation "delegates" does not exist
+      // i.e. the invite feature silently depended on someone having opened the
+      // Documents page first this boot.
+      //
+      // It can't be email alone: updateDelegate() writes the WHOLE PROFILE_FIELDS
+      // set on every call (see db/delegates.js), so a missing sibling column
+      // fails the same UPDATE. These are the eight of those thirteen that
+      // db/schema.js omits — verified against information_schema on a fresh
+      // boot, not assumed. Types are kept byte-identical to document.js's own
+      // declarations so whichever module runs first wins and the other no-ops;
+      // ADD COLUMN IF NOT EXISTS makes the order irrelevant in both directions.
+      //
+      // This belongs in db/schema.js with the rest of the delegates columns,
+      // but that file is JQ's foundation and off-limits to teammate modules —
+      // so FaceCheck guarantees its own preconditions here instead.
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS email           VARCHAR(191)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS role            VARCHAR(191)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS industry        VARCHAR(191)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS phone           VARCHAR(64)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS website         VARCHAR(255)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS passport_no     VARCHAR(64)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS nationality     VARCHAR(128)`);
+      await dbRun(`ALTER TABLE delegates ADD COLUMN IF NOT EXISTS passport_expiry VARCHAR(32)`);
+    })().catch((e) => { biometricsReady = null; throw e; });
   }
   return biometricsReady;
 }
@@ -890,7 +931,14 @@ router.get("/api/enroll/lookup", wrap(async (req, res) => {
       name: d.name,
       coachId: d.coachId || null,
       coachLabel: coachName(d.coachId),
-      email: d.email || null, // lets the staff view show who still needs an address
+      // Staff-only. This route is deliberately UNAUTHENTICATED so the emailed
+      // magic link works with no account (see the block comment above), which
+      // meant anyone who hit /api/enroll/lookup got the entire roster's email
+      // addresses back. The staff view (MobileEnrolmentPage) always calls this
+      // with its Bearer token, so gating on a resolved account keeps "who still
+      // needs an address" working there while a delegate's own public request
+      // — which never reads this field — no longer receives it.
+      email: account ? (d.email || null) : undefined,
       enrolled: {
         face: !!(row && asVector(row.face_vector)),
         voice: !!(row && (asVector(row.voice_vector) || row.voice_hash !== null)),
@@ -998,6 +1046,10 @@ router.get("/api/enroll/invite/preview", requireAuth(), wrap(async (req, res) =>
   res.json({
     delegateId: delegate.id, name: delegate.name, to: delegate.email || null,
     dryRun: isDryRun(), mailConfigured: mailConfigured(),
+    // Non-null when the link in this email is one a delegate can't actually
+    // open (dev/LAN PUBLIC_APP_URL) — shown in the preview sheet so it's caught
+    // BEFORE someone bulk-sends 40 invites nobody can act on.
+    linkWarning: appBaseUrlWarning(),
     subject: mail.subject, html: mail.html, text: mail.text, link,
   });
 }));
@@ -1007,6 +1059,10 @@ router.get("/api/enroll/invite/preview", requireAuth(), wrap(async (req, res) =>
  * saved onto the delegate first, so staff can fill in a missing address and
  * invite in a single action. */
 router.post("/api/enroll/invite", requireAuth(), wrap(async (req, res) => {
+  // Guarantees delegates.email exists before updateDelegate() below writes to
+  // it — this is the one invite route that never touches bioMap(), so it was
+  // the one that blew up on a fresh database. See ensureBiometrics().
+  await ensureBiometrics();
   const { delegateId, email } = req.body || {};
   const delegate = typeof delegateId === "string" ? await getDelegateById(delegateId) : null;
   if (!delegate) return fail(res, 404, "NOT_FOUND", "We couldn't find that delegate.");
@@ -1025,7 +1081,7 @@ router.post("/api/enroll/invite", requireAuth(), wrap(async (req, res) => {
     name: delegate.name, tripName: trip && trip.name, link, expiresInDays: ENROL_TOKEN_DAYS,
   });
   const result = await sendMail({ to, ...mail });
-  res.json({ delegateId: delegate.id, name: delegate.name, ...result });
+  res.json({ delegateId: delegate.id, name: delegate.name, ...result, linkWarning: appBaseUrlWarning() });
 }));
 
 /* POST /api/enroll/invite-all  { onlyMissing = true, tripId? }
@@ -1069,6 +1125,7 @@ router.post("/api/enroll/invite-all", requireAuth(), wrap(async (req, res) => {
 
   res.json({
     dryRun: isDryRun(),
+    linkWarning: appBaseUrlWarning(),
     considered: targets.length,
     sent: results.filter((r) => r.sent).length,
     previewed: results.filter((r) => r.dryRun).length,

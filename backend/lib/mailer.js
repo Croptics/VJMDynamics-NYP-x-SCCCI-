@@ -52,6 +52,44 @@ export function appBaseUrl() {
   return (PUBLIC_APP_URL || "http://localhost:5173").replace(/\/+$/, "");
 }
 
+/**
+ * Is the base URL something a real delegate could actually open?
+ *
+ * This is the failure that looks like success: SMTP accepts the message, the
+ * API reports { sent: true }, the invite lands in the inbox — and the button
+ * inside it goes nowhere, because PUBLIC_APP_URL was left as a dev address.
+ * A LAN IP doesn't resolve off that wifi, changes whenever DHCP reassigns it,
+ * and over https:// serves a self-signed cert that fronts the enrolment page
+ * with a full-screen "Your connection is not private" warning.
+ *
+ * Returns null when the URL is fine, otherwise a one-line human explanation.
+ * Callers surface it (boot warning, invite preview) rather than blocking —
+ * emailing a LAN link to yourself on the same wifi is a legitimate way to
+ * test, so this warns loudly instead of failing closed.
+ */
+export function appBaseUrlWarning() {
+  const url = appBaseUrl();
+  let u;
+  try { u = new URL(url); } catch { return `PUBLIC_APP_URL is not a valid URL ("${url}").`; }
+
+  const host = u.hostname;
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  // RFC1918 + link-local: 10/8, 172.16/12, 192.168/16, 169.254/16.
+  const isPrivateIp = /^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  const isRawIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+
+  if (isLocal) {
+    return `PUBLIC_APP_URL is ${url} — that only resolves on this machine, so the enrolment link in every invite is dead for the delegate who receives it.`;
+  }
+  if (isPrivateIp) {
+    return `PUBLIC_APP_URL is ${url} — a private LAN address. Delegates can only open it on this exact wifi, it breaks when the router reassigns the IP${u.protocol === "https:" ? ", and over https it serves a self-signed certificate so they hit a browser security warning first" : ""}.`;
+  }
+  if (isRawIp && u.protocol === "https:") {
+    return `PUBLIC_APP_URL is ${url} — https to a bare IP serves a certificate that won't validate, so delegates hit a browser security warning before the enrolment page.`;
+  }
+  return null;
+}
+
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 

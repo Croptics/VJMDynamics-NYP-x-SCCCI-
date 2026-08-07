@@ -38,6 +38,12 @@ export default function MobileEnrolmentPage() {
   const [filter, setFilter] = useState("all");
   const [inviting, setInviting] = useState("");      // delegateId currently sending, or "all"
   const [inviteMsg, setInviteMsg] = useState(null);  // { tone, text }
+  // Set when the backend reports that the enrolment link inside the invite is
+  // unreachable for a delegate (dev/LAN PUBLIC_APP_URL). Kept separate from
+  // inviteMsg because the send itself genuinely succeeded — it's the link that
+  // won't work, and conflating the two would either hide a real success or
+  // hide a real problem.
+  const [linkWarn, setLinkWarn] = useState("");
   const [preview, setPreview] = useState(null);      // rendered invite being viewed
   const [previewing, setPreviewing] = useState("");  // delegateId whose preview is loading
   const [previewTab, setPreviewTab] = useState("html"); // html | text
@@ -71,9 +77,10 @@ export default function MobileEnrolmentPage() {
       email = (window.prompt(`${t("Email address for")} ${d.name}:`) || "").trim();
       if (!email) return;
     }
-    setInviting(d.delegateId); setInviteMsg(null);
+    setInviting(d.delegateId); setInviteMsg(null); setLinkWarn("");
     try {
       const r = await apiPost("/enroll/invite", { delegateId: d.delegateId, email });
+      setLinkWarn(r.linkWarning || "");
       setInviteMsg(r.dryRun
         ? { tone: "review", text: `${t("Preview only (dry run) — no email sent to")} ${r.to}` }
         : r.sent
@@ -109,9 +116,10 @@ export default function MobileEnrolmentPage() {
     const outstanding = roster.filter((d) => !d.enrolled?.face && !d.enrolled?.voice);
     if (!outstanding.length) { setInviteMsg({ tone: "present", text: t("Everyone's already enrolled.") }); return; }
     if (!window.confirm(`${t("Email an enrolment link to")} ${outstanding.length} ${t("delegate(s) who haven't enrolled?")}`)) return;
-    setInviting("all"); setInviteMsg(null);
+    setInviting("all"); setInviteMsg(null); setLinkWarn("");
     try {
       const r = await apiPost("/enroll/invite-all", { onlyMissing: true, tripId: getMobileTripId() });
+      setLinkWarn(r.linkWarning || "");
       const skipped = (r.skippedNoEmail || []).length;
       const base = r.dryRun
         ? `${t("Preview only (dry run)")} — ${r.previewed} ${t("would be emailed")}`
@@ -208,6 +216,19 @@ export default function MobileEnrolmentPage() {
           background: `var(--st-${inviteMsg.tone}-bg)`, color: `var(--st-${inviteMsg.tone})`,
         }}>
           {inviteMsg.text}
+        </div>
+      )}
+
+      {/* The send succeeded but the link inside it is unreachable — a separate,
+          quieter warning so a green "sent" never hides a dead invite. */}
+      {linkWarn && (
+        <div className="row" style={{
+          gap: 8, alignItems: "flex-start", marginTop: 8, padding: "10px 12px",
+          borderRadius: "var(--r-sm)", background: "var(--st-late-bg)", color: "var(--st-late)",
+          fontSize: 12.5, fontWeight: 600, lineHeight: 1.5,
+        }}>
+          <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{linkWarn}</span>
         </div>
       )}
 
@@ -334,6 +355,19 @@ export default function MobileEnrolmentPage() {
                 </span>
                 {!preview.mailConfigured && <span className="badge badge-missing">{t("SMTP not configured")}</span>}
               </div>
+              {/* The email sends fine but its link goes nowhere — worth catching
+                  here, before a bulk send, rather than from a delegate ringing
+                  up to say the button doesn't work. */}
+              {preview.linkWarning && (
+                <div className="row" style={{
+                  gap: 8, alignItems: "flex-start", marginTop: 4, padding: "9px 11px",
+                  borderRadius: "var(--r-sm)", background: "var(--st-late-bg)", color: "var(--st-late)",
+                  fontSize: 12, fontWeight: 600, lineHeight: 1.5,
+                }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>{preview.linkWarning}</span>
+                </div>
+              )}
             </div>
 
             {/* html / text toggle */}
