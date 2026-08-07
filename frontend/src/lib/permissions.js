@@ -281,6 +281,22 @@ export const PERMISSIONS = [
     group: "mobileView",
   },
   {
+    key: "viewMobileScannerQr",
+    label: "QR check-in",
+    desc: "See the mobile QR check-in scanner",
+    chip: "QR scan",
+    default: true,
+    group: "mobileView",
+  },
+  {
+    key: "viewMobileScannerManual",
+    label: "Manual check-in",
+    desc: "See the mobile Manual check-in roster",
+    chip: "Manual check-in",
+    default: true,
+    group: "mobileView",
+  },
+  {
     // Not a tab — a floating bubble on every /mobile/* route.
     key: "viewMobileChatbot",
     label: "Chatbot",

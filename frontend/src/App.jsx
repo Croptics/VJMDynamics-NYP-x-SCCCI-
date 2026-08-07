@@ -86,6 +86,7 @@ const MOBILE_FALLBACK_ORDER = [
   // dumps them on /mobile/profile as though they had no permissions at all.
   { path: "/mobile/scan/qr", perm: "viewMobileScannerQr" },
   { path: "/mobile/scan/face", perm: "viewMobileScannerFace" },
+  { path: "/mobile/scan/manual", perm: "viewMobileScannerManual" },
   { path: "/mobile/trips", perm: "viewMobileTrips" },
   { path: "/mobile/issues", perm: "viewMobileIssues" },
 ];
