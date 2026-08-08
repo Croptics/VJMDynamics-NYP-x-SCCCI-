@@ -50,6 +50,21 @@ import {
 // trip.js's own edits already use; exported from there rather than
 // duplicated here.
 import { recordEvent } from "./trip.js";
+// The actual fix for the History Log page itself (2026-08-08 — "i did a face
+// scan on the log. can you follow like the qr code text"): recordEvent()
+// above writes the Trips board's OWN durable audit trail (trip_event_log) —
+// a different table, read by a different page — plus trip.js's file-local,
+// in-memory logActivity(tripId, text, kind) (unrelated despite sharing the
+// name; feeds /api/trips/:id/activity, not what the History Log page reads).
+// The History Log page (Dashboard -> History) reads GET /api/activity, which
+// is db/history.js's logActivity(text, kind, actor, meta) writing to the
+// persisted activity_log table — QR (document.js) and manual (exceptions.js)
+// already call it directly for exactly this "X checked in (Y)" line; the
+// face/voice scanner never did, so a scan only ever produced updateDelegate's
+// own generic "delegate UPDATED / Status: ASSIGNED -> ARRIVED" entry there,
+// never a "checked in (Face)"/"checked in (Voice)" one like QR gets.
+import { logActivity } from "../db/history.js";
+import { actorOf } from "../lib/actor.js";
 // Shared connection helpers (JQ's db layer) — this module owns its OWN table
 // and never edits db/schema.js, same arrangement as Jayden's exceptions module.
 // Aliased: several handlers below use a local `all` for the delegate list.
@@ -542,6 +557,15 @@ router.post("/api/attendance/scan", requireKioskOrPermission("manageScanner"), w
       before: { status: matched.status }, after: { status: "PRESENT" },
     });
   }
+  // The History Log page's own entry — same call QR (document.js) and manual
+  // (exceptions.js) already make, so a face/voice scan reads as "X checked in
+  // (Face)"/"X checked in (Voice)" there too, instead of only the generic
+  // "delegate UPDATED" line updateDelegate() above already produces. See the
+  // import comment above for why recordEvent() alone never reached this page.
+  await logActivity(
+    `${matched.name} checked in (${method === "VOICE" ? "Voice" : "Face"})`,
+    "checkin", actorOf(req), { delegateId: matched.id, tripUuid: scanTripUuid }
+  );
 
   const processedInMs = Date.now() - started;
   const when = timestamp && !Number.isNaN(Date.parse(timestamp)) ? new Date(timestamp) : new Date();
