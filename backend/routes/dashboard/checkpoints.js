@@ -160,9 +160,8 @@ export async function resetArrivedBeforeNextCheckpoint(now = new Date()) {
 
     const candidates = await all(
       `SELECT id, name FROM delegates
-       WHERE trip_id = $1 AND "coachId" IS NOT NULL AND status IN ('ARRIVED', 'LATE', 'PRESENT')
-         AND id NOT IN (SELECT delegate_id FROM checkpoint_checkins WHERE itinerary_item_id = $2)`,
-      [item.tripId, item.id]
+       WHERE trip_id = $1 AND "coachId" IS NOT NULL AND status IN ('ARRIVED', 'LATE', 'PRESENT')`,
+      [item.tripId]
     );
     // One consolidated History Log entry per checkpoint instead of one per
     // delegate (a wall of identical rows for what is really one system event) —

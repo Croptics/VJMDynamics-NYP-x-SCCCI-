@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { Home, ClipboardList, User, Bus } from "lucide-react";
+import { Home, ClipboardList, User, Bus, ScanFace, QrCode } from "lucide-react";
 import { getPermissions, getUser, apiGet } from "../../lib/api.js";
 import { useLang } from "../../lib/i18n.jsx";
 import { useSessionGuard } from "../../lib/useSessionGuard.js";
@@ -165,9 +165,17 @@ export default function MobileLayout({ onLogout }) {
   // Tabs mirror the /mobile/* route permission gates in App.jsx. Profile stays
   // ungated (account settings, not a feature view). Home is gated on
   // viewMobileHome only — a coach captain needs it as much as an admin does.
+  const scannerMode = perms.viewMobileScannerFace ? "face"
+     : perms.viewMobileScannerQr ? "qr"
+     : perms.viewMobileScannerManual ? "manual"
+     : null;
   const tabs = [
     ...(perms.viewMobileHome
       ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
+    ...(!restrictToHomeOnly && scannerMode
+      ? [{ to: `/mobile/scan/${scannerMode}`, label: "Scan", icon: ScanFace }] : []),
+    ...(!restrictToHomeOnly && perms.viewMobileScannerQr
+      ? [{ to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true }] : []),
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
     // A CRITICAL open exception takes the badge over the missing count — it's
     // the more urgent of the two and needs to be seen without opening the tab.
