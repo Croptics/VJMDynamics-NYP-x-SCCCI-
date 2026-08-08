@@ -2349,7 +2349,13 @@ function CoachBoardView({ tripId }) {
     present: statDelegates.filter((d) => d.status === "PRESENT" || d.status === "ARRIVED").length,
     late: statDelegates.filter((d) => d.status === "LATE").length,
     missing: statDelegates.filter((d) => d.status === "MISSING").length,
-    unassigned: scopedToCoach ? 0 : delegates.filter((d) => !(d.coachId && coachIdSet.has(d.coachId))).length,
+    // NOT scoped to 0 (2026-08-08 — "this trip have some unassign delegate
+    // but on staff trip view i can't see it"): an unassigned delegate isn't
+    // any coach's exclusive territory, so it stays out of the OTHER coaches'
+    // scoping the same way the backend's own dashboard KPI already treats it
+    // (db/dashboard.js's getDashboard() keeps `!x.coachId ||` in its
+    // visibleCoachIds filter for exactly this reason). Always the real count.
+    unassigned: delegates.filter((d) => !(d.coachId && coachIdSet.has(d.coachId))).length,
     coaches: scopedToCoach ? 1 : coaches.length,
     itinStops: itinerary.length,
     itinDays: new Set(itinerary.map((i) => i.dayNumber)).size,
@@ -2537,14 +2543,22 @@ function CoachBoardView({ tripId }) {
                 onCycleArrival={editable && mode === "live" ? handleCycleArrival : undefined}
               />
             ))}
-            {!scopedToCoach && (
-              <FleetCard
-                coach={{ id: UNASSIGNED_COL, label: t("Unassigned") }} delegates={delegatesByCoach[UNASSIGNED_COL] || []} mode={mode}
-                isUnassigned isOver={overCol === UNASSIGNED_COL} colRef={(node) => { colRefs.current[UNASSIGNED_COL] = node; }}
-                onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id} onRemoveDelegate={editable ? handleRemoveDelegate : undefined}
-                wrongCoachIds={wrongCoachIds}
-              />
-            )}
+            {/* Always shown, even scoped to one coach (2026-08-08 — "this trip
+                have some unassign delegate but on staff trip view i can't see
+                it"): Unassigned isn't any coach's territory, so hiding it here
+                left a captain-scoped staff account with genuinely no way to
+                even SEE who's unassigned, let alone pull them onto their own
+                coach — despite the KPI row above already counting them (see
+                the summaryStats.unassigned fix above). No new write capability
+                — onRemoveDelegate below was already ungated on scopedToCoach,
+                and drag-reassign is independently gated server-side on
+                manageTrips (writeAccess in trip.js), same as `editable` here. */}
+            <FleetCard
+              coach={{ id: UNASSIGNED_COL, label: t("Unassigned") }} delegates={delegatesByCoach[UNASSIGNED_COL] || []} mode={mode}
+              isUnassigned isOver={overCol === UNASSIGNED_COL} colRef={(node) => { colRefs.current[UNASSIGNED_COL] = node; }}
+              onPointerDownCard={onPointerDownCard} onKeyOpen={setPanelDelegate} draggingId={ghost?.delegate?.id} onRemoveDelegate={editable ? handleRemoveDelegate : undefined}
+              wrongCoachIds={wrongCoachIds}
+            />
             {editable && !scopedToCoach && <button className="tf-add-fleet-card" onClick={() => setShowAddCoach(true)}><Plus size={18} /> {t("Add coach")}</button>}
           </div>
         </div>
