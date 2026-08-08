@@ -378,8 +378,17 @@ export default function AnnouncementsPage() {
           active — so a trip with zero announcements showed both empty-state
           cards stacked, reading as a duplicate. This one is now only for
           the untabbed case (a trip with no day-grouping at all); the day
-          tabs' own empty state (below) covers the tabbed case. */}
-      {!loading && announcements.length === 0 && sections.length <= 1 && (
+          tabs' own empty state (below) covers the tabbed case.
+          `sections.length === 0`, not `<= 1` (2026-08-08 — a single-day trip
+          with an itinerary but zero posts still has exactly ONE section, a
+          lone "Day 1" — sections.length <= 1 was true there too, so this card
+          rendered ABOVE the day content block (line ~420) which renders that
+          same "Day 1" unconditionally on `activeSection`, with its own empty
+          state right underneath. The duplicate the 2026-07-30 fix targeted
+          for multi-day trips was still showing, just for the one-day case
+          instead. This card is only needed when NOTHING else below it will
+          say anything — i.e. no General section AND no day sections at all. */}
+      {!loading && announcements.length === 0 && sections.length === 0 && (
         <div className="card" style={{ marginTop: 20, padding: 24, textAlign: "center" }}>
           <Megaphone size={28} color="var(--ink-3)" />
           <p className="muted" style={{ marginTop: 8, fontSize: 13.5 }}>{t("No announcements yet for this trip.")}</p>
