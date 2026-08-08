@@ -8,3 +8,5 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+
+*.jsonl -text
