@@ -99,10 +99,33 @@ export function cleanRole(role) {
 export function accountPermissions(row) {
   if (!row) return cleanPerms({});
   if (row.role === "admin") return defaultPermsForRole("admin", !!row.readOnly);
+  let perms;
   try {
-    if (row.permissions) return cleanPerms(JSON.parse(row.permissions));
-  } catch { /* fall through */ }
-  return defaultPermsForRole("staff");
+    perms = row.permissions ? cleanPerms(JSON.parse(row.permissions)) : defaultPermsForRole("staff");
+  } catch {
+    perms = defaultPermsForRole("staff");
+  }
+  // View permissions (desktopView/mobileView groups) are always granted — see
+  // AccountControlPage.jsx's EMPTY_FORM comment: "an account can always SEE
+  // every page/tab", the two access dropdowns only ever control WRITE
+  // capability. applyAccessLevels() (accountHelpers.js) already enforces this
+  // for every account saved through the current New/Edit form, but it only
+  // runs when that form is actually touched — an account whose permissions
+  // JSON still carries an explicit `false` for a view key from BEFORE the
+  // 2026-07-31 redesign (the old per-permission checkbox tree let an admin
+  // individually uncheck e.g. Announcements) stays stuck on that stale value
+  // forever otherwise, since editing an existing account loads its permissions
+  // as-is (AccountControlPage.jsx's openEdit) and only applyAccessLevels()
+  // would normalize it, which nothing forces the admin to trigger. Enforcing
+  // the same invariant here, at the single canonical resolver every read path
+  // (login, account listing/editing, ViewGate authorization) goes through,
+  // self-heals every such account immediately with no per-account re-save
+  // needed (2026-08-08 — "why this role not allow staff to see the
+  // announcement page").
+  for (const p of PERMISSIONS) {
+    if (p.group === "desktopView" || p.group === "mobileView") perms[p.key] = true;
+  }
+  return perms;
 }
 
 /** Count of FULL (non-read-only) admin accounts — used to block
