@@ -262,7 +262,19 @@ export default function MobileScannerPage({ lockMode }) {
   const fetchCoaches = useCallback(async () => {
     try {
       setLoadErr("");
-      const { data } = await cachedFetch("mobile-manual-checkin-coach-list", () => apiGet("/attendance/coaches"));
+      // MUST scope both the request and the cache key to TRIP_ID (2026-08-08 —
+      // "coach dropdown shows duplicate Coach 1/2/3... from every trip"):
+      // GET /attendance/coaches with no ?tripId= falls through the backend
+      // (db/dashboard.js getDashboard) to `SELECT * FROM coaches ORDER BY id`
+      // — every coach on every trip in the database, not just this one. Every
+      // other trip-scoped mobile fetch (MobileHomePage's own dashboard call,
+      // and fetchCoach() right below) already sends tripId; this was the one
+      // place that didn't, so the "CHECKING IN TO" picker filled up with
+      // other trips' identically-labelled "Coach 1"/"Coach 2" rows mixed in.
+      const { data } = await cachedFetch(
+        `mobile-manual-checkin-coach-list:${TRIP_ID}`,
+        () => apiGet(`/attendance/coaches?tripId=${encodeURIComponent(TRIP_ID)}`)
+      );
       setCoaches(data.coaches || []);
       setCoachId((prev) => {
         if (prev && (data.coaches || []).some((c) => c.id === prev)) return prev;
