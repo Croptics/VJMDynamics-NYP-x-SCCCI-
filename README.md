@@ -3,6 +3,9 @@
 Real-time headcount & attendance reconciliation for SCCCI overseas delegations.
 **SCCCI AI Challenge — Problem Statement #10.** *No one gets left behind.*
 
+> **🌐 Live app:** **https://mustergo.duckdns.org**
+> Architecture: [`docs/architecture.md`](docs/architecture.md)
+
 A live trip-tracking app: admins/staff run a Dashboard + Trips/Coach board on
 desktop, delegates get scanned in via QR or face recognition on mobile, and
 missing/late/exception cases surface in real time across both.
