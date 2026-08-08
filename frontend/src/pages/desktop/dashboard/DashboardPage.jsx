@@ -2150,10 +2150,14 @@ export default function DashboardPage() {
                 setForm((f) => ({ ...f, status, cancelled: status === "UNASSIGNED" ? f.cancelled : false }));
               }}>
               <option value="UNASSIGNED">{t("Unassigned")}</option>
-              <option value="ASSIGNED">{t("Assigned")}</option>
-              <option value="ARRIVED">{t("Arrived")}</option>
-              <option value="LATE">{t("Late")}</option>
-              <option value="MISSING">{t("Missing")}</option>
+              {editingId && (
+                <>
+                  <option value="ASSIGNED">{t("Assigned")}</option>
+                  <option value="ARRIVED">{t("Arrived")}</option>
+                  <option value="LATE">{t("Late")}</option>
+                  <option value="MISSING">{t("Missing")}</option>
+                </>
+              )}
             </select>
 
             {/* No coach field on purpose: assignment belongs to Desmond's Trips

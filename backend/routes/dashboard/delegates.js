@@ -47,7 +47,7 @@ router.get("/api/trips/:id/delegates", requireAuth(), wrap(async (req, res) => {
   const tripUuid = await resolveTripUuid(req.params.id);
   const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
   const delegates = await listDelegates(tripUuid);
-  res.json({ delegates: visibleCoachIds ? delegates.filter((d) => visibleCoachIds.has(d.coachId)) : delegates });
+  res.json({ delegates: visibleCoachIds ? delegates.filter((d) => !d.coachId || visibleCoachIds.has(d.coachId)) : delegates });
 }));
 
 // "Delete all" — scoped to the selected trip; the base t-1 view
@@ -70,7 +70,7 @@ router.post("/api/trips/:id/delegates", requirePermission("manageDelegates"), wr
   // Coach-scoped staff (see getVisibleCoachIds' doc) can only add onto a coach
   // they can see, else they'd create someone they can't find again.
   const visibleCoachIds = await getVisibleCoachIds(tripUuid, req.account);
-  if (visibleCoachIds && (!body.coachId || !visibleCoachIds.has(body.coachId))) {
+  if (visibleCoachIds && body.status !== "UNASSIGNED" && (!body.coachId || !visibleCoachIds.has(body.coachId))) {
     return res.status(403).json({ error: "FORBIDDEN", message: "You can only add delegates to your own coach." });
   }
   const delegate = await createDelegate(body, tripUuid, actorOf(req), req.account?.id || null);

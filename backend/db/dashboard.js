@@ -113,10 +113,7 @@ export async function getVisibleCoachIds(tripUuid, account) {
 
 export async function getDashboard(tripUuid = null, visibleCoachIds = null) {
   let d = await listDelegates(tripUuid);
-  // Unassigned delegates (coachId null) aren't part of any coach, so a
-  // captain-scoped staff account has no reason to see them — they only ever
-  // show up again once assigned to a coach that account can see.
-  if (visibleCoachIds) d = d.filter((x) => visibleCoachIds.has(x.coachId));
+  if (visibleCoachIds) d = d.filter((x) => !x.coachId || visibleCoachIds.has(x.coachId));
   let activity = await getActivity(8); // small preview — full history lives on its own endpoint
   if (visibleCoachIds) activity = activity.filter((a) => !a.coachId || visibleCoachIds.has(a.coachId));
   const present = d.filter(isBoarded).length;
