@@ -165,17 +165,24 @@ export default function MobileLayout({ onLogout }) {
   // Tabs mirror the /mobile/* route permission gates in App.jsx. Profile stays
   // ungated (account settings, not a feature view). Home is gated on
   // viewMobileHome only — a coach captain needs it as much as an admin does.
-  const scannerMode = perms.viewMobileScannerFace ? "face"
-     : perms.viewMobileScannerQr ? "qr"
-     : perms.viewMobileScannerManual ? "manual"
-     : null;
+  //
+  // Order restored to match Vimal's original FaceCheck-Pro layout — Home, Ops,
+  // QR (primary/raised, dead-centre), Face, Me (2026-08-08). A prior edit here
+  // put a critical-badge-bearing "Ops" tab immediately to the RIGHT of the
+  // raised QR disc and added a redundant computed "Scan" tab (face/qr/manual,
+  // whichever permission came first) sitting where Vimal's plain "Ops" used to
+  // be — on a 390px phone the badge's top-right dot and the disc's own raised,
+  // bordered edge sat close enough to visually collide, and any account with
+  // BOTH Face and QR granted (the default for every account) saw two
+  // check-in tabs that opened almost the same screen. Restoring Vimal's
+  // Home/Ops/QR/Face/Me order keeps the badge on the far side of Home, away
+  // from the disc, and Face is its own tab again — never a second "Scan" tab
+  // duplicating QR. Manual stays deliberately OUT of the tab bar, exactly as
+  // in Vimal's original: it's the one-tap-inside-the-scanner fallback for when
+  // a scan won't cooperate, not a top-level destination.
   const tabs = [
     ...(perms.viewMobileHome
       ? [{ to: "/mobile", label: "Home", icon: Home, end: true }] : []),
-    ...(!restrictToHomeOnly && scannerMode
-      ? [{ to: `/mobile/scan/${scannerMode}`, label: "Scan", icon: ScanFace }] : []),
-    ...(!restrictToHomeOnly && perms.viewMobileScannerQr
-      ? [{ to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true }] : []),
     // Trips + Attendance are ONE destination now (MobileOpsPage composes both).
     // A CRITICAL open exception takes the badge over the missing count — it's
     // the more urgent of the two and needs to be seen without opening the tab.
@@ -186,6 +193,15 @@ export default function MobileLayout({ onLogout }) {
           badge: criticalOpen > 0 ? criticalOpen : missing,
           critical: criticalOpen > 0,
         }] : []),
+    // QR leads (and is the raised, dead-centre `primary` tab) because it's the
+    // fastest, most reliable check-in; Face is the premium path but needs good
+    // light and an enrolled delegate. Each is its OWN permission (unlike
+    // Vimal's single viewMobileScanner) so an account can be granted one
+    // check-in path without the other — see permissions.js.
+    ...(!restrictToHomeOnly && perms.viewMobileScannerQr
+      ? [{ to: "/mobile/scan/qr", label: "QR", icon: QrCode, primary: true }] : []),
+    ...(!restrictToHomeOnly && perms.viewMobileScannerFace
+      ? [{ to: "/mobile/scan/face", label: "Face", icon: ScanFace }] : []),
     { to: "/mobile/profile", label: "Me", icon: User },
   ];
 
