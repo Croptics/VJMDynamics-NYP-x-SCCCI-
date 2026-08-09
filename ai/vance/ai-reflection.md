@@ -1,4 +1,4 @@
-# AI Reflection — Vance (Document Parsing + Trip Assistant)
+# AI Reflection — Vance (Document Parsing, Boarding Passes & MusterChat)
 
 
 ## Where AI genuinely added value
@@ -73,6 +73,30 @@ wrong, so I treated its output as a draft to verify, not an answer.
    passes originally printed the whole trip even when the list was filtered — I
    changed it to print what's actually on screen. Small, but they're the
    difference between a demo that feels finished and one that doesn't.
+
+6. **The emailed boarding-pass QR — I overrode "just embed the image".**
+   For the emailed pass, AI's first version put the QR inline as a `cid:` image
+   inside a CSS 3D flip card. It looked perfect in the preview, so I nearly kept
+   it — but I opened it in real Gmail and it was broken: Gmail strips `<style>`
+   (the flip flattened into two stacked faces) and its Android app won't render
+   inline `cid:` images at all. AI's next idea was a public QR-image service so
+   Gmail could proxy it; I rejected adding a third-party dependency for something
+   the email already carries as an attachment, and dropped the body image
+   entirely. The email is now clean text (code + company chip) with the scannable
+   QR as a `boarding-pass.png` attachment, and the interactive flip on a hosted
+   page. Lesson: "renders in my preview" is not "renders in the client the user
+   actually opens" — I only found this by testing in the real inbox.
+
+7. **Integrating into the team branch — I stopped AI from deleting a teammate's
+   work.** When I merged my updates into the integrated branch, AI's default on a
+   merge conflict was to take *my* version. I checked first and found the
+   integrated branch's chat components were actually **newer** than mine — a
+   teammate had since added group edit/delete and day-separators I didn't have.
+   Taking my side wholesale would have silently reverted their work. I scoped the
+   merge to only my own files, kept the team's versions of everything else,
+   preserved their access-control hooks (`guardTrip`, an admin-only gate), and
+   verified with a full production build + runtime tests before pushing to the
+   shared branch. AI is fast at merging; deciding what *not* to merge was mine.
 
 ## What I'd do differently / take forward
 - Verify against **real, representative data** early, not just the seed row —
