@@ -45,7 +45,7 @@ erDiagram
         varchar email "shared (Vance) — invites are sent to it"
     }
     delegate_biometrics {
-        varchar delegate_id PK_FK "★ mine — 1:1 with delegates"
+        varchar delegate_id PK "★ mine — also the FK to delegates.id (1:1)"
         varchar consent "★ GRANTED | REVOKED"
         jsonb face_vector "★ anonymous embedding, never an image"
         jsonb voice_vector "★ 64-band FFT voiceprint"
