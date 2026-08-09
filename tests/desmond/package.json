@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "description": "Scopes Desmond's unit tests to ESM so they can import the ESM backend modules, without affecting the rest of the repo."
+}
