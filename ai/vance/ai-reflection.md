@@ -1,10 +1,5 @@
 # AI Reflection — Vance (Document Parsing + Trip Assistant)
 
-> **Draft to personalise.** This is grounded in the real decisions I made on my
-> two features; before submitting, read it through, correct anything that doesn't
-> match your memory, and add your own voice and any moments I've missed. The
-> rubric (C2) rewards *reasoning* about where AI helped and where you overrode it
-> — not a list of chat logs.
 
 ## Where AI genuinely added value
 
