@@ -4,6 +4,7 @@
    ========================================================================== */
 
 :root {
+  color-scheme: light;
   /* Brand */
   --scc-red: #e1232a;
   --scc-red-600: #c41d24;
@@ -20,14 +21,32 @@
   --bg: #f4f5f7;
   --surface: #ffffff;
   --surface-2: #fafbfc;
+  /* Fixed dark swatch for badges/icons (bot avatars, etc.) that should stay
+     a dark circle with light text in BOTH themes, unlike --ink which flips
+     to a light color in dark mode. Intentionally not overridden below. */
+  --ink-solid: #1a1d21;
 
-  /* Five-state status system */
-  --st-present: #16a34a;   /* green   — boarded / present       */
+  /* Five-state status system. --st-present is the pre-5-status token kept
+     around because some check-in routes still write "PRESENT" directly
+     (legacy alias, see normalize() in backend/data.js) — --st-arrived is
+     the same color under the new name for delegates whose status now reads
+     ARRIVED. */
+  --st-present: #16a34a;   /* green   — boarded / present (legacy)*/
   --st-present-bg: #e7f6ec;
+  --st-arrived: #16a34a;   /* green   — boarded / arrived        */
+  --st-arrived-bg: #e7f6ec;
   --st-missing: #e1232a;   /* red     — missing / critical      */
   --st-missing-bg: #fdecec;
-  --st-unassigned: #d97706;/* amber   — unassigned / needs coach*/
-  --st-unassigned-bg: #fef3e2;
+  /* Was amber (#d97706) — changed to a light grey (2026-07-19) per direct
+     request; same slate as --st-neutral so "Unassigned" reads as a calm
+     "no status yet" everywhere it appears (badges, KPI tiles, filters), not
+     an "attention needed" amber. */
+  --st-unassigned: #6b7280;/* slate   — unassigned / needs coach*/
+  --st-unassigned-bg: #f1f3f5;
+  --st-assigned: #2563eb;  /* blue    — assigned, not yet checked in */
+  --st-assigned-bg: #e7eefb;
+  --st-late: #ea580c;      /* orange  — late, hasn't scanned by cutoff */
+  --st-late-bg: #fceedb;
   --st-review: #ca8a04;    /* yellow  — low-confidence / review */
   --st-review-bg: #fdf6e3;
   --st-normal: #7c3aed;    /* violet  — normal-priority exception */
@@ -48,9 +67,97 @@
   --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.12);
 
   --sidebar-w: 232px;
+
+  /* The app-wide zoom factor (see `html { zoom: ... }` below) as a plain
+     number, so any element that needs to convert a viewport-unit measurement
+     into ACTUAL rendered/visual pixels can divide by it. Keep this in sync
+     with the percentage in the `html` rule by hand — CSS has no way to read
+     one from the other. WHY THIS EXISTS: `zoom` scales the RENDERED box of
+     everything on the page, but `vh`/`vw` units and layout-overflow
+     detection (scrollHeight/clientHeight) are computed in PRE-zoom space —
+     so `height: 100vh` on a zoomed page renders taller than the actual
+     physical viewport by exactly the zoom factor, silently overflowing a
+     sticky/pinned element (this bit the sidebar: at 110% zoom, `height:
+     100vh` rendered as 110% of the real viewport, pushing the Log out
+     button off-screen with no way to reach it — a real user got locked out
+     of logging out — the fix below still applies at ANY zoom value, not
+     just >100%, since the formula is `100vh / --app-zoom` either way).
+     Anything using `100vh` for a viewport-CLAMPED (not page-scrollable)
+     element must divide by this factor instead.
+     Value: was 1.1 (110%) originally; lowered to 0.99 (99%) per user
+     preference — they were manually zooming Chrome to 90% on top of the
+     app's own 110% (net ~99% effective size) to get a size they liked, so
+     this bakes that same net size in as the default instead of requiring a
+     manual per-browser zoom override every time. */
+  --app-zoom: 0.99;
+}
+
+/* Dark theme — toggled by adding data-theme="dark" to <html> (see lib/theme.jsx).
+   Softened to a lighter charcoal (was near-black, #121417 bg / #1a1d22
+   cards) — same relative structure (bg < surface < surface-2), just lifted
+   several steps so it reads as a gentler dark mode instead of pure black. */
+:root[data-theme="dark"] {
+  /* Without this, native form widgets (<select> dropdown lists, <input
+     type="time/date">, checkboxes, scrollbars) render with their LIGHT
+     system chrome regardless of our own dark CSS variables — black text on
+     a white popup — because the browser doesn't know the page is dark. */
+  color-scheme: dark;
+  --ink: #eef0f2;
+  --ink-2: #c7cdd4;
+  --ink-3: #949aa3;
+  --line: #383c42;
+  --line-2: #2d3136;
+  --bg: #1a1d21;
+  --surface: #24272c;
+  --surface-2: #2a2e33;
+
+  /* Brand red, brightened for dark mode (2026-07-31 — "the chatbot, staff/
+     admin profile in dark mode can't see much"). The comment this replaced
+     claimed brand red "stays legible on dark backgrounds unchanged" — it
+     doesn't: the light-mode #e1232a measures ~2.9:1 against these dark
+     surfaces (WCAG AA needs 4.5:1 for body text), which is exactly why
+     things like the assistant's clickable delegate names, red nav-item
+     text, and MISSING badges read as a barely-visible dark smear in dark
+     mode despite looking fine on white. This lighter red measures ~4.5:1+
+     against --surface/--surface-2 while staying plenty readable as a button
+     background (white-on-red contrast barely changes) — text usages get
+     fixed, background usages stay fine. --st-missing shares the same value
+     since both are literally the same "red" concept. */
+  --scc-red: #ff5a60;
+  --scc-red-600: #ff7378;
+  --scc-red-700: #ff8c90;
+  --scc-red-tint: #43262a;
+  --scc-red-tint-2: #52292e;
+
+  --st-missing: #ff5a60;
+
+  --st-present-bg: #17392a;
+  --st-arrived-bg: #17392a;
+  --st-missing-bg: #432427;
+  --st-unassigned-bg: #2b2f34;
+  --st-assigned-bg: #1f2f4d;
+  --st-late-bg: #3d2a16;
+  --st-review-bg: #3c3013;
+  --st-normal-bg: #302650;
+  --st-neutral-bg: #2b2f34;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
+
+/* Bake in a fixed 110% visual scale so the app reads at the same comfortable
+   size the team has been using (Chrome zoomed to 110%) at every viewer's
+   OWN default 100% browser zoom — consistent across Chrome/Edge/Firefox/
+   Safari, since it's part of the page instead of a per-browser manual zoom
+   setting nobody would remember to set the same way twice. `zoom` (not
+   `transform: scale`) is used because it participates in normal layout flow
+   — scrollbars, viewport units, and hit-testing all stay correct, whereas a
+   transform would visually scale without updating the scrollable area or
+   click coordinates. Supported in Chrome/Edge/Safari and Firefox 126+. */
+html { zoom: calc(var(--app-zoom) * 100%); }
 
 html, body, #root { height: 100%; }
 
@@ -61,6 +168,24 @@ body {
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Themed scrollbars — the default OS scrollbar renders as a bright white bar
+   in dark mode, which looks out of place. Tie the track/thumb to theme tokens
+   so it stays dark in dark mode and light in light mode, everywhere (the page
+   itself and any overflow:auto container like the History tracker list). */
+* {
+  scrollbar-width: thin;                       /* Firefox */
+  scrollbar-color: var(--line) transparent;    /* Firefox: thumb, track */
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
 
 h1, h2, h3 { margin: 0; font-weight: 600; }
 button { font-family: inherit; cursor: pointer; }
@@ -93,12 +218,21 @@ a { color: inherit; }
 .btn:active { transform: translateY(1px); }
 .btn-primary { background: var(--scc-red); color: #fff; }
 .btn-primary:hover { background: var(--scc-red-600); }
-.btn-dark { background: var(--ink); color: #fff; }
-.btn-dark:hover { background: #000; }
-.btn-ghost { background: #fff; color: var(--ink); border-color: var(--line); }
+.btn-dark { background: var(--ink); color: var(--surface); }
+.btn-dark:hover { filter: brightness(0.92); }
+.btn-ghost { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .btn-ghost:hover { background: var(--surface-2); }
 .btn-block { width: 100%; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Skeletons ----------------------------------------------------------- */
+.skeleton-line {
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--line) 25%, var(--surface-2) 37%, var(--line) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+@keyframes skeleton-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
 /* ---- Cards ------------------------------------------------------------- */
 .card {
@@ -116,22 +250,42 @@ a { color: inherit; }
   flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--line);
-  padding: 20px 14px;
+  padding: 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   /* Stay put while the page content scrolls */
   position: sticky;
   top: 0;
-  height: 100vh;
+  /* `height: 100vh` would render as 100vh × --app-zoom of ACTUAL visual
+     space, because `zoom` scales the rendered box while `vh` is computed in
+     pre-zoom layout space (see --app-zoom's definition above for the full
+     story) — on this sticky, viewport-clamped element that meant the bottom
+     ~10% silently overflowed the real screen with no way to reach it: a
+     real user got locked out of the Log out button. Dividing by --app-zoom
+     here cancels that scale-up so the rendered box is exactly one real
+     viewport tall, matching what `100vh` is supposed to mean. */
+  height: calc(100vh / var(--app-zoom));
+  /* Safety net, not the primary fix: if content ever still doesn't fit
+     (a custom OS font size, an added nav item, etc.), it stays reachable by
+     scrolling instead of silently disappearing. Never hide navigation/
+     account controls with no fallback way to reach them. */
   overflow-y: auto;
 }
-.sidebar-brand { padding: 6px 10px 20px; font-size: 22px; }
+.sidebar-brand { padding: 4px 10px 14px; font-size: 22px; }
+/* The nav-item list is the ONLY part that scrolls when the sidebar is
+   taller than the viewport (e.g. a tablet browser with a short viewport
+   height) — .sidebar-brand above and the account/Log out footer below stay
+   put, so Log out is always visible without having to scroll past the nav
+   list first. min-height: 0 is required for a flex child to be allowed to
+   shrink/scroll instead of stretching its flex parent. On a normal desktop
+   viewport this list already fits, so nothing here is visibly different. */
+.sidebar-nav-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-radius: var(--r-sm);
   color: var(--ink-2);
   text-decoration: none;
@@ -156,6 +310,81 @@ a { color: inherit; }
   padding: 0 5px;
 }
 
+/* Sidebar account block — links to /settings, so it needs the same
+   hover/active affordance as the nav items above it to read as clickable. */
+.sidebar-account {
+  border-radius: var(--r-sm);
+  transition: background 0.15s;
+}
+.sidebar-account:hover { background: var(--surface-2); }
+.sidebar-account.active { background: var(--scc-red-tint); }
+
+/* ---- Collapsible sidebar (tablet + narrow widths) -----------------------
+   Desktop (>1024px): sidebar is always visible, exactly as before — the
+   hamburger topbar and backdrop stay hidden. At <=1024px the sidebar becomes
+   an off-canvas drawer (hidden by default, toggled via the hamburger in
+   Layout.jsx's .app-topbar-collapsed) instead of the old behavior of just
+   vanishing below 720px with no way to reopen it. */
+.app-topbar-collapsed { display: none; }
+.app-sidebar-backdrop { display: none; }
+
+@media (max-width: 1024px) {
+  .app-topbar-collapsed {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 16px;
+    width: 100%;
+  }
+  .app-hamburger {
+    background: none;
+    border: none;
+    color: var(--ink);
+    display: flex;
+    padding: 4px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+  }
+  .app-hamburger:hover { background: var(--surface-2); }
+  .app-topbar-brand { font-size: 17px; }
+
+  .app-shell { flex-direction: column; }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .app-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 24, 40, 0.45);
+    z-index: 40;
+  }
+
+  .main { width: 100%; }
+  .page { padding: 20px; }
+  /* Dashboard's Coach status + History tracker two-column grid — stack to
+     one column so neither card gets cramped on tablet. Needs !important to
+     beat the inline style={S.twoCol} the element also carries. */
+  .dash-two-col { grid-template-columns: 1fr !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}
+
 .main { flex: 1; min-width: 0; }
 .page { padding: 32px 40px; max-width: 1180px; }
 .page-eyebrow {
@@ -166,6 +395,93 @@ a { color: inherit; }
   color: var(--ink-3);
 }
 .page-title { font-size: 28px; margin: 4px 0 2px; }
+/* The Dashboard's trip switcher, which IS the page title (2026-07-29). The
+   name is real text with the chevron right after it, sized to the actual
+   selected name at any length rather than the widest option.
+   2026-07-30 ("fix the button color for dark theme mode" / "i don't like the
+   hover effect") — this used to be a native <select> laid invisibly over the
+   text so the browser's own dropdown handled the list; but a native
+   <option>'s hover highlight is drawn by the OS, not by this CSS, and in
+   dark theme that came out dark-on-dark and unreadable. Rebuilt below as a
+   real button + our own menu (TripSwitcher in DashboardPage.jsx), styled
+   entirely with this app's own tokens — same --surface-2 hover fill every
+   other menu/nav item already uses, so it's guaranteed readable in both
+   themes and consistent with the rest of the app. */
+.mg-title-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  color: inherit;
+}
+.mg-title-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+/* 2026-07-30 ("can you show all the text" then "can you show in one line?")
+   — this used to hard-truncate with an ellipsis whenever the flex row didn't
+   have room for the full name (e.g. "Beijing study mission (china)" ->
+   "Beijing study mission (chi..."). Wrapping it onto a second line instead
+   wasn't right either — the ask was one line, full text. So: no ellipsis, no
+   wrap — the name always renders in full on one line; if the row genuinely
+   doesn't have room, it overflows past its own box rather than cutting or
+   wrapping (harmless here: the box already sizes to content, not the other
+   way around, so this only matters at the very narrowest viewports). */
+.mg-title-switch-btn .mg-title-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: visible;
+}
+.mg-title-switch-btn > svg { flex-shrink: 0; color: var(--ink-3); }
+.mg-title-switch-btn:hover { background: var(--surface-2); }
+.mg-title-switch-btn:hover .mg-title-name,
+.mg-title-switch-btn:hover > svg { color: var(--scc-red); }
+.mg-title-switch-btn:focus-visible { outline: 2px solid var(--scc-red); outline-offset: 2px; }
+.mg-title-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.18));
+  padding: 6px;
+  z-index: 30;
+}
+.mg-title-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mg-title-menu-item:hover { background: var(--surface-2); }
+.mg-title-menu-item.active { color: var(--scc-red); font-weight: 700; }
 .page-sub { color: var(--ink-3); font-size: 14px; }
 
 /* ---- Status + confidence badges --------------------------------------- */
@@ -178,10 +494,14 @@ a { color: inherit; }
   padding: 4px 10px;
   border-radius: 999px;
   line-height: 1;
+  white-space: nowrap;
 }
 .badge-present    { color: var(--st-present);    background: var(--st-present-bg); }
+.badge-arrived    { color: var(--st-arrived);    background: var(--st-arrived-bg); }
 .badge-missing    { color: var(--st-missing);    background: var(--st-missing-bg); }
 .badge-unassigned { color: var(--st-unassigned); background: var(--st-unassigned-bg); }
+.badge-assigned   { color: var(--st-assigned);   background: var(--st-assigned-bg); }
+.badge-late       { color: var(--st-late);       background: var(--st-late-bg); }
 .badge-review     { color: var(--st-review);     background: var(--st-review-bg); }
 .badge-normal     { color: var(--st-normal);     background: var(--st-normal-bg); }
 .badge-neutral    { color: var(--st-neutral);    background: var(--st-neutral-bg); }
@@ -223,8 +543,18 @@ a { color: inherit; }
   border-radius: var(--r-sm);
   font-size: 14px;
   font-family: inherit;
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
+}
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
 }
 .input:focus, .select:focus { outline: 2px solid var(--scc-red-tint-2); border-color: var(--scc-red); }
 .field-label { font-size: 13px; font-weight: 600; margin-bottom: 6px; display: block; }
@@ -256,7 +586,6 @@ a { color: inherit; }
 .muted { color: var(--ink-3); }
 .mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 
-@media (max-width: 720px) {
-  .sidebar { display: none; }
-  .page { padding: 20px; }
-}
+/* Note: the old rule that fully hid .sidebar below 720px (with no way to
+   reopen it) was replaced by the collapsible off-canvas drawer + hamburger
+   above (see the max-width:1024px block) — it now covers this width too. */

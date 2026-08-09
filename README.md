@@ -3,51 +3,153 @@
 Real-time headcount & attendance reconciliation for SCCCI overseas delegations.
 **SCCCI AI Challenge — Problem Statement #10.** *No one gets left behind.*
 
-> **Build mode:** QR-primary. On-device facial recognition is deferred for this
-> phase — QR code scanning is the sole high-speed check-in method, with manual
-> override as the fallback.
+> **🌐 Live app:** **https://mustergo.duckdns.org**
+> Architecture: [`docs/architecture.md`](docs/architecture.md)
+> Submission index (per-student docs, tests, AI logs): [`docs/SUBMISSION.md`](docs/SUBMISSION.md)
+> Who built what: [`CONTRIBUTIONS.md`](CONTRIBUTIONS.md)
 
-## Deliverables in this package
+A live trip-tracking app: admins/staff run a Dashboard + Trips/Coach board on
+desktop, delegates get scanned in via QR or face recognition on mobile, and
+missing/late/exception cases surface in real time across both.
 
-| File | What it is |
-|---|---|
-| `HIGH_LEVEL_DESIGN.md` | Architecture, full PostgreSQL DDL, REST API table, folder structure |
-| `PROJECT_IMPLEMENTATION_PHASE.md` | 4-phase sprint plan to the Sun 14 Jun 2026 target, tasks per member |
-| `frontend/` | Runnable React (Vite) base — full Onboarding page + routing + scaffolds |
+## What's actually built
 
-## Run the frontend
+Every item below is a real, working feature against a live PostgreSQL
+database — nothing here is a scaffold or simulated data.
+
+| Area | Screen(s) | Owner | What it does |
+|---|---|---|---|
+| Admin Dashboard | Overview / Delegate management / Room Management / Checkpoint history / Analytics / Staff operations | Jun Qi (JQ) | Live KPIs, full delegate CRUD, reverse-headcount "Missing" list, multi-checkpoint attendance history, AI-assisted room assignment |
+| Auth, Accounts & RBAC | Login, Account control, Settings | Jun Qi (JQ) | Signed-JWT sessions (single active session per account), granular per-account permissions (`permissions.js`), named role templates |
+| Trips & Coach board | Trips list, Trip/Coach board | Desmond | Trip CRUD, coach capacity + drag-and-drop reassignment, offline reassignment queue, live Now/Next itinerary |
+| Exception Logging | Exception inbox, mobile Exceptions | Jayden | Support-ticket-style exception tracking, critical alerts, QR check-in fallback, manual override |
+| DocuSync AI + MusterChat | Documents (Onboarding), MusterChat | Vance | AI document parsing for delegate onboarding, boarding passes, full team messaging (1:1/group/AI assistant) + video calls |
+| FaceCheck-Pro | Mobile QR/Face scanner, biometric enrolment | Vimal | Privacy-first on-device face/voice matching (zero-image — raw pixels never leave the device), QR fallback, manual check-in |
+| Multi-checkpoint attendance | Delegate timeline, checkpoint history | Jun Qi (JQ) | Per-stop (not just per-day) attendance tracking, auto Late/Arrived transitions against each itinerary stop's own cutoff |
+
+Full ownership boundaries and integration history: see
+[`README/INTEGRATION_NOTES.md`](README/INTEGRATION_NOTES.md).
+
+## Architecture
+
+- **Frontend:** React 18 + Vite, plain CSS (no framework), `react-router-dom`.
+  Two parallel shells — a desktop sidebar layout and a mobile bottom-tab
+  layout — sharing the same backend and most of the same `lib/` code.
+- **Backend:** Express + `pg` (PostgreSQL, tested against Neon). One base
+  router (JQ's Auth/Dashboard/Delegates/Accounts) plus one router per
+  teammate feature, all mounted in `backend/server.js`.
+- **AI:** Anthropic Claude (document parsing) and/or local Ollama (chat
+  assistant, insights) — both called **server-side only**, so no API key
+  ever reaches the browser.
+- **Biometrics:** on-device only (`@vladmandic/human` for face, Web Speech
+  for voice) — no image or audio is ever uploaded or stored.
+
+Full file-by-file breakdown: [`README/PROJECT_STRUCTURE.md`](README/PROJECT_STRUCTURE.md).
+
+## Run it locally
+
+### 1. Backend
+
+```bash
+cd backend
+npm install
+cp .env.example .env      # then fill in at least DATABASE_URL — see below
+npm run dev                # http://localhost:4000
+```
+
+The schema (tables, columns, indexes) is created automatically on first boot
+— there is no separate migration step to run. A few demo accounts and a
+sample trip are seeded automatically too.
+
+### 2. Frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev      # http://localhost:5173
+npm run dev                # https://localhost:5173
 ```
 
-Sign in with any credentials (demo auth). Then open **Documents** in the sidebar
-to use the fully built AI document-parsing / onboarding page — drag any files
-onto the dropzone to watch the simulated Claude extraction, review low-confidence
-rows, and confirm. **Chat assistant** is also fully interactive.
+**Note the `https://`, not `http://`** — the dev server serves over HTTPS
+with an auto-generated self-signed certificate (accept the one-time browser
+warning: "Advanced" → "Proceed"). This isn't cosmetic: the camera
+(`getUserMedia`, used by the face/QR scanner) and the browser's
+password-save/autofill (Credential Management API, used by passkey sign-in)
+only work in a secure context — `https://` or `http://localhost` specifically.
+Reaching the dev server from a phone over the LAN (`http://192.168.x.x:5173`)
+is **not** a secure context, so both would silently fail without this.
 
-## Feature → owner map
+### 3. Sign in
 
-| Sidebar item | Screen | Owner | Status |
-|---|---|---|---|
-| Documents (onboarding) | 4 | Vance | **Built** |
-| Chat assistant | 6 | Vance | **Built** |
-| Login | 1 | shared | **Built** |
-| Dashboard | 2 | Jun Qi | scaffold |
-| Trips & coaches | 3 | Desmond | scaffold |
-| Exception inbox | 5 | Jayden | scaffold |
-| QR check-in | mobile | Vimal | scaffold |
+```
+staff_194 / password123!
+```
 
-## Wiring the real backend
+This is a shared demo login seeded on first boot. If several people are
+developing against the **same** database (see the gotcha below), logins
+enforce a single active session per account — signing in on one machine logs
+out everyone else currently using that same login. Run `npm run seed:team`
+(from `backend/`) once to give each developer their own login instead.
 
-The frontend ships with simulated data so it runs standalone. To connect the
-Express + PostgreSQL backend described in `HIGH_LEVEL_DESIGN.md`:
+## Run the tests
 
-1. Set `VITE_API_URL` to your API origin.
-2. In `src/lib/claudeParse.js`, set `USE_SIMULATION = false`.
-3. Run migration `001_init.sql` (the DDL from the HLD) and seed dev data.
+From the repository root — Node's built-in runner, no external framework, and
+no database, server or browser needed:
 
-The Anthropic Claude API is called **server-side only** (document parsing +
-trip assistant), so the shared team API seat / key never reaches the browser.
+```bash
+node --test "tests/*/*.test.js"
+```
+
+**293 tests, all passing.** One person's suite alone:
+
+```bash
+node --test "tests/vimal/*.test.js"
+```
+
+Each `tests/<name>/README.md` documents what that suite covers, file by file.
+
+## Environment variables
+
+Only `DATABASE_URL` is required — every other feature just shows a plain
+"not configured" message instead of failing if its variables are omitted.
+Full list with explanations: [`backend/.env.example`](backend/.env.example).
+
+| Variable | Required? | Powers |
+|---|---|---|
+| `DATABASE_URL` | **Required** | The Postgres connection (Neon, Supabase, or local) |
+| `JWT_SECRET` | Recommended | Signs login sessions — a random default is used (with a console warning) if omitted |
+| `FRONTEND_URL` | Recommended for deploy | CORS allowlist — without it, any origin is allowed (fine for local dev, not for production) |
+| `CLOUDINARY_*` | Optional | Delegate profile photo uploads |
+| `ANTHROPIC_API_KEY` / `OLLAMA_*` | Optional | AI Insights, document parsing, chat assistant (defaults to local Ollama if no key is set) |
+| `SMTP_*` | Optional | "Escalate to office" emails |
+| `TWILIO_*` | Optional | Escalation SMS/WhatsApp (unset = server just logs what would have sent) |
+
+## Database initialization rules
+
+- Schema creation is **idempotent** — every `CREATE TABLE IF NOT EXISTS` /
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` runs on every boot, so a fresh
+  database and an already-running one both end up correct with no manual
+  migration step.
+- Demo/seed data (`backend/data.js` → `initDb()`) only inserts rows that
+  don't already exist — safe to restart the server repeatedly without
+  duplicating anything.
+- **Shared-database gotcha:** the team develops against one shared Neon
+  database by default. `git clone` resets your *code*, not the *database* —
+  if a teammate's branch has since changed the seeded login, "can't log in
+  after cloning" is a database-drift issue, not a code bug. Fix:
+  `npm run reset:login` (from `backend/`), or better, give each developer
+  their own free-tier Neon database. Full writeup:
+  [`README/PROJECT_STRUCTURE.md`](README/PROJECT_STRUCTURE.md) → "CAN'T LOG
+  IN AFTER CLONING?".
+
+## Where to find more
+
+| Question | Doc |
+|---|---|
+| "How does file X work?" | [`README/PROJECT_STRUCTURE.md`](README/PROJECT_STRUCTURE.md) — organized by file path |
+| "Whose file is this, can I touch it, what broke last time someone merged?" | [`README/INTEGRATION_NOTES.md`](README/INTEGRATION_NOTES.md) — organized by feature/contributor |
+| "How does multi-checkpoint attendance work end to end?" | [`README/INTEGRATION_NOTES.md`](README/INTEGRATION_NOTES.md)'s "Feature Deep-Dive: Multi-Checkpoint Attendance" section (merged in from the former standalone `CHECKPOINT_FEATURE_HANDOFF.md`) |
+| "What third-party services does this use and how are they configured?" | [`README/THIRD_PARTY_SERVICES.md`](README/THIRD_PARTY_SERVICES.md) |
+| "How do I deploy this?" | [`README/DEPLOYMENT.md`](README/DEPLOYMENT.md) (general server setup) — the Anthropic API key specifically is covered in [`README/THIRD_PARTY_SERVICES.md`](README/THIRD_PARTY_SERVICES.md)'s AI section |
+| "Who built what?" | [`CONTRIBUTIONS.md`](CONTRIBUTIONS.md) — module ownership per team member |
+| "Where is everything for marking?" | [`docs/SUBMISSION.md`](docs/SUBMISSION.md) — per-student docs, tests and AI logs |
+| Original design/sprint docs | [`HIGH_LEVEL_DESIGN.md`](HIGH_LEVEL_DESIGN.md), [`PROJECT_IMPLEMENTATION_PHASE.md`](PROJECT_IMPLEMENTATION_PHASE.md) |
