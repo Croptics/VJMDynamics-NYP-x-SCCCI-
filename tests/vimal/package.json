@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "description": "Scopes Vimal's unit tests to ESM so they can import the ESM backend/frontend modules, without affecting the rest of the repo."
+}
