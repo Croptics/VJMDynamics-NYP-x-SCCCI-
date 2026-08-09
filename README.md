@@ -90,6 +90,23 @@ enforce a single active session per account — signing in on one machine logs
 out everyone else currently using that same login. Run `npm run seed:team`
 (from `backend/`) once to give each developer their own login instead.
 
+## Run the tests
+
+From the repository root — Node's built-in runner, no external framework, and
+no database, server or browser needed:
+
+```bash
+node --test "tests/*/*.test.js"
+```
+
+**293 tests, all passing.** One person's suite alone:
+
+```bash
+node --test "tests/vimal/*.test.js"
+```
+
+Each `tests/<name>/README.md` documents what that suite covers, file by file.
+
 ## Environment variables
 
 Only `DATABASE_URL` is required — every other feature just shows a plain
@@ -133,5 +150,6 @@ Full list with explanations: [`backend/.env.example`](backend/.env.example).
 | "How does multi-checkpoint attendance work end to end?" | [`README/INTEGRATION_NOTES.md`](README/INTEGRATION_NOTES.md)'s "Feature Deep-Dive: Multi-Checkpoint Attendance" section (merged in from the former standalone `CHECKPOINT_FEATURE_HANDOFF.md`) |
 | "What third-party services does this use and how are they configured?" | [`README/THIRD_PARTY_SERVICES.md`](README/THIRD_PARTY_SERVICES.md) |
 | "How do I deploy this?" | [`README/DEPLOYMENT.md`](README/DEPLOYMENT.md) (general server setup) — the Anthropic API key specifically is covered in [`README/THIRD_PARTY_SERVICES.md`](README/THIRD_PARTY_SERVICES.md)'s AI section |
-| "What changed, in order, session by session?" | [`README/Jun Qi - AI Log.md`](README/Jun%20Qi%20-%20AI%20Log.md) — JQ's own condensed AI-usage log |
+| "Who built what?" | [`CONTRIBUTIONS.md`](CONTRIBUTIONS.md) — module ownership per team member |
+| "Where is everything for marking?" | [`docs/SUBMISSION.md`](docs/SUBMISSION.md) — per-student docs, tests and AI logs |
 | Original design/sprint docs | [`HIGH_LEVEL_DESIGN.md`](HIGH_LEVEL_DESIGN.md), [`PROJECT_IMPLEMENTATION_PHASE.md`](PROJECT_IMPLEMENTATION_PHASE.md) |
