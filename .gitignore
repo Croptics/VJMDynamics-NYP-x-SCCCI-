@@ -1,2 +1,4 @@
 .claude/
 Jun Qi - AI Log.md
+# Vite dev-server artifacts (basic-ssl generates a throwaway localhost cert+key)
+.vite/
