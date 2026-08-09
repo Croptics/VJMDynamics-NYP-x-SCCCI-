@@ -1,6 +1,0 @@
-node_modules/
-.env
-delegates.json
-database.db
-database.db-journal
-mustergo.db

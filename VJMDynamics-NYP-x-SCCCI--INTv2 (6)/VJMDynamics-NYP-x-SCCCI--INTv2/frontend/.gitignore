@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+# mkcert-generated local dev certs (see INTEGRATION_NOTES.md — per-machine, never shared)
+*.pem
+
+# Self-hosted face-recognition model weights (copied from @vladmandic/human by scripts/copy-human-models.mjs)
+public/models/human/
