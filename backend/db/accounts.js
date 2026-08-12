@@ -123,8 +123,8 @@ export function accountPermissions(row) {
   // needed (2026-08-08 — "why this role not allow staff to see the
   // announcement page").
   for (const p of PERMISSIONS) {
-  if (p.group === "desktopView" || p.group === "mobileView") permissions[p.key] = true;
-}
+    if (p.group === "desktopView" || p.group === "mobileView") perms[p.key] = true;
+  }
   return perms;
 }
 
@@ -476,7 +476,17 @@ function roleTemplatePublic(row) {
   if (!row) return null;
   let permissions = {};
   try { permissions = JSON.parse(row.permissions || "{}"); } catch { /* corrupt row — treat as empty */ }
-  return { id: row.id, label: row.label, permissions: cleanPermissions(permissions), createdAt: row.createdAt };
+  permissions = cleanPermissions(permissions);
+  // Same self-heal as accountPermissions() above: view permissions are
+  // always granted on a real account regardless of what's stored, so a
+  // template still carrying an explicit `false` for one (e.g. "onsite"'s
+  // stale viewDocuments/viewExceptions) could never exactly-match ANY
+  // account — matchRoleTemplate() showed "Custom" forever, no matter what
+  // was picked.
+  for (const p of PERMISSIONS) {
+    if (p.group === "desktopView" || p.group === "mobileView") permissions[p.key] = true;
+  }
+  return { id: row.id, label: row.label, permissions, createdAt: row.createdAt };
 }
 
 export async function listRoleTemplates() {
