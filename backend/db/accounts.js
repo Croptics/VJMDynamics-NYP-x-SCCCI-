@@ -123,8 +123,8 @@ export function accountPermissions(row) {
   // needed (2026-08-08 — "why this role not allow staff to see the
   // announcement page").
   for (const p of PERMISSIONS) {
-    if (p.group === "desktopView" || p.group === "mobileView") perms[p.key] = true;
-  }
+  if (p.group === "desktopView" || p.group === "mobileView") permissions[p.key] = true;
+}
   return perms;
 }
 
