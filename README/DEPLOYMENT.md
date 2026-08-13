@@ -13,6 +13,49 @@ whenever the deployment process changes (a new required env var, a different
 process manager, a new build step) so it stays a true step-by-step, not a
 snapshot of one deploy.
 
+## Current live deployment (verified 2026-08-12)
+
+- **Server:** Alibaba Cloud ECS VM.
+- **Repo path on the server:** `/var/www/mustergo/backend` (and sibling
+  `/var/www/mustergo/frontend`) — NOT the repo root name you'd guess from
+  `git clone`; if you `find / -iname "VJMDynamics*"` on this box it will find
+  nothing, because the folder was renamed to `mustergo` at some point. Use
+  `pm2 show <process-name>` (see below) to locate it directly instead of
+  guessing a folder name.
+- **PM2 process name:** `mustergo-api` — **not** `mustergo-backend` as
+  written in step 5 below (that was this doc's original placeholder name;
+  the live process was actually started under a different name and this
+  doc wasn't updated to match at the time). Use `mustergo-api` in every
+  `pm2 restart` / `pm2 logs` command against this server.
+- **Database:** as of 2026-08-12, this server's `DATABASE_URL` was found
+  pointed at a **separate local Postgres on the same VM**
+  (`postgresql://mustergo:...@localhost:5432/mustergo`), NOT the team's
+  shared Neon instance — meaning the live site had been showing its own
+  isolated seed data ("Demo (malaysia)" trip) instead of the real shared
+  data every teammate sees locally. This was corrected by editing
+  `backend/.env`'s `DATABASE_URL` to the team's real Neon connection string
+  and restarting `mustergo-api`. If the live site ever shows unfamiliar
+  trips/data again, checking `cat .env | grep DATABASE_URL` on this server
+  is the first thing to do — don't assume it's still pointed at Neon just
+  because it was fixed once.
+
+To update the live backend after pulling new code:
+```bash
+ssh root@<vm-ip>              # credentials: ask whoever set up the VM
+cd /var/www/mustergo/backend
+git status                    # confirm branch — should be on INTv2
+git pull origin INTv2
+pm2 restart mustergo-api
+pm2 logs mustergo-api --lines 50   # confirm clean startup, no errors
+```
+A **frontend-only** fix additionally needs a rebuild — `pm2 restart` alone
+does not pick up `.jsx` changes:
+```bash
+cd /var/www/mustergo/frontend
+git pull origin INTv2   # if not already pulled from the backend dir above
+npm run build
+```
+
 ## The short version
 
 The code itself is already deploy-ready — the parts that would normally block
