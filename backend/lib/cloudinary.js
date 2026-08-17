@@ -74,6 +74,8 @@ export function uploadVideo(buffer, folder) {
         const url = cloudinary.url(result.public_id, {
           resource_type: "video",
           secure: true,
+          format: "mp4",
+          video_codec: "auto",
         });
         resolve({ url, publicId: result.public_id });
       }
